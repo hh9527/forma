@@ -1,4 +1,4 @@
-use crate::Value;
+use crate::{Origin, Value};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -112,6 +112,14 @@ pub struct BytecodeFunction {
     register_count: usize,
     constants: Vec<Value>,
     instructions: Vec<Instruction>,
+    debug_origins: Vec<DebugOriginRange>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DebugOriginRange {
+    pub start: usize,
+    pub end: usize,
+    pub origin: Origin,
 }
 
 impl BytecodeFunction {
@@ -139,6 +147,27 @@ impl BytecodeFunction {
             register_count,
             constants,
             instructions,
+            debug_origins: Vec::new(),
+        }
+    }
+
+    pub(crate) fn assembled(
+        name: impl Into<Arc<str>>,
+        parameter_count: usize,
+        capture_count: usize,
+        register_count: usize,
+        constants: Vec<Value>,
+        instructions: Vec<Instruction>,
+        debug_origins: Vec<DebugOriginRange>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            parameter_count,
+            capture_count,
+            register_count,
+            constants,
+            instructions,
+            debug_origins,
         }
     }
 
@@ -164,5 +193,16 @@ impl BytecodeFunction {
 
     pub fn instructions(&self) -> &[Instruction] {
         &self.instructions
+    }
+
+    pub fn origin_at(&self, instruction: usize) -> Option<Origin> {
+        self.debug_origins
+            .iter()
+            .find(|range| range.start <= instruction && instruction < range.end)
+            .map(|range| range.origin)
+    }
+
+    pub fn debug_origins(&self) -> &[DebugOriginRange] {
+        &self.debug_origins
     }
 }

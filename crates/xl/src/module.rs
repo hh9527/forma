@@ -46,7 +46,9 @@ pub struct LoadedModule {
 
 impl LoadedModule {
     pub fn execute(&self, instruction_budget: usize) -> Result<Value, crate::RuntimeError> {
-        Vm::new().execute(&self.function, instruction_budget)
+        Vm::new()
+            .execute(&self.function, instruction_budget)
+            .map_err(|error| error.with_sources(&self.sources))
     }
 }
 
@@ -127,7 +129,9 @@ impl ModuleLoader {
                                 value,
                                 provenance: Provenance::default(),
                             })
-                            .map_err(|error| ModuleError::new(error.to_string()))
+                            .map_err(|error| {
+                                ModuleError::new(error.with_sources(&self.sources).to_string())
+                            })
                     })
             }
             Some(extension) => Err(ModuleError::new(format!(

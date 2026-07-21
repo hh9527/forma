@@ -5,12 +5,12 @@ use crate::ast::{
 use crate::compiler::compile_expression_with_bindings;
 use crate::json::{Provenance, ValuePath, ValuePathSegment};
 use crate::lexer::{FrontendError, SourceLocation};
+use crate::lir::RegisterId;
 use crate::parser::parse_registered;
 use crate::source::{Diagnostic, SourceDatabase};
-use crate::value::{Atom, Callable, NativeError, NativeFunction, Value};
-use crate::{BuiltinAtom, Vm};
+use crate::value::{Atom, Closure, NativeError, NativeFunction, Value};
+use crate::{BuiltinAtom, CallContext, ValueKind, ValueRef, Vm};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::Arc;
 
 const DEFAULT_TOOL_BUDGET: usize = 100_000;
 
@@ -386,7 +386,10 @@ fn evaluate_tool_expression(
         .map_err(|error| {
             frontend_error(
                 source_name,
-                format!("tool-stage evaluation failed: {error}"),
+                format!(
+                    "tool-stage evaluation failed: {}",
+                    error.with_sources(sources)
+                ),
             )
         })
 }
@@ -412,85 +415,346 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
     ] {
         prelude.insert(
             function.name().into(),
-            Value::Func(Arc::new(Callable::Native(function))),
+            Value::Func(std::sync::Arc::new(Closure::native(function))),
         );
     }
     prelude
 }
 
-fn native_atom_type(vm: &mut Vm, arguments: &[Value]) -> Result<Value, NativeError> {
-    let Value::Atom(atom) = &arguments[0] else {
+fn native_atom_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+    let argument = context.argument(0)?;
+    let Some(atom) = context.value(argument)?.as_atom() else {
         return Err(NativeError::new("Atom expects an Atom value"));
     };
-    Ok(TypeDescriptor::Atom(atom.clone()).to_value(vm))
+    let descriptor = TypeDescriptor::Atom(atom_from_name(atom));
+    write_native_type(context, context.result(), &descriptor)
 }
 
-fn native_array_type(vm: &mut Vm, arguments: &[Value]) -> Result<Value, NativeError> {
-    let item = decode_native_type(&arguments[0])?;
-    Ok(TypeDescriptor::Array(Box::new(item)).to_value(vm))
+fn native_array_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+    let item = decode_native_type(context.value(context.argument(0)?)?)?;
+    write_native_type(
+        context,
+        context.result(),
+        &TypeDescriptor::Array(Box::new(item)),
+    )
 }
 
-fn native_tuple_type(vm: &mut Vm, arguments: &[Value]) -> Result<Value, NativeError> {
-    let Value::Array(items) = &arguments[0] else {
+fn native_tuple_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+    let value = context.value(context.argument(0)?)?;
+    if value.kind() != ValueKind::Array {
         return Err(NativeError::new("Tuple expects an Array of Types"));
-    };
-    let items = items
-        .iter()
-        .map(decode_native_type)
+    }
+    let items = (0..value.sequence_len().expect("Array has a length"))
+        .map(|index| decode_native_type(value.sequence_get(index).expect("valid Array index")))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(TypeDescriptor::Tuple(items).to_value(vm))
+    write_native_type(context, context.result(), &TypeDescriptor::Tuple(items))
 }
 
-fn native_struct_type(vm: &mut Vm, arguments: &[Value]) -> Result<Value, NativeError> {
-    let Value::Dict(fields) = &arguments[0] else {
+fn native_struct_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+    let value = context.value(context.argument(0)?)?;
+    let Some(names) = value.dict_fields() else {
         return Err(NativeError::new("Struct expects a Dict of Types"));
     };
-    let fields = fields
-        .shape()
-        .fields()
+    let fields = names
         .iter()
-        .zip(fields.values())
-        .map(|(name, value)| Ok((name.clone(), decode_native_type(value)?)))
+        .map(|name| {
+            Ok((
+                name.clone(),
+                decode_native_type(value.dict_get(name).expect("Dict field exists"))?,
+            ))
+        })
         .collect::<Result<BTreeMap<_, _>, NativeError>>()?;
-    Ok(TypeDescriptor::Struct(fields).to_value(vm))
+    write_native_type(context, context.result(), &TypeDescriptor::Struct(fields))
 }
 
-fn native_union_type(vm: &mut Vm, arguments: &[Value]) -> Result<Value, NativeError> {
-    let Value::Array(variants) = &arguments[0] else {
+fn native_union_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+    let value = context.value(context.argument(0)?)?;
+    if value.kind() != ValueKind::Array {
         return Err(NativeError::new("Union expects an Array of Types"));
-    };
-    if variants.is_empty() {
+    }
+    let length = value.sequence_len().expect("Array has a length");
+    if length == 0 {
         return Err(NativeError::new("Union requires at least one variant"));
     }
-    let variants = variants
-        .iter()
-        .map(decode_native_type)
+    let variants = (0..length)
+        .map(|index| decode_native_type(value.sequence_get(index).expect("valid Array index")))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(TypeDescriptor::Union(variants).to_value(vm))
+    write_native_type(context, context.result(), &TypeDescriptor::Union(variants))
 }
 
-fn native_validate(_vm: &mut Vm, arguments: &[Value]) -> Result<Value, NativeError> {
-    let descriptor = decode_native_type(&arguments[0])?;
-    match validate_value(&descriptor, &arguments[1], "value") {
-        Ok(()) => Ok(Value::Tuple(
-            vec![
-                Value::Atom(Atom::builtin(BuiltinAtom::Ok)),
-                arguments[1].clone(),
-            ]
-            .into(),
-        )),
-        Err(message) => Ok(Value::Tuple(
-            vec![
-                Value::Atom(Atom::builtin(BuiltinAtom::Err)),
-                Value::string(message),
-            ]
-            .into(),
+fn native_validate(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+    let type_register = context.argument(0)?;
+    let value_register = context.argument(1)?;
+    let descriptor = decode_native_type(context.value(type_register)?)?;
+    let tag = context.scratch();
+    let payload = context.scratch();
+    match validate_value_ref(&descriptor, context.value(value_register)?, "value") {
+        Ok(()) => {
+            context.set_atom(tag, "Ok")?;
+            context.copy(payload, value_register)?;
+        }
+        Err(message) => {
+            context.set_atom(tag, "Err")?;
+            context.set_string(payload, message)?;
+        }
+    }
+    context.make_tuple(context.result(), &[tag, payload])
+}
+
+fn decode_native_type(value: ValueRef<'_>) -> Result<TypeDescriptor, NativeError> {
+    decode_type_ref(value, "Type").map_err(NativeError::new)
+}
+
+fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, String> {
+    let fields = value
+        .dict_fields()
+        .ok_or_else(|| format!("{path} must be a Dict"))?;
+    let kind = value
+        .dict_get("kind")
+        .and_then(ValueRef::as_atom)
+        .ok_or_else(|| format!("{path}.kind must be an Atom"))?;
+    let require = |expected: &[&str]| -> Result<(), String> {
+        if fields
+            .iter()
+            .map(String::as_str)
+            .eq(expected.iter().copied())
+        {
+            Ok(())
+        } else {
+            Err(format!("{path} has invalid fields for {kind}"))
+        }
+    };
+    Ok(match kind {
+        "Any" => {
+            require(&["kind"])?;
+            TypeDescriptor::Any
+        }
+        "Int" => {
+            require(&["kind"])?;
+            TypeDescriptor::Int
+        }
+        "Float" => {
+            require(&["kind"])?;
+            TypeDescriptor::Float
+        }
+        "String" => {
+            require(&["kind"])?;
+            TypeDescriptor::String
+        }
+        "Bytes" => {
+            require(&["kind"])?;
+            TypeDescriptor::Bytes
+        }
+        "Atom" => {
+            require(&["kind", "tag"])?;
+            let tag = value
+                .dict_get("tag")
+                .and_then(ValueRef::as_atom)
+                .ok_or_else(|| format!("{path}.tag must be an Atom"))?;
+            TypeDescriptor::Atom(atom_from_name(tag))
+        }
+        "Array" => {
+            require(&["item", "kind"])?;
+            let item = value
+                .dict_get("item")
+                .ok_or_else(|| format!("{path}.item is missing"))?;
+            TypeDescriptor::Array(Box::new(decode_type_ref(item, &format!("{path}.item"))?))
+        }
+        "Tuple" | "Union" => {
+            let field = if kind == "Tuple" { "items" } else { "variants" };
+            require(&[field, "kind"])?;
+            let sequence = value
+                .dict_get(field)
+                .ok_or_else(|| format!("{path}.{field} is missing"))?;
+            if sequence.kind() != ValueKind::Array {
+                return Err(format!("{path}.{field} must be an Array"));
+            }
+            let values = (0..sequence.sequence_len().expect("Array has a length"))
+                .map(|index| {
+                    decode_type_ref(
+                        sequence.sequence_get(index).expect("valid Array index"),
+                        &format!("{path}.{field}[{index}]"),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if kind == "Union" && values.is_empty() {
+                return Err(format!("{path}.variants must not be empty"));
+            }
+            if kind == "Tuple" {
+                TypeDescriptor::Tuple(values)
+            } else {
+                TypeDescriptor::Union(values)
+            }
+        }
+        "Struct" => {
+            require(&["fields", "kind"])?;
+            let fields_value = value
+                .dict_get("fields")
+                .ok_or_else(|| format!("{path}.fields is missing"))?;
+            let names = fields_value
+                .dict_fields()
+                .ok_or_else(|| format!("{path}.fields must be a Dict"))?;
+            TypeDescriptor::Struct(
+                names
+                    .iter()
+                    .map(|name| {
+                        let field = fields_value.dict_get(name).expect("Dict field exists");
+                        Ok((
+                            name.clone(),
+                            decode_type_ref(field, &format!("{path}.fields.{name}"))?,
+                        ))
+                    })
+                    .collect::<Result<_, String>>()?,
+            )
+        }
+        _ => return Err(format!("{path}.kind has unknown value '{kind}")),
+    })
+}
+
+fn write_native_type(
+    context: &mut CallContext<'_, '_>,
+    destination: RegisterId,
+    descriptor: &TypeDescriptor,
+) -> Result<(), NativeError> {
+    let kind = context.scratch();
+    let name = match descriptor {
+        TypeDescriptor::Any => "Any",
+        TypeDescriptor::Int => "Int",
+        TypeDescriptor::Float => "Float",
+        TypeDescriptor::String => "String",
+        TypeDescriptor::Bytes => "Bytes",
+        TypeDescriptor::Atom(_) => "Atom",
+        TypeDescriptor::Array(_) => "Array",
+        TypeDescriptor::Tuple(_) => "Tuple",
+        TypeDescriptor::Struct(_) => "Struct",
+        TypeDescriptor::Union(_) => "Union",
+    };
+    context.set_atom(kind, name)?;
+    let mut fields = vec![("kind".to_owned(), kind)];
+    match descriptor {
+        TypeDescriptor::Atom(atom) => {
+            let tag = context.scratch();
+            context.set_atom(tag, atom.name())?;
+            fields.push(("tag".into(), tag));
+        }
+        TypeDescriptor::Array(item) => {
+            let value = context.scratch();
+            write_native_type(context, value, item)?;
+            fields.push(("item".into(), value));
+        }
+        TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
+            let mut item_registers = Vec::with_capacity(items.len());
+            for item in items {
+                let register = context.scratch();
+                write_native_type(context, register, item)?;
+                item_registers.push(register);
+            }
+            let sequence = context.scratch();
+            context.make_array(sequence, &item_registers)?;
+            fields.push((
+                if matches!(descriptor, TypeDescriptor::Tuple(_)) {
+                    "items"
+                } else {
+                    "variants"
+                }
+                .into(),
+                sequence,
+            ));
+        }
+        TypeDescriptor::Struct(items) => {
+            let mut item_fields = Vec::with_capacity(items.len());
+            for (name, item) in items {
+                let register = context.scratch();
+                write_native_type(context, register, item)?;
+                item_fields.push((name.clone(), register));
+            }
+            let value = context.scratch();
+            context.make_dict(value, &item_fields)?;
+            fields.push(("fields".into(), value));
+        }
+        TypeDescriptor::Any
+        | TypeDescriptor::Int
+        | TypeDescriptor::Float
+        | TypeDescriptor::String
+        | TypeDescriptor::Bytes => {}
+    }
+    context.make_dict(destination, &fields)
+}
+
+fn validate_value_ref(
+    descriptor: &TypeDescriptor,
+    value: ValueRef<'_>,
+    path: &str,
+) -> Result<(), String> {
+    match descriptor {
+        TypeDescriptor::Any => Ok(()),
+        TypeDescriptor::Int if value.kind() == ValueKind::Int => Ok(()),
+        TypeDescriptor::Float if value.kind() == ValueKind::Float => Ok(()),
+        TypeDescriptor::String if value.kind() == ValueKind::String => Ok(()),
+        TypeDescriptor::Bytes if value.kind() == ValueKind::Bytes => Ok(()),
+        TypeDescriptor::Atom(expected) if value.as_atom() == Some(expected.name()) => Ok(()),
+        TypeDescriptor::Atom(expected) => Err(format!("{path} must be '{}", expected.name())),
+        TypeDescriptor::Array(item) => {
+            if value.kind() != ValueKind::Array {
+                return Err(format!("{path} must be an Array"));
+            }
+            for index in 0..value.sequence_len().expect("Array has a length") {
+                validate_value_ref(
+                    item,
+                    value.sequence_get(index).expect("valid Array index"),
+                    &format!("{path}[{index}]"),
+                )?;
+            }
+            Ok(())
+        }
+        TypeDescriptor::Tuple(items) => {
+            if value.kind() != ValueKind::Tuple {
+                return Err(format!("{path} must be a Tuple"));
+            }
+            if value.sequence_len() != Some(items.len()) {
+                return Err(format!("{path} must have {} tuple items", items.len()));
+            }
+            for (index, item) in items.iter().enumerate() {
+                validate_value_ref(
+                    item,
+                    value.sequence_get(index).expect("valid Tuple index"),
+                    &format!("{path}.{index}"),
+                )?;
+            }
+            Ok(())
+        }
+        TypeDescriptor::Struct(items) => {
+            let Some(names) = value.dict_fields() else {
+                return Err(format!("{path} must be a Dict"));
+            };
+            if !items.keys().eq(names.iter()) {
+                return Err(format!("{path} has a different field shape"));
+            }
+            for (name, item) in items {
+                validate_value_ref(
+                    item,
+                    value.dict_get(name).expect("matching shape"),
+                    &format!("{path}.{name}"),
+                )?;
+            }
+            Ok(())
+        }
+        TypeDescriptor::Union(variants) => {
+            if variants
+                .iter()
+                .any(|variant| validate_value_ref(variant, value, path).is_ok())
+            {
+                Ok(())
+            } else {
+                Err(format!("{path} does not match any Union variant"))
+            }
+        }
+        descriptor => Err(format!(
+            "{path} must be {}, got {:?}",
+            descriptor.display_name(),
+            value.kind()
         )),
     }
-}
-
-fn decode_native_type(value: &Value) -> Result<TypeDescriptor, NativeError> {
-    TypeDescriptor::from_value(value).map_err(NativeError::new)
 }
 
 fn kind_entry(kind: &str) -> (String, Value) {
@@ -933,72 +1197,6 @@ fn incompatibility_path(actual: &TypeDescriptor, expected: &TypeDescriptor) -> O
     }
     let mut path = Vec::new();
     visit(actual, expected, &mut path).then_some(path)
-}
-
-fn validate_value(descriptor: &TypeDescriptor, value: &Value, path: &str) -> Result<(), String> {
-    match descriptor {
-        TypeDescriptor::Any => Ok(()),
-        TypeDescriptor::Int if matches!(value, Value::Int(_)) => Ok(()),
-        TypeDescriptor::Float if matches!(value, Value::Float(_)) => Ok(()),
-        TypeDescriptor::String if matches!(value, Value::String(_)) => Ok(()),
-        TypeDescriptor::Bytes if matches!(value, Value::Bytes(_)) => Ok(()),
-        TypeDescriptor::Atom(expected) => match value {
-            Value::Atom(actual) if actual == expected => Ok(()),
-            _ => Err(format!("{path} must be '{}", expected.name())),
-        },
-        TypeDescriptor::Array(item) => {
-            let Value::Array(values) = value else {
-                return Err(format!("{path} must be an Array"));
-            };
-            for (index, value) in values.iter().enumerate() {
-                validate_value(item, value, &format!("{path}[{index}]"))?;
-            }
-            Ok(())
-        }
-        TypeDescriptor::Tuple(items) => {
-            let Value::Tuple(values) = value else {
-                return Err(format!("{path} must be a Tuple"));
-            };
-            if items.len() != values.len() {
-                return Err(format!("{path} must have {} tuple items", items.len()));
-            }
-            for (index, (item, value)) in items.iter().zip(values.iter()).enumerate() {
-                validate_value(item, value, &format!("{path}.{index}"))?;
-            }
-            Ok(())
-        }
-        TypeDescriptor::Struct(fields) => {
-            let Value::Dict(values) = value else {
-                return Err(format!("{path} must be a Dict"));
-            };
-            if fields.keys().ne(values.shape().fields().iter()) {
-                return Err(format!("{path} has a different field shape"));
-            }
-            for (name, field) in fields {
-                validate_value(
-                    field,
-                    values.get(name).expect("matching shape"),
-                    &format!("{path}.{name}"),
-                )?;
-            }
-            Ok(())
-        }
-        TypeDescriptor::Union(variants) => {
-            if variants
-                .iter()
-                .any(|variant| validate_value(variant, value, path).is_ok())
-            {
-                Ok(())
-            } else {
-                Err(format!("{path} does not match any Union variant"))
-            }
-        }
-        descriptor => Err(format!(
-            "{path} must be {}, got {}",
-            descriptor.display_name(),
-            value.type_name()
-        )),
-    }
 }
 
 fn atom_from_name(name: &str) -> Atom {

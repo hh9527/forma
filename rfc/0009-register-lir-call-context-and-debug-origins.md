@@ -1,7 +1,7 @@
 # RFC 0009: Register LIR, Call Context, and Debug Origins
 
 - Status: Accepted
-- Implementation: Pending
+- Implementation: Complete
 
 ## Summary
 
@@ -335,3 +335,31 @@ IR should be justified by concrete passes.
 10. Runtime `Value` equality and representation remain independent of source
     origins, and existing language/tool-stage/module behavior remains intact.
 11. Workspace tests, strict Clippy, formatting, and diff checks pass.
+
+## Implementation result
+
+The compiler now emits a symbolic register LIR whose operations carry source
+or synthetic origins. Branches use `LabelId`; call arguments are assembled
+from validated contiguous register ranges. The assembler recursively validates
+nested functions, resolves labels, and emits executable instructions with a
+coalesced PC-to-Origin side table. Existing hand-built bytecode constructors
+remain available for VM-level compatibility tests.
+
+Runtime functions now use one `Closure` representation over bytecode or native
+prototypes and immutable upvalues. Native callbacks receive only
+`&mut CallContext`: arguments, upvalues, scratch slots, and the single result
+are addressed by `RegisterId`. `ValueRef` supports scoped inspection without
+exposing an owned value, while all construction writes directly into a context
+register. The type-metadata and validation built-ins were migrated to this ABI.
+
+The interpreter uses one contiguous XL value stack with explicit frame windows
+and an iterative frame loop. Bytecode calls no longer recurse through Rust or
+allocate a separate register vector per call. One budget covers bytecode and
+native dispatch, and successful calls produce exactly one value. Focused tests
+exercise native upvalues and 512 nested bytecode frames.
+
+Runtime errors retain ordered frame traces. Each frame resolves its PC through
+the prototype debug map, and compiler, tool-stage, loaded-module, and imported
+module paths render the resulting origin through their shared source database.
+Tests cover nested division-by-zero traces, missing fields, and dynamic string
+interpolation at their source expressions.

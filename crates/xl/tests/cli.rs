@@ -85,7 +85,9 @@ fn run_accepts_external_json_and_failures_are_nonzero() {
         .output()
         .unwrap();
     assert!(!failure.status.success());
-    assert!(String::from_utf8_lossy(&failure.stderr).contains("division by zero"));
+    let stderr = String::from_utf8_lossy(&failure.stderr);
+    assert!(stderr.contains("division by zero"));
+    assert!(stderr.contains("bad.xl:1:1"));
     fs::remove_dir_all(directory).unwrap();
 }
 

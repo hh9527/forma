@@ -1,0 +1,504 @@
+use crate::bytecode::{BytecodeFunction, DebugOriginRange, Instruction, Register};
+use crate::{Origin, Value, WithOrigin};
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::Arc;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RegisterId(pub u32);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ConstantId(pub u32);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct LabelId(pub u32);
+
+#[derive(Clone, Debug)]
+pub enum Operation {
+    LoadConst {
+        dst: RegisterId,
+        constant: ConstantId,
+    },
+    Move {
+        dst: RegisterId,
+        src: RegisterId,
+    },
+    Add {
+        dst: RegisterId,
+        left: RegisterId,
+        right: RegisterId,
+    },
+    Subtract {
+        dst: RegisterId,
+        left: RegisterId,
+        right: RegisterId,
+    },
+    Multiply {
+        dst: RegisterId,
+        left: RegisterId,
+        right: RegisterId,
+    },
+    Divide {
+        dst: RegisterId,
+        left: RegisterId,
+        right: RegisterId,
+    },
+    Negate {
+        dst: RegisterId,
+        src: RegisterId,
+    },
+    Equal {
+        dst: RegisterId,
+        left: RegisterId,
+        right: RegisterId,
+    },
+    LessThan {
+        dst: RegisterId,
+        left: RegisterId,
+        right: RegisterId,
+    },
+    MakeArray {
+        dst: RegisterId,
+        items: Vec<RegisterId>,
+    },
+    MakeTuple {
+        dst: RegisterId,
+        items: Vec<RegisterId>,
+    },
+    InterpolateString {
+        dst: RegisterId,
+        parts: Vec<RegisterId>,
+    },
+    MakeDict {
+        dst: RegisterId,
+        fields: Vec<(String, RegisterId)>,
+    },
+    GetField {
+        dst: RegisterId,
+        dict: RegisterId,
+        field: String,
+    },
+    TupleLengthEquals {
+        dst: RegisterId,
+        value: RegisterId,
+        length: usize,
+    },
+    GetTuple {
+        dst: RegisterId,
+        tuple: RegisterId,
+        index: usize,
+    },
+    MakeClosure {
+        dst: RegisterId,
+        function: Box<Function>,
+        captures: Vec<RegisterId>,
+    },
+    Call {
+        dst: RegisterId,
+        callee: RegisterId,
+        argument_base: RegisterId,
+        argument_count: u32,
+    },
+    Jump {
+        target: LabelId,
+    },
+    JumpIfFalse {
+        condition: RegisterId,
+        target: LabelId,
+    },
+    Return {
+        src: RegisterId,
+    },
+    Fail {
+        message: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum Item {
+    Label(LabelId),
+    Operation(WithOrigin<Operation>),
+}
+
+#[derive(Clone, Debug)]
+pub struct Function {
+    pub name: String,
+    pub parameter_count: u32,
+    pub capture_count: u32,
+    pub register_count: u32,
+    pub constants: Vec<Value>,
+    pub items: Vec<Item>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssembleError {
+    pub message: String,
+}
+
+impl fmt::Display for AssembleError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AssembleError {}
+
+pub fn assemble(function: Function) -> Result<BytecodeFunction, AssembleError> {
+    let register_count = usize::try_from(function.register_count)
+        .map_err(|_| assembly_error("register count does not fit this platform"))?;
+    let parameter_count = usize::try_from(function.parameter_count)
+        .map_err(|_| assembly_error("parameter count does not fit this platform"))?;
+    let capture_count = usize::try_from(function.capture_count)
+        .map_err(|_| assembly_error("capture count does not fit this platform"))?;
+    if parameter_count + capture_count > register_count {
+        return Err(assembly_error(
+            "parameters and captures exceed the declared register count",
+        ));
+    }
+
+    let mut labels = HashMap::new();
+    let mut pc = 0usize;
+    for item in &function.items {
+        match item {
+            Item::Label(label) => {
+                if labels.insert(*label, pc).is_some() {
+                    return Err(assembly_error(format!("duplicate label {}", label.0)));
+                }
+            }
+            Item::Operation(_) => pc += 1,
+        }
+    }
+
+    let mut instructions = Vec::with_capacity(pc);
+    let mut origins = Vec::with_capacity(pc);
+    for item in function.items {
+        let Item::Operation(operation) = item else {
+            continue;
+        };
+        let instruction = lower_operation(
+            operation.value,
+            register_count,
+            function.constants.len(),
+            &labels,
+        )?;
+        instructions.push(instruction);
+        origins.push(operation.origin);
+    }
+    if instructions.is_empty() {
+        return Err(assembly_error(
+            "function contains no executable instructions",
+        ));
+    }
+    let debug_origins = compress_origins(&origins);
+    Ok(BytecodeFunction::assembled(
+        function.name,
+        parameter_count,
+        capture_count,
+        register_count,
+        function.constants,
+        instructions,
+        debug_origins,
+    ))
+}
+
+fn lower_operation(
+    operation: Operation,
+    register_count: usize,
+    constant_count: usize,
+    labels: &HashMap<LabelId, usize>,
+) -> Result<Instruction, AssembleError> {
+    let register = |id: RegisterId| -> Result<Register, AssembleError> {
+        let index = usize::try_from(id.0).map_err(|_| assembly_error("register is too large"))?;
+        if index >= register_count {
+            return Err(assembly_error(format!(
+                "register {} is out of bounds",
+                id.0
+            )));
+        }
+        Ok(Register(index))
+    };
+    let registers = |ids: Vec<RegisterId>| -> Result<Vec<Register>, AssembleError> {
+        ids.into_iter().map(register).collect()
+    };
+    let label = |id: LabelId| -> Result<usize, AssembleError> {
+        labels
+            .get(&id)
+            .copied()
+            .ok_or_else(|| assembly_error(format!("undefined label {}", id.0)))
+    };
+    Ok(match operation {
+        Operation::LoadConst { dst, constant } => {
+            let constant =
+                usize::try_from(constant.0).map_err(|_| assembly_error("constant is too large"))?;
+            if constant >= constant_count {
+                return Err(assembly_error(format!(
+                    "constant {constant} is out of bounds"
+                )));
+            }
+            Instruction::LoadConst {
+                dst: register(dst)?,
+                constant,
+            }
+        }
+        Operation::Move { dst, src } => Instruction::Move {
+            dst: register(dst)?,
+            src: register(src)?,
+        },
+        Operation::Add { dst, left, right } => Instruction::Add {
+            dst: register(dst)?,
+            left: register(left)?,
+            right: register(right)?,
+        },
+        Operation::Subtract { dst, left, right } => Instruction::Subtract {
+            dst: register(dst)?,
+            left: register(left)?,
+            right: register(right)?,
+        },
+        Operation::Multiply { dst, left, right } => Instruction::Multiply {
+            dst: register(dst)?,
+            left: register(left)?,
+            right: register(right)?,
+        },
+        Operation::Divide { dst, left, right } => Instruction::Divide {
+            dst: register(dst)?,
+            left: register(left)?,
+            right: register(right)?,
+        },
+        Operation::Negate { dst, src } => Instruction::Negate {
+            dst: register(dst)?,
+            src: register(src)?,
+        },
+        Operation::Equal { dst, left, right } => Instruction::Equal {
+            dst: register(dst)?,
+            left: register(left)?,
+            right: register(right)?,
+        },
+        Operation::LessThan { dst, left, right } => Instruction::LessThan {
+            dst: register(dst)?,
+            left: register(left)?,
+            right: register(right)?,
+        },
+        Operation::MakeArray { dst, items } => Instruction::MakeArray {
+            dst: register(dst)?,
+            items: registers(items)?,
+        },
+        Operation::MakeTuple { dst, items } => Instruction::MakeTuple {
+            dst: register(dst)?,
+            items: registers(items)?,
+        },
+        Operation::InterpolateString { dst, parts } => Instruction::InterpolateString {
+            dst: register(dst)?,
+            parts: registers(parts)?,
+        },
+        Operation::MakeDict { dst, fields } => Instruction::MakeDict {
+            dst: register(dst)?,
+            fields: fields
+                .into_iter()
+                .map(|(name, value)| Ok((name, register(value)?)))
+                .collect::<Result<_, AssembleError>>()?,
+        },
+        Operation::GetField { dst, dict, field } => Instruction::GetField {
+            dst: register(dst)?,
+            dict: register(dict)?,
+            field,
+        },
+        Operation::TupleLengthEquals { dst, value, length } => Instruction::TupleLengthEquals {
+            dst: register(dst)?,
+            value: register(value)?,
+            length,
+        },
+        Operation::GetTuple { dst, tuple, index } => Instruction::GetTuple {
+            dst: register(dst)?,
+            tuple: register(tuple)?,
+            index,
+        },
+        Operation::MakeClosure {
+            dst,
+            function,
+            captures,
+        } => Instruction::MakeClosure {
+            dst: register(dst)?,
+            function: Arc::new(assemble(*function)?),
+            captures: registers(captures)?,
+        },
+        Operation::Call {
+            dst,
+            callee,
+            argument_base,
+            argument_count,
+        } => {
+            let base = usize::try_from(argument_base.0)
+                .map_err(|_| assembly_error("argument base is too large"))?;
+            let count = usize::try_from(argument_count)
+                .map_err(|_| assembly_error("argument count is too large"))?;
+            let end = base
+                .checked_add(count)
+                .ok_or_else(|| assembly_error("argument range overflows"))?;
+            if end > register_count {
+                return Err(assembly_error("argument range is out of bounds"));
+            }
+            Instruction::Call {
+                dst: register(dst)?,
+                callee: register(callee)?,
+                arguments: (base..end).map(Register).collect(),
+            }
+        }
+        Operation::Jump { target } => Instruction::Jump {
+            target: label(target)?,
+        },
+        Operation::JumpIfFalse { condition, target } => Instruction::JumpIfFalse {
+            condition: register(condition)?,
+            target: label(target)?,
+        },
+        Operation::Return { src } => Instruction::Return {
+            src: register(src)?,
+        },
+        Operation::Fail { message } => Instruction::Fail { message },
+    })
+}
+
+fn compress_origins(origins: &[Origin]) -> Vec<DebugOriginRange> {
+    let mut ranges: Vec<DebugOriginRange> = Vec::new();
+    for (pc, origin) in origins.iter().copied().enumerate() {
+        if let Some(last) = ranges.last_mut()
+            && last.origin == origin
+            && last.end == pc
+        {
+            last.end += 1;
+            continue;
+        }
+        ranges.push(DebugOriginRange {
+            start: pc,
+            end: pc + 1,
+            origin,
+        });
+    }
+    ranges
+}
+
+fn assembly_error(message: impl Into<String>) -> AssembleError {
+    AssembleError {
+        message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn origin() -> Origin {
+        Origin::Synthetic { derived_from: None }
+    }
+
+    #[test]
+    fn resolves_labels_and_compresses_origins() {
+        let function = Function {
+            name: "test".into(),
+            parameter_count: 0,
+            capture_count: 0,
+            register_count: 1,
+            constants: vec![Value::Int(1)],
+            items: vec![
+                Item::Operation(WithOrigin {
+                    value: Operation::LoadConst {
+                        dst: RegisterId(0),
+                        constant: ConstantId(0),
+                    },
+                    origin: origin(),
+                }),
+                Item::Operation(WithOrigin {
+                    value: Operation::Jump { target: LabelId(0) },
+                    origin: origin(),
+                }),
+                Item::Label(LabelId(0)),
+                Item::Operation(WithOrigin {
+                    value: Operation::Return { src: RegisterId(0) },
+                    origin: origin(),
+                }),
+            ],
+        };
+        let bytecode = assemble(function).unwrap();
+        assert!(matches!(
+            bytecode.instructions()[1],
+            Instruction::Jump { target: 2 }
+        ));
+        assert_eq!(bytecode.debug_origins().len(), 1);
+        assert_eq!(bytecode.debug_origins()[0].end, 3);
+    }
+
+    #[test]
+    fn rejects_undefined_labels_and_bad_registers() {
+        let bad_label = Function {
+            name: "test".into(),
+            parameter_count: 0,
+            capture_count: 0,
+            register_count: 1,
+            constants: vec![],
+            items: vec![Item::Operation(WithOrigin {
+                value: Operation::Jump { target: LabelId(4) },
+                origin: origin(),
+            })],
+        };
+        assert!(
+            assemble(bad_label)
+                .unwrap_err()
+                .message
+                .contains("undefined label")
+        );
+        let bad_register = Function {
+            name: "test".into(),
+            parameter_count: 0,
+            capture_count: 0,
+            register_count: 1,
+            constants: vec![],
+            items: vec![Item::Operation(WithOrigin {
+                value: Operation::Return { src: RegisterId(1) },
+                origin: origin(),
+            })],
+        };
+        assert!(
+            assemble(bad_register)
+                .unwrap_err()
+                .message
+                .contains("out of bounds")
+        );
+
+        let bad_arguments = Function {
+            name: "test".into(),
+            parameter_count: 0,
+            capture_count: 0,
+            register_count: 1,
+            constants: vec![],
+            items: vec![Item::Operation(WithOrigin {
+                value: Operation::Call {
+                    dst: RegisterId(0),
+                    callee: RegisterId(0),
+                    argument_base: RegisterId(0),
+                    argument_count: 2,
+                },
+                origin: origin(),
+            })],
+        };
+        assert!(
+            assemble(bad_arguments)
+                .unwrap_err()
+                .message
+                .contains("argument range")
+        );
+
+        let duplicate_label = Function {
+            name: "test".into(),
+            parameter_count: 0,
+            capture_count: 0,
+            register_count: 1,
+            constants: vec![],
+            items: vec![Item::Label(LabelId(0)), Item::Label(LabelId(0))],
+        };
+        assert!(
+            assemble(duplicate_label)
+                .unwrap_err()
+                .message
+                .contains("duplicate label")
+        );
+    }
+}

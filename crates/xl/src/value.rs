@@ -1,5 +1,5 @@
 use crate::bytecode::BytecodeFunction;
-use crate::vm::Vm;
+use crate::vm::CallContext;
 use std::fmt;
 use std::sync::Arc;
 
@@ -81,8 +81,8 @@ pub struct Dict {
 
 #[derive(Clone, Debug)]
 pub struct Closure {
-    function: Arc<BytecodeFunction>,
-    captures: Arc<[Value]>,
+    prototype: Prototype,
+    upvalues: Arc<[Value]>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -98,7 +98,7 @@ impl NativeError {
     }
 }
 
-pub type NativeCallback = fn(&mut Vm, &[Value]) -> Result<Value, NativeError>;
+pub type NativeCallback = fn(&mut CallContext<'_, '_>) -> Result<(), NativeError>;
 
 #[derive(Clone, Copy)]
 pub struct NativeFunction {
@@ -140,25 +140,38 @@ impl fmt::Debug for NativeFunction {
 }
 
 #[derive(Clone, Debug)]
-pub enum Callable {
-    Bytecode(Closure),
+pub enum Prototype {
+    Bytecode(Arc<BytecodeFunction>),
     Native(NativeFunction),
 }
+
+pub type Callable = Prototype;
 
 impl Closure {
     pub fn new(function: Arc<BytecodeFunction>, captures: Vec<Value>) -> Self {
         Self {
-            function,
-            captures: captures.into(),
+            prototype: Prototype::Bytecode(function),
+            upvalues: captures.into(),
         }
     }
 
-    pub fn function(&self) -> &Arc<BytecodeFunction> {
-        &self.function
+    pub fn native(function: NativeFunction) -> Self {
+        Self::native_with_upvalues(function, Vec::new())
     }
 
-    pub fn captures(&self) -> &[Value] {
-        &self.captures
+    pub fn native_with_upvalues(function: NativeFunction, upvalues: Vec<Value>) -> Self {
+        Self {
+            prototype: Prototype::Native(function),
+            upvalues: upvalues.into(),
+        }
+    }
+
+    pub fn prototype(&self) -> &Prototype {
+        &self.prototype
+    }
+
+    pub fn upvalues(&self) -> &[Value] {
+        &self.upvalues
     }
 }
 
@@ -200,7 +213,7 @@ pub enum Value {
     Array(Arc<[Value]>),
     Atom(Atom),
     Tuple(Arc<[Value]>),
-    Func(Arc<Callable>),
+    Func(Arc<Closure>),
 }
 
 impl Value {
@@ -273,11 +286,11 @@ impl fmt::Display for Value {
             Self::Array(values) => format_sequence(formatter, "[", "]", values),
             Self::Atom(atom) => write!(formatter, "'{}", atom.name()),
             Self::Tuple(values) => format_sequence(formatter, "(", ")", values),
-            Self::Func(callable) => match callable.as_ref() {
-                Callable::Bytecode(closure) => {
-                    write!(formatter, "<fn {}>", closure.function().name())
+            Self::Func(closure) => match closure.prototype() {
+                Prototype::Bytecode(function) => {
+                    write!(formatter, "<fn {}>", function.name())
                 }
-                Callable::Native(function) => write!(formatter, "<native fn {}>", function.name()),
+                Prototype::Native(function) => write!(formatter, "<native fn {}>", function.name()),
             },
         }
     }

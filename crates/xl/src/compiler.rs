@@ -2,16 +2,16 @@ use crate::ast::{
     BinaryOperator, BindingKind, Block, DictField, Expr, ExprKind, Identifier, MatchArm, Pattern,
     PatternKind, Program, StringPartKind, UnaryOperator,
 };
-use crate::bytecode::{BytecodeFunction, Instruction, Register};
+use crate::bytecode::BytecodeFunction;
 use crate::lexer::{FrontendError, SourceLocation};
+use crate::lir::{self, ConstantId, Item, LabelId, Operation, RegisterId};
 use crate::parser::parse_registered;
-use crate::source::{Diagnostic, Location, SourceDatabase, SourceFile};
+use crate::source::{Diagnostic, Location, Origin, SourceDatabase, SourceFile, WithOrigin};
 use crate::types::{Analysis, analyze_program_registered};
 use crate::value::{Atom, BuiltinAtom, Value};
 use crate::{RuntimeError, Vm};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
 
 #[derive(Debug)]
 pub enum ExecutionError {
@@ -79,7 +79,11 @@ pub fn run_source(
     instruction_budget: usize,
 ) -> Result<Value, ExecutionError> {
     let function = compile_source(source_name, source)?;
-    Ok(Vm::new().execute(&function, instruction_budget)?)
+    let mut sources = SourceDatabase::default();
+    sources.add(source_name, source);
+    Vm::new()
+        .execute(&function, instruction_budget)
+        .map_err(|error| ExecutionError::Runtime(error.with_sources(&sources)))
 }
 
 pub(crate) fn compile_expression_with_bindings(
@@ -94,8 +98,9 @@ pub(crate) fn compile_expression_with_bindings(
         function_name: function_name.to_owned(),
         environment: HashMap::new(),
         constants: Vec::new(),
-        instructions: Vec::new(),
+        items: Vec::new(),
         next_register: 0,
+        next_label: 0,
         parameter_count: 0,
         capture_count: 0,
         closure_index: 0,
@@ -105,25 +110,24 @@ pub(crate) fn compile_expression_with_bindings(
         source_file: Some(source_file),
     };
     for (name, value) in bindings {
-        let register = compiler.load_constant(value.clone());
+        let register = compiler.load_constant(value.clone(), expression.location);
         compiler.environment.insert(name.clone(), register);
     }
     let result = compiler.compile_expr(expression)?;
-    compiler
-        .instructions
-        .push(Instruction::Return { src: result });
-    Ok(compiler.finish())
+    compiler.emit_synthetic(Operation::Return { src: result }, expression.location);
+    compiler.finish()
 }
 
 struct Compiler<'a> {
     source_name: &'a str,
     function_name: String,
-    environment: HashMap<String, Register>,
+    environment: HashMap<String, RegisterId>,
     constants: Vec<Value>,
-    instructions: Vec<Instruction>,
-    next_register: usize,
-    parameter_count: usize,
-    capture_count: usize,
+    items: Vec<Item>,
+    next_register: u32,
+    next_label: u32,
+    parameter_count: u32,
+    capture_count: u32,
     closure_index: usize,
     resolved_types: HashMap<String, Value>,
     retained_names: HashSet<String>,
@@ -165,8 +169,9 @@ impl<'a> Compiler<'a> {
             function_name: source_name.to_owned(),
             environment: HashMap::new(),
             constants: Vec::new(),
-            instructions: Vec::new(),
+            items: Vec::new(),
             next_register: 0,
+            next_label: 0,
             parameter_count: 0,
             capture_count: 0,
             closure_index: 0,
@@ -177,7 +182,7 @@ impl<'a> Compiler<'a> {
         };
         for (name, value) in &analysis.prelude {
             if compiler.retained_names.contains(name) {
-                let register = compiler.load_constant(value.clone());
+                let register = compiler.load_constant(value.clone(), program.location);
                 compiler.environment.insert(name.clone(), register);
             }
         }
@@ -188,15 +193,13 @@ impl<'a> Compiler<'a> {
                     .get(name)
                     .expect("analyzed dynamic binding")
                     .clone();
-                let register = compiler.load_constant(value);
+                let register = compiler.load_constant(value, program.location);
                 compiler.environment.insert(name.clone(), register);
             }
         }
         let result = compiler.compile_block(&program.value.body)?;
-        compiler
-            .instructions
-            .push(Instruction::Return { src: result });
-        Ok(compiler.finish())
+        compiler.emit_synthetic(Operation::Return { src: result }, program.location);
+        compiler.finish()
     }
 
     fn nested(
@@ -209,7 +212,12 @@ impl<'a> Compiler<'a> {
         let mut environment = HashMap::new();
         for (index, parameter) in parameters.iter().enumerate() {
             if environment
-                .insert(parameter.value.clone(), Register(index))
+                .insert(
+                    parameter.value.clone(),
+                    RegisterId(u32::try_from(index).map_err(|_| {
+                        frontend_error(source_name, "too many function parameters")
+                    })?),
+                )
                 .is_some()
             {
                 return Err(frontend_error(
@@ -219,17 +227,35 @@ impl<'a> Compiler<'a> {
             }
         }
         for (offset, capture) in captures.iter().enumerate() {
-            environment.insert(capture.clone(), Register(parameters.len() + offset));
+            let index = parameters
+                .len()
+                .checked_add(offset)
+                .ok_or_else(|| frontend_error(source_name, "too many closure registers"))?;
+            environment.insert(
+                capture.clone(),
+                RegisterId(
+                    u32::try_from(index)
+                        .map_err(|_| frontend_error(source_name, "too many closure captures"))?,
+                ),
+            );
         }
+        let register_count = parameters
+            .len()
+            .checked_add(captures.len())
+            .ok_or_else(|| frontend_error(source_name, "too many closure registers"))?;
         Ok(Self {
             source_name,
             function_name,
             environment,
             constants: Vec::new(),
-            instructions: Vec::new(),
-            next_register: parameters.len() + captures.len(),
-            parameter_count: parameters.len(),
-            capture_count: captures.len(),
+            items: Vec::new(),
+            next_register: u32::try_from(register_count)
+                .map_err(|_| frontend_error(source_name, "too many closure registers"))?,
+            next_label: 0,
+            parameter_count: u32::try_from(parameters.len())
+                .map_err(|_| frontend_error(source_name, "too many function parameters"))?,
+            capture_count: u32::try_from(captures.len())
+                .map_err(|_| frontend_error(source_name, "too many closure captures"))?,
             closure_index: 0,
             resolved_types: HashMap::new(),
             retained_names: HashSet::new(),
@@ -238,18 +264,24 @@ impl<'a> Compiler<'a> {
         })
     }
 
-    fn finish(self) -> BytecodeFunction {
-        BytecodeFunction::with_signature(
-            self.function_name,
-            self.parameter_count,
-            self.capture_count,
-            self.next_register,
-            self.constants,
-            self.instructions,
-        )
+    fn finish_lir(self) -> lir::Function {
+        lir::Function {
+            name: self.function_name,
+            parameter_count: self.parameter_count,
+            capture_count: self.capture_count,
+            register_count: self.next_register,
+            constants: self.constants,
+            items: self.items,
+        }
     }
 
-    fn compile_block(&mut self, block: &Block) -> Result<Register, FrontendError> {
+    fn finish(self) -> Result<BytecodeFunction, FrontendError> {
+        let source_name = self.source_name;
+        lir::assemble(self.finish_lir())
+            .map_err(|error| frontend_error(source_name, error.to_string()))
+    }
+
+    fn compile_block(&mut self, block: &Block) -> Result<RegisterId, FrontendError> {
         let outer = self.environment.clone();
         for binding in &block.value.bindings {
             match binding.value.kind {
@@ -265,7 +297,7 @@ impl<'a> Compiler<'a> {
                                     "nested type declarations are not supported in the MVP",
                                 )
                             })?;
-                        let register = self.load_constant(value);
+                        let register = self.load_constant(value, binding.location);
                         self.environment
                             .insert(binding.value.name.value.clone(), register);
                     }
@@ -285,7 +317,7 @@ impl<'a> Compiler<'a> {
                                 ),
                             )
                         })?;
-                    let register = self.load_constant(value);
+                    let register = self.load_constant(value, binding.location);
                     self.environment
                         .insert(binding.value.name.value.clone(), register);
                     continue;
@@ -301,30 +333,39 @@ impl<'a> Compiler<'a> {
         Ok(result)
     }
 
-    fn compile_expr(&mut self, expression: &Expr) -> Result<Register, FrontendError> {
+    fn compile_expr(&mut self, expression: &Expr) -> Result<RegisterId, FrontendError> {
         match &expression.value {
-            ExprKind::Int(value) => Ok(self.load_constant(Value::Int(*value))),
-            ExprKind::Float(value) => Ok(self.load_constant(Value::Float(*value))),
-            ExprKind::String(value) => Ok(self.load_constant(Value::string(value.clone()))),
+            ExprKind::Int(value) => Ok(self.load_constant(Value::Int(*value), expression.location)),
+            ExprKind::Float(value) => {
+                Ok(self.load_constant(Value::Float(*value), expression.location))
+            }
+            ExprKind::String(value) => {
+                Ok(self.load_constant(Value::string(value.clone()), expression.location))
+            }
             ExprKind::InterpolatedString(parts) => {
                 let mut registers = Vec::with_capacity(parts.len());
                 for part in parts {
                     registers.push(match &part.value {
                         StringPartKind::Text(text) => {
-                            self.load_constant(Value::string(text.clone()))
+                            self.load_constant(Value::string(text.clone()), part.location)
                         }
                         StringPartKind::Expression(expression) => self.compile_expr(expression)?,
                     });
                 }
                 let dst = self.allocate();
-                self.instructions.push(Instruction::InterpolateString {
-                    dst,
-                    parts: registers,
-                });
+                self.emit(
+                    Operation::InterpolateString {
+                        dst,
+                        parts: registers,
+                    },
+                    expression.location,
+                );
                 Ok(dst)
             }
-            ExprKind::Bytes(value) => Ok(self.load_constant(Value::Bytes(value.clone().into()))),
-            ExprKind::Atom(name) => Ok(self.load_constant(atom_value(name))),
+            ExprKind::Bytes(value) => {
+                Ok(self.load_constant(Value::Bytes(value.clone().into()), expression.location))
+            }
+            ExprKind::Atom(name) => Ok(self.load_constant(atom_value(name), expression.location)),
             ExprKind::Variable(name) => {
                 self.environment.get(&name.value).copied().ok_or_else(|| {
                     self.error_at(
@@ -336,25 +377,23 @@ impl<'a> Compiler<'a> {
             ExprKind::Array(items) => {
                 let items = self.compile_many(items)?;
                 let dst = self.allocate();
-                self.instructions
-                    .push(Instruction::MakeArray { dst, items });
+                self.emit(Operation::MakeArray { dst, items }, expression.location);
                 Ok(dst)
             }
             ExprKind::Tuple(items) => {
                 let items = self.compile_many(items)?;
                 let dst = self.allocate();
-                self.instructions
-                    .push(Instruction::MakeTuple { dst, items });
+                self.emit(Operation::MakeTuple { dst, items }, expression.location);
                 Ok(dst)
             }
-            ExprKind::Dict(fields) => self.compile_dict(fields),
+            ExprKind::Dict(fields) => self.compile_dict(fields, expression.location),
             ExprKind::Block(block) => self.compile_block(block),
             ExprKind::Unary { operator, operand } => {
                 let src = self.compile_expr(operand)?;
                 let dst = self.allocate();
                 match operator.value {
                     UnaryOperator::Negate => {
-                        self.instructions.push(Instruction::Negate { dst, src });
+                        self.emit(Operation::Negate { dst, src }, expression.location);
                     }
                 }
                 Ok(dst)
@@ -367,55 +406,94 @@ impl<'a> Compiler<'a> {
                 let left = self.compile_expr(left)?;
                 let right = self.compile_expr(right)?;
                 let dst = self.allocate();
-                self.instructions.push(match operator.value {
-                    BinaryOperator::Add => Instruction::Add { dst, left, right },
-                    BinaryOperator::Subtract => Instruction::Subtract { dst, left, right },
-                    BinaryOperator::Multiply => Instruction::Multiply { dst, left, right },
-                    BinaryOperator::Divide => Instruction::Divide { dst, left, right },
-                    BinaryOperator::LessThan => Instruction::LessThan { dst, left, right },
-                    BinaryOperator::Equal => Instruction::Equal { dst, left, right },
-                });
+                let operation = match operator.value {
+                    BinaryOperator::Add => Operation::Add { dst, left, right },
+                    BinaryOperator::Subtract => Operation::Subtract { dst, left, right },
+                    BinaryOperator::Multiply => Operation::Multiply { dst, left, right },
+                    BinaryOperator::Divide => Operation::Divide { dst, left, right },
+                    BinaryOperator::LessThan => Operation::LessThan { dst, left, right },
+                    BinaryOperator::Equal => Operation::Equal { dst, left, right },
+                };
+                self.emit(operation, expression.location);
                 Ok(dst)
             }
             ExprKind::Field { receiver, field } => {
                 let dict = self.compile_expr(receiver)?;
                 let dst = self.allocate();
-                self.instructions.push(Instruction::GetField {
-                    dst,
-                    dict,
-                    field: field.value.clone(),
-                });
+                self.emit(
+                    Operation::GetField {
+                        dst,
+                        dict,
+                        field: field.value.clone(),
+                    },
+                    expression.location,
+                );
                 Ok(dst)
             }
             ExprKind::Call { callee, arguments } => {
                 let callee = self.compile_expr(callee)?;
                 let arguments = self.compile_many(arguments)?;
+                let argument_base = if arguments.is_empty() {
+                    RegisterId(0)
+                } else {
+                    let base = self.allocate();
+                    self.emit(
+                        Operation::Move {
+                            dst: base,
+                            src: arguments[0],
+                        },
+                        expression.location,
+                    );
+                    for argument in arguments.iter().skip(1) {
+                        let destination = self.allocate();
+                        self.emit(
+                            Operation::Move {
+                                dst: destination,
+                                src: *argument,
+                            },
+                            expression.location,
+                        );
+                    }
+                    base
+                };
                 let dst = self.allocate();
-                self.instructions.push(Instruction::Call {
-                    dst,
-                    callee,
-                    arguments,
-                });
+                self.emit(
+                    Operation::Call {
+                        dst,
+                        callee,
+                        argument_base,
+                        argument_count: u32::try_from(arguments.len()).map_err(|_| {
+                            frontend_error(self.source_name, "too many call arguments")
+                        })?,
+                    },
+                    expression.location,
+                );
                 Ok(dst)
             }
-            ExprKind::Closure { parameters, body } => self.compile_closure(parameters, body),
+            ExprKind::Closure { parameters, body } => {
+                self.compile_closure(parameters, body, expression.location)
+            }
             ExprKind::If {
                 condition,
                 then_branch,
                 else_branch,
-            } => self.compile_if(condition, then_branch, else_branch),
-            ExprKind::Match { value, arms } => self.compile_match(value, arms),
+            } => self.compile_if(condition, then_branch, else_branch, expression.location),
+            ExprKind::Match { value, arms } => self.compile_match(value, arms, expression.location),
         }
     }
 
-    fn compile_many(&mut self, expressions: &[Expr]) -> Result<Vec<Register>, FrontendError> {
+    fn compile_many(&mut self, expressions: &[Expr]) -> Result<Vec<RegisterId>, FrontendError> {
         expressions
             .iter()
             .map(|expression| self.compile_expr(expression))
             .collect()
     }
 
-    fn compile_dict(&mut self, fields: &[DictField]) -> Result<Register, FrontendError> {
+    fn compile_dict(
+        &mut self,
+        fields: &[DictField],
+        location: Location,
+    ) -> Result<RegisterId, FrontendError> {
         let mut seen = HashSet::new();
         let mut compiled = Vec::with_capacity(fields.len());
         for field in fields {
@@ -429,10 +507,13 @@ impl<'a> Compiler<'a> {
             compiled.push((name.clone(), self.compile_expr(&field.value.value)?));
         }
         let dst = self.allocate();
-        self.instructions.push(Instruction::MakeDict {
-            dst,
-            fields: compiled,
-        });
+        self.emit(
+            Operation::MakeDict {
+                dst,
+                fields: compiled,
+            },
+            location,
+        );
         Ok(dst)
     }
 
@@ -440,7 +521,8 @@ impl<'a> Compiler<'a> {
         &mut self,
         parameters: &[Identifier],
         body: &Block,
-    ) -> Result<Register, FrontendError> {
+        location: Location,
+    ) -> Result<RegisterId, FrontendError> {
         let mut bound = parameters
             .iter()
             .map(|parameter| parameter.value.clone())
@@ -473,17 +555,18 @@ impl<'a> Compiler<'a> {
             &captures,
         )?;
         let result = nested.compile_block(body)?;
-        nested
-            .instructions
-            .push(Instruction::Return { src: result });
-        let function = Arc::new(nested.finish());
+        nested.emit_synthetic(Operation::Return { src: result }, body.location);
+        let function = Box::new(nested.finish_lir());
 
         let dst = self.allocate();
-        self.instructions.push(Instruction::MakeClosure {
-            dst,
-            function,
-            captures: capture_registers,
-        });
+        self.emit(
+            Operation::MakeClosure {
+                dst,
+                function,
+                captures: capture_registers,
+            },
+            location,
+        );
         Ok(dst)
     }
 
@@ -492,23 +575,39 @@ impl<'a> Compiler<'a> {
         condition: &Expr,
         then_branch: &Block,
         else_branch: &Block,
-    ) -> Result<Register, FrontendError> {
+        location: Location,
+    ) -> Result<RegisterId, FrontendError> {
+        let condition_location = condition.location;
         let condition = self.compile_expr(condition)?;
-        let jump_else = self.emit_jump_if_false(condition);
+        let else_label = self.new_label();
+        self.emit(
+            Operation::JumpIfFalse {
+                condition,
+                target: else_label,
+            },
+            condition_location,
+        );
         let then_value = self.compile_block(then_branch)?;
         let result = self.allocate();
-        self.instructions.push(Instruction::Move {
-            dst: result,
-            src: then_value,
-        });
-        let jump_end = self.emit_jump();
-        self.patch_jump(jump_else, self.instructions.len());
+        self.emit_synthetic(
+            Operation::Move {
+                dst: result,
+                src: then_value,
+            },
+            then_branch.location,
+        );
+        let end_label = self.new_label();
+        self.emit_synthetic(Operation::Jump { target: end_label }, location);
+        self.mark_label(else_label);
         let else_value = self.compile_block(else_branch)?;
-        self.instructions.push(Instruction::Move {
-            dst: result,
-            src: else_value,
-        });
-        self.patch_jump(jump_end, self.instructions.len());
+        self.emit_synthetic(
+            Operation::Move {
+                dst: result,
+                src: else_value,
+            },
+            else_branch.location,
+        );
+        self.mark_label(end_label);
         Ok(result)
     }
 
@@ -516,7 +615,8 @@ impl<'a> Compiler<'a> {
         &mut self,
         value: &Expr,
         arms: &[MatchArm],
-    ) -> Result<Register, FrontendError> {
+        location: Location,
+    ) -> Result<RegisterId, FrontendError> {
         let value = self.compile_expr(value)?;
         let result = self.allocate();
         let mut end_jumps = Vec::new();
@@ -532,24 +632,30 @@ impl<'a> Compiler<'a> {
                 &mut pattern_bindings,
             )?;
             let arm_value = self.compile_expr(&arm.value.value)?;
-            self.instructions.push(Instruction::Move {
-                dst: result,
-                src: arm_value,
-            });
-            end_jumps.push(self.emit_jump());
-            let next_arm = self.instructions.len();
+            self.emit_synthetic(
+                Operation::Move {
+                    dst: result,
+                    src: arm_value,
+                },
+                arm.location,
+            );
+            let end = self.new_label();
+            self.emit_synthetic(Operation::Jump { target: end }, arm.location);
+            end_jumps.push(end);
             for failure in failures {
-                self.patch_jump(failure, next_arm);
+                self.mark_label(failure);
             }
             self.environment = outer;
         }
 
-        self.instructions.push(Instruction::Fail {
-            message: "no match arm accepted the value".into(),
-        });
-        let end = self.instructions.len();
+        self.emit(
+            Operation::Fail {
+                message: "no match arm accepted the value".into(),
+            },
+            location,
+        );
         for jump in end_jumps {
-            self.patch_jump(jump, end);
+            self.mark_label(jump);
         }
         Ok(result)
     }
@@ -557,8 +663,8 @@ impl<'a> Compiler<'a> {
     fn compile_pattern(
         &mut self,
         pattern: &Pattern,
-        value: Register,
-        failures: &mut Vec<usize>,
+        value: RegisterId,
+        failures: &mut Vec<LabelId>,
         bindings: &mut HashSet<String>,
     ) -> Result<(), FrontendError> {
         match &pattern.value {
@@ -573,36 +679,50 @@ impl<'a> Compiler<'a> {
                 self.environment.insert(name.value.clone(), value);
             }
             PatternKind::Int(item) => {
-                let expected = self.load_constant(Value::Int(*item));
-                self.emit_pattern_equality(value, expected, failures);
+                let expected = self.load_constant(Value::Int(*item), pattern.location);
+                self.emit_pattern_equality(value, expected, failures, pattern.location);
             }
             PatternKind::Float(item) => {
-                let expected = self.load_constant(Value::Float(*item));
-                self.emit_pattern_equality(value, expected, failures);
+                let expected = self.load_constant(Value::Float(*item), pattern.location);
+                self.emit_pattern_equality(value, expected, failures, pattern.location);
             }
             PatternKind::String(item) => {
-                let expected = self.load_constant(Value::string(item.clone()));
-                self.emit_pattern_equality(value, expected, failures);
+                let expected = self.load_constant(Value::string(item.clone()), pattern.location);
+                self.emit_pattern_equality(value, expected, failures, pattern.location);
             }
             PatternKind::Atom(item) => {
-                let expected = self.load_constant(atom_value(item));
-                self.emit_pattern_equality(value, expected, failures);
+                let expected = self.load_constant(atom_value(item), pattern.location);
+                self.emit_pattern_equality(value, expected, failures, pattern.location);
             }
             PatternKind::Tuple(items) => {
                 let condition = self.allocate();
-                self.instructions.push(Instruction::TupleLengthEquals {
-                    dst: condition,
-                    value,
-                    length: items.len(),
-                });
-                failures.push(self.emit_jump_if_false(condition));
+                self.emit(
+                    Operation::TupleLengthEquals {
+                        dst: condition,
+                        value,
+                        length: items.len(),
+                    },
+                    pattern.location,
+                );
+                let failure = self.new_label();
+                self.emit(
+                    Operation::JumpIfFalse {
+                        condition,
+                        target: failure,
+                    },
+                    pattern.location,
+                );
+                failures.push(failure);
                 for (index, pattern) in items.iter().enumerate() {
                     let element = self.allocate();
-                    self.instructions.push(Instruction::GetTuple {
-                        dst: element,
-                        tuple: value,
-                        index,
-                    });
+                    self.emit(
+                        Operation::GetTuple {
+                            dst: element,
+                            tuple: value,
+                            index,
+                        },
+                        pattern.location,
+                    );
                     self.compile_pattern(pattern, element, failures, bindings)?;
                 }
             }
@@ -612,61 +732,81 @@ impl<'a> Compiler<'a> {
 
     fn emit_pattern_equality(
         &mut self,
-        value: Register,
-        expected: Register,
-        failures: &mut Vec<usize>,
+        value: RegisterId,
+        expected: RegisterId,
+        failures: &mut Vec<LabelId>,
+        location: Location,
     ) {
         let condition = self.allocate();
-        self.instructions.push(Instruction::Equal {
-            dst: condition,
-            left: value,
-            right: expected,
-        });
-        failures.push(self.emit_jump_if_false(condition));
+        self.emit(
+            Operation::Equal {
+                dst: condition,
+                left: value,
+                right: expected,
+            },
+            location,
+        );
+        let failure = self.new_label();
+        self.emit(
+            Operation::JumpIfFalse {
+                condition,
+                target: failure,
+            },
+            location,
+        );
+        failures.push(failure);
     }
 
-    fn load_constant(&mut self, value: Value) -> Register {
+    fn load_constant(&mut self, value: Value, location: Location) -> RegisterId {
         let constant = self.constants.len();
         self.constants.push(value);
         let dst = self.allocate();
-        self.instructions
-            .push(Instruction::LoadConst { dst, constant });
+        self.emit(
+            Operation::LoadConst {
+                dst,
+                constant: ConstantId(u32::try_from(constant).expect("constant pool exceeds u32")),
+            },
+            location,
+        );
         dst
     }
 
-    fn allocate(&mut self) -> Register {
-        let register = Register(self.next_register);
-        self.next_register += 1;
+    fn allocate(&mut self) -> RegisterId {
+        let register = RegisterId(self.next_register);
+        self.next_register = self
+            .next_register
+            .checked_add(1)
+            .expect("register count exceeds u32");
         register
     }
 
-    fn emit_jump_if_false(&mut self, condition: Register) -> usize {
-        let index = self.instructions.len();
-        self.instructions.push(Instruction::JumpIfFalse {
-            condition,
-            target: usize::MAX,
-        });
-        index
+    fn emit(&mut self, operation: Operation, location: Location) {
+        self.items.push(Item::Operation(WithOrigin {
+            value: operation,
+            origin: Origin::Source(location),
+        }));
     }
 
-    fn emit_jump(&mut self) -> usize {
-        let index = self.instructions.len();
-        self.instructions
-            .push(Instruction::Jump { target: usize::MAX });
-        index
+    fn emit_synthetic(&mut self, operation: Operation, derived_from: Location) {
+        self.items.push(Item::Operation(WithOrigin {
+            value: operation,
+            origin: Origin::Synthetic {
+                derived_from: Some(derived_from),
+            },
+        }));
     }
 
-    fn patch_jump(&mut self, instruction: usize, target: usize) {
-        match &mut self.instructions[instruction] {
-            Instruction::Jump {
-                target: jump_target,
-            }
-            | Instruction::JumpIfFalse {
-                target: jump_target,
-                ..
-            } => *jump_target = target,
-            _ => unreachable!("compiler only patches jump instructions"),
-        }
+    fn new_label(&mut self) -> LabelId {
+        let label = LabelId(self.next_label);
+        self.next_label = self
+            .next_label
+            .checked_add(1)
+            .expect("label count exceeds u32");
+        label
+    }
+
+    fn mark_label(&mut self, label: LabelId) {
+        self.items.push(Item::Label(label));
     }
 }
 
@@ -965,5 +1105,30 @@ mod tests {
             panic!("expected runtime error");
         };
         assert!(error.message.contains("expected 1 arguments"));
+    }
+
+    #[test]
+    fn runtime_errors_retain_expression_origins_and_call_trace() {
+        let error = run("let divide = fn(x) {\n  x / 0\n};\ndivide(4)").unwrap_err();
+        let ExecutionError::Runtime(error) = error else {
+            panic!("expected runtime error");
+        };
+        assert_eq!(error.kind, RuntimeErrorKind::DivisionByZero);
+        assert_eq!(error.trace.len(), 2);
+        let Origin::Source(location) = error.origin().expect("runtime origin") else {
+            panic!("expected source origin");
+        };
+        assert_eq!(location.range.start, 23);
+        assert!(error.to_string().contains("test:2:3"));
+    }
+
+    #[test]
+    fn runtime_field_and_interpolation_errors_render_their_expressions() {
+        let field = run("let value = {present: 1};\nvalue.missing").unwrap_err();
+        assert!(field.to_string().contains("test:2:1"));
+
+        let interpolation =
+            run("fn render(value) {\n  \"value=\\{value}\"\n}\nrender([1])").unwrap_err();
+        assert!(interpolation.to_string().contains("test:2:3"));
     }
 }
