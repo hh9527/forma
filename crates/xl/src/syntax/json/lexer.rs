@@ -106,7 +106,7 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
                 };
                 let span = lexer.span();
                 let (token, error) = match result {
-                    Ok(token) => (normal_token(token), false),
+                    Ok(token) => (token.into(), false),
                     Err(_) => (Token::Error, true),
                 };
                 let next = if token == Token::DoubleQuote {
@@ -123,9 +123,7 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
                 };
                 let span = lexer.span();
                 let (token, error) = match result {
-                    Ok(StringToken::DoubleQuote) => (Token::DoubleQuote, false),
-                    Ok(StringToken::EscapeSequence) => (Token::EscapeSequence, false),
-                    Ok(StringToken::StringText) => (Token::StringText, false),
+                    Ok(token) => (token.into(), false),
                     Err(_) => (Token::Error, true),
                 };
                 let next = if token == Token::DoubleQuote {
@@ -147,20 +145,32 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
     (tokens, spans)
 }
 
-fn normal_token(token: NormalToken) -> Token {
-    match token {
-        NormalToken::True => Token::True,
-        NormalToken::False => Token::False,
-        NormalToken::Null => Token::Null,
-        NormalToken::LBrace => Token::LBrace,
-        NormalToken::RBrace => Token::RBrace,
-        NormalToken::LBracket => Token::LBracket,
-        NormalToken::RBracket => Token::RBracket,
-        NormalToken::Comma => Token::Comma,
-        NormalToken::Colon => Token::Colon,
-        NormalToken::DoubleQuote => Token::DoubleQuote,
-        NormalToken::Number => Token::Number,
-        NormalToken::Whitespace => Token::Whitespace,
+impl From<NormalToken> for Token {
+    fn from(token: NormalToken) -> Self {
+        match token {
+            NormalToken::True => Self::True,
+            NormalToken::False => Self::False,
+            NormalToken::Null => Self::Null,
+            NormalToken::LBrace => Self::LBrace,
+            NormalToken::RBrace => Self::RBrace,
+            NormalToken::LBracket => Self::LBracket,
+            NormalToken::RBracket => Self::RBracket,
+            NormalToken::Comma => Self::Comma,
+            NormalToken::Colon => Self::Colon,
+            NormalToken::DoubleQuote => Self::DoubleQuote,
+            NormalToken::Number => Self::Number,
+            NormalToken::Whitespace => Self::Whitespace,
+        }
+    }
+}
+
+impl From<StringToken> for Token {
+    fn from(token: StringToken) -> Self {
+        match token {
+            StringToken::DoubleQuote => Self::DoubleQuote,
+            StringToken::EscapeSequence => Self::EscapeSequence,
+            StringToken::StringText => Self::StringText,
+        }
     }
 }
 

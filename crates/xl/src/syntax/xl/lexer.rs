@@ -189,7 +189,7 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
                 };
                 let span = lexer.span();
                 let (token, error) = match result {
-                    Ok(token) => (normal_token(token), false),
+                    Ok(token) => (token.into(), false),
                     Err(_) => (Token::Error, true),
                 };
                 let context = *lexer
@@ -236,10 +236,7 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
                 };
                 let span = lexer.span();
                 let (token, error) = match result {
-                    Ok(StringToken::DoubleQuote) => (Token::DoubleQuote, false),
-                    Ok(StringToken::InterpolationStart) => (Token::InterpolationStart, false),
-                    Ok(StringToken::EscapeSequence) => (Token::EscapeSequence, false),
-                    Ok(StringToken::StringText) => (Token::StringText, false),
+                    Ok(token) => (token.into(), false),
                     Err(_) => (Token::Error, true),
                 };
                 let next = match token {
@@ -269,43 +266,56 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
     (tokens, spans)
 }
 
-fn normal_token(token: NormalToken) -> Token {
-    match token {
-        NormalToken::Let => Token::Let,
-        NormalToken::Type => Token::Type,
-        NormalToken::Fn => Token::Fn,
-        NormalToken::If => Token::If,
-        NormalToken::Else => Token::Else,
-        NormalToken::Match => Token::Match,
-        NormalToken::Import => Token::Import,
-        NormalToken::From => Token::From,
-        NormalToken::LParen => Token::LParen,
-        NormalToken::RParen => Token::RParen,
-        NormalToken::LBrace => Token::LBrace,
-        NormalToken::RBrace => Token::RBrace,
-        NormalToken::LBracket => Token::LBracket,
-        NormalToken::RBracket => Token::RBracket,
-        NormalToken::Comma => Token::Comma,
-        NormalToken::Colon => Token::Colon,
-        NormalToken::Semicolon => Token::Semicolon,
-        NormalToken::Dot => Token::Dot,
-        NormalToken::Plus => Token::Plus,
-        NormalToken::Minus => Token::Minus,
-        NormalToken::Star => Token::Star,
-        NormalToken::Slash => Token::Slash,
-        NormalToken::Less => Token::Less,
-        NormalToken::EqualEqual => Token::EqualEqual,
-        NormalToken::Equal => Token::Equal,
-        NormalToken::FatArrow => Token::FatArrow,
-        NormalToken::Pipe => Token::Pipe,
-        NormalToken::Int => Token::Int,
-        NormalToken::Float => Token::Float,
-        NormalToken::DoubleQuote => Token::DoubleQuote,
-        NormalToken::Bytes => Token::Bytes,
-        NormalToken::Atom => Token::Atom,
-        NormalToken::Identifier => Token::Identifier,
-        NormalToken::Whitespace => Token::Whitespace,
-        NormalToken::Comment => Token::Comment,
+impl From<NormalToken> for Token {
+    fn from(token: NormalToken) -> Self {
+        match token {
+            NormalToken::Let => Self::Let,
+            NormalToken::Type => Self::Type,
+            NormalToken::Fn => Self::Fn,
+            NormalToken::If => Self::If,
+            NormalToken::Else => Self::Else,
+            NormalToken::Match => Self::Match,
+            NormalToken::Import => Self::Import,
+            NormalToken::From => Self::From,
+            NormalToken::LParen => Self::LParen,
+            NormalToken::RParen => Self::RParen,
+            NormalToken::LBrace => Self::LBrace,
+            NormalToken::RBrace => Self::RBrace,
+            NormalToken::LBracket => Self::LBracket,
+            NormalToken::RBracket => Self::RBracket,
+            NormalToken::Comma => Self::Comma,
+            NormalToken::Colon => Self::Colon,
+            NormalToken::Semicolon => Self::Semicolon,
+            NormalToken::Dot => Self::Dot,
+            NormalToken::Plus => Self::Plus,
+            NormalToken::Minus => Self::Minus,
+            NormalToken::Star => Self::Star,
+            NormalToken::Slash => Self::Slash,
+            NormalToken::Less => Self::Less,
+            NormalToken::EqualEqual => Self::EqualEqual,
+            NormalToken::Equal => Self::Equal,
+            NormalToken::FatArrow => Self::FatArrow,
+            NormalToken::Pipe => Self::Pipe,
+            NormalToken::Int => Self::Int,
+            NormalToken::Float => Self::Float,
+            NormalToken::DoubleQuote => Self::DoubleQuote,
+            NormalToken::Bytes => Self::Bytes,
+            NormalToken::Atom => Self::Atom,
+            NormalToken::Identifier => Self::Identifier,
+            NormalToken::Whitespace => Self::Whitespace,
+            NormalToken::Comment => Self::Comment,
+        }
+    }
+}
+
+impl From<StringToken> for Token {
+    fn from(token: StringToken) -> Self {
+        match token {
+            StringToken::DoubleQuote => Self::DoubleQuote,
+            StringToken::InterpolationStart => Self::InterpolationStart,
+            StringToken::EscapeSequence => Self::EscapeSequence,
+            StringToken::StringText => Self::StringText,
+        }
     }
 }
 
