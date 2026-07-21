@@ -1,4 +1,4 @@
-use crate::source::{Diagnostic, SourceDatabase, SourceId, Span};
+use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
 use crate::syntax::json::lexer::Token;
 use crate::syntax::json::parser::{CstData, Node, NodeRef, Rule};
 use crate::{BuiltinAtom, Value, Vm};
@@ -35,8 +35,8 @@ pub type ValuePath = Vec<ValuePathSegment>;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct Provenance {
-    pub values: BTreeMap<ValuePath, Span>,
-    pub keys: BTreeMap<ValuePath, Span>,
+    pub values: BTreeMap<ValuePath, Location>,
+    pub keys: BTreeMap<ValuePath, Location>,
 }
 
 #[derive(Clone, Debug)]
@@ -101,7 +101,7 @@ fn compatibility_error(
     let offset = diagnostic
         .labels
         .first()
-        .map_or(0, |label| label.span.range.start);
+        .map_or(0, |label| label.location.range.start);
     let position = sources.get(source_id).position(offset);
     JsonError {
         source_name: sources.get(source_id).name.to_string(),
@@ -164,7 +164,7 @@ impl<'a> JsonLowerer<'a> {
         };
         self.provenance
             .values
-            .insert(self.path.clone(), self.span(node));
+            .insert(self.path.clone(), self.location(node));
         Ok(value)
     }
 
@@ -188,29 +188,27 @@ impl<'a> JsonLowerer<'a> {
             .filter(|child| self.rule(*child) == Some(Rule::Member))
             .collect::<Vec<_>>();
         let mut fields = BTreeMap::new();
-        let mut key_spans: BTreeMap<String, Span> = BTreeMap::new();
+        let mut key_spans: BTreeMap<String, Location> = BTreeMap::new();
         for member in members {
             let key_node = self
                 .token_children(member, Token::String)
                 .next()
                 .ok_or_else(|| self.error(member, "JSON object key must be a string"))?;
             let key = self.decode_string(key_node)?;
-            let key_span = self.span(key_node);
+            let key_span = self.location(key_node);
             if let Some(previous) = key_spans.get(&key) {
                 return Err(Diagnostic::error(
                     format!("duplicate JSON object key {key:?}"),
                     key_span,
                 )
-                .with_secondary("first defined here", previous.clone()));
+                .with_secondary("first defined here", *previous));
             }
             let value_node = self
                 .children(member)
                 .find(|child| *child != key_node && self.is_value(*child))
                 .ok_or_else(|| self.error(member, "JSON member has no value"))?;
             self.path.push(ValuePathSegment::Key(key.clone()));
-            self.provenance
-                .keys
-                .insert(self.path.clone(), key_span.clone());
+            self.provenance.keys.insert(self.path.clone(), key_span);
             let value = self.value(value_node)?;
             self.path.pop();
             key_spans.insert(key.clone(), key_span);
@@ -316,14 +314,12 @@ impl<'a> JsonLowerer<'a> {
     fn text(&self, node: NodeRef) -> &str {
         &self.source[self.cst.span(node)]
     }
-    fn span(&self, node: NodeRef) -> Span {
-        Span {
-            source: self.source_id,
-            range: self.cst.span(node),
-        }
+    fn location(&self, node: NodeRef) -> Location {
+        Location::from_usize(self.source_id, self.cst.span(node))
+            .expect("CST span fits registered source")
     }
     fn error(&self, node: NodeRef, message: impl Into<String>) -> Diagnostic {
-        Diagnostic::error(message, self.span(node))
+        Diagnostic::error(message, self.location(node))
     }
 }
 
@@ -400,12 +396,21 @@ mod tests {
         let mut sources = SourceDatabase::default();
         let duplicate = sources.add("duplicate.json", r#"{"a":1,"a":2}"#);
         let parsed = parse_json_registered(&sources, duplicate);
-        assert_eq!(parsed.diagnostics[0].labels[0].span.range, 7..10);
-        assert_eq!(parsed.diagnostics[0].labels[1].span.range, 1..4);
+        assert_eq!(
+            parsed.diagnostics[0].labels[0].location.range.to_usize(),
+            7..10
+        );
+        assert_eq!(
+            parsed.diagnostics[0].labels[1].location.range.to_usize(),
+            1..4
+        );
 
         let large = sources.add("large.json", "9223372036854775808");
         let parsed = parse_json_registered(&sources, large);
-        assert_eq!(parsed.diagnostics[0].labels[0].span.range, 0..19);
+        assert_eq!(
+            parsed.diagnostics[0].labels[0].location.range.to_usize(),
+            0..19
+        );
     }
 
     #[test]
@@ -420,6 +425,6 @@ mod tests {
             first.provenance.values[&path].source,
             second.provenance.values[&path].source
         );
-        assert_eq!(first.provenance.values[&path].range, 8..13);
+        assert_eq!(first.provenance.values[&path].range.to_usize(), 8..13);
     }
 }

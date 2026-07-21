@@ -34,10 +34,8 @@ pub(crate) fn convert_diagnostics(
                 .into_iter()
                 .enumerate()
                 .map(|(index, label)| crate::source::Label {
-                    span: crate::source::Span {
-                        source,
-                        range: label.range,
-                    },
+                    location: crate::source::Location::from_usize(source, label.range)
+                        .expect("lexer span fits registered source"),
                     message: label.message,
                     primary: index == 0,
                 })

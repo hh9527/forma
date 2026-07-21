@@ -1,10 +1,11 @@
 use crate::ast::{
-    BinaryOperator, BindingKind, Block, Expr, MatchArm, Pattern, Program, UnaryOperator,
+    BinaryOperator, BindingKind, Block, DictField, Expr, ExprKind, Identifier, MatchArm, Pattern,
+    PatternKind, Program, UnaryOperator,
 };
 use crate::bytecode::{BytecodeFunction, Instruction, Register};
 use crate::lexer::{FrontendError, SourceLocation};
 use crate::parser::parse_registered;
-use crate::source::{Diagnostic, SourceDatabase, SourceFile, Span};
+use crate::source::{Diagnostic, Location, SourceDatabase, SourceFile};
 use crate::types::{Analysis, analyze_program_registered};
 use crate::value::{Atom, BuiltinAtom, Value};
 use crate::{RuntimeError, Vm};
@@ -86,6 +87,7 @@ pub(crate) fn compile_expression_with_bindings(
     function_name: &str,
     expression: &Expr,
     bindings: &BTreeMap<String, Value>,
+    source_file: &SourceFile,
 ) -> Result<BytecodeFunction, FrontendError> {
     let mut compiler = Compiler {
         source_name,
@@ -100,7 +102,7 @@ pub(crate) fn compile_expression_with_bindings(
         resolved_types: HashMap::new(),
         retained_names: HashSet::new(),
         external_values: BTreeMap::new(),
-        source_file: None,
+        source_file: Some(source_file),
     };
     for (name, value) in bindings {
         let register = compiler.load_constant(value.clone());
@@ -130,15 +132,15 @@ struct Compiler<'a> {
 }
 
 impl<'a> Compiler<'a> {
-    fn error_at(&self, span: &Span, message: impl Into<String>) -> FrontendError {
+    fn error_at(&self, location: Location, message: impl Into<String>) -> FrontendError {
         let message = message.into();
         if let Some(source_file) = self.source_file {
-            let position = source_file.position(span.range.start);
-            let diagnostic = Diagnostic::error(message.clone(), span.clone());
+            let position = source_file.position(location.range.start);
+            let diagnostic = Diagnostic::error(message.clone(), location);
             FrontendError {
                 source_name: source_file.name.to_string(),
                 location: SourceLocation {
-                    offset: span.range.start,
+                    offset: location.range.start as usize,
                     line: position.line,
                     column: position.column,
                 },
@@ -146,17 +148,7 @@ impl<'a> Compiler<'a> {
                 diagnostic: Some(Box::new(diagnostic)),
             }
         } else {
-            let diagnostic = Diagnostic::error(message.clone(), span.clone());
-            FrontendError {
-                source_name: self.source_name.to_owned(),
-                location: SourceLocation {
-                    offset: span.range.start,
-                    line: 1,
-                    column: span.range.start + 1,
-                },
-                message,
-                diagnostic: Some(Box::new(diagnostic)),
-            }
+            unreachable!("located compiler errors require their source file")
         }
     }
 
@@ -167,7 +159,7 @@ impl<'a> Compiler<'a> {
         analysis: &Analysis,
     ) -> Result<BytecodeFunction, FrontendError> {
         let mut retained_names = HashSet::new();
-        collect_runtime_names_block(&program.body, &mut retained_names);
+        collect_runtime_names_block(&program.value.body, &mut retained_names);
         let mut compiler = Self {
             source_name,
             function_name: source_name.to_owned(),
@@ -200,7 +192,7 @@ impl<'a> Compiler<'a> {
                 compiler.environment.insert(name.clone(), register);
             }
         }
-        let result = compiler.compile_block(&program.body)?;
+        let result = compiler.compile_block(&program.value.body)?;
         compiler
             .instructions
             .push(Instruction::Return { src: result });
@@ -211,18 +203,18 @@ impl<'a> Compiler<'a> {
         source_name: &'a str,
         source_file: Option<&'a SourceFile>,
         function_name: String,
-        parameters: &[String],
+        parameters: &[Identifier],
         captures: &[String],
     ) -> Result<Self, FrontendError> {
         let mut environment = HashMap::new();
         for (index, parameter) in parameters.iter().enumerate() {
             if environment
-                .insert(parameter.clone(), Register(index))
+                .insert(parameter.value.clone(), Register(index))
                 .is_some()
             {
                 return Err(frontend_error(
                     source_name,
-                    format!("duplicate parameter {parameter:?}"),
+                    format!("duplicate parameter {:?}", parameter.value),
                 ));
             }
         }
@@ -259,94 +251,98 @@ impl<'a> Compiler<'a> {
 
     fn compile_block(&mut self, block: &Block) -> Result<Register, FrontendError> {
         let outer = self.environment.clone();
-        for binding in &block.bindings {
-            match binding.kind {
+        for binding in &block.value.bindings {
+            match binding.value.kind {
                 BindingKind::Type => {
-                    if self.retained_names.contains(&binding.name) {
-                        let value =
-                            self.resolved_types
-                                .get(&binding.name)
-                                .cloned()
-                                .ok_or_else(|| {
-                                    frontend_error(
-                                        self.source_name,
-                                        "nested type declarations are not supported in the MVP",
-                                    )
-                                })?;
+                    if self.retained_names.contains(&binding.value.name.value) {
+                        let value = self
+                            .resolved_types
+                            .get(&binding.value.name.value)
+                            .cloned()
+                            .ok_or_else(|| {
+                                frontend_error(
+                                    self.source_name,
+                                    "nested type declarations are not supported in the MVP",
+                                )
+                            })?;
                         let register = self.load_constant(value);
-                        self.environment.insert(binding.name.clone(), register);
+                        self.environment
+                            .insert(binding.value.name.value.clone(), register);
                     }
                     continue;
                 }
                 BindingKind::Import => {
                     let value = self
                         .external_values
-                        .get(&binding.name)
+                        .get(&binding.value.name.value)
                         .cloned()
                         .ok_or_else(|| {
                             frontend_error(
                                 self.source_name,
-                                format!("import {} has not been resolved", binding.name),
+                                format!(
+                                    "import {} has not been resolved",
+                                    binding.value.name.value
+                                ),
                             )
                         })?;
                     let register = self.load_constant(value);
-                    self.environment.insert(binding.name.clone(), register);
+                    self.environment
+                        .insert(binding.value.name.value.clone(), register);
                     continue;
                 }
                 BindingKind::Let => {}
             }
-            let value = self.compile_expr(&binding.value)?;
-            self.environment.insert(binding.name.clone(), value);
+            let value = self.compile_expr(&binding.value.value)?;
+            self.environment
+                .insert(binding.value.name.value.clone(), value);
         }
-        let result = self.compile_expr(&block.result)?;
+        let result = self.compile_expr(&block.value.result)?;
         self.environment = outer;
         Ok(result)
     }
 
     fn compile_expr(&mut self, expression: &Expr) -> Result<Register, FrontendError> {
-        match expression {
-            Expr::Spanned { span, expression } => self.compile_expr(expression).map_err(|error| {
-                if error.location.offset == 0 {
-                    self.error_at(span, error.message)
-                } else {
-                    error
-                }
-            }),
-            Expr::Int(value) => Ok(self.load_constant(Value::Int(*value))),
-            Expr::Float(value) => Ok(self.load_constant(Value::Float(*value))),
-            Expr::String(value) => Ok(self.load_constant(Value::string(value.clone()))),
-            Expr::Bytes(value) => Ok(self.load_constant(Value::Bytes(value.clone().into()))),
-            Expr::Atom(name) => Ok(self.load_constant(atom_value(name))),
-            Expr::Variable(name) => self.environment.get(name).copied().ok_or_else(|| {
-                frontend_error(self.source_name, format!("unknown binding {name:?}"))
-            }),
-            Expr::Array(items) => {
+        match &expression.value {
+            ExprKind::Int(value) => Ok(self.load_constant(Value::Int(*value))),
+            ExprKind::Float(value) => Ok(self.load_constant(Value::Float(*value))),
+            ExprKind::String(value) => Ok(self.load_constant(Value::string(value.clone()))),
+            ExprKind::Bytes(value) => Ok(self.load_constant(Value::Bytes(value.clone().into()))),
+            ExprKind::Atom(name) => Ok(self.load_constant(atom_value(name))),
+            ExprKind::Variable(name) => {
+                self.environment.get(&name.value).copied().ok_or_else(|| {
+                    self.error_at(
+                        expression.location,
+                        format!("unknown binding {:?}", name.value),
+                    )
+                })
+            }
+            ExprKind::Array(items) => {
                 let items = self.compile_many(items)?;
                 let dst = self.allocate();
                 self.instructions
                     .push(Instruction::MakeArray { dst, items });
                 Ok(dst)
             }
-            Expr::Tuple(items) => {
+            ExprKind::Tuple(items) => {
                 let items = self.compile_many(items)?;
                 let dst = self.allocate();
                 self.instructions
                     .push(Instruction::MakeTuple { dst, items });
                 Ok(dst)
             }
-            Expr::Dict(fields) => self.compile_dict(fields),
-            Expr::Block(block) => self.compile_block(block),
-            Expr::Unary { operator, operand } => {
+            ExprKind::Dict(fields) => self.compile_dict(fields),
+            ExprKind::Block(block) => self.compile_block(block),
+            ExprKind::Unary { operator, operand } => {
                 let src = self.compile_expr(operand)?;
                 let dst = self.allocate();
-                match operator {
+                match operator.value {
                     UnaryOperator::Negate => {
                         self.instructions.push(Instruction::Negate { dst, src });
                     }
                 }
                 Ok(dst)
             }
-            Expr::Binary {
+            ExprKind::Binary {
                 operator,
                 left,
                 right,
@@ -354,7 +350,7 @@ impl<'a> Compiler<'a> {
                 let left = self.compile_expr(left)?;
                 let right = self.compile_expr(right)?;
                 let dst = self.allocate();
-                self.instructions.push(match operator {
+                self.instructions.push(match operator.value {
                     BinaryOperator::Add => Instruction::Add { dst, left, right },
                     BinaryOperator::Subtract => Instruction::Subtract { dst, left, right },
                     BinaryOperator::Multiply => Instruction::Multiply { dst, left, right },
@@ -364,17 +360,17 @@ impl<'a> Compiler<'a> {
                 });
                 Ok(dst)
             }
-            Expr::Field { receiver, field } => {
+            ExprKind::Field { receiver, field } => {
                 let dict = self.compile_expr(receiver)?;
                 let dst = self.allocate();
                 self.instructions.push(Instruction::GetField {
                     dst,
                     dict,
-                    field: field.clone(),
+                    field: field.value.clone(),
                 });
                 Ok(dst)
             }
-            Expr::Call { callee, arguments } => {
+            ExprKind::Call { callee, arguments } => {
                 let callee = self.compile_expr(callee)?;
                 let arguments = self.compile_many(arguments)?;
                 let dst = self.allocate();
@@ -385,13 +381,13 @@ impl<'a> Compiler<'a> {
                 });
                 Ok(dst)
             }
-            Expr::Closure { parameters, body } => self.compile_closure(parameters, body),
-            Expr::If {
+            ExprKind::Closure { parameters, body } => self.compile_closure(parameters, body),
+            ExprKind::If {
                 condition,
                 then_branch,
                 else_branch,
             } => self.compile_if(condition, then_branch, else_branch),
-            Expr::Match { value, arms } => self.compile_match(value, arms),
+            ExprKind::Match { value, arms } => self.compile_match(value, arms),
         }
     }
 
@@ -402,17 +398,18 @@ impl<'a> Compiler<'a> {
             .collect()
     }
 
-    fn compile_dict(&mut self, fields: &[(String, Expr)]) -> Result<Register, FrontendError> {
+    fn compile_dict(&mut self, fields: &[DictField]) -> Result<Register, FrontendError> {
         let mut seen = HashSet::new();
         let mut compiled = Vec::with_capacity(fields.len());
-        for (field, value) in fields {
-            if !seen.insert(field) {
+        for field in fields {
+            let name = &field.value.name.value;
+            if !seen.insert(name) {
                 return Err(frontend_error(
                     self.source_name,
-                    format!("duplicate Dict field {field:?}"),
+                    format!("duplicate Dict field {name:?}"),
                 ));
             }
-            compiled.push((field.clone(), self.compile_expr(value)?));
+            compiled.push((name.clone(), self.compile_expr(&field.value.value)?));
         }
         let dst = self.allocate();
         self.instructions.push(Instruction::MakeDict {
@@ -424,10 +421,13 @@ impl<'a> Compiler<'a> {
 
     fn compile_closure(
         &mut self,
-        parameters: &[String],
+        parameters: &[Identifier],
         body: &Block,
     ) -> Result<Register, FrontendError> {
-        let mut bound = parameters.iter().cloned().collect::<HashSet<_>>();
+        let mut bound = parameters
+            .iter()
+            .map(|parameter| parameter.value.clone())
+            .collect::<HashSet<_>>();
         if bound.len() != parameters.len() {
             return Err(frontend_error(
                 self.source_name,
@@ -508,8 +508,13 @@ impl<'a> Compiler<'a> {
             let outer = self.environment.clone();
             let mut failures = Vec::new();
             let mut pattern_bindings = HashSet::new();
-            self.compile_pattern(&arm.pattern, value, &mut failures, &mut pattern_bindings)?;
-            let arm_value = self.compile_expr(&arm.value)?;
+            self.compile_pattern(
+                &arm.value.pattern,
+                value,
+                &mut failures,
+                &mut pattern_bindings,
+            )?;
+            let arm_value = self.compile_expr(&arm.value.value)?;
             self.instructions.push(Instruction::Move {
                 dst: result,
                 src: arm_value,
@@ -539,37 +544,34 @@ impl<'a> Compiler<'a> {
         failures: &mut Vec<usize>,
         bindings: &mut HashSet<String>,
     ) -> Result<(), FrontendError> {
-        match pattern {
-            Pattern::Spanned { pattern, .. } => {
-                return self.compile_pattern(pattern, value, failures, bindings);
-            }
-            Pattern::Wildcard => {}
-            Pattern::Binding(name) => {
-                if !bindings.insert(name.clone()) {
+        match &pattern.value {
+            PatternKind::Wildcard => {}
+            PatternKind::Binding(name) => {
+                if !bindings.insert(name.value.clone()) {
                     return Err(frontend_error(
                         self.source_name,
-                        format!("duplicate pattern binding {name:?}"),
+                        format!("duplicate pattern binding {:?}", name.value),
                     ));
                 }
-                self.environment.insert(name.clone(), value);
+                self.environment.insert(name.value.clone(), value);
             }
-            Pattern::Int(item) => {
+            PatternKind::Int(item) => {
                 let expected = self.load_constant(Value::Int(*item));
                 self.emit_pattern_equality(value, expected, failures);
             }
-            Pattern::Float(item) => {
+            PatternKind::Float(item) => {
                 let expected = self.load_constant(Value::Float(*item));
                 self.emit_pattern_equality(value, expected, failures);
             }
-            Pattern::String(item) => {
+            PatternKind::String(item) => {
                 let expected = self.load_constant(Value::string(item.clone()));
                 self.emit_pattern_equality(value, expected, failures);
             }
-            Pattern::Atom(item) => {
+            PatternKind::Atom(item) => {
                 let expected = self.load_constant(atom_value(item));
                 self.emit_pattern_equality(value, expected, failures);
             }
-            Pattern::Tuple(items) => {
+            PatternKind::Tuple(items) => {
                 let condition = self.allocate();
                 self.instructions.push(Instruction::TupleLengthEquals {
                     dst: condition,
@@ -668,49 +670,51 @@ fn atom_value(name: &str) -> Value {
 }
 
 fn free_block(block: &Block, bound: &mut HashSet<String>, free: &mut BTreeSet<String>) {
-    for binding in &block.bindings {
-        free_expr(&binding.value, bound, free);
-        bound.insert(binding.name.clone());
+    for binding in &block.value.bindings {
+        free_expr(&binding.value.value, bound, free);
+        bound.insert(binding.value.name.value.clone());
     }
-    free_expr(&block.result, bound, free);
+    free_expr(&block.value.result, bound, free);
 }
 
 fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<String>) {
-    match expression {
-        Expr::Spanned { expression, .. } => free_expr(expression, bound, free),
-        Expr::Variable(name) => {
-            if !bound.contains(name) {
-                free.insert(name.clone());
+    match &expression.value {
+        ExprKind::Variable(name) => {
+            if !bound.contains(&name.value) {
+                free.insert(name.value.clone());
             }
         }
-        Expr::Array(items) | Expr::Tuple(items) => {
+        ExprKind::Array(items) | ExprKind::Tuple(items) => {
             for item in items {
                 free_expr(item, bound, free);
             }
         }
-        Expr::Dict(fields) => {
-            for (_, value) in fields {
-                free_expr(value, bound, free);
+        ExprKind::Dict(fields) => {
+            for field in fields {
+                free_expr(&field.value.value, bound, free);
             }
         }
-        Expr::Block(block) => {
+        ExprKind::Block(block) => {
             let mut inner = bound.clone();
             free_block(block, &mut inner, free);
         }
-        Expr::Unary { operand, .. } => free_expr(operand, bound, free),
-        Expr::Binary { left, right, .. } => {
+        ExprKind::Unary { operand, .. } => free_expr(operand, bound, free),
+        ExprKind::Binary { left, right, .. } => {
             free_expr(left, bound, free);
             free_expr(right, bound, free);
         }
-        Expr::Field { receiver, .. } => free_expr(receiver, bound, free),
-        Expr::Call { callee, arguments } => {
+        ExprKind::Field { receiver, .. } => free_expr(receiver, bound, free),
+        ExprKind::Call { callee, arguments } => {
             free_expr(callee, bound, free);
             for argument in arguments {
                 free_expr(argument, bound, free);
             }
         }
-        Expr::Closure { parameters, body } => {
-            let mut closure_bound = parameters.iter().cloned().collect::<HashSet<_>>();
+        ExprKind::Closure { parameters, body } => {
+            let mut closure_bound = parameters
+                .iter()
+                .map(|parameter| parameter.value.clone())
+                .collect::<HashSet<_>>();
             let mut closure_free = BTreeSet::new();
             free_block(body, &mut closure_bound, &mut closure_free);
             for name in closure_free {
@@ -719,7 +723,7 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
                 }
             }
         }
-        Expr::If {
+        ExprKind::If {
             condition,
             then_branch,
             else_branch,
@@ -730,77 +734,79 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
             let mut else_bound = bound.clone();
             free_block(else_branch, &mut else_bound, free);
         }
-        Expr::Match { value, arms } => {
+        ExprKind::Match { value, arms } => {
             free_expr(value, bound, free);
             for arm in arms {
                 let mut arm_bound = bound.clone();
-                bind_pattern(&arm.pattern, &mut arm_bound);
-                free_expr(&arm.value, &arm_bound, free);
+                bind_pattern(&arm.value.pattern, &mut arm_bound);
+                free_expr(&arm.value.value, &arm_bound, free);
             }
         }
-        Expr::Int(_) | Expr::Float(_) | Expr::String(_) | Expr::Bytes(_) | Expr::Atom(_) => {}
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::String(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::Atom(_) => {}
     }
 }
 
 fn bind_pattern(pattern: &Pattern, bound: &mut HashSet<String>) {
-    match pattern {
-        Pattern::Spanned { pattern, .. } => bind_pattern(pattern, bound),
-        Pattern::Binding(name) => {
-            bound.insert(name.clone());
+    match &pattern.value {
+        PatternKind::Binding(name) => {
+            bound.insert(name.value.clone());
         }
-        Pattern::Tuple(items) => {
+        PatternKind::Tuple(items) => {
             for item in items {
                 bind_pattern(item, bound);
             }
         }
-        Pattern::Wildcard
-        | Pattern::Int(_)
-        | Pattern::Float(_)
-        | Pattern::String(_)
-        | Pattern::Atom(_) => {}
+        PatternKind::Wildcard
+        | PatternKind::Int(_)
+        | PatternKind::Float(_)
+        | PatternKind::String(_)
+        | PatternKind::Atom(_) => {}
     }
 }
 
 fn collect_runtime_names_block(block: &Block, names: &mut HashSet<String>) {
-    for binding in &block.bindings {
-        if binding.kind == BindingKind::Let {
-            collect_runtime_names(&binding.value, names);
+    for binding in &block.value.bindings {
+        if binding.value.kind == BindingKind::Let {
+            collect_runtime_names(&binding.value.value, names);
         }
     }
-    collect_runtime_names(&block.result, names);
+    collect_runtime_names(&block.value.result, names);
 }
 
 fn collect_runtime_names(expression: &Expr, names: &mut HashSet<String>) {
-    match expression {
-        Expr::Spanned { expression, .. } => collect_runtime_names(expression, names),
-        Expr::Variable(name) => {
-            names.insert(name.clone());
+    match &expression.value {
+        ExprKind::Variable(name) => {
+            names.insert(name.value.clone());
         }
-        Expr::Array(items) | Expr::Tuple(items) => {
+        ExprKind::Array(items) | ExprKind::Tuple(items) => {
             for item in items {
                 collect_runtime_names(item, names);
             }
         }
-        Expr::Dict(fields) => {
-            for (_, value) in fields {
-                collect_runtime_names(value, names);
+        ExprKind::Dict(fields) => {
+            for field in fields {
+                collect_runtime_names(&field.value.value, names);
             }
         }
-        Expr::Block(block) => collect_runtime_names_block(block, names),
-        Expr::Unary { operand, .. } => collect_runtime_names(operand, names),
-        Expr::Binary { left, right, .. } => {
+        ExprKind::Block(block) => collect_runtime_names_block(block, names),
+        ExprKind::Unary { operand, .. } => collect_runtime_names(operand, names),
+        ExprKind::Binary { left, right, .. } => {
             collect_runtime_names(left, names);
             collect_runtime_names(right, names);
         }
-        Expr::Field { receiver, .. } => collect_runtime_names(receiver, names),
-        Expr::Call { callee, arguments } => {
+        ExprKind::Field { receiver, .. } => collect_runtime_names(receiver, names),
+        ExprKind::Call { callee, arguments } => {
             collect_runtime_names(callee, names);
             for argument in arguments {
                 collect_runtime_names(argument, names);
             }
         }
-        Expr::Closure { body, .. } => collect_runtime_names_block(body, names),
-        Expr::If {
+        ExprKind::Closure { body, .. } => collect_runtime_names_block(body, names),
+        ExprKind::If {
             condition,
             then_branch,
             else_branch,
@@ -809,13 +815,17 @@ fn collect_runtime_names(expression: &Expr, names: &mut HashSet<String>) {
             collect_runtime_names_block(then_branch, names);
             collect_runtime_names_block(else_branch, names);
         }
-        Expr::Match { value, arms } => {
+        ExprKind::Match { value, arms } => {
             collect_runtime_names(value, names);
             for arm in arms {
-                collect_runtime_names(&arm.value, names);
+                collect_runtime_names(&arm.value.value, names);
             }
         }
-        Expr::Int(_) | Expr::Float(_) | Expr::String(_) | Expr::Bytes(_) | Expr::Atom(_) => {}
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::String(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::Atom(_) => {}
     }
 }
 

@@ -34,12 +34,12 @@ impl FrontendError {
         diagnostic: crate::source::Diagnostic,
     ) -> Self {
         let label = diagnostic.labels.first().expect("diagnostic has a label");
-        let file = sources.get(label.span.source);
-        let position = file.position(label.span.range.start);
+        let file = sources.get(label.location.source);
+        let position = file.position(label.location.range.start);
         Self {
             source_name: file.name.to_string(),
             location: SourceLocation {
-                offset: label.span.range.start,
+                offset: label.location.range.start as usize,
                 line: position.line,
                 column: position.column,
             },

@@ -1,8 +1,10 @@
 use crate::ast::{
-    BinaryOperator, Binding, BindingKind, Block, Expr, MatchArm, Pattern, Program, UnaryOperator,
+    BinaryOperator, Binding, BindingData, BindingKind, Block, BlockKind, DictFieldKind, Expr,
+    ExprKind, Identifier, MatchArm, MatchArmKind, Pattern, PatternKind, Program, ProgramKind,
+    UnaryOperator, located,
 };
 use crate::lexer::{FrontendError, SourceLocation};
-use crate::source::{Diagnostic, SourceDatabase, SourceId, Span};
+use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
 use crate::syntax::xl::lexer::Token;
 use crate::syntax::xl::parser::{CstData, Node, NodeRef, Rule};
 
@@ -58,12 +60,12 @@ fn compatibility_error(
     let offset = diagnostic
         .labels
         .first()
-        .map_or(0, |label| label.span.range.start);
+        .map_or(0, |label| label.location.range.start);
     let position = sources.get(source_id).position(offset);
     FrontendError::new(
         sources.get(source_id).name.as_ref(),
         SourceLocation {
-            offset,
+            offset: offset as usize,
             line: position.line,
             column: position.column,
         },
@@ -93,10 +95,12 @@ impl<'a> Lowerer<'a> {
             .find(|node| self.rule(*node) == Some(Rule::Body))
             .or_else(|| self.first_rule(root))
             .ok_or_else(|| self.error(root, "program has no body"))?;
-        Ok(Program {
-            body: self.block_body(body_node)?,
-            span: self.span(root),
-        })
+        Ok(located(
+            ProgramKind {
+                body: self.block_body(body_node)?,
+            },
+            self.location(root),
+        ))
     }
 
     fn block_body(&self, node: NodeRef) -> Result<Block, Diagnostic> {
@@ -131,11 +135,13 @@ impl<'a> Lowerer<'a> {
         }
         let result =
             result.ok_or_else(|| self.error(body, "a block requires a result expression"))?;
-        Ok(Block {
-            bindings,
-            result: Box::new(result),
-            span: self.span(node),
-        })
+        Ok(located(
+            BlockKind {
+                bindings,
+                result: Box::new(result),
+            },
+            self.location(node),
+        ))
     }
 
     fn binding(&self, node: NodeRef) -> Result<Binding, Diagnostic> {
@@ -147,7 +153,7 @@ impl<'a> Lowerer<'a> {
             .first()
             .copied()
             .ok_or_else(|| self.error(node, "binding has no name"))?;
-        let name = self.text(name_node).to_owned();
+        let name = self.identifier(name_node);
         match self
             .rule(node)
             .ok_or_else(|| self.error(node, "invalid binding"))?
@@ -176,46 +182,53 @@ impl<'a> Lowerer<'a> {
                     None
                 };
                 let value = self.expression(value_node)?;
-                Ok(Binding {
-                    kind: BindingKind::Let,
-                    name,
-                    annotation,
-                    value,
-                    span: self.span(node),
-                })
+                Ok(located(
+                    BindingData {
+                        kind: BindingKind::Let,
+                        name,
+                        annotation,
+                        value,
+                    },
+                    self.location(node),
+                ))
             }
-            Rule::TypeBinding => Ok(Binding {
-                kind: BindingKind::Type,
-                name,
-                annotation: None,
-                value: {
-                    let equal = self.first_token(node, Token::Equal)?;
-                    let start = self.cst.span(equal).start;
-                    self.expression(
-                        self.children(node)
-                            .find(|child| {
-                                self.is_expression(*child) && self.cst.span(*child).start > start
-                            })
-                            .ok_or_else(|| self.error(node, "type has no value"))?,
-                    )?
+            Rule::TypeBinding => Ok(located(
+                BindingData {
+                    kind: BindingKind::Type,
+                    name,
+                    annotation: None,
+                    value: {
+                        let equal = self.first_token(node, Token::Equal)?;
+                        let start = self.cst.span(equal).start;
+                        self.expression(
+                            self.children(node)
+                                .find(|child| {
+                                    self.is_expression(*child)
+                                        && self.cst.span(*child).start > start
+                                })
+                                .ok_or_else(|| self.error(node, "type has no value"))?,
+                        )?
+                    },
                 },
-                span: self.span(node),
-            }),
+                self.location(node),
+            )),
             Rule::ImportBinding => {
                 let path = self
                     .token_children(node, Token::String)
                     .next()
                     .ok_or_else(|| self.error(node, "import has no path"))?;
-                Ok(Binding {
-                    kind: BindingKind::Import,
-                    name,
-                    annotation: None,
-                    value: Expr::spanned(
-                        self.span(path),
-                        Expr::String(self.decode_xl_string(path)?),
-                    ),
-                    span: self.span(node),
-                })
+                Ok(located(
+                    BindingData {
+                        kind: BindingKind::Import,
+                        name,
+                        annotation: None,
+                        value: located(
+                            ExprKind::String(self.decode_xl_string(path)?),
+                            self.location(path),
+                        ),
+                    },
+                    self.location(node),
+                ))
             }
             Rule::NamedFunction => {
                 let parameters = rules
@@ -228,19 +241,21 @@ impl<'a> Lowerer<'a> {
                     .find(|child| self.rule(**child) == Some(Rule::Block))
                     .copied()
                     .ok_or_else(|| self.error(node, "function has no body"))?;
-                Ok(Binding {
-                    kind: BindingKind::Let,
-                    name,
-                    annotation: None,
-                    value: Expr::spanned(
-                        self.span(node),
-                        Expr::Closure {
-                            parameters: self.parameters(parameters),
-                            body: self.block_body(block)?,
-                        },
-                    ),
-                    span: self.span(node),
-                })
+                Ok(located(
+                    BindingData {
+                        kind: BindingKind::Let,
+                        name,
+                        annotation: None,
+                        value: located(
+                            ExprKind::Closure {
+                                parameters: self.parameters(parameters),
+                                body: self.block_body(block)?,
+                            },
+                            self.location(node),
+                        ),
+                    },
+                    self.location(node),
+                ))
             }
             _ => Err(self.error(node, "unexpected binding rule")),
         }
@@ -248,25 +263,25 @@ impl<'a> Lowerer<'a> {
 
     fn expression(&self, node: NodeRef) -> Result<Expr, Diagnostic> {
         if let Node::Token(token, _) = self.cst.get(node) {
-            let span = self.span(node);
+            let location = self.location(node);
             let inner = match token {
-                Token::Int => Expr::Int(
+                Token::Int => ExprKind::Int(
                     self.text(node)
                         .parse()
                         .map_err(|_| self.error(node, "Int literal is outside the i64 range"))?,
                 ),
-                Token::Float => Expr::Float(
+                Token::Float => ExprKind::Float(
                     self.text(node)
                         .parse()
                         .map_err(|_| self.error(node, "invalid Float literal"))?,
                 ),
-                Token::String => Expr::String(self.decode_xl_string(node)?),
-                Token::Bytes => Expr::Bytes(self.decode_xl_string(node)?.into_bytes()),
-                Token::Atom => Expr::Atom(self.text(node).trim_start_matches('\'').to_owned()),
-                Token::Identifier => Expr::Variable(self.text(node).to_owned()),
+                Token::String => ExprKind::String(self.decode_xl_string(node)?),
+                Token::Bytes => ExprKind::Bytes(self.decode_xl_string(node)?.into_bytes()),
+                Token::Atom => ExprKind::Atom(self.text(node).trim_start_matches('\'').to_owned()),
+                Token::Identifier => ExprKind::Variable(self.identifier(node)),
                 _ => return Err(self.error(node, "expected expression token")),
             };
-            return Ok(Expr::spanned(span, inner));
+            return Ok(located(inner, location));
         }
         let Some(rule) = self.rule(node) else {
             return Err(self.error(node, "expected expression"));
@@ -277,42 +292,41 @@ impl<'a> Lowerer<'a> {
                     .ok_or_else(|| self.error(node, "empty expression"))?,
             );
         }
-        let span = self.span(node);
+        let location = self.location(node);
         let rules = self.rule_children(node).collect::<Vec<_>>();
         let inner = match rule {
-            Rule::IntExpr => Expr::Int(
+            Rule::IntExpr => ExprKind::Int(
                 self.text(self.first_token(node, Token::Int)?)
                     .parse()
                     .map_err(|_| self.error(node, "Int literal is outside the i64 range"))?,
             ),
-            Rule::FloatExpr => Expr::Float(
+            Rule::FloatExpr => ExprKind::Float(
                 self.text(self.first_token(node, Token::Float)?)
                     .parse()
                     .map_err(|_| self.error(node, "invalid Float literal"))?,
             ),
             Rule::StringExpr => {
-                Expr::String(self.decode_xl_string(self.first_token(node, Token::String)?)?)
+                ExprKind::String(self.decode_xl_string(self.first_token(node, Token::String)?)?)
             }
-            Rule::BytesExpr => Expr::Bytes(
+            Rule::BytesExpr => ExprKind::Bytes(
                 self.decode_xl_string(self.first_token(node, Token::Bytes)?)?
                     .into_bytes(),
             ),
-            Rule::AtomExpr => Expr::Atom(
+            Rule::AtomExpr => ExprKind::Atom(
                 self.text(self.first_token(node, Token::Atom)?)
                     .trim_start_matches('\'')
                     .to_owned(),
             ),
-            Rule::VariableExpr => Expr::Variable(
-                self.text(self.first_token(node, Token::Identifier)?)
-                    .to_owned(),
-            ),
-            Rule::ArrayExpr => Expr::Array(self.expression_children(node)?),
+            Rule::VariableExpr => {
+                ExprKind::Variable(self.identifier(self.first_token(node, Token::Identifier)?))
+            }
+            Rule::ArrayExpr => ExprKind::Array(self.expression_children(node)?),
             Rule::ParenExpr => {
                 let items = self.expression_children(node)?;
                 if items.len() == 1 && self.token_children(node, Token::Comma).next().is_none() {
                     return Ok(items.into_iter().next().unwrap());
                 }
-                Expr::Tuple(items)
+                ExprKind::Tuple(items)
             }
             Rule::DictExpr => {
                 let mut fields = Vec::new();
@@ -331,9 +345,9 @@ impl<'a> Lowerer<'a> {
                         })
                         .ok_or_else(|| self.error(field, "Dict field has no key"))?;
                     let name = if matches!(self.cst.get(key), Node::Token(Token::String, _)) {
-                        self.decode_xl_string(key)?
+                        located(self.decode_xl_string(key)?, self.location(key))
                     } else {
-                        self.text(key).to_owned()
+                        self.identifier(key)
                     };
                     let colon = self.first_token(field, Token::Colon)?;
                     let value = self
@@ -343,11 +357,17 @@ impl<'a> Lowerer<'a> {
                                 && self.cst.span(*child).start > self.cst.span(colon).start
                         })
                         .ok_or_else(|| self.error(field, "Dict field has no value"))?;
-                    fields.push((name, self.expression(value)?));
+                    fields.push(located(
+                        DictFieldKind {
+                            name,
+                            value: self.expression(value)?,
+                        },
+                        self.location(field),
+                    ));
                 }
-                Expr::Dict(fields)
+                ExprKind::Dict(fields)
             }
-            Rule::Block => Expr::Block(self.block_body(node)?),
+            Rule::Block => ExprKind::Block(self.block_body(node)?),
             Rule::Closure => {
                 let parameters = rules
                     .iter()
@@ -359,13 +379,16 @@ impl<'a> Lowerer<'a> {
                     .find(|child| self.rule(**child) == Some(Rule::Block))
                     .copied()
                     .ok_or_else(|| self.error(node, "closure has no body"))?;
-                Expr::Closure {
+                ExprKind::Closure {
                     parameters: self.parameters(parameters),
                     body: self.block_body(block)?,
                 }
             }
-            Rule::UnaryExpr => Expr::Unary {
-                operator: UnaryOperator::Negate,
+            Rule::UnaryExpr => ExprKind::Unary {
+                operator: located(
+                    UnaryOperator::Negate,
+                    self.location(self.first_token(node, Token::Minus)?),
+                ),
                 operand: Box::new(
                     self.expression(
                         self.children(node)
@@ -396,21 +419,25 @@ impl<'a> Lowerer<'a> {
                     ));
                 }
                 let values = self.expression_children(node)?;
-                let operator = if self.token_children(node, Token::Plus).next().is_some() {
-                    BinaryOperator::Add
-                } else if self.token_children(node, Token::Minus).next().is_some() {
-                    BinaryOperator::Subtract
-                } else if self.token_children(node, Token::Star).next().is_some() {
-                    BinaryOperator::Multiply
-                } else if self.token_children(node, Token::Slash).next().is_some() {
-                    BinaryOperator::Divide
-                } else if self.token_children(node, Token::Less).next().is_some() {
-                    BinaryOperator::LessThan
-                } else {
-                    BinaryOperator::Equal
-                };
-                Expr::Binary {
-                    operator,
+                let (operator, operator_node) =
+                    if let Some(operator) = self.token_children(node, Token::Plus).next() {
+                        (BinaryOperator::Add, operator)
+                    } else if let Some(operator) = self.token_children(node, Token::Minus).next() {
+                        (BinaryOperator::Subtract, operator)
+                    } else if let Some(operator) = self.token_children(node, Token::Star).next() {
+                        (BinaryOperator::Multiply, operator)
+                    } else if let Some(operator) = self.token_children(node, Token::Slash).next() {
+                        (BinaryOperator::Divide, operator)
+                    } else if let Some(operator) = self.token_children(node, Token::Less).next() {
+                        (BinaryOperator::LessThan, operator)
+                    } else {
+                        (
+                            BinaryOperator::Equal,
+                            self.first_token(node, Token::EqualEqual)?,
+                        )
+                    };
+                ExprKind::Binary {
+                    operator: located(operator, self.location(operator_node)),
                     left: Box::new(values[0].clone()),
                     right: Box::new(values[1].clone()),
                 }
@@ -424,9 +451,9 @@ impl<'a> Lowerer<'a> {
                     .token_children(node, Token::Identifier)
                     .last()
                     .ok_or_else(|| self.error(node, "field access has no field"))?;
-                Expr::Field {
+                ExprKind::Field {
                     receiver: Box::new(self.expression(receiver)?),
-                    field: self.text(field).to_owned(),
+                    field: self.identifier(field),
                 }
             }
             Rule::CallExpr => {
@@ -439,7 +466,7 @@ impl<'a> Lowerer<'a> {
                     .iter()
                     .find(|child| self.rule(**child) == Some(Rule::Arguments))
                     .map_or(Ok(Vec::new()), |args| self.expression_children(*args))?;
-                Expr::Call {
+                ExprKind::Call {
                     callee: Box::new(callee),
                     arguments,
                 }
@@ -447,7 +474,7 @@ impl<'a> Lowerer<'a> {
             Rule::PipelineExpr => {
                 let values = self.expression_children(node)?;
                 return Ok(elaborate_pipeline(
-                    span,
+                    location,
                     values[0].clone(),
                     values[1].clone(),
                 ));
@@ -463,7 +490,7 @@ impl<'a> Lowerer<'a> {
                     .filter(|child| self.rule(**child) == Some(Rule::Block))
                     .copied()
                     .collect::<Vec<_>>();
-                Expr::If {
+                ExprKind::If {
                     condition: Box::new(condition),
                     then_branch: self.block_body(blocks[0])?,
                     else_branch: self.block_body(blocks[1])?,
@@ -481,14 +508,14 @@ impl<'a> Lowerer<'a> {
                     .filter(|child| self.rule(*child) == Some(Rule::MatchArm))
                     .map(|arm| self.match_arm(arm))
                     .collect::<Result<Vec<_>, _>>()?;
-                Expr::Match {
+                ExprKind::Match {
                     value: Box::new(value),
                     arms,
                 }
             }
             _ => return Err(self.error(node, format!("unexpected expression rule {rule:?}"))),
         };
-        Ok(Expr::spanned(span, inner))
+        Ok(located(inner, location))
     }
 
     fn match_arm(&self, node: NodeRef) -> Result<MatchArm, Diagnostic> {
@@ -502,11 +529,13 @@ impl<'a> Lowerer<'a> {
             .children(node)
             .find(|child| self.is_expression(*child) && self.cst.span(*child).start > arrow_start)
             .ok_or_else(|| self.error(node, "match arm has no value"))?;
-        Ok(MatchArm {
-            pattern: self.pattern(pattern)?,
-            value: self.expression(value)?,
-            span: self.span(node),
-        })
+        Ok(located(
+            MatchArmKind {
+                pattern: self.pattern(pattern)?,
+                value: self.expression(value)?,
+            },
+            self.location(node),
+        ))
     }
 
     fn pattern(&self, node: NodeRef) -> Result<Pattern, Diagnostic> {
@@ -515,26 +544,28 @@ impl<'a> Lowerer<'a> {
                 Token::Identifier => {
                     let name = self.text(node);
                     if name == "_" {
-                        Pattern::Wildcard
+                        PatternKind::Wildcard
                     } else {
-                        Pattern::Binding(name.to_owned())
+                        PatternKind::Binding(self.identifier(node))
                     }
                 }
-                Token::Int => Pattern::Int(
+                Token::Int => PatternKind::Int(
                     self.text(node)
                         .parse()
                         .map_err(|_| self.error(node, "invalid Int pattern"))?,
                 ),
-                Token::Float => Pattern::Float(
+                Token::Float => PatternKind::Float(
                     self.text(node)
                         .parse()
                         .map_err(|_| self.error(node, "invalid Float pattern"))?,
                 ),
-                Token::String => Pattern::String(self.decode_xl_string(node)?),
-                Token::Atom => Pattern::Atom(self.text(node).trim_start_matches('\'').to_owned()),
+                Token::String => PatternKind::String(self.decode_xl_string(node)?),
+                Token::Atom => {
+                    PatternKind::Atom(self.text(node).trim_start_matches('\'').to_owned())
+                }
                 _ => return Err(self.error(node, "expected pattern token")),
             };
-            return Ok(Pattern::spanned(self.span(node), inner));
+            return Ok(located(inner, self.location(node)));
         }
         let rule = self
             .rule(node)
@@ -549,30 +580,32 @@ impl<'a> Lowerer<'a> {
             Rule::IdentifierPattern => {
                 let name = self.text(self.first_token(node, Token::Identifier)?);
                 if name == "_" {
-                    Pattern::Wildcard
+                    PatternKind::Wildcard
                 } else {
-                    Pattern::Binding(name.to_owned())
+                    PatternKind::Binding(
+                        self.identifier(self.first_token(node, Token::Identifier)?),
+                    )
                 }
             }
-            Rule::IntPattern => Pattern::Int(
+            Rule::IntPattern => PatternKind::Int(
                 self.text(self.first_token(node, Token::Int)?)
                     .parse()
                     .map_err(|_| self.error(node, "invalid Int pattern"))?,
             ),
-            Rule::FloatPattern => Pattern::Float(
+            Rule::FloatPattern => PatternKind::Float(
                 self.text(self.first_token(node, Token::Float)?)
                     .parse()
                     .map_err(|_| self.error(node, "invalid Float pattern"))?,
             ),
             Rule::StringPattern => {
-                Pattern::String(self.decode_xl_string(self.first_token(node, Token::String)?)?)
+                PatternKind::String(self.decode_xl_string(self.first_token(node, Token::String)?)?)
             }
-            Rule::AtomPattern => Pattern::Atom(
+            Rule::AtomPattern => PatternKind::Atom(
                 self.text(self.first_token(node, Token::Atom)?)
                     .trim_start_matches('\'')
                     .to_owned(),
             ),
-            Rule::TuplePattern => Pattern::Tuple(
+            Rule::TuplePattern => PatternKind::Tuple(
                 self.children(node)
                     .filter(|child| self.is_pattern(*child))
                     .map(|child| self.pattern(child))
@@ -580,12 +613,12 @@ impl<'a> Lowerer<'a> {
             ),
             _ => return Err(self.error(node, "unexpected pattern rule")),
         };
-        Ok(Pattern::spanned(self.span(node), inner))
+        Ok(located(inner, self.location(node)))
     }
 
-    fn parameters(&self, node: NodeRef) -> Vec<String> {
+    fn parameters(&self, node: NodeRef) -> Vec<Identifier> {
         self.token_children(node, Token::Identifier)
-            .map(|child| self.text(child).to_owned())
+            .map(|child| self.identifier(child))
             .collect()
     }
     fn expression_children(&self, node: NodeRef) -> Result<Vec<Expr>, Diagnostic> {
@@ -679,17 +712,18 @@ impl<'a> Lowerer<'a> {
             Node::Token(..) => None,
         }
     }
-    fn span(&self, node: NodeRef) -> Span {
-        Span {
-            source: self.source_id,
-            range: self.cst.span(node),
-        }
+    fn location(&self, node: NodeRef) -> Location {
+        Location::from_usize(self.source_id, self.cst.span(node))
+            .expect("CST span fits registered source")
+    }
+    fn identifier(&self, node: NodeRef) -> Identifier {
+        located(self.text(node).to_owned(), self.location(node))
     }
     fn text(&self, node: NodeRef) -> &str {
         &self.source[self.cst.span(node)]
     }
     fn error(&self, node: NodeRef, message: impl Into<String>) -> Diagnostic {
-        Diagnostic::error(message, self.span(node))
+        Diagnostic::error(message, self.location(node))
     }
 
     fn decode_xl_string(&self, node: NodeRef) -> Result<String, Diagnostic> {
@@ -718,27 +752,28 @@ impl<'a> Lowerer<'a> {
     }
 }
 
-fn elaborate_pipeline(span: Span, left: Expr, right: Expr) -> Expr {
-    let expression = match right.unspanned() {
-        Expr::Call { callee, arguments } => {
+fn elaborate_pipeline(location: Location, left: Expr, right: Expr) -> Expr {
+    let expression = match &right.value {
+        ExprKind::Call { callee, arguments } => {
             let mut arguments = arguments.clone();
             arguments.insert(0, left);
-            Expr::Call {
+            ExprKind::Call {
                 callee: callee.clone(),
                 arguments,
             }
         }
-        _ => Expr::Call {
+        _ => ExprKind::Call {
             callee: Box::new(right),
             arguments: vec![left],
         },
     };
-    Expr::spanned(span, expression)
+    located(expression, location)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::Located;
 
     #[test]
     fn lowers_directly_from_cst_with_spans_and_precedence() {
@@ -747,12 +782,21 @@ mod tests {
         let parsed = parse_registered(&sources, id);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let program = parsed.program.unwrap();
-        assert_eq!(program.span.range, 0..17);
-        assert_eq!(program.body.bindings[0].span.range, 0..10);
+        assert_eq!(program.location.range.to_usize(), 0..17);
+        assert_eq!(
+            program.value.body.value.bindings[0]
+                .location
+                .range
+                .to_usize(),
+            0..10
+        );
         assert!(matches!(
-            program.body.result.unspanned(),
-            Expr::Binary {
-                operator: BinaryOperator::Equal,
+            &program.value.body.value.result.value,
+            ExprKind::Binary {
+                operator: Located {
+                    value: BinaryOperator::Equal,
+                    ..
+                },
                 ..
             }
         ));

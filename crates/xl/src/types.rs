@@ -1,4 +1,6 @@
-use crate::ast::{BinaryOperator, BindingKind, Block, Expr, Pattern, Program, UnaryOperator};
+use crate::ast::{
+    BinaryOperator, BindingKind, Block, Expr, ExprKind, Pattern, PatternKind, Program,
+};
 use crate::compiler::compile_expression_with_bindings;
 use crate::json::{Provenance, ValuePath, ValuePathSegment};
 use crate::lexer::{FrontendError, SourceLocation};
@@ -153,7 +155,7 @@ pub fn analyze_source_with_budget(
         instruction_budget,
         &BTreeMap::new(),
         &HashSet::new(),
-        Some(&sources),
+        &sources,
         &BTreeMap::new(),
     )
 }
@@ -170,7 +172,7 @@ pub(crate) fn analyze_program_registered(
         instruction_budget,
         &BTreeMap::new(),
         &HashSet::new(),
-        Some(sources),
+        sources,
         &BTreeMap::new(),
     )
 }
@@ -181,7 +183,7 @@ pub(crate) fn analyze_program_with_bindings(
     instruction_budget: usize,
     external_values: &BTreeMap<String, Value>,
     dynamic_bindings: &HashSet<String>,
-    sources: Option<&SourceDatabase>,
+    sources: &SourceDatabase,
     external_provenance: &BTreeMap<String, Provenance>,
 ) -> Result<Analysis, FrontendError> {
     let mut tool_vm = Vm::new();
@@ -204,54 +206,62 @@ pub(crate) fn analyze_program_with_bindings(
         binding_types.insert(name.clone(), TypeDescriptor::Any);
     }
 
-    for binding in &program.body.bindings {
-        match binding.kind {
+    for binding in &program.value.body.value.bindings {
+        match binding.value.kind {
             BindingKind::Type => {
                 let value = evaluate_tool_expression(
                     source_name,
-                    &binding.value,
+                    &binding.value.value,
                     &tool_values,
                     instruction_budget,
+                    sources,
                 )?;
                 let descriptor = TypeDescriptor::from_value(&value).map_err(|message| {
                     frontend_error(
                         source_name,
-                        format!("type {} produced invalid metadata: {message}", binding.name),
+                        format!(
+                            "type {} produced invalid metadata: {message}",
+                            binding.value.name.value
+                        ),
                     )
                 })?;
-                declared_types.insert(binding.name.clone(), descriptor);
-                declared_type_spans.insert(binding.name.clone(), binding.span.clone());
-                resolved_types.insert(binding.name.clone(), value.clone());
-                tool_values.insert(binding.name.clone(), value);
+                declared_types.insert(binding.value.name.value.clone(), descriptor);
+                declared_type_spans.insert(binding.value.name.value.clone(), binding.location);
+                resolved_types.insert(binding.value.name.value.clone(), value.clone());
+                tool_values.insert(binding.value.name.value.clone(), value);
             }
             BindingKind::Let => {
-                let inferred = infer_expr(&binding.value, &static_environment);
-                let checked = if let Some(annotation) = &binding.annotation {
+                let inferred = infer_expr(&binding.value.value, &static_environment);
+                let checked = if let Some(annotation) = &binding.value.annotation {
                     let metadata = evaluate_tool_expression(
                         source_name,
                         annotation,
                         &tool_values,
                         instruction_budget,
+                        sources,
                     )?;
                     let expected = TypeDescriptor::from_value(&metadata).map_err(|message| {
                         frontend_error(
                             source_name,
-                            format!("annotation on {} is invalid: {message}", binding.name),
+                            format!(
+                                "annotation on {} is invalid: {message}",
+                                binding.value.name.value
+                            ),
                         )
                     })?;
                     if !assignable(&inferred, &expected) {
                         let message = format!(
                             "binding {} has type {}, which is not assignable to {}",
-                            binding.name,
+                            binding.value.name.value,
                             inferred.display_name(),
                             expected.display_name()
                         );
-                        if let Some(sources) = sources {
+                        {
                             let path =
                                 incompatibility_path(&inferred, &expected).unwrap_or_default();
-                            let data_span = match binding.value.unspanned() {
-                                Expr::Variable(name) => external_provenance
-                                    .get(name)
+                            let data_span = match &binding.value.value.value {
+                                ExprKind::Variable(name) => external_provenance
+                                    .get(&name.value)
                                     .and_then(|provenance| {
                                         provenance
                                             .values
@@ -259,52 +269,57 @@ pub(crate) fn analyze_program_with_bindings(
                                             .or_else(|| provenance.values.get(&Vec::new()))
                                     })
                                     .cloned(),
-                                _ => binding.value.span().cloned(),
+                                _ => Some(binding.value.value.location),
                             }
-                            .unwrap_or_else(|| binding.span.clone());
-                            let rule_span = match annotation.unspanned() {
-                                Expr::Variable(name) => declared_type_spans.get(name).cloned(),
-                                _ => annotation.span().cloned(),
+                            .unwrap_or(binding.location);
+                            let rule_span = match &annotation.value {
+                                ExprKind::Variable(name) => {
+                                    declared_type_spans.get(&name.value).copied()
+                                }
+                                _ => Some(annotation.location),
                             }
-                            .unwrap_or_else(|| binding.span.clone());
+                            .unwrap_or(binding.location);
                             let diagnostic = Diagnostic::error(message, data_span)
                                 .with_secondary("type requirement declared here", rule_span);
                             return Err(FrontendError::from_diagnostic(sources, diagnostic));
                         }
-                        return Err(frontend_error(source_name, message));
                     }
                     expected
                 } else {
                     inferred
                 };
-                static_environment.insert(binding.name.clone(), checked.clone());
-                binding_types.insert(binding.name.clone(), checked);
+                static_environment.insert(binding.value.name.value.clone(), checked.clone());
+                binding_types.insert(binding.value.name.value.clone(), checked);
 
                 if let Ok(value) = evaluate_tool_expression(
                     source_name,
-                    &binding.value,
+                    &binding.value.value,
                     &tool_values,
                     instruction_budget,
+                    sources,
                 ) {
-                    tool_values.insert(binding.name.clone(), value);
+                    tool_values.insert(binding.value.name.value.clone(), value);
                 }
             }
             BindingKind::Import => {
-                let value = external_values.get(&binding.name).cloned().ok_or_else(|| {
-                    frontend_error(
-                        source_name,
-                        format!("import {} has not been resolved", binding.name),
-                    )
-                })?;
+                let value = external_values
+                    .get(&binding.value.name.value)
+                    .cloned()
+                    .ok_or_else(|| {
+                        frontend_error(
+                            source_name,
+                            format!("import {} has not been resolved", binding.value.name.value),
+                        )
+                    })?;
                 let inferred = infer_value(&value);
-                static_environment.insert(binding.name.clone(), inferred.clone());
-                binding_types.insert(binding.name.clone(), inferred);
-                tool_values.insert(binding.name.clone(), value);
+                static_environment.insert(binding.value.name.value.clone(), inferred.clone());
+                binding_types.insert(binding.value.name.value.clone(), inferred);
+                tool_values.insert(binding.value.name.value.clone(), value);
             }
         }
     }
 
-    let result_type = infer_expr(&program.body.result, &static_environment);
+    let result_type = infer_expr(&program.value.body.value.result, &static_environment);
     Ok(Analysis {
         declared_types,
         binding_types,
@@ -347,9 +362,15 @@ fn evaluate_tool_expression(
     expression: &Expr,
     bindings: &BTreeMap<String, Value>,
     instruction_budget: usize,
+    sources: &SourceDatabase,
 ) -> Result<Value, FrontendError> {
-    let function =
-        compile_expression_with_bindings(source_name, "<tool-stage>", expression, bindings)?;
+    let function = compile_expression_with_bindings(
+        source_name,
+        "<tool-stage>",
+        expression,
+        bindings,
+        sources.get(expression.location.source),
+    )?;
     Vm::new()
         .execute(&function, instruction_budget)
         .map_err(|error| {
@@ -580,18 +601,17 @@ fn require_fields(metadata: &crate::Dict, path: &str, fields: &[&str]) -> Result
 }
 
 fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) -> TypeDescriptor {
-    match expression {
-        Expr::Spanned { expression, .. } => infer_expr(expression, environment),
-        Expr::Int(_) => TypeDescriptor::Int,
-        Expr::Float(_) => TypeDescriptor::Float,
-        Expr::String(_) => TypeDescriptor::String,
-        Expr::Bytes(_) => TypeDescriptor::Bytes,
-        Expr::Atom(name) => TypeDescriptor::Atom(atom_from_name(name)),
-        Expr::Variable(name) => environment
-            .get(name)
+    match &expression.value {
+        ExprKind::Int(_) => TypeDescriptor::Int,
+        ExprKind::Float(_) => TypeDescriptor::Float,
+        ExprKind::String(_) => TypeDescriptor::String,
+        ExprKind::Bytes(_) => TypeDescriptor::Bytes,
+        ExprKind::Atom(name) => TypeDescriptor::Atom(atom_from_name(name)),
+        ExprKind::Variable(name) => environment
+            .get(&name.value)
             .cloned()
             .unwrap_or(TypeDescriptor::Any),
-        Expr::Array(items) => {
+        ExprKind::Array(items) => {
             let item_types = items
                 .iter()
                 .map(|item| infer_expr(item, environment))
@@ -599,28 +619,30 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
             let item = common_type(item_types).unwrap_or(TypeDescriptor::Any);
             TypeDescriptor::Array(Box::new(item))
         }
-        Expr::Tuple(items) => TypeDescriptor::Tuple(
+        ExprKind::Tuple(items) => TypeDescriptor::Tuple(
             items
                 .iter()
                 .map(|item| infer_expr(item, environment))
                 .collect(),
         ),
-        Expr::Dict(fields) => TypeDescriptor::Struct(
+        ExprKind::Dict(fields) => TypeDescriptor::Struct(
             fields
                 .iter()
-                .map(|(name, value)| (name.clone(), infer_expr(value, environment)))
+                .map(|field| {
+                    (
+                        field.value.name.value.clone(),
+                        infer_expr(&field.value.value, environment),
+                    )
+                })
                 .collect(),
         ),
-        Expr::Block(block) => infer_block(block, environment),
-        Expr::Unary {
-            operator: UnaryOperator::Negate,
-            operand,
-        } => infer_expr(operand, environment),
-        Expr::Binary {
+        ExprKind::Block(block) => infer_block(block, environment),
+        ExprKind::Unary { operand, .. } => infer_expr(operand, environment),
+        ExprKind::Binary {
             operator,
             left,
             right,
-        } => match operator {
+        } => match operator.value {
             BinaryOperator::LessThan | BinaryOperator::Equal => TypeDescriptor::Union(vec![
                 TypeDescriptor::Atom(Atom::builtin(BuiltinAtom::True)),
                 TypeDescriptor::Atom(Atom::builtin(BuiltinAtom::False)),
@@ -635,14 +657,15 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
                 }
             }
         },
-        Expr::Field { receiver, field } => match infer_expr(receiver, environment) {
-            TypeDescriptor::Struct(fields) => {
-                fields.get(field).cloned().unwrap_or(TypeDescriptor::Any)
-            }
+        ExprKind::Field { receiver, field } => match infer_expr(receiver, environment) {
+            TypeDescriptor::Struct(fields) => fields
+                .get(&field.value)
+                .cloned()
+                .unwrap_or(TypeDescriptor::Any),
             _ => TypeDescriptor::Any,
         },
-        Expr::Call { .. } | Expr::Closure { .. } => TypeDescriptor::Any,
-        Expr::If {
+        ExprKind::Call { .. } | ExprKind::Closure { .. } => TypeDescriptor::Any,
+        ExprKind::If {
             then_branch,
             else_branch,
             ..
@@ -650,12 +673,12 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
             infer_block(then_branch, environment),
             infer_block(else_branch, environment),
         ]),
-        Expr::Match { arms, .. } => union_or_single(
+        ExprKind::Match { arms, .. } => union_or_single(
             arms.iter()
                 .map(|arm| {
                     let mut arm_environment = environment.clone();
-                    bind_pattern_types(&arm.pattern, &mut arm_environment);
-                    infer_expr(&arm.value, &arm_environment)
+                    bind_pattern_types(&arm.value.pattern, &mut arm_environment);
+                    infer_expr(&arm.value.value, &arm_environment)
                 })
                 .collect(),
         ),
@@ -664,21 +687,21 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
 
 fn infer_block(block: &Block, environment: &HashMap<String, TypeDescriptor>) -> TypeDescriptor {
     let mut environment = environment.clone();
-    for binding in &block.bindings {
-        if matches!(binding.kind, BindingKind::Let | BindingKind::Import) {
-            let inferred = infer_expr(&binding.value, &environment);
-            environment.insert(binding.name.clone(), inferred);
+    for binding in &block.value.bindings {
+        if matches!(binding.value.kind, BindingKind::Let | BindingKind::Import) {
+            let inferred = infer_expr(&binding.value.value, &environment);
+            environment.insert(binding.value.name.value.clone(), inferred);
         }
     }
-    infer_expr(&block.result, &environment)
+    infer_expr(&block.value.result, &environment)
 }
 
 fn bind_pattern_types(pattern: &Pattern, environment: &mut HashMap<String, TypeDescriptor>) {
-    match pattern {
-        Pattern::Binding(name) => {
-            environment.insert(name.clone(), TypeDescriptor::Any);
+    match &pattern.value {
+        PatternKind::Binding(name) => {
+            environment.insert(name.value.clone(), TypeDescriptor::Any);
         }
-        Pattern::Tuple(items) => {
+        PatternKind::Tuple(items) => {
             for item in items {
                 bind_pattern_types(item, environment);
             }

@@ -1,7 +1,7 @@
 # RFC 0006: Located Syntax Nodes and Source Origins
 
 - Status: Accepted
-- Implementation: Pending
+- Implementation: Complete
 
 ## Summary
 
@@ -201,3 +201,18 @@ design surface. They will be specified by the next RFC.
 9. Focused layout, checked-conversion, nested-location, Unicode diagnostic, and
    provenance tests pass with formatting and strict Clippy checks.
 
+## Implementation result
+
+Implemented in the Rust frontend and module loader. XL CST lowering now creates
+mandatory located programs, blocks, bindings, expressions, patterns, match
+arms, dictionary fields, identifiers, and operators. Compiler, type-analysis,
+free-variable, import-discovery, and tool-stage paths consume the located AST
+directly; the old transparent span variants and byte-column fallback have been
+removed.
+
+Diagnostics and JSON provenance share `Location` values backed by the module
+loader's `SourceDatabase`. Validation failures can therefore render the JSON
+value as the primary label and the XL type declaration as a secondary label
+without adding location data to runtime `Value`. The compact representation,
+checked conversions, UTF-8 positions, CST ranges, cross-source diagnostics,
+language behavior, and CLI paths are covered by the test suite.

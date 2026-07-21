@@ -1,25 +1,31 @@
-use crate::source::Span;
+use crate::source::{Located, Location};
+
+pub type Identifier = Located<String>;
+pub type Program = Located<ProgramKind>;
+pub type Block = Located<BlockKind>;
+pub type Binding = Located<BindingData>;
+pub type Expr = Located<ExprKind>;
+pub type Pattern = Located<PatternKind>;
+pub type MatchArm = Located<MatchArmKind>;
+pub type DictField = Located<DictFieldKind>;
 
 #[derive(Clone, Debug)]
-pub struct Program {
+pub struct ProgramKind {
     pub body: Block,
-    pub span: Span,
 }
 
 #[derive(Clone, Debug)]
-pub struct Block {
+pub struct BlockKind {
     pub bindings: Vec<Binding>,
     pub result: Box<Expr>,
-    pub span: Span,
 }
 
 #[derive(Clone, Debug)]
-pub struct Binding {
+pub struct BindingData {
     pub kind: BindingKind,
-    pub name: String,
+    pub name: Identifier,
     pub annotation: Option<Expr>,
     pub value: Expr,
-    pub span: Span,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,40 +36,36 @@ pub enum BindingKind {
 }
 
 #[derive(Clone, Debug)]
-pub enum Expr {
-    Spanned {
-        span: Span,
-        expression: Box<Expr>,
-    },
+pub enum ExprKind {
     Int(i64),
     Float(f64),
     String(String),
     Bytes(Vec<u8>),
     Atom(String),
-    Variable(String),
+    Variable(Identifier),
     Array(Vec<Expr>),
     Tuple(Vec<Expr>),
-    Dict(Vec<(String, Expr)>),
+    Dict(Vec<DictField>),
     Block(Block),
     Unary {
-        operator: UnaryOperator,
+        operator: Located<UnaryOperator>,
         operand: Box<Expr>,
     },
     Binary {
-        operator: BinaryOperator,
+        operator: Located<BinaryOperator>,
         left: Box<Expr>,
         right: Box<Expr>,
     },
     Field {
         receiver: Box<Expr>,
-        field: String,
+        field: Identifier,
     },
     Call {
         callee: Box<Expr>,
         arguments: Vec<Expr>,
     },
     Closure {
-        parameters: Vec<String>,
+        parameters: Vec<Identifier>,
         body: Block,
     },
     If {
@@ -75,29 +77,6 @@ pub enum Expr {
         value: Box<Expr>,
         arms: Vec<MatchArm>,
     },
-}
-
-impl Expr {
-    pub fn spanned(span: Span, expression: Expr) -> Self {
-        Self::Spanned {
-            span,
-            expression: Box::new(expression),
-        }
-    }
-
-    pub fn span(&self) -> Option<&Span> {
-        match self {
-            Self::Spanned { span, .. } => Some(span),
-            _ => None,
-        }
-    }
-
-    pub fn unspanned(&self) -> &Self {
-        match self {
-            Self::Spanned { expression, .. } => expression.unspanned(),
-            expression => expression,
-        }
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,17 +95,21 @@ pub enum BinaryOperator {
 }
 
 #[derive(Clone, Debug)]
-pub struct MatchArm {
-    pub pattern: Pattern,
+pub struct DictFieldKind {
+    pub name: Identifier,
     pub value: Expr,
-    pub span: Span,
 }
 
 #[derive(Clone, Debug)]
-pub enum Pattern {
-    Spanned { span: Span, pattern: Box<Pattern> },
+pub struct MatchArmKind {
+    pub pattern: Pattern,
+    pub value: Expr,
+}
+
+#[derive(Clone, Debug)]
+pub enum PatternKind {
     Wildcard,
-    Binding(String),
+    Binding(Identifier),
     Int(i64),
     Float(f64),
     String(String),
@@ -134,25 +117,6 @@ pub enum Pattern {
     Tuple(Vec<Pattern>),
 }
 
-impl Pattern {
-    pub fn spanned(span: Span, pattern: Pattern) -> Self {
-        Self::Spanned {
-            span,
-            pattern: Box::new(pattern),
-        }
-    }
-
-    pub fn span(&self) -> Option<&Span> {
-        match self {
-            Self::Spanned { span, .. } => Some(span),
-            _ => None,
-        }
-    }
-
-    pub fn unspanned(&self) -> &Self {
-        match self {
-            Self::Spanned { pattern, .. } => pattern.unspanned(),
-            pattern => pattern,
-        }
-    }
+pub fn located<T>(value: T, location: Location) -> Located<T> {
+    Located::new(value, location)
 }

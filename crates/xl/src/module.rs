@@ -1,4 +1,4 @@
-use crate::ast::{BindingKind, Expr, Program};
+use crate::ast::{BindingKind, Expr, ExprKind, Program};
 use crate::compiler::compile_program_analyzed_in;
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
 use crate::parser::parse_registered;
@@ -168,17 +168,17 @@ impl ModuleLoader {
         reject_nested_imports(&program, &source_name)?;
         let mut external_provenance = BTreeMap::new();
 
-        for binding in &program.body.bindings {
-            if binding.kind != BindingKind::Import {
+        for binding in &program.value.body.value.bindings {
+            if binding.value.kind != BindingKind::Import {
                 continue;
             }
-            if external_bindings.contains_key(&binding.name) {
+            if external_bindings.contains_key(&binding.value.name.value) {
                 return Err(ModuleError::new(format!(
                     "duplicate module binding {:?} in {source_name}",
-                    binding.name
+                    binding.value.name.value
                 )));
             }
-            let Expr::String(relative) = binding.value.unspanned() else {
+            let ExprKind::String(relative) = &binding.value.value.value else {
                 return Err(ModuleError::new("import path must be a string"));
             };
             let imported = path
@@ -187,9 +187,9 @@ impl ModuleLoader {
                 .join(relative);
             let sourced = self.load_value(&imported)?;
             if !sourced.provenance.values.is_empty() {
-                external_provenance.insert(binding.name.clone(), sourced.provenance);
+                external_provenance.insert(binding.value.name.value.clone(), sourced.provenance);
             }
-            external_bindings.insert(binding.name.clone(), sourced.value);
+            external_bindings.insert(binding.value.name.value.clone(), sourced.value);
         }
 
         let dynamic_bindings = if is_root && external_bindings.contains_key("input") {
@@ -203,7 +203,7 @@ impl ModuleLoader {
             self.instruction_budget,
             &external_bindings,
             &dynamic_bindings,
-            Some(&self.sources),
+            &self.sources,
             &external_provenance,
         )
         .map_err(|error| {
@@ -242,14 +242,14 @@ impl ModuleLoader {
 }
 
 fn reject_nested_imports(program: &Program, source_name: &str) -> Result<(), ModuleError> {
-    for binding in &program.body.bindings {
-        if binding.kind == BindingKind::Let && expression_has_import(&binding.value) {
+    for binding in &program.value.body.value.bindings {
+        if binding.value.kind == BindingKind::Let && expression_has_import(&binding.value.value) {
             return Err(ModuleError::new(format!(
                 "{source_name}: imports are only allowed at module top level"
             )));
         }
     }
-    if expression_has_import(&program.body.result) {
+    if expression_has_import(&program.value.body.value.result) {
         return Err(ModuleError::new(format!(
             "{source_name}: imports are only allowed at module top level"
         )));
@@ -258,64 +258,74 @@ fn reject_nested_imports(program: &Program, source_name: &str) -> Result<(), Mod
 }
 
 fn expression_has_import(expression: &Expr) -> bool {
-    match expression {
-        Expr::Spanned { expression, .. } => expression_has_import(expression),
-        Expr::Block(block) => {
+    match &expression.value {
+        ExprKind::Block(block) => {
             block
+                .value
                 .bindings
                 .iter()
-                .any(|binding| binding.kind == BindingKind::Import)
+                .any(|binding| binding.value.kind == BindingKind::Import)
                 || block
+                    .value
                     .bindings
                     .iter()
-                    .any(|binding| expression_has_import(&binding.value))
-                || expression_has_import(&block.result)
+                    .any(|binding| expression_has_import(&binding.value.value))
+                || expression_has_import(&block.value.result)
         }
-        Expr::Array(items) | Expr::Tuple(items) => items.iter().any(expression_has_import),
-        Expr::Dict(fields) => fields.iter().any(|(_, value)| expression_has_import(value)),
-        Expr::Unary { operand, .. } => expression_has_import(operand),
-        Expr::Binary { left, right, .. } => {
+        ExprKind::Array(items) | ExprKind::Tuple(items) => items.iter().any(expression_has_import),
+        ExprKind::Dict(fields) => fields
+            .iter()
+            .any(|field| expression_has_import(&field.value.value)),
+        ExprKind::Unary { operand, .. } => expression_has_import(operand),
+        ExprKind::Binary { left, right, .. } => {
             expression_has_import(left) || expression_has_import(right)
         }
-        Expr::Field { receiver, .. } => expression_has_import(receiver),
-        Expr::Call { callee, arguments } => {
+        ExprKind::Field { receiver, .. } => expression_has_import(receiver),
+        ExprKind::Call { callee, arguments } => {
             expression_has_import(callee) || arguments.iter().any(expression_has_import)
         }
-        Expr::Closure { body, .. } => {
-            body.bindings
+        ExprKind::Closure { body, .. } => {
+            body.value
+                .bindings
                 .iter()
-                .any(|binding| binding.kind == BindingKind::Import)
+                .any(|binding| binding.value.kind == BindingKind::Import)
                 || body
+                    .value
                     .bindings
                     .iter()
-                    .any(|binding| expression_has_import(&binding.value))
-                || expression_has_import(&body.result)
+                    .any(|binding| expression_has_import(&binding.value.value))
+                || expression_has_import(&body.value.result)
         }
-        Expr::If {
+        ExprKind::If {
             condition,
             then_branch,
             else_branch,
         } => {
             expression_has_import(condition)
                 || then_branch
+                    .value
                     .bindings
                     .iter()
-                    .chain(&else_branch.bindings)
+                    .chain(&else_branch.value.bindings)
                     .any(|binding| {
-                        binding.kind == BindingKind::Import || expression_has_import(&binding.value)
+                        binding.value.kind == BindingKind::Import
+                            || expression_has_import(&binding.value.value)
                     })
-                || expression_has_import(&then_branch.result)
-                || expression_has_import(&else_branch.result)
+                || expression_has_import(&then_branch.value.result)
+                || expression_has_import(&else_branch.value.result)
         }
-        Expr::Match { value, arms } => {
-            expression_has_import(value) || arms.iter().any(|arm| expression_has_import(&arm.value))
+        ExprKind::Match { value, arms } => {
+            expression_has_import(value)
+                || arms
+                    .iter()
+                    .any(|arm| expression_has_import(&arm.value.value))
         }
-        Expr::Int(_)
-        | Expr::Float(_)
-        | Expr::String(_)
-        | Expr::Bytes(_)
-        | Expr::Atom(_)
-        | Expr::Variable(_) => false,
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::String(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::Atom(_)
+        | ExprKind::Variable(_) => false,
     }
 }
 

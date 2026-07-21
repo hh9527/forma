@@ -19,6 +19,9 @@ pub use json::{
 };
 pub use lexer::{FrontendError, SourceLocation};
 pub use module::{LoadedModule, ModuleError, load_module};
+pub use source::{
+    Diagnostic, Label, Located, Location, Origin, SourceDatabase, SourceId, TextRange, WithOrigin,
+};
 pub use types::{Analysis, TypeDescriptor, analyze_source, analyze_source_with_budget};
 pub use value::{
     Atom, BuiltinAtom, Callable, Closure, Dict, NativeError, NativeFunction, Shape, Value,
