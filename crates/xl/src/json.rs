@@ -149,7 +149,7 @@ impl<'a> JsonLowerer<'a> {
             Node::Token(Token::Null, _) => Value::none(),
             Node::Token(Token::True, _) => Value::Atom(crate::Atom::builtin(BuiltinAtom::True)),
             Node::Token(Token::False, _) => Value::Atom(crate::Atom::builtin(BuiltinAtom::False)),
-            Node::Token(Token::String, _) => Value::string(self.decode_string(node)?),
+            Node::Rule(Rule::StringLiteral, _) => Value::string(self.decode_string(node)?),
             Node::Token(Token::Number, _) => self.number(node)?,
             Node::Rule(Rule::Literal | Rule::Value, _) => {
                 let child = self
@@ -191,8 +191,8 @@ impl<'a> JsonLowerer<'a> {
         let mut key_spans: BTreeMap<String, Location> = BTreeMap::new();
         for member in members {
             let key_node = self
-                .token_children(member, Token::String)
-                .next()
+                .rule_children(member)
+                .find(|child| self.rule(*child) == Some(Rule::StringLiteral))
                 .ok_or_else(|| self.error(member, "JSON object key must be a string"))?;
             let key = self.decode_string(key_node)?;
             let key_span = self.location(key_node);
@@ -284,13 +284,10 @@ impl<'a> JsonLowerer<'a> {
     fn is_value(&self, node: NodeRef) -> bool {
         matches!(
             self.cst.get(node),
-            Node::Token(
-                Token::String | Token::Number | Token::True | Token::False | Token::Null,
-                _
-            )
+            Node::Token(Token::Number | Token::True | Token::False | Token::Null, _)
         ) || matches!(
             self.rule(node),
-            Some(Rule::Value | Rule::Literal | Rule::Array | Rule::Object)
+            Some(Rule::Value | Rule::Literal | Rule::Array | Rule::Object | Rule::StringLiteral)
         )
     }
     fn children(&self, node: NodeRef) -> impl Iterator<Item = NodeRef> + '_ {
@@ -299,11 +296,6 @@ impl<'a> JsonLowerer<'a> {
     fn rule_children(&self, node: NodeRef) -> impl Iterator<Item = NodeRef> + '_ {
         self.children(node)
             .filter(|child| matches!(self.cst.get(*child), Node::Rule(..)))
-    }
-    fn token_children(&self, node: NodeRef, token: Token) -> impl Iterator<Item = NodeRef> + '_ {
-        self.children(node).filter(
-            move |child| matches!(self.cst.get(*child), Node::Token(found, _) if found == token),
-        )
     }
     fn rule(&self, node: NodeRef) -> Option<Rule> {
         match self.cst.get(node) {

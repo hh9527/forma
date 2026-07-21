@@ -2,6 +2,7 @@ use crate::bytecode::{BytecodeFunction, Instruction, Register};
 use crate::value::{Atom, BuiltinAtom, Callable, Closure, Dict, Shape, Value};
 use std::collections::HashMap;
 use std::fmt;
+use std::fmt::Write;
 use std::sync::{Arc, Weak};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -271,6 +272,38 @@ impl Vm {
                         pc,
                     )?;
                 }
+                Instruction::InterpolateString { dst, parts } => {
+                    let mut length = 0usize;
+                    for part in parts {
+                        let value = read_register(&registers, *part, function, pc)?;
+                        length += match value {
+                            Value::String(value) => value.len(),
+                            Value::Int(value) => decimal_length(*value),
+                            Value::Atom(value) => value.name().len(),
+                            value => {
+                                return Err(type_error(
+                                    "String, Int, or Atom interpolation value",
+                                    value,
+                                    function,
+                                    pc,
+                                ));
+                            }
+                        };
+                    }
+                    let mut output = String::with_capacity(length);
+                    for part in parts {
+                        let value = read_register(&registers, *part, function, pc)?;
+                        match value {
+                            Value::String(value) => output.push_str(value),
+                            Value::Int(value) => {
+                                write!(output, "{value}").expect("writing to String cannot fail");
+                            }
+                            Value::Atom(value) => output.push_str(value.name()),
+                            _ => unreachable!("interpolation values were validated"),
+                        }
+                    }
+                    write_register(&mut registers, *dst, Value::string(output), function, pc)?;
+                }
                 Instruction::MakeDict { dst, fields } => {
                     let mut entries = fields
                         .iter()
@@ -437,6 +470,16 @@ impl Vm {
             pc += 1;
         }
     }
+}
+
+fn decimal_length(value: i64) -> usize {
+    let magnitude = value.unsigned_abs();
+    let digits = if magnitude == 0 {
+        1
+    } else {
+        magnitude.ilog10() as usize + 1
+    };
+    digits + usize::from(value.is_negative())
 }
 
 fn read_register<'a>(

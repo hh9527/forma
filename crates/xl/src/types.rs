@@ -1,5 +1,6 @@
 use crate::ast::{
     BinaryOperator, BindingKind, Block, Expr, ExprKind, Pattern, PatternKind, Program,
+    StringPartKind,
 };
 use crate::compiler::compile_expression_with_bindings;
 use crate::json::{Provenance, ValuePath, ValuePathSegment};
@@ -207,6 +208,10 @@ pub(crate) fn analyze_program_with_bindings(
     }
 
     for binding in &program.value.body.value.bindings {
+        check_interpolations(&binding.value.value, &static_environment, sources)?;
+        if let Some(annotation) = &binding.value.annotation {
+            check_interpolations(annotation, &static_environment, sources)?;
+        }
         match binding.value.kind {
             BindingKind::Type => {
                 let value = evaluate_tool_expression(
@@ -319,6 +324,11 @@ pub(crate) fn analyze_program_with_bindings(
         }
     }
 
+    check_interpolations(
+        &program.value.body.value.result,
+        &static_environment,
+        sources,
+    )?;
     let result_type = infer_expr(&program.value.body.value.result, &static_environment);
     Ok(Analysis {
         declared_types,
@@ -605,6 +615,7 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
         ExprKind::Int(_) => TypeDescriptor::Int,
         ExprKind::Float(_) => TypeDescriptor::Float,
         ExprKind::String(_) => TypeDescriptor::String,
+        ExprKind::InterpolatedString(_) => TypeDescriptor::String,
         ExprKind::Bytes(_) => TypeDescriptor::Bytes,
         ExprKind::Atom(name) => TypeDescriptor::Atom(atom_from_name(name)),
         ExprKind::Variable(name) => environment
@@ -682,6 +693,122 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
                 })
                 .collect(),
         ),
+    }
+}
+
+fn check_interpolations(
+    expression: &Expr,
+    environment: &HashMap<String, TypeDescriptor>,
+    sources: &SourceDatabase,
+) -> Result<(), FrontendError> {
+    match &expression.value {
+        ExprKind::InterpolatedString(parts) => {
+            for part in parts {
+                if let StringPartKind::Expression(part_expression) = &part.value {
+                    let inferred = infer_expr(part_expression, environment);
+                    if !interpolation_type_supported(&inferred) {
+                        let message = format!(
+                            "string interpolation does not support {}",
+                            inferred.display_name()
+                        );
+                        return Err(FrontendError::from_diagnostic(
+                            sources,
+                            Diagnostic::error(message, part_expression.location),
+                        ));
+                    }
+                    check_interpolations(part_expression, environment, sources)?;
+                }
+            }
+        }
+        ExprKind::Array(items) | ExprKind::Tuple(items) => {
+            for item in items {
+                check_interpolations(item, environment, sources)?;
+            }
+        }
+        ExprKind::Dict(fields) => {
+            for field in fields {
+                check_interpolations(&field.value.value, environment, sources)?;
+            }
+        }
+        ExprKind::Block(block) => check_block_interpolations(block, environment, sources)?,
+        ExprKind::Unary { operand, .. } => {
+            check_interpolations(operand, environment, sources)?;
+        }
+        ExprKind::Binary { left, right, .. } => {
+            check_interpolations(left, environment, sources)?;
+            check_interpolations(right, environment, sources)?;
+        }
+        ExprKind::Field { receiver, .. } => {
+            check_interpolations(receiver, environment, sources)?;
+        }
+        ExprKind::Call { callee, arguments } => {
+            check_interpolations(callee, environment, sources)?;
+            for argument in arguments {
+                check_interpolations(argument, environment, sources)?;
+            }
+        }
+        ExprKind::Closure { parameters, body } => {
+            let mut closure_environment = environment.clone();
+            for parameter in parameters {
+                closure_environment.insert(parameter.value.clone(), TypeDescriptor::Any);
+            }
+            check_block_interpolations(body, &closure_environment, sources)?;
+        }
+        ExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            check_interpolations(condition, environment, sources)?;
+            check_block_interpolations(then_branch, environment, sources)?;
+            check_block_interpolations(else_branch, environment, sources)?;
+        }
+        ExprKind::Match { value, arms } => {
+            check_interpolations(value, environment, sources)?;
+            for arm in arms {
+                let mut arm_environment = environment.clone();
+                bind_pattern_types(&arm.value.pattern, &mut arm_environment);
+                check_interpolations(&arm.value.value, &arm_environment, sources)?;
+            }
+        }
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::String(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::Atom(_)
+        | ExprKind::Variable(_) => {}
+    }
+    Ok(())
+}
+
+fn check_block_interpolations(
+    block: &Block,
+    environment: &HashMap<String, TypeDescriptor>,
+    sources: &SourceDatabase,
+) -> Result<(), FrontendError> {
+    let mut environment = environment.clone();
+    for binding in &block.value.bindings {
+        check_interpolations(&binding.value.value, &environment, sources)?;
+        if matches!(binding.value.kind, BindingKind::Let | BindingKind::Import) {
+            let inferred = infer_expr(&binding.value.value, &environment);
+            environment.insert(binding.value.name.value.clone(), inferred);
+        }
+    }
+    check_interpolations(&block.value.result, &environment, sources)
+}
+
+fn interpolation_type_supported(descriptor: &TypeDescriptor) -> bool {
+    match descriptor {
+        TypeDescriptor::Any
+        | TypeDescriptor::Int
+        | TypeDescriptor::String
+        | TypeDescriptor::Atom(_) => true,
+        TypeDescriptor::Union(variants) => variants.iter().all(interpolation_type_supported),
+        TypeDescriptor::Float
+        | TypeDescriptor::Bytes
+        | TypeDescriptor::Array(_)
+        | TypeDescriptor::Tuple(_)
+        | TypeDescriptor::Struct(_) => false,
     }
 }
 

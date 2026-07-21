@@ -8,6 +8,7 @@ pub type Expr = Located<ExprKind>;
 pub type Pattern = Located<PatternKind>;
 pub type MatchArm = Located<MatchArmKind>;
 pub type DictField = Located<DictFieldKind>;
+pub type StringPart = Located<StringPartKind>;
 
 #[derive(Clone, Debug)]
 pub struct ProgramKind {
@@ -40,6 +41,7 @@ pub enum ExprKind {
     Int(i64),
     Float(f64),
     String(String),
+    InterpolatedString(Vec<StringPart>),
     Bytes(Vec<u8>),
     Atom(String),
     Variable(Identifier),
@@ -77,6 +79,12 @@ pub enum ExprKind {
         value: Box<Expr>,
         arms: Vec<MatchArm>,
     },
+}
+
+#[derive(Clone, Debug)]
+pub enum StringPartKind {
+    Text(String),
+    Expression(Expr),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

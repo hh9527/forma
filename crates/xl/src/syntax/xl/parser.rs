@@ -35,9 +35,19 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
         self.peek(1) != Token::RBracket
     }
     fn predicate_braced_1(&self) -> bool {
-        self.peek(1) == Token::RBrace
-            || matches!(self.peek(1), Token::Identifier | Token::String)
-                && self.peek(2) == Token::Colon
+        if self.peek(1) == Token::RBrace
+            || self.peek(1) == Token::Identifier && self.peek(2) == Token::Colon
+        {
+            return true;
+        }
+        if self.peek(1) != Token::DoubleQuote {
+            return false;
+        }
+        let mut lookahead = 2;
+        while !matches!(self.peek(lookahead), Token::DoubleQuote | Token::EOF) {
+            lookahead += 1;
+        }
+        self.peek(lookahead) == Token::DoubleQuote && self.peek(lookahead + 1) == Token::Colon
     }
     fn predicate_braced_2(&self) -> bool {
         self.peek(1) != Token::RBrace

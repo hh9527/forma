@@ -1,7 +1,7 @@
 # RFC 0007: Structured Strings and Interpolation
 
 - Status: Accepted
-- Implementation: Pending
+- Implementation: Complete
 
 ## Summary
 
@@ -195,3 +195,26 @@ Debug display is not stable language semantics. The deliberately narrow
 9. Runtime values remain source-location-free and string construction avoids
    pairwise intermediate allocations.
 10. Workspace tests, formatting, strict Clippy, and diff checks pass.
+
+## Implementation result
+
+Implemented for XL and JSON. Their lexers now use separate Logos normal and
+string modes, producing only token kinds and source ranges. Lelwel CSTs retain
+opening and closing quotes, maximal text tokens, individual escape tokens, and
+XL interpolation nodes while remaining byte-for-byte reconstructable. Empty
+strings require no zero-width token, JSON Unicode behavior is preserved, and
+byte literals remain opaque as specified.
+
+XL lowering preserves plain strings as `ExprKind::String` and produces located
+`StringPartKind::Text` and `StringPartKind::Expression` parts for interpolation.
+Imports, dictionary keys, and string patterns reject interpolation. Static
+analysis accepts only `String`, `Int`, `Atom`, and `Any` parts; unsupported known
+types receive a source diagnostic, while unsupported dynamic values fail in
+the VM.
+
+`InterpolateString` validates all source registers, calculates the final UTF-8
+length, allocates the result once, and appends String contents, decimal Ints,
+and Atom names in evaluation order. Runtime `Value` remains location-free.
+Lexer ranges, lossless CST structure, lowering locations, malformed strings,
+nested interpolation, static and dynamic failures, VM behavior, existing
+module/JSON behavior, and the CLI path are covered by tests.

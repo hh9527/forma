@@ -4,7 +4,9 @@ token LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
 token Comma=',' Colon=':' Semicolon=';' Dot='.';
 token Plus='+' Minus='-' Star='*' Slash='/' Less='<' EqualEqual='==' Equal='=';
 token FatArrow='=>' Pipe='|>';
-token Int='<integer>' Float='<float>' String='<string>' Bytes='<bytes>';
+token Int='<integer>' Float='<float>' Bytes='<bytes>';
+token DoubleQuote='"' StringText='<string text>' EscapeSequence='<escape>';
+token InterpolationStart='<interpolation start>';
 token Atom='<atom>' Identifier='<identifier>';
 token Whitespace Comment;
 
@@ -16,7 +18,7 @@ body: (?1 binding)* expression;
 binding^: let_binding | type_binding | import_binding | named_function;
 let_binding: 'let' Identifier [':' expression] '=' expression ';';
 type_binding: 'type' Identifier '=' expression ';';
-import_binding: 'import' Identifier 'from' String ';';
+import_binding: 'import' Identifier 'from' string_literal ';';
 named_function: 'fn' Identifier parameters block;
 
 expression:
@@ -33,7 +35,7 @@ expression:
 primary:
   Int @int_expr
 | Float @float_expr
-| String @string_expr
+| string_literal @string_expr
 | Bytes @bytes_expr
 | Atom @atom_expr
 | Identifier @variable_expr
@@ -49,7 +51,7 @@ braced:
   ?1 '{' [dict_field (?2 ',' dict_field)* [',']] '}' @dict_expr
 | ?t block
 ;
-dict_field: (Identifier | String) ':' expression;
+dict_field: (Identifier | string_literal) ':' expression;
 block: '{' body '}';
 closure: 'fn' parameters block;
 parameters: '(' [Identifier (?1 ',' Identifier)* [',']] ')';
@@ -61,7 +63,10 @@ pattern:
   Identifier @identifier_pattern
 | Int @int_pattern
 | Float @float_pattern
-| String @string_pattern
+| string_literal @string_pattern
 | Atom @atom_pattern
 | '(' [pattern (?1 ',' pattern)* [',']] ')' @tuple_pattern
 ;
+string_literal: DoubleQuote string_part* DoubleQuote;
+string_part^: StringText | EscapeSequence | interpolation;
+interpolation: InterpolationStart expression RBrace;

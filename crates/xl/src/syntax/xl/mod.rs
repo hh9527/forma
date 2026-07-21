@@ -15,6 +15,7 @@ pub fn parse(source_id: crate::source::SourceId, source: &str) -> super::Parse<C
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lexer::Token;
     use parser::{Node, NodeRef};
 
     fn reconstruct(cst: &CstData, source: &str, node: NodeRef, output: &mut String) {
@@ -38,6 +39,46 @@ mod tests {
         reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
         assert_eq!(reconstructed, source);
         assert!(parsed.diagnostics.len() >= 2);
+    }
+
+    #[test]
+    fn cst_preserves_string_quotes_text_escapes_and_interpolation() {
+        let source = r#""hi\n \{name}""#;
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("strings.xl", source);
+        let parsed = parse(id, source);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        let tokens = parsed
+            .syntax
+            .children(NodeRef::ROOT)
+            .flat_map(|node| collect_tokens(&parsed.syntax, node))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tokens,
+            vec![
+                Token::DoubleQuote,
+                Token::StringText,
+                Token::EscapeSequence,
+                Token::StringText,
+                Token::InterpolationStart,
+                Token::Identifier,
+                Token::RBrace,
+                Token::DoubleQuote,
+            ]
+        );
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+    }
+
+    fn collect_tokens(cst: &CstData, node: NodeRef) -> Vec<Token> {
+        match cst.get(node) {
+            Node::Token(token, _) => vec![token],
+            Node::Rule(..) => cst
+                .children(node)
+                .flat_map(|child| collect_tokens(cst, child))
+                .collect(),
+        }
     }
 
     #[test]

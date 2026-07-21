@@ -88,3 +88,28 @@ fn run_accepts_external_json_and_failures_are_nonzero() {
     assert!(String::from_utf8_lossy(&failure.stderr).contains("division by zero"));
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn run_evaluates_structured_string_interpolation() {
+    let directory = fixture_dir();
+    fs::write(
+        directory.join("interpolation.xl"),
+        r#"let name = "Ada"; let count = 2; "hi, \{name} x\{count}""#,
+    )
+    .unwrap();
+
+    let run = xl()
+        .args(["run", directory.join("interpolation.xl").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout).trim(),
+        "\"hi, Ada x2\""
+    );
+    fs::remove_dir_all(directory).unwrap();
+}

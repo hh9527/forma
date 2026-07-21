@@ -56,6 +56,10 @@ pub enum Instruction {
         dst: Register,
         items: Vec<Register>,
     },
+    InterpolateString {
+        dst: Register,
+        parts: Vec<Register>,
+    },
     MakeDict {
         dst: Register,
         fields: Vec<(String, Register)>,

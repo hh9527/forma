@@ -1,7 +1,7 @@
 use crate::ast::{
     BinaryOperator, Binding, BindingData, BindingKind, Block, BlockKind, DictFieldKind, Expr,
     ExprKind, Identifier, MatchArm, MatchArmKind, Pattern, PatternKind, Program, ProgramKind,
-    UnaryOperator, located,
+    StringPartKind, UnaryOperator, located,
 };
 use crate::lexer::{FrontendError, SourceLocation};
 use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
@@ -214,8 +214,8 @@ impl<'a> Lowerer<'a> {
             )),
             Rule::ImportBinding => {
                 let path = self
-                    .token_children(node, Token::String)
-                    .next()
+                    .rule_children(node)
+                    .find(|child| self.rule(*child) == Some(Rule::StringLiteral))
                     .ok_or_else(|| self.error(node, "import has no path"))?;
                 Ok(located(
                     BindingData {
@@ -223,7 +223,7 @@ impl<'a> Lowerer<'a> {
                         name,
                         annotation: None,
                         value: located(
-                            ExprKind::String(self.decode_xl_string(path)?),
+                            ExprKind::String(self.plain_string(path, "import path")?),
                             self.location(path),
                         ),
                     },
@@ -275,7 +275,6 @@ impl<'a> Lowerer<'a> {
                         .parse()
                         .map_err(|_| self.error(node, "invalid Float literal"))?,
                 ),
-                Token::String => ExprKind::String(self.decode_xl_string(node)?),
                 Token::Bytes => ExprKind::Bytes(self.decode_xl_string(node)?.into_bytes()),
                 Token::Atom => ExprKind::Atom(self.text(node).trim_start_matches('\'').to_owned()),
                 Token::Identifier => ExprKind::Variable(self.identifier(node)),
@@ -305,9 +304,7 @@ impl<'a> Lowerer<'a> {
                     .parse()
                     .map_err(|_| self.error(node, "invalid Float literal"))?,
             ),
-            Rule::StringExpr => {
-                ExprKind::String(self.decode_xl_string(self.first_token(node, Token::String)?)?)
-            }
+            Rule::StringExpr => return self.string_expression(node),
             Rule::BytesExpr => ExprKind::Bytes(
                 self.decode_xl_string(self.first_token(node, Token::Bytes)?)?
                     .into_bytes(),
@@ -338,14 +335,15 @@ impl<'a> Lowerer<'a> {
                     let key = self
                         .children(field)
                         .find(|child| {
-                            matches!(
-                                self.cst.get(*child),
-                                Node::Token(Token::Identifier | Token::String, _)
-                            )
+                            matches!(self.cst.get(*child), Node::Token(Token::Identifier, _))
+                                || self.rule(*child) == Some(Rule::StringLiteral)
                         })
                         .ok_or_else(|| self.error(field, "Dict field has no key"))?;
-                    let name = if matches!(self.cst.get(key), Node::Token(Token::String, _)) {
-                        located(self.decode_xl_string(key)?, self.location(key))
+                    let name = if self.rule(key) == Some(Rule::StringLiteral) {
+                        located(
+                            self.plain_string(key, "Dict field name")?,
+                            self.location(key),
+                        )
                     } else {
                         self.identifier(key)
                     };
@@ -559,7 +557,6 @@ impl<'a> Lowerer<'a> {
                         .parse()
                         .map_err(|_| self.error(node, "invalid Float pattern"))?,
                 ),
-                Token::String => PatternKind::String(self.decode_xl_string(node)?),
                 Token::Atom => {
                     PatternKind::Atom(self.text(node).trim_start_matches('\'').to_owned())
                 }
@@ -598,7 +595,11 @@ impl<'a> Lowerer<'a> {
                     .map_err(|_| self.error(node, "invalid Float pattern"))?,
             ),
             Rule::StringPattern => {
-                PatternKind::String(self.decode_xl_string(self.first_token(node, Token::String)?)?)
+                let string = self
+                    .rule_children(node)
+                    .find(|child| self.rule(*child) == Some(Rule::StringLiteral))
+                    .ok_or_else(|| self.error(node, "string pattern has no literal"))?;
+                PatternKind::String(self.plain_string(string, "string pattern")?)
             }
             Rule::AtomPattern => PatternKind::Atom(
                 self.text(self.first_token(node, Token::Atom)?)
@@ -631,12 +632,7 @@ impl<'a> Lowerer<'a> {
         matches!(
             self.cst.get(node),
             Node::Token(
-                Token::Int
-                    | Token::Float
-                    | Token::String
-                    | Token::Bytes
-                    | Token::Atom
-                    | Token::Identifier,
+                Token::Int | Token::Float | Token::Bytes | Token::Atom | Token::Identifier,
                 _
             )
         ) || matches!(
@@ -670,7 +666,7 @@ impl<'a> Lowerer<'a> {
         matches!(
             self.cst.get(node),
             Node::Token(
-                Token::Identifier | Token::Int | Token::Float | Token::String | Token::Atom,
+                Token::Identifier | Token::Int | Token::Float | Token::Atom,
                 _
             )
         ) || matches!(
@@ -724,6 +720,106 @@ impl<'a> Lowerer<'a> {
     }
     fn error(&self, node: NodeRef, message: impl Into<String>) -> Diagnostic {
         Diagnostic::error(message, self.location(node))
+    }
+
+    fn string_expression(&self, node: NodeRef) -> Result<Expr, Diagnostic> {
+        let literal = self
+            .rule_children(node)
+            .find(|child| self.rule(*child) == Some(Rule::StringLiteral))
+            .ok_or_else(|| self.error(node, "string expression has no literal"))?;
+        let mut components = Vec::new();
+        self.collect_string_components(literal, &mut components);
+        let has_interpolation = components
+            .iter()
+            .any(|component| self.rule(*component) == Some(Rule::Interpolation));
+        if !has_interpolation {
+            return Ok(located(
+                ExprKind::String(self.decode_string_components(&components)?),
+                self.location(node),
+            ));
+        }
+
+        let mut parts = Vec::new();
+        for component in components {
+            if self.rule(component) == Some(Rule::Interpolation) {
+                let expression_node = self
+                    .children(component)
+                    .find(|child| self.is_expression(*child))
+                    .ok_or_else(|| self.error(component, "interpolation has no expression"))?;
+                let expression = self.expression(expression_node)?;
+                let location = expression.location;
+                parts.push(located(StringPartKind::Expression(expression), location));
+            } else {
+                parts.push(located(
+                    StringPartKind::Text(self.decode_string_component(component)?),
+                    self.location(component),
+                ));
+            }
+        }
+        Ok(located(
+            ExprKind::InterpolatedString(parts),
+            self.location(node),
+        ))
+    }
+
+    fn plain_string(&self, node: NodeRef, context: &str) -> Result<String, Diagnostic> {
+        let mut components = Vec::new();
+        self.collect_string_components(node, &mut components);
+        if let Some(interpolation) = components
+            .iter()
+            .find(|component| self.rule(**component) == Some(Rule::Interpolation))
+        {
+            return Err(self.error(
+                *interpolation,
+                format!("interpolation is not allowed in {context}"),
+            ));
+        }
+        self.decode_string_components(&components)
+    }
+
+    fn collect_string_components(&self, node: NodeRef, output: &mut Vec<NodeRef>) {
+        match self.cst.get(node) {
+            Node::Token(Token::StringText | Token::EscapeSequence, _) => output.push(node),
+            Node::Rule(Rule::Interpolation, _) => output.push(node),
+            Node::Token(..) => {}
+            Node::Rule(..) => {
+                for child in self.children(node) {
+                    self.collect_string_components(child, output);
+                }
+            }
+        }
+    }
+
+    fn decode_string_components(&self, components: &[NodeRef]) -> Result<String, Diagnostic> {
+        let mut output = String::new();
+        for component in components {
+            output.push_str(&self.decode_string_component(*component)?);
+        }
+        Ok(output)
+    }
+
+    fn decode_string_component(&self, node: NodeRef) -> Result<String, Diagnostic> {
+        match self.cst.get(node) {
+            Node::Token(Token::StringText, _) => Ok(self.text(node).to_owned()),
+            Node::Token(Token::EscapeSequence, _) => {
+                let escaped = self.text(node)[1..]
+                    .chars()
+                    .next()
+                    .expect("escape token includes a character");
+                let decoded = match escaped {
+                    'n' => '\n',
+                    'r' => '\r',
+                    't' => '\t',
+                    '"' => '"',
+                    '\\' => '\\',
+                    other => {
+                        return Err(self.error(node, format!("unsupported escape \\{other}")));
+                    }
+                };
+                Ok(decoded.to_string())
+            }
+            _ => Err(self.error(node, "expected string text or escape")),
+        }
     }
 
     fn decode_xl_string(&self, node: NodeRef) -> Result<String, Diagnostic> {
@@ -817,5 +913,37 @@ mod tests {
         assert!(chained.message.contains("do not associate"));
         assert!(parse("test", "(1 < 2) == 3").is_ok());
         assert!(parse("test", "1 < (2 == 3)").is_ok());
+    }
+
+    #[test]
+    fn lowers_interpolation_with_located_text_and_expression_parts() {
+        let program = parse("test", r#"let name = "Ada"; "hi, \{name}""#).unwrap();
+        let ExprKind::InterpolatedString(parts) = &program.value.body.value.result.value else {
+            panic!("expected interpolated string");
+        };
+        assert_eq!(parts.len(), 2);
+        assert!(matches!(&parts[0].value, StringPartKind::Text(text) if text == "hi, "));
+        assert!(matches!(
+            &parts[1].value,
+            StringPartKind::Expression(expression)
+                if matches!(&expression.value, ExprKind::Variable(name) if name.value == "name")
+        ));
+        assert_eq!(parts[1].location.range.to_usize(), 25..29);
+    }
+
+    #[test]
+    fn rejects_interpolation_in_plain_string_contexts() {
+        let error = parse("test", r#"match "x" { "\{1}" => 1 }"#).unwrap_err();
+        assert!(error.message.contains("not allowed in string pattern"));
+    }
+
+    #[test]
+    fn reports_invalid_and_unterminated_string_parts() {
+        let invalid = parse("test", r#""bad\q""#).unwrap_err();
+        assert!(invalid.message.contains("unsupported escape"));
+        assert_eq!(invalid.location.offset, 4);
+
+        let unterminated = parse("test", r#""unfinished"#).unwrap_err();
+        assert!(unterminated.message.contains("expected"));
     }
 }

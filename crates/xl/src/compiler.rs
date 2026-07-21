@@ -1,6 +1,6 @@
 use crate::ast::{
     BinaryOperator, BindingKind, Block, DictField, Expr, ExprKind, Identifier, MatchArm, Pattern,
-    PatternKind, Program, UnaryOperator,
+    PatternKind, Program, StringPartKind, UnaryOperator,
 };
 use crate::bytecode::{BytecodeFunction, Instruction, Register};
 use crate::lexer::{FrontendError, SourceLocation};
@@ -306,6 +306,23 @@ impl<'a> Compiler<'a> {
             ExprKind::Int(value) => Ok(self.load_constant(Value::Int(*value))),
             ExprKind::Float(value) => Ok(self.load_constant(Value::Float(*value))),
             ExprKind::String(value) => Ok(self.load_constant(Value::string(value.clone()))),
+            ExprKind::InterpolatedString(parts) => {
+                let mut registers = Vec::with_capacity(parts.len());
+                for part in parts {
+                    registers.push(match &part.value {
+                        StringPartKind::Text(text) => {
+                            self.load_constant(Value::string(text.clone()))
+                        }
+                        StringPartKind::Expression(expression) => self.compile_expr(expression)?,
+                    });
+                }
+                let dst = self.allocate();
+                self.instructions.push(Instruction::InterpolateString {
+                    dst,
+                    parts: registers,
+                });
+                Ok(dst)
+            }
             ExprKind::Bytes(value) => Ok(self.load_constant(Value::Bytes(value.clone().into()))),
             ExprKind::Atom(name) => Ok(self.load_constant(atom_value(name))),
             ExprKind::Variable(name) => {
@@ -689,6 +706,13 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
                 free_expr(item, bound, free);
             }
         }
+        ExprKind::InterpolatedString(parts) => {
+            for part in parts {
+                if let StringPartKind::Expression(expression) = &part.value {
+                    free_expr(expression, bound, free);
+                }
+            }
+        }
         ExprKind::Dict(fields) => {
             for field in fields {
                 free_expr(&field.value.value, bound, free);
@@ -787,6 +811,13 @@ fn collect_runtime_names(expression: &Expr, names: &mut HashSet<String>) {
                 collect_runtime_names(item, names);
             }
         }
+        ExprKind::InterpolatedString(parts) => {
+            for part in parts {
+                if let StringPartKind::Expression(expression) = &part.value {
+                    collect_runtime_names(expression, names);
+                }
+            }
+        }
         ExprKind::Dict(fields) => {
             for field in fields {
                 collect_runtime_names(&field.value.value, names);
@@ -866,6 +897,39 @@ mod tests {
     fn pipeline_inserts_the_first_argument() {
         let value = run("let add = fn(a, b) { a + b }; 40 |> add(2)").unwrap();
         assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn interpolates_strings_ints_and_atoms() {
+        let value = run(
+            r#"let name = "Ada"; let count = 3; let state = 'Ok; "hi, \{name} count=\{count} state=\{state}""#,
+        )
+        .unwrap();
+        assert!(
+            matches!(&value, Value::String(text) if text.as_ref() == "hi, Ada count=3 state=Ok")
+        );
+
+        let nested = run(r#""value=\{if 'True { "yes" } else { "no" }}""#).unwrap();
+        assert!(matches!(&nested, Value::String(text) if text.as_ref() == "value=yes"));
+    }
+
+    #[test]
+    fn checks_known_and_dynamic_unsupported_interpolation_values() {
+        let static_error = run(r#""items=\{[1, 2]}""#).unwrap_err();
+        assert!(
+            static_error
+                .to_string()
+                .contains("does not support Array<Int>")
+        );
+
+        let dynamic_error = run(r#"fn render(x) { "x=\{x}" } render([1])"#).unwrap_err();
+        assert!(matches!(
+            dynamic_error,
+            ExecutionError::Runtime(RuntimeError {
+                kind: RuntimeErrorKind::TypeMismatch,
+                ..
+            })
+        ));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::ast::{BindingKind, Expr, ExprKind, Program};
+use crate::ast::{BindingKind, Expr, ExprKind, Program, StringPartKind};
 use crate::compiler::compile_program_analyzed_in;
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
 use crate::parser::parse_registered;
@@ -273,6 +273,10 @@ fn expression_has_import(expression: &Expr) -> bool {
                 || expression_has_import(&block.value.result)
         }
         ExprKind::Array(items) | ExprKind::Tuple(items) => items.iter().any(expression_has_import),
+        ExprKind::InterpolatedString(parts) => parts.iter().any(|part| match &part.value {
+            StringPartKind::Text(_) => false,
+            StringPartKind::Expression(expression) => expression_has_import(expression),
+        }),
         ExprKind::Dict(fields) => fields
             .iter()
             .any(|field| expression_has_import(&field.value.value)),
