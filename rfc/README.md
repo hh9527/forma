@@ -24,3 +24,4 @@ semantics from an earlier RFC.
 6. Located syntax nodes, compact source ranges, and synthetic origins.
 7. Structured lossless strings and restricted expression interpolation.
 8. Typed CST views, missing-slot validation, and tolerant lexical errors.
+9. Register LIR, VM call context, unified closures, and debug origins.
