@@ -21,3 +21,4 @@ semantics from an earlier RFC.
 3. Type metadata, tool-stage evaluation, checking, and validation.
 4. Modules, JSON data modules, external JSON input, and the MVP CLI.
 5. Unified sources, lossless XL and JSON parsing, spans, and provenance.
+6. Located syntax nodes, compact source ranges, and synthetic origins.
