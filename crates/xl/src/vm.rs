@@ -1,0 +1,727 @@
+use crate::bytecode::{BytecodeFunction, Instruction, Register};
+use crate::value::{Atom, BuiltinAtom, Dict, Shape, Value};
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::{Arc, Weak};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RuntimeErrorKind {
+    BudgetExceeded,
+    DivisionByZero,
+    IntegerOverflow,
+    InvalidBytecode,
+    MissingField,
+    TypeMismatch,
+    UnsupportedEquality,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeError {
+    pub kind: RuntimeErrorKind,
+    pub message: String,
+    pub function: String,
+    pub instruction: usize,
+}
+
+impl fmt::Display for RuntimeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{} at {}:{}",
+            self.message, self.function, self.instruction
+        )
+    }
+}
+
+impl std::error::Error for RuntimeError {}
+
+#[derive(Default)]
+struct ShapeInterner {
+    shapes: HashMap<Vec<String>, Weak<Shape>>,
+}
+
+impl ShapeInterner {
+    fn intern(&mut self, fields: Vec<String>) -> Arc<Shape> {
+        if let Some(shape) = self.shapes.get(&fields).and_then(Weak::upgrade) {
+            return shape;
+        }
+        let shape = Arc::new(Shape::from_sorted_fields(fields.clone()));
+        self.shapes.insert(fields, Arc::downgrade(&shape));
+        shape
+    }
+}
+
+#[derive(Default)]
+pub struct Vm {
+    shapes: ShapeInterner,
+}
+
+impl Vm {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn execute(
+        &mut self,
+        function: &BytecodeFunction,
+        instruction_budget: usize,
+    ) -> Result<Value, RuntimeError> {
+        let mut registers = vec![None; function.register_count()];
+        let mut pc = 0usize;
+        let mut remaining = instruction_budget;
+
+        loop {
+            if remaining == 0 {
+                return Err(error(
+                    RuntimeErrorKind::BudgetExceeded,
+                    "instruction budget exhausted",
+                    function,
+                    pc,
+                ));
+            }
+            remaining -= 1;
+
+            let instruction = function.instructions().get(pc).ok_or_else(|| {
+                error(
+                    RuntimeErrorKind::InvalidBytecode,
+                    "instruction pointer is out of bounds",
+                    function,
+                    pc,
+                )
+            })?;
+
+            match instruction {
+                Instruction::LoadConst { dst, constant } => {
+                    let value = function
+                        .constants()
+                        .get(*constant)
+                        .cloned()
+                        .ok_or_else(|| {
+                            error(
+                                RuntimeErrorKind::InvalidBytecode,
+                                format!("constant index {constant} is out of bounds"),
+                                function,
+                                pc,
+                            )
+                        })?;
+                    write_register(&mut registers, *dst, value, function, pc)?;
+                }
+                Instruction::Move { dst, src } => {
+                    let value = read_register(&registers, *src, function, pc)?.clone();
+                    write_register(&mut registers, *dst, value, function, pc)?;
+                }
+                Instruction::Add { dst, left, right } => {
+                    let value = numeric_binary(
+                        read_register(&registers, *left, function, pc)?,
+                        read_register(&registers, *right, function, pc)?,
+                        NumericOperation::Add,
+                        function,
+                        pc,
+                    )?;
+                    write_register(&mut registers, *dst, value, function, pc)?;
+                }
+                Instruction::Subtract { dst, left, right } => {
+                    let value = numeric_binary(
+                        read_register(&registers, *left, function, pc)?,
+                        read_register(&registers, *right, function, pc)?,
+                        NumericOperation::Subtract,
+                        function,
+                        pc,
+                    )?;
+                    write_register(&mut registers, *dst, value, function, pc)?;
+                }
+                Instruction::Multiply { dst, left, right } => {
+                    let value = numeric_binary(
+                        read_register(&registers, *left, function, pc)?,
+                        read_register(&registers, *right, function, pc)?,
+                        NumericOperation::Multiply,
+                        function,
+                        pc,
+                    )?;
+                    write_register(&mut registers, *dst, value, function, pc)?;
+                }
+                Instruction::Divide { dst, left, right } => {
+                    let value = numeric_binary(
+                        read_register(&registers, *left, function, pc)?,
+                        read_register(&registers, *right, function, pc)?,
+                        NumericOperation::Divide,
+                        function,
+                        pc,
+                    )?;
+                    write_register(&mut registers, *dst, value, function, pc)?;
+                }
+                Instruction::Negate { dst, src } => {
+                    let value = match read_register(&registers, *src, function, pc)? {
+                        Value::Int(value) => Value::Int(value.checked_neg().ok_or_else(|| {
+                            error(
+                                RuntimeErrorKind::IntegerOverflow,
+                                "integer negation overflowed",
+                                function,
+                                pc,
+                            )
+                        })?),
+                        Value::Float(value) => Value::Float(-value),
+                        value => {
+                            return Err(type_error("numeric value", value, function, pc));
+                        }
+                    };
+                    write_register(&mut registers, *dst, value, function, pc)?;
+                }
+                Instruction::Equal { dst, left, right } => {
+                    let equal = values_equal(
+                        read_register(&registers, *left, function, pc)?,
+                        read_register(&registers, *right, function, pc)?,
+                        function,
+                        pc,
+                    )?;
+                    write_register(&mut registers, *dst, Value::bool(equal), function, pc)?;
+                }
+                Instruction::LessThan { dst, left, right } => {
+                    let left = read_register(&registers, *left, function, pc)?;
+                    let right = read_register(&registers, *right, function, pc)?;
+                    let less = match (left, right) {
+                        (Value::Int(left), Value::Int(right)) => left < right,
+                        (Value::Float(left), Value::Float(right)) => left < right,
+                        _ => return Err(numeric_type_error(left, right, function, pc)),
+                    };
+                    write_register(&mut registers, *dst, Value::bool(less), function, pc)?;
+                }
+                Instruction::MakeArray { dst, items } => {
+                    let values = read_many(&registers, items, function, pc)?;
+                    write_register(
+                        &mut registers,
+                        *dst,
+                        Value::Array(values.into()),
+                        function,
+                        pc,
+                    )?;
+                }
+                Instruction::MakeTuple { dst, items } => {
+                    let values = read_many(&registers, items, function, pc)?;
+                    write_register(
+                        &mut registers,
+                        *dst,
+                        Value::Tuple(values.into()),
+                        function,
+                        pc,
+                    )?;
+                }
+                Instruction::MakeDict { dst, fields } => {
+                    let mut entries = fields
+                        .iter()
+                        .map(|(field, register)| {
+                            Ok((
+                                field.clone(),
+                                read_register(&registers, *register, function, pc)?.clone(),
+                            ))
+                        })
+                        .collect::<Result<Vec<_>, RuntimeError>>()?;
+                    entries.sort_by(|left, right| left.0.cmp(&right.0));
+                    if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                        return Err(error(
+                            RuntimeErrorKind::InvalidBytecode,
+                            "Dict contains a duplicate field",
+                            function,
+                            pc,
+                        ));
+                    }
+                    let (fields, values): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+                    let shape = self.shapes.intern(fields);
+                    write_register(
+                        &mut registers,
+                        *dst,
+                        Value::Dict(Dict::new(shape, values)),
+                        function,
+                        pc,
+                    )?;
+                }
+                Instruction::GetField { dst, dict, field } => {
+                    let dict = read_register(&registers, *dict, function, pc)?;
+                    let Value::Dict(dict) = dict else {
+                        return Err(type_error("Dict", dict, function, pc));
+                    };
+                    let value = dict.get(field).cloned().ok_or_else(|| {
+                        error(
+                            RuntimeErrorKind::MissingField,
+                            format!("Dict has no field {field:?}"),
+                            function,
+                            pc,
+                        )
+                    })?;
+                    write_register(&mut registers, *dst, value, function, pc)?;
+                }
+                Instruction::Jump { target } => {
+                    validate_jump(*target, function, pc)?;
+                    pc = *target;
+                    continue;
+                }
+                Instruction::JumpIfFalse { condition, target } => {
+                    match read_register(&registers, *condition, function, pc)? {
+                        Value::Atom(Atom::Builtin(BuiltinAtom::True)) => {}
+                        Value::Atom(Atom::Builtin(BuiltinAtom::False)) => {
+                            validate_jump(*target, function, pc)?;
+                            pc = *target;
+                            continue;
+                        }
+                        value => {
+                            return Err(type_error("'True or 'False", value, function, pc));
+                        }
+                    }
+                }
+                Instruction::Return { src } => {
+                    return Ok(read_register(&registers, *src, function, pc)?.clone());
+                }
+            }
+            pc += 1;
+        }
+    }
+}
+
+fn read_register<'a>(
+    registers: &'a [Option<Value>],
+    register: Register,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> Result<&'a Value, RuntimeError> {
+    registers
+        .get(register.0)
+        .ok_or_else(|| {
+            error(
+                RuntimeErrorKind::InvalidBytecode,
+                format!("register {} is out of bounds", register.0),
+                function,
+                pc,
+            )
+        })?
+        .as_ref()
+        .ok_or_else(|| {
+            error(
+                RuntimeErrorKind::InvalidBytecode,
+                format!("register {} is uninitialized", register.0),
+                function,
+                pc,
+            )
+        })
+}
+
+fn write_register(
+    registers: &mut [Option<Value>],
+    register: Register,
+    value: Value,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> Result<(), RuntimeError> {
+    let slot = registers.get_mut(register.0).ok_or_else(|| {
+        error(
+            RuntimeErrorKind::InvalidBytecode,
+            format!("register {} is out of bounds", register.0),
+            function,
+            pc,
+        )
+    })?;
+    *slot = Some(value);
+    Ok(())
+}
+
+fn read_many(
+    registers: &[Option<Value>],
+    items: &[Register],
+    function: &BytecodeFunction,
+    pc: usize,
+) -> Result<Vec<Value>, RuntimeError> {
+    items
+        .iter()
+        .map(|register| read_register(registers, *register, function, pc).cloned())
+        .collect()
+}
+
+#[derive(Clone, Copy)]
+enum NumericOperation {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+}
+
+fn numeric_binary(
+    left: &Value,
+    right: &Value,
+    operation: NumericOperation,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> Result<Value, RuntimeError> {
+    match (left, right) {
+        (Value::Int(left), Value::Int(right)) => {
+            if matches!(operation, NumericOperation::Divide) && *right == 0 {
+                return Err(error(
+                    RuntimeErrorKind::DivisionByZero,
+                    "integer division by zero",
+                    function,
+                    pc,
+                ));
+            }
+            let value = match operation {
+                NumericOperation::Add => left.checked_add(*right),
+                NumericOperation::Subtract => left.checked_sub(*right),
+                NumericOperation::Multiply => left.checked_mul(*right),
+                NumericOperation::Divide => left.checked_div(*right),
+            }
+            .ok_or_else(|| {
+                error(
+                    RuntimeErrorKind::IntegerOverflow,
+                    "integer arithmetic overflowed",
+                    function,
+                    pc,
+                )
+            })?;
+            Ok(Value::Int(value))
+        }
+        (Value::Float(left), Value::Float(right)) => Ok(Value::Float(match operation {
+            NumericOperation::Add => left + right,
+            NumericOperation::Subtract => left - right,
+            NumericOperation::Multiply => left * right,
+            NumericOperation::Divide => left / right,
+        })),
+        _ => Err(numeric_type_error(left, right, function, pc)),
+    }
+}
+
+fn numeric_type_error(
+    left: &Value,
+    right: &Value,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> RuntimeError {
+    error(
+        RuntimeErrorKind::TypeMismatch,
+        format!(
+            "numeric operands must have the same type, got {} and {}",
+            left.type_name(),
+            right.type_name()
+        ),
+        function,
+        pc,
+    )
+}
+
+fn values_equal(
+    left: &Value,
+    right: &Value,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> Result<bool, RuntimeError> {
+    match (left, right) {
+        (Value::Func(_), _) | (_, Value::Func(_)) => Err(error(
+            RuntimeErrorKind::UnsupportedEquality,
+            "functions cannot be compared for equality",
+            function,
+            pc,
+        )),
+        (Value::Int(left), Value::Int(right)) => Ok(left == right),
+        (Value::Float(left), Value::Float(right)) => Ok(left == right),
+        (Value::String(left), Value::String(right)) => Ok(left == right),
+        (Value::Bytes(left), Value::Bytes(right)) => Ok(left == right),
+        (Value::Atom(left), Value::Atom(right)) => Ok(left == right),
+        (Value::Array(left), Value::Array(right)) | (Value::Tuple(left), Value::Tuple(right)) => {
+            sequences_equal(left, right, function, pc)
+        }
+        (Value::Dict(left), Value::Dict(right)) => {
+            if left.shape().fields() != right.shape().fields() {
+                return Ok(false);
+            }
+            sequences_equal(left.values(), right.values(), function, pc)
+        }
+        _ => Ok(false),
+    }
+}
+
+fn sequences_equal(
+    left: &[Value],
+    right: &[Value],
+    function: &BytecodeFunction,
+    pc: usize,
+) -> Result<bool, RuntimeError> {
+    if left.len() != right.len() {
+        return Ok(false);
+    }
+    for (left, right) in left.iter().zip(right) {
+        if !values_equal(left, right, function, pc)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn validate_jump(
+    target: usize,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> Result<(), RuntimeError> {
+    if target >= function.instructions().len() {
+        return Err(error(
+            RuntimeErrorKind::InvalidBytecode,
+            format!("jump target {target} is out of bounds"),
+            function,
+            pc,
+        ));
+    }
+    Ok(())
+}
+
+fn type_error(
+    expected: &str,
+    actual: &Value,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> RuntimeError {
+    error(
+        RuntimeErrorKind::TypeMismatch,
+        format!("expected {expected}, got {}", actual.type_name()),
+        function,
+        pc,
+    )
+}
+
+fn error(
+    kind: RuntimeErrorKind,
+    message: impl Into<String>,
+    function: &BytecodeFunction,
+    instruction: usize,
+) -> RuntimeError {
+    RuntimeError {
+        kind,
+        message: message.into(),
+        function: function.name().to_owned(),
+        instruction,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BytecodeFunction, Instruction, Register};
+
+    fn run(
+        vm: &mut Vm,
+        registers: usize,
+        constants: Vec<Value>,
+        instructions: Vec<Instruction>,
+    ) -> Result<Value, RuntimeError> {
+        vm.execute(
+            &BytecodeFunction::new("test", registers, constants, instructions),
+            1_000,
+        )
+    }
+
+    #[test]
+    fn executes_arithmetic_and_branching() {
+        let result = run(
+            &mut Vm::new(),
+            4,
+            vec![Value::Int(20), Value::Int(22), Value::Int(0)],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::LoadConst {
+                    dst: Register(1),
+                    constant: 1,
+                },
+                Instruction::Add {
+                    dst: Register(2),
+                    left: Register(0),
+                    right: Register(1),
+                },
+                Instruction::LoadConst {
+                    dst: Register(3),
+                    constant: 2,
+                },
+                Instruction::LessThan {
+                    dst: Register(3),
+                    left: Register(3),
+                    right: Register(2),
+                },
+                Instruction::JumpIfFalse {
+                    condition: Register(3),
+                    target: 7,
+                },
+                Instruction::Return { src: Register(2) },
+                Instruction::Return { src: Register(0) },
+            ],
+        )
+        .unwrap();
+        assert!(matches!(result, Value::Int(42)));
+    }
+
+    #[test]
+    fn canonicalizes_and_interns_dict_shapes() {
+        let result = run(
+            &mut Vm::new(),
+            4,
+            vec![Value::Int(1), Value::Int(2)],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::LoadConst {
+                    dst: Register(1),
+                    constant: 1,
+                },
+                Instruction::MakeDict {
+                    dst: Register(2),
+                    fields: vec![("b".into(), Register(1)), ("a".into(), Register(0))],
+                },
+                Instruction::MakeDict {
+                    dst: Register(3),
+                    fields: vec![("a".into(), Register(1)), ("b".into(), Register(0))],
+                },
+                Instruction::MakeTuple {
+                    dst: Register(0),
+                    items: vec![Register(2), Register(3)],
+                },
+                Instruction::Return { src: Register(0) },
+            ],
+        )
+        .unwrap();
+        let Value::Tuple(dicts) = result else {
+            panic!("expected tuple");
+        };
+        let (Value::Dict(left), Value::Dict(right)) = (&dicts[0], &dicts[1]) else {
+            panic!("expected Dict values");
+        };
+        assert_eq!(left.shape().fields(), &["a".to_owned(), "b".to_owned()]);
+        assert!(left.shares_shape_with(right));
+        assert!(matches!(left.get("a"), Some(Value::Int(1))));
+    }
+
+    #[test]
+    fn constructs_and_reads_structured_values() {
+        let result = run(
+            &mut Vm::new(),
+            5,
+            vec![Value::Atom(Atom::builtin(BuiltinAtom::Ok)), Value::Int(42)],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::LoadConst {
+                    dst: Register(1),
+                    constant: 1,
+                },
+                Instruction::MakeTuple {
+                    dst: Register(2),
+                    items: vec![Register(0), Register(1)],
+                },
+                Instruction::MakeArray {
+                    dst: Register(3),
+                    items: vec![Register(1), Register(2)],
+                },
+                Instruction::MakeDict {
+                    dst: Register(4),
+                    fields: vec![("result".into(), Register(3))],
+                },
+                Instruction::GetField {
+                    dst: Register(0),
+                    dict: Register(4),
+                    field: "result".into(),
+                },
+                Instruction::Return { src: Register(0) },
+            ],
+        )
+        .unwrap();
+        assert_eq!(result.to_string(), "[42, ('Ok, 42)]");
+    }
+
+    #[test]
+    fn reports_integer_errors_consistently() {
+        let overflow = run(
+            &mut Vm::new(),
+            3,
+            vec![Value::Int(i64::MAX), Value::Int(1)],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::LoadConst {
+                    dst: Register(1),
+                    constant: 1,
+                },
+                Instruction::Add {
+                    dst: Register(2),
+                    left: Register(0),
+                    right: Register(1),
+                },
+                Instruction::Return { src: Register(2) },
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(overflow.kind, RuntimeErrorKind::IntegerOverflow);
+
+        let division = run(
+            &mut Vm::new(),
+            3,
+            vec![Value::Int(1), Value::Int(0)],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::LoadConst {
+                    dst: Register(1),
+                    constant: 1,
+                },
+                Instruction::Divide {
+                    dst: Register(2),
+                    left: Register(0),
+                    right: Register(1),
+                },
+                Instruction::Return { src: Register(2) },
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(division.kind, RuntimeErrorKind::DivisionByZero);
+    }
+
+    #[test]
+    fn rejects_non_boolean_conditions() {
+        let error = run(
+            &mut Vm::new(),
+            1,
+            vec![Value::Int(1)],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::JumpIfFalse {
+                    condition: Register(0),
+                    target: 2,
+                },
+                Instruction::Return { src: Register(0) },
+            ],
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, RuntimeErrorKind::TypeMismatch);
+    }
+
+    #[test]
+    fn enforces_budget_and_rejects_malformed_bytecode() {
+        let loop_function =
+            BytecodeFunction::new("loop", 0, vec![], vec![Instruction::Jump { target: 0 }]);
+        let error = Vm::new().execute(&loop_function, 5).unwrap_err();
+        assert_eq!(error.kind, RuntimeErrorKind::BudgetExceeded);
+
+        let invalid = BytecodeFunction::new(
+            "invalid",
+            0,
+            vec![],
+            vec![Instruction::Return { src: Register(9) }],
+        );
+        let error = Vm::new().execute(&invalid, 5).unwrap_err();
+        assert_eq!(error.kind, RuntimeErrorKind::InvalidBytecode);
+    }
+}

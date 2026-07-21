@@ -1,7 +1,7 @@
 # RFC 0001: Runtime Values and Bytecode VM
 
 - Status: Accepted for MVP
-- Implementation: Pending
+- Implementation: Complete
 
 ## Summary
 
@@ -157,3 +157,8 @@ bytecode functions and execute them.
 7. Malformed register, constant, and jump indexes return errors without panic.
 8. `cargo test --workspace` passes.
 
+## Implementation result
+
+Implemented in the `xl` crate. The acceptance suite passes under
+`cargo test --workspace`, and the implementation is warning-free under
+`cargo clippy --workspace --all-targets -- -D warnings`.
