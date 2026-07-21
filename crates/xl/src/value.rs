@@ -1,4 +1,5 @@
 use crate::bytecode::BytecodeFunction;
+use crate::vm::Vm;
 use std::fmt;
 use std::sync::Arc;
 
@@ -84,6 +85,66 @@ pub struct Closure {
     captures: Arc<[Value]>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NativeError {
+    pub message: String,
+}
+
+impl NativeError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+pub type NativeCallback = fn(&mut Vm, &[Value]) -> Result<Value, NativeError>;
+
+#[derive(Clone, Copy)]
+pub struct NativeFunction {
+    name: &'static str,
+    arity: usize,
+    callback: NativeCallback,
+}
+
+impl NativeFunction {
+    pub const fn new(name: &'static str, arity: usize, callback: NativeCallback) -> Self {
+        Self {
+            name,
+            arity,
+            callback,
+        }
+    }
+
+    pub const fn name(self) -> &'static str {
+        self.name
+    }
+
+    pub const fn arity(self) -> usize {
+        self.arity
+    }
+
+    pub const fn callback(self) -> NativeCallback {
+        self.callback
+    }
+}
+
+impl fmt::Debug for NativeFunction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("NativeFunction")
+            .field("name", &self.name)
+            .field("arity", &self.arity)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum Callable {
+    Bytecode(Closure),
+    Native(NativeFunction),
+}
+
 impl Closure {
     pub fn new(function: Arc<BytecodeFunction>, captures: Vec<Value>) -> Self {
         Self {
@@ -139,7 +200,7 @@ pub enum Value {
     Array(Arc<[Value]>),
     Atom(Atom),
     Tuple(Arc<[Value]>),
-    Func(Arc<Closure>),
+    Func(Arc<Callable>),
 }
 
 impl Value {
@@ -212,7 +273,12 @@ impl fmt::Display for Value {
             Self::Array(values) => format_sequence(formatter, "[", "]", values),
             Self::Atom(atom) => write!(formatter, "'{}", atom.name()),
             Self::Tuple(values) => format_sequence(formatter, "(", ")", values),
-            Self::Func(closure) => write!(formatter, "<fn {}>", closure.function().name()),
+            Self::Func(callable) => match callable.as_ref() {
+                Callable::Bytecode(closure) => {
+                    write!(formatter, "<fn {}>", closure.function().name())
+                }
+                Callable::Native(function) => write!(formatter, "<native fn {}>", function.name()),
+            },
         }
     }
 }

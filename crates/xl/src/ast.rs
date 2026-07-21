@@ -11,8 +11,16 @@ pub struct Block {
 
 #[derive(Clone, Debug)]
 pub struct Binding {
+    pub kind: BindingKind,
     pub name: String,
+    pub annotation: Option<Expr>,
     pub value: Expr,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BindingKind {
+    Let,
+    Type,
 }
 
 #[derive(Clone, Debug)]

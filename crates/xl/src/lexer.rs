@@ -59,6 +59,7 @@ pub(crate) enum TokenKind {
     Atom(String),
     Identifier(String),
     Let,
+    Type,
     Fn,
     If,
     Else,
@@ -313,6 +314,7 @@ impl<'a> Lexer<'a> {
         }
         match &self.source[start..self.location.offset] {
             "let" => TokenKind::Let,
+            "type" => TokenKind::Type,
             "fn" => TokenKind::Fn,
             "if" => TokenKind::If,
             "else" => TokenKind::Else,

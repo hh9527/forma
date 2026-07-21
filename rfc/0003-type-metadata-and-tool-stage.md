@@ -1,7 +1,7 @@
 # RFC 0003: Type Metadata and Tool-Stage Evaluation
 
 - Status: Accepted for MVP
-- Implementation: Pending
+- Implementation: Complete
 
 ## Summary
 
@@ -196,3 +196,10 @@ support for erasing or retaining resolved type bindings.
 9. Existing dynamic programs continue to compile and run.
 10. Workspace tests and strict Clippy pass.
 
+## Implementation result
+
+Implemented in the `xl` crate. The tool-stage evaluator executes user bytecode
+and trusted native metadata constructors under one shared VM budget. Canonical
+metadata decoding, focused structural analysis, runtime validation, and
+program-stage erasure/retention are covered by the workspace test suite. Strict
+Clippy reports no warnings.

@@ -1,4 +1,6 @@
-use crate::ast::{BinaryOperator, Binding, Block, Expr, MatchArm, Pattern, Program, UnaryOperator};
+use crate::ast::{
+    BinaryOperator, Binding, BindingKind, Block, Expr, MatchArm, Pattern, Program, UnaryOperator,
+};
 use crate::lexer::{FrontendError, Token, TokenKind, lex};
 
 pub fn parse(source_name: &str, source: &str) -> Result<Program, FrontendError> {
@@ -31,6 +33,8 @@ impl<'a> Parser<'a> {
         loop {
             if self.at(&TokenKind::Let) {
                 bindings.push(self.parse_let()?);
+            } else if self.at(&TokenKind::Type) {
+                bindings.push(self.parse_type()?);
             } else if self.at(&TokenKind::Fn)
                 && matches!(self.peek_kind(1), Some(TokenKind::Identifier(_)))
             {
@@ -55,10 +59,34 @@ impl<'a> Parser<'a> {
     fn parse_let(&mut self) -> Result<Binding, FrontendError> {
         self.expect(TokenKind::Let, "expected 'let'")?;
         let name = self.identifier("expected a binding name")?;
+        let annotation = if self.consume(&TokenKind::Colon) {
+            Some(self.parse_expression(0)?)
+        } else {
+            None
+        };
         self.expect(TokenKind::Equal, "expected '=' after binding name")?;
         let value = self.parse_expression(0)?;
         self.expect(TokenKind::Semicolon, "expected ';' after binding")?;
-        Ok(Binding { name, value })
+        Ok(Binding {
+            kind: BindingKind::Let,
+            name,
+            annotation,
+            value,
+        })
+    }
+
+    fn parse_type(&mut self) -> Result<Binding, FrontendError> {
+        self.expect(TokenKind::Type, "expected 'type'")?;
+        let name = self.identifier("expected a type name")?;
+        self.expect(TokenKind::Equal, "expected '=' after type name")?;
+        let value = self.parse_expression(0)?;
+        self.expect(TokenKind::Semicolon, "expected ';' after type declaration")?;
+        Ok(Binding {
+            kind: BindingKind::Type,
+            name,
+            annotation: None,
+            value,
+        })
     }
 
     fn parse_named_function(&mut self) -> Result<Binding, FrontendError> {
@@ -67,7 +95,9 @@ impl<'a> Parser<'a> {
         let parameters = self.parse_parameters()?;
         let body = self.parse_required_block()?;
         Ok(Binding {
+            kind: BindingKind::Let,
             name,
+            annotation: None,
             value: Expr::Closure { parameters, body },
         })
     }

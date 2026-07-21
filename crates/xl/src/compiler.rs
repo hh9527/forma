@@ -1,10 +1,13 @@
-use crate::ast::{BinaryOperator, Block, Expr, MatchArm, Pattern, Program, UnaryOperator};
+use crate::ast::{
+    BinaryOperator, BindingKind, Block, Expr, MatchArm, Pattern, Program, UnaryOperator,
+};
 use crate::bytecode::{BytecodeFunction, Instruction, Register};
 use crate::lexer::{FrontendError, SourceLocation};
 use crate::parser::parse;
+use crate::types::{Analysis, analyze_program};
 use crate::value::{Atom, BuiltinAtom, Value};
 use crate::{RuntimeError, Vm};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -39,7 +42,8 @@ impl From<RuntimeError> for ExecutionError {
 
 pub fn compile_source(source_name: &str, source: &str) -> Result<BytecodeFunction, FrontendError> {
     let program = parse(source_name, source)?;
-    Compiler::program(source_name, &program)
+    let analysis = analyze_program(source_name, &program, 100_000)?;
+    Compiler::program(source_name, &program, &analysis)
 }
 
 pub fn run_source(
@@ -49,6 +53,36 @@ pub fn run_source(
 ) -> Result<Value, ExecutionError> {
     let function = compile_source(source_name, source)?;
     Ok(Vm::new().execute(&function, instruction_budget)?)
+}
+
+pub(crate) fn compile_expression_with_bindings(
+    source_name: &str,
+    function_name: &str,
+    expression: &Expr,
+    bindings: &BTreeMap<String, Value>,
+) -> Result<BytecodeFunction, FrontendError> {
+    let mut compiler = Compiler {
+        source_name,
+        function_name: function_name.to_owned(),
+        environment: HashMap::new(),
+        constants: Vec::new(),
+        instructions: Vec::new(),
+        next_register: 0,
+        parameter_count: 0,
+        capture_count: 0,
+        closure_index: 0,
+        resolved_types: HashMap::new(),
+        retained_names: HashSet::new(),
+    };
+    for (name, value) in bindings {
+        let register = compiler.load_constant(value.clone());
+        compiler.environment.insert(name.clone(), register);
+    }
+    let result = compiler.compile_expr(expression)?;
+    compiler
+        .instructions
+        .push(Instruction::Return { src: result });
+    Ok(compiler.finish())
 }
 
 struct Compiler<'a> {
@@ -61,10 +95,18 @@ struct Compiler<'a> {
     parameter_count: usize,
     capture_count: usize,
     closure_index: usize,
+    resolved_types: HashMap<String, Value>,
+    retained_names: HashSet<String>,
 }
 
 impl<'a> Compiler<'a> {
-    fn program(source_name: &'a str, program: &Program) -> Result<BytecodeFunction, FrontendError> {
+    fn program(
+        source_name: &'a str,
+        program: &Program,
+        analysis: &Analysis,
+    ) -> Result<BytecodeFunction, FrontendError> {
+        let mut retained_names = HashSet::new();
+        collect_runtime_names_block(&program.body, &mut retained_names);
         let mut compiler = Self {
             source_name,
             function_name: source_name.to_owned(),
@@ -75,7 +117,15 @@ impl<'a> Compiler<'a> {
             parameter_count: 0,
             capture_count: 0,
             closure_index: 0,
+            resolved_types: analysis.resolved_types.clone(),
+            retained_names,
         };
+        for (name, value) in &analysis.prelude {
+            if compiler.retained_names.contains(name) {
+                let register = compiler.load_constant(value.clone());
+                compiler.environment.insert(name.clone(), register);
+            }
+        }
         let result = compiler.compile_block(&program.body)?;
         compiler
             .instructions
@@ -114,6 +164,8 @@ impl<'a> Compiler<'a> {
             parameter_count: parameters.len(),
             capture_count: captures.len(),
             closure_index: 0,
+            resolved_types: HashMap::new(),
+            retained_names: HashSet::new(),
         })
     }
 
@@ -131,6 +183,23 @@ impl<'a> Compiler<'a> {
     fn compile_block(&mut self, block: &Block) -> Result<Register, FrontendError> {
         let outer = self.environment.clone();
         for binding in &block.bindings {
+            if binding.kind == BindingKind::Type {
+                if self.retained_names.contains(&binding.name) {
+                    let value =
+                        self.resolved_types
+                            .get(&binding.name)
+                            .cloned()
+                            .ok_or_else(|| {
+                                frontend_error(
+                                    self.source_name,
+                                    "nested type declarations are not supported in the MVP",
+                                )
+                            })?;
+                    let register = self.load_constant(value);
+                    self.environment.insert(binding.name.clone(), register);
+                }
+                continue;
+            }
             let value = self.compile_expr(&binding.value)?;
             self.environment.insert(binding.name.clone(), value);
         }
@@ -576,6 +645,63 @@ fn bind_pattern(pattern: &Pattern, bound: &mut HashSet<String>) {
         | Pattern::Float(_)
         | Pattern::String(_)
         | Pattern::Atom(_) => {}
+    }
+}
+
+fn collect_runtime_names_block(block: &Block, names: &mut HashSet<String>) {
+    for binding in &block.bindings {
+        if binding.kind == BindingKind::Let {
+            collect_runtime_names(&binding.value, names);
+        }
+    }
+    collect_runtime_names(&block.result, names);
+}
+
+fn collect_runtime_names(expression: &Expr, names: &mut HashSet<String>) {
+    match expression {
+        Expr::Variable(name) => {
+            names.insert(name.clone());
+        }
+        Expr::Array(items) | Expr::Tuple(items) => {
+            for item in items {
+                collect_runtime_names(item, names);
+            }
+        }
+        Expr::Dict(fields) => {
+            for (_, value) in fields {
+                collect_runtime_names(value, names);
+            }
+        }
+        Expr::Block(block) => collect_runtime_names_block(block, names),
+        Expr::Unary { operand, .. } => collect_runtime_names(operand, names),
+        Expr::Binary { left, right, .. } => {
+            collect_runtime_names(left, names);
+            collect_runtime_names(right, names);
+        }
+        Expr::Field { receiver, .. } => collect_runtime_names(receiver, names),
+        Expr::Call { callee, arguments } => {
+            collect_runtime_names(callee, names);
+            for argument in arguments {
+                collect_runtime_names(argument, names);
+            }
+        }
+        Expr::Closure { body, .. } => collect_runtime_names_block(body, names),
+        Expr::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_runtime_names(condition, names);
+            collect_runtime_names_block(then_branch, names);
+            collect_runtime_names_block(else_branch, names);
+        }
+        Expr::Match { value, arms } => {
+            collect_runtime_names(value, names);
+            for arm in arms {
+                collect_runtime_names(&arm.value, names);
+            }
+        }
+        Expr::Int(_) | Expr::Float(_) | Expr::String(_) | Expr::Bytes(_) | Expr::Atom(_) => {}
     }
 }
 

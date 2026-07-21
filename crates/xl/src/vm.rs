@@ -1,5 +1,5 @@
 use crate::bytecode::{BytecodeFunction, Instruction, Register};
-use crate::value::{Atom, BuiltinAtom, Closure, Dict, Shape, Value};
+use crate::value::{Atom, BuiltinAtom, Callable, Closure, Dict, Shape, Value};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Weak};
@@ -60,6 +60,20 @@ pub struct Vm {
 impl Vm {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn make_dict(
+        &mut self,
+        entries: impl IntoIterator<Item = (String, Value)>,
+    ) -> Result<Value, String> {
+        let mut entries = entries.into_iter().collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err("Dict contains a duplicate field".into());
+        }
+        let (fields, values): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+        let shape = self.shapes.intern(fields);
+        Ok(Value::Dict(Dict::new(shape, values)))
     }
 
     pub fn execute(
@@ -329,7 +343,8 @@ impl Vm {
                     captures,
                 } => {
                     let captures = read_many(&registers, captures, function, pc)?;
-                    let closure = Closure::new(closure_function.clone(), captures);
+                    let closure =
+                        Callable::Bytecode(Closure::new(closure_function.clone(), captures));
                     write_register(
                         &mut registers,
                         *dst,
@@ -344,16 +359,49 @@ impl Vm {
                     arguments,
                 } => {
                     let callee = read_register(&registers, *callee, function, pc)?.clone();
-                    let Value::Func(closure) = callee else {
+                    let Value::Func(callable) = callee else {
                         return Err(type_error("Func", &callee, function, pc));
                     };
                     let arguments = read_many(&registers, arguments, function, pc)?;
-                    let value = self.execute_frame(
-                        closure.function(),
-                        &arguments,
-                        closure.captures(),
-                        remaining,
-                    )?;
+                    let value = match callable.as_ref() {
+                        Callable::Bytecode(closure) => self.execute_frame(
+                            closure.function(),
+                            &arguments,
+                            closure.captures(),
+                            remaining,
+                        )?,
+                        Callable::Native(native) => {
+                            if arguments.len() != native.arity() {
+                                return Err(error(
+                                    RuntimeErrorKind::TypeMismatch,
+                                    format!(
+                                        "expected {} arguments, got {}",
+                                        native.arity(),
+                                        arguments.len()
+                                    ),
+                                    function,
+                                    pc,
+                                ));
+                            }
+                            if *remaining == 0 {
+                                return Err(error(
+                                    RuntimeErrorKind::BudgetExceeded,
+                                    "instruction budget exhausted",
+                                    function,
+                                    pc,
+                                ));
+                            }
+                            *remaining -= 1;
+                            (native.callback())(self, &arguments).map_err(|native_error| {
+                                error(
+                                    RuntimeErrorKind::TypeMismatch,
+                                    format!("{}: {}", native.name(), native_error.message),
+                                    function,
+                                    pc,
+                                )
+                            })?
+                        }
+                    };
                     write_register(&mut registers, *dst, value, function, pc)?;
                 }
                 Instruction::Jump { target } => {
