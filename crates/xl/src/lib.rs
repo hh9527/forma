@@ -14,8 +14,8 @@ pub mod vm;
 pub use bytecode::{BytecodeFunction, Instruction, Register};
 pub use compiler::{ExecutionError, compile_source, run_source};
 pub use json::{
-    JsonError, Provenance, SourcedValue, ValuePath, ValuePathSegment, parse_json,
-    parse_json_with_provenance,
+    JsonError, JsonParse, Provenance, SourcedValue, ValuePath, ValuePathSegment, parse_json,
+    parse_json_registered, parse_json_with_provenance,
 };
 pub use lexer::{FrontendError, SourceLocation};
 pub use module::{LoadedModule, ModuleError, load_module};

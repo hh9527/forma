@@ -219,3 +219,10 @@ cross-source labels; an ignored test provides a repeatable full-parse baseline.
 
 The LSP server and propagation of provenance through arbitrary runtime
 transformations remain deferred as specified above.
+
+The completed lowering consumes CST rules directly; the legacy Pratt parser and
+hand-written JSON parser have been removed. Module loading owns one shared
+`SourceDatabase`, retains imported JSON provenance, and renders assignability
+failures with the invalid data as the primary label and the XL type declaration
+as a secondary label. Compatibility fail-fast APIs remain, while registered
+parse APIs expose the complete recovered diagnostic set.

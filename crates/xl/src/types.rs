@@ -1,7 +1,9 @@
 use crate::ast::{BinaryOperator, BindingKind, Block, Expr, Pattern, Program, UnaryOperator};
 use crate::compiler::compile_expression_with_bindings;
+use crate::json::{Provenance, ValuePath, ValuePathSegment};
 use crate::lexer::{FrontendError, SourceLocation};
-use crate::parser::parse;
+use crate::parser::parse_registered;
+use crate::source::{Diagnostic, SourceDatabase};
 use crate::value::{Atom, Callable, NativeError, NativeFunction, Value};
 use crate::{BuiltinAtom, Vm};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -132,12 +134,33 @@ pub fn analyze_source_with_budget(
     source: &str,
     instruction_budget: usize,
 ) -> Result<Analysis, FrontendError> {
-    let program = parse(source_name, source)?;
-    analyze_program(source_name, &program, instruction_budget)
+    let mut sources = SourceDatabase::default();
+    let source_id = sources.add(source_name, source);
+    let parsed = parse_registered(&sources, source_id);
+    let program = parsed.program.ok_or_else(|| {
+        FrontendError::from_diagnostic(
+            &sources,
+            parsed
+                .diagnostics
+                .into_iter()
+                .next()
+                .expect("failed parse has a diagnostic"),
+        )
+    })?;
+    analyze_program_with_bindings(
+        source_name,
+        &program,
+        instruction_budget,
+        &BTreeMap::new(),
+        &HashSet::new(),
+        Some(&sources),
+        &BTreeMap::new(),
+    )
 }
 
-pub(crate) fn analyze_program(
+pub(crate) fn analyze_program_registered(
     source_name: &str,
+    sources: &SourceDatabase,
     program: &Program,
     instruction_budget: usize,
 ) -> Result<Analysis, FrontendError> {
@@ -147,6 +170,8 @@ pub(crate) fn analyze_program(
         instruction_budget,
         &BTreeMap::new(),
         &HashSet::new(),
+        Some(sources),
+        &BTreeMap::new(),
     )
 }
 
@@ -156,6 +181,8 @@ pub(crate) fn analyze_program_with_bindings(
     instruction_budget: usize,
     external_values: &BTreeMap<String, Value>,
     dynamic_bindings: &HashSet<String>,
+    sources: Option<&SourceDatabase>,
+    external_provenance: &BTreeMap<String, Provenance>,
 ) -> Result<Analysis, FrontendError> {
     let mut tool_vm = Vm::new();
     let prelude = core_prelude(&mut tool_vm);
@@ -164,6 +191,7 @@ pub(crate) fn analyze_program_with_bindings(
     let mut declared_types = BTreeMap::new();
     let mut binding_types = BTreeMap::new();
     let mut resolved_types = HashMap::new();
+    let mut declared_type_spans = HashMap::new();
 
     for name in dynamic_bindings {
         if !external_values.contains_key(name) {
@@ -192,6 +220,7 @@ pub(crate) fn analyze_program_with_bindings(
                     )
                 })?;
                 declared_types.insert(binding.name.clone(), descriptor);
+                declared_type_spans.insert(binding.name.clone(), binding.span.clone());
                 resolved_types.insert(binding.name.clone(), value.clone());
                 tool_values.insert(binding.name.clone(), value);
             }
@@ -211,15 +240,38 @@ pub(crate) fn analyze_program_with_bindings(
                         )
                     })?;
                     if !assignable(&inferred, &expected) {
-                        return Err(frontend_error(
-                            source_name,
-                            format!(
-                                "binding {} has type {}, which is not assignable to {}",
-                                binding.name,
-                                inferred.display_name(),
-                                expected.display_name()
-                            ),
-                        ));
+                        let message = format!(
+                            "binding {} has type {}, which is not assignable to {}",
+                            binding.name,
+                            inferred.display_name(),
+                            expected.display_name()
+                        );
+                        if let Some(sources) = sources {
+                            let path =
+                                incompatibility_path(&inferred, &expected).unwrap_or_default();
+                            let data_span = match binding.value.unspanned() {
+                                Expr::Variable(name) => external_provenance
+                                    .get(name)
+                                    .and_then(|provenance| {
+                                        provenance
+                                            .values
+                                            .get(&path)
+                                            .or_else(|| provenance.values.get(&Vec::new()))
+                                    })
+                                    .cloned(),
+                                _ => binding.value.span().cloned(),
+                            }
+                            .unwrap_or_else(|| binding.span.clone());
+                            let rule_span = match annotation.unspanned() {
+                                Expr::Variable(name) => declared_type_spans.get(name).cloned(),
+                                _ => annotation.span().cloned(),
+                            }
+                            .unwrap_or_else(|| binding.span.clone());
+                            let diagnostic = Diagnostic::error(message, data_span)
+                                .with_secondary("type requirement declared here", rule_span);
+                            return Err(FrontendError::from_diagnostic(sources, diagnostic));
+                        }
+                        return Err(frontend_error(source_name, message));
                     }
                     expected
                 } else {
@@ -529,6 +581,7 @@ fn require_fields(metadata: &crate::Dict, path: &str, fields: &[&str]) -> Result
 
 fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) -> TypeDescriptor {
     match expression {
+        Expr::Spanned { expression, .. } => infer_expr(expression, environment),
         Expr::Int(_) => TypeDescriptor::Int,
         Expr::Float(_) => TypeDescriptor::Float,
         Expr::String(_) => TypeDescriptor::String,
@@ -683,6 +736,50 @@ fn assignable(actual: &TypeDescriptor, expected: &TypeDescriptor) -> bool {
         }
         _ => actual == expected,
     }
+}
+
+fn incompatibility_path(actual: &TypeDescriptor, expected: &TypeDescriptor) -> Option<ValuePath> {
+    fn visit(actual: &TypeDescriptor, expected: &TypeDescriptor, path: &mut ValuePath) -> bool {
+        match (actual, expected) {
+            (TypeDescriptor::Any, _) | (_, TypeDescriptor::Any) => false,
+            (TypeDescriptor::Struct(actual), TypeDescriptor::Struct(expected)) => {
+                for (name, expected) in expected {
+                    path.push(ValuePathSegment::Key(name.clone()));
+                    let mismatch = actual
+                        .get(name)
+                        .is_none_or(|actual| visit(actual, expected, path));
+                    if mismatch {
+                        return true;
+                    }
+                    path.pop();
+                }
+                if let Some(name) = actual.keys().find(|name| !expected.contains_key(*name)) {
+                    path.push(ValuePathSegment::Key(name.clone()));
+                    return true;
+                }
+                false
+            }
+            (TypeDescriptor::Tuple(actual), TypeDescriptor::Tuple(expected)) => {
+                if actual.len() != expected.len() {
+                    return true;
+                }
+                for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+                    path.push(ValuePathSegment::Index(index));
+                    if visit(actual, expected, path) {
+                        return true;
+                    }
+                    path.pop();
+                }
+                false
+            }
+            (TypeDescriptor::Array(actual), TypeDescriptor::Array(expected)) => {
+                visit(actual, expected, path)
+            }
+            _ => !assignable(actual, expected),
+        }
+    }
+    let mut path = Vec::new();
+    visit(actual, expected, &mut path).then_some(path)
 }
 
 fn validate_value(descriptor: &TypeDescriptor, value: &Value, path: &str) -> Result<(), String> {

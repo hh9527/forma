@@ -70,6 +70,12 @@ file. JSON lowering can additionally return a provenance side table through
 `parse_json_with_provenance`; provenance is deliberately not stored in runtime
 `Value` objects.
 
+Tooling and module loaders use `parse_registered` and `parse_json_registered`
+with one shared `SourceDatabase`. These APIs retain all recovered diagnostics;
+the older `parse` and `parse_json` entry points remain fail-fast compatibility
+wrappers. Semantic AST nodes are lowered directly from CST rules and carry
+source spans.
+
 Run all verification with:
 
 ```sh

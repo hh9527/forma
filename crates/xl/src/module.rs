@@ -1,8 +1,10 @@
 use crate::ast::{BindingKind, Expr, Program};
-use crate::compiler::compile_program_analyzed;
-use crate::parser::parse;
+use crate::compiler::compile_program_analyzed_in;
+use crate::json::{Provenance, SourcedValue, parse_json_registered};
+use crate::parser::parse_registered;
+use crate::source::SourceDatabase;
 use crate::types::{Analysis, analyze_program_with_bindings};
-use crate::{BytecodeFunction, Value, Vm, parse_json};
+use crate::{BytecodeFunction, Value, Vm};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
@@ -39,6 +41,7 @@ pub struct LoadedModule {
     pub dependencies: Vec<PathBuf>,
     pub analysis: Analysis,
     pub function: BytecodeFunction,
+    pub sources: SourceDatabase,
 }
 
 impl LoadedModule {
@@ -61,15 +64,17 @@ pub fn load_module(
         visiting: Vec::new(),
         dependencies: BTreeSet::new(),
         instruction_budget,
+        sources: SourceDatabase::default(),
     };
     loader.load_root(root, external_bindings)
 }
 
 struct ModuleLoader {
-    cache: HashMap<PathBuf, Value>,
+    cache: HashMap<PathBuf, SourcedValue>,
     visiting: Vec<PathBuf>,
     dependencies: BTreeSet<PathBuf>,
     instruction_budget: usize,
+    sources: SourceDatabase,
 }
 
 impl ModuleLoader {
@@ -87,10 +92,11 @@ impl ModuleLoader {
             dependencies: self.dependencies.iter().cloned().collect(),
             analysis,
             function,
+            sources: self.sources.clone(),
         })
     }
 
-    fn load_value(&mut self, path: &Path) -> Result<Value, ModuleError> {
+    fn load_value(&mut self, path: &Path) -> Result<SourcedValue, ModuleError> {
         let path = canonicalize(path)?;
         if let Some(value) = self.cache.get(&path) {
             return Ok(value.clone());
@@ -99,14 +105,28 @@ impl ModuleLoader {
         let result = match path.extension().and_then(|extension| extension.to_str()) {
             Some("json") => {
                 let source = read(&path)?;
-                parse_json(&path.display().to_string(), &source)
-                    .map_err(|error| ModuleError::new(error.to_string()))
+                let source_id = self.sources.add(path.display().to_string(), source);
+                let parsed = parse_json_registered(&self.sources, source_id);
+                parsed.value.ok_or_else(|| {
+                    ModuleError::new(
+                        parsed
+                            .diagnostics
+                            .iter()
+                            .map(|diagnostic| self.sources.render(diagnostic))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )
+                })
             }
             Some("xl") => {
                 self.compile_xl(&path, BTreeMap::new(), false)
                     .and_then(|(_, function)| {
                         Vm::new()
                             .execute(&function, self.instruction_budget)
+                            .map(|value| SourcedValue {
+                                value,
+                                provenance: Provenance::default(),
+                            })
                             .map_err(|error| ModuleError::new(error.to_string()))
                     })
             }
@@ -133,9 +153,20 @@ impl ModuleLoader {
     ) -> Result<(Analysis, BytecodeFunction), ModuleError> {
         let source = read(path)?;
         let source_name = path.display().to_string();
-        let program =
-            parse(&source_name, &source).map_err(|error| ModuleError::new(error.to_string()))?;
+        let source_id = self.sources.add(source_name.clone(), source);
+        let parsed = parse_registered(&self.sources, source_id);
+        let program = parsed.program.ok_or_else(|| {
+            ModuleError::new(
+                parsed
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| self.sources.render(diagnostic))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        })?;
         reject_nested_imports(&program, &source_name)?;
+        let mut external_provenance = BTreeMap::new();
 
         for binding in &program.body.bindings {
             if binding.kind != BindingKind::Import {
@@ -147,15 +178,18 @@ impl ModuleLoader {
                     binding.name
                 )));
             }
-            let Expr::String(relative) = &binding.value else {
+            let Expr::String(relative) = binding.value.unspanned() else {
                 return Err(ModuleError::new("import path must be a string"));
             };
             let imported = path
                 .parent()
                 .expect("canonical module path has a parent")
                 .join(relative);
-            let value = self.load_value(&imported)?;
-            external_bindings.insert(binding.name.clone(), value);
+            let sourced = self.load_value(&imported)?;
+            if !sourced.provenance.values.is_empty() {
+                external_provenance.insert(binding.name.clone(), sourced.provenance);
+            }
+            external_bindings.insert(binding.name.clone(), sourced.value);
         }
 
         let dynamic_bindings = if is_root && external_bindings.contains_key("input") {
@@ -169,10 +203,18 @@ impl ModuleLoader {
             self.instruction_budget,
             &external_bindings,
             &dynamic_bindings,
+            Some(&self.sources),
+            &external_provenance,
         )
-        .map_err(|error| ModuleError::new(error.to_string()))?;
-        let function = compile_program_analyzed(&source_name, &program, &analysis)
-            .map_err(|error| ModuleError::new(error.to_string()))?;
+        .map_err(|error| {
+            error.diagnostic.as_ref().map_or_else(
+                || ModuleError::new(error.to_string()),
+                |diagnostic| ModuleError::new(self.sources.render(diagnostic)),
+            )
+        })?;
+        let function =
+            compile_program_analyzed_in(self.sources.get(source_id), &program, &analysis)
+                .map_err(|error| ModuleError::new(error.to_string()))?;
         Ok((analysis, function))
     }
 
@@ -217,6 +259,7 @@ fn reject_nested_imports(program: &Program, source_name: &str) -> Result<(), Mod
 
 fn expression_has_import(expression: &Expr) -> bool {
     match expression {
+        Expr::Spanned { expression, .. } => expression_has_import(expression),
         Expr::Block(block) => {
             block
                 .bindings
@@ -291,6 +334,7 @@ fn read(path: &Path) -> Result<String, ModuleError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::parse_json;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn fixture_dir() -> PathBuf {
@@ -353,6 +397,31 @@ mod tests {
             crate::TypeDescriptor::Any
         );
         assert_eq!(module.execute(100_000).unwrap().to_string(), "{value: 42}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn annotation_error_labels_json_data_and_xl_type_declaration() {
+        let directory = fixture_dir();
+        fs::write(directory.join("user.json"), r#"{"name":"Ada","age":"old"}"#).unwrap();
+        fs::write(
+            directory.join("main.xl"),
+            "import user from \"./user.json\";\n\
+             type User = Struct({name: String, age: Int});\n\
+             let checked: User = user;\n\
+             checked",
+        )
+        .unwrap();
+        let error = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap_err();
+        let message = error.message();
+        assert!(
+            message.contains("user.json:1:21: binding checked has type"),
+            "{message}"
+        );
+        assert!(
+            message.contains("main.xl:2:1: type requirement declared here"),
+            "{message}"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 }

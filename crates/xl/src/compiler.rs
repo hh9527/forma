@@ -3,8 +3,9 @@ use crate::ast::{
 };
 use crate::bytecode::{BytecodeFunction, Instruction, Register};
 use crate::lexer::{FrontendError, SourceLocation};
-use crate::parser::parse;
-use crate::types::{Analysis, analyze_program};
+use crate::parser::parse_registered;
+use crate::source::{Diagnostic, SourceDatabase, SourceFile, Span};
+use crate::types::{Analysis, analyze_program_registered};
 use crate::value::{Atom, BuiltinAtom, Value};
 use crate::{RuntimeError, Vm};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -41,17 +42,34 @@ impl From<RuntimeError> for ExecutionError {
 }
 
 pub fn compile_source(source_name: &str, source: &str) -> Result<BytecodeFunction, FrontendError> {
-    let program = parse(source_name, source)?;
-    let analysis = analyze_program(source_name, &program, 100_000)?;
-    compile_program_analyzed(source_name, &program, &analysis)
+    let mut sources = SourceDatabase::default();
+    let source_id = sources.add(source_name, source);
+    let parsed = parse_registered(&sources, source_id);
+    let program = parsed.program.ok_or_else(|| {
+        FrontendError::from_diagnostic(
+            &sources,
+            parsed
+                .diagnostics
+                .into_iter()
+                .next()
+                .expect("failed parse has a diagnostic"),
+        )
+    })?;
+    let analysis = analyze_program_registered(source_name, &sources, &program, 100_000)?;
+    compile_program_analyzed_in(sources.get(source_id), &program, &analysis)
 }
 
-pub(crate) fn compile_program_analyzed(
-    source_name: &str,
+pub(crate) fn compile_program_analyzed_in(
+    source_file: &SourceFile,
     program: &Program,
     analysis: &Analysis,
 ) -> Result<BytecodeFunction, FrontendError> {
-    Compiler::program(source_name, program, analysis)
+    Compiler::program_in(
+        source_file.name.as_ref(),
+        Some(source_file),
+        program,
+        analysis,
+    )
 }
 
 pub fn run_source(
@@ -82,6 +100,7 @@ pub(crate) fn compile_expression_with_bindings(
         resolved_types: HashMap::new(),
         retained_names: HashSet::new(),
         external_values: BTreeMap::new(),
+        source_file: None,
     };
     for (name, value) in bindings {
         let register = compiler.load_constant(value.clone());
@@ -107,11 +126,43 @@ struct Compiler<'a> {
     resolved_types: HashMap<String, Value>,
     retained_names: HashSet<String>,
     external_values: BTreeMap<String, Value>,
+    source_file: Option<&'a SourceFile>,
 }
 
 impl<'a> Compiler<'a> {
-    fn program(
+    fn error_at(&self, span: &Span, message: impl Into<String>) -> FrontendError {
+        let message = message.into();
+        if let Some(source_file) = self.source_file {
+            let position = source_file.position(span.range.start);
+            let diagnostic = Diagnostic::error(message.clone(), span.clone());
+            FrontendError {
+                source_name: source_file.name.to_string(),
+                location: SourceLocation {
+                    offset: span.range.start,
+                    line: position.line,
+                    column: position.column,
+                },
+                message,
+                diagnostic: Some(Box::new(diagnostic)),
+            }
+        } else {
+            let diagnostic = Diagnostic::error(message.clone(), span.clone());
+            FrontendError {
+                source_name: self.source_name.to_owned(),
+                location: SourceLocation {
+                    offset: span.range.start,
+                    line: 1,
+                    column: span.range.start + 1,
+                },
+                message,
+                diagnostic: Some(Box::new(diagnostic)),
+            }
+        }
+    }
+
+    fn program_in(
         source_name: &'a str,
+        source_file: Option<&'a SourceFile>,
         program: &Program,
         analysis: &Analysis,
     ) -> Result<BytecodeFunction, FrontendError> {
@@ -130,6 +181,7 @@ impl<'a> Compiler<'a> {
             resolved_types: analysis.resolved_types.clone(),
             retained_names,
             external_values: analysis.external_values.clone(),
+            source_file,
         };
         for (name, value) in &analysis.prelude {
             if compiler.retained_names.contains(name) {
@@ -157,6 +209,7 @@ impl<'a> Compiler<'a> {
 
     fn nested(
         source_name: &'a str,
+        source_file: Option<&'a SourceFile>,
         function_name: String,
         parameters: &[String],
         captures: &[String],
@@ -189,6 +242,7 @@ impl<'a> Compiler<'a> {
             resolved_types: HashMap::new(),
             retained_names: HashSet::new(),
             external_values: BTreeMap::new(),
+            source_file,
         })
     }
 
@@ -251,6 +305,13 @@ impl<'a> Compiler<'a> {
 
     fn compile_expr(&mut self, expression: &Expr) -> Result<Register, FrontendError> {
         match expression {
+            Expr::Spanned { span, expression } => self.compile_expr(expression).map_err(|error| {
+                if error.location.offset == 0 {
+                    self.error_at(span, error.message)
+                } else {
+                    error
+                }
+            }),
             Expr::Int(value) => Ok(self.load_constant(Value::Int(*value))),
             Expr::Float(value) => Ok(self.load_constant(Value::Float(*value))),
             Expr::String(value) => Ok(self.load_constant(Value::string(value.clone()))),
@@ -387,7 +448,13 @@ impl<'a> Compiler<'a> {
 
         let name = format!("{}::closure{}", self.function_name, self.closure_index);
         self.closure_index += 1;
-        let mut nested = Self::nested(self.source_name, name, parameters, &captures)?;
+        let mut nested = Self::nested(
+            self.source_name,
+            self.source_file,
+            name,
+            parameters,
+            &captures,
+        )?;
         let result = nested.compile_block(body)?;
         nested
             .instructions
@@ -473,6 +540,9 @@ impl<'a> Compiler<'a> {
         bindings: &mut HashSet<String>,
     ) -> Result<(), FrontendError> {
         match pattern {
+            Pattern::Spanned { pattern, .. } => {
+                return self.compile_pattern(pattern, value, failures, bindings);
+            }
             Pattern::Wildcard => {}
             Pattern::Binding(name) => {
                 if !bindings.insert(name.clone()) {
@@ -607,6 +677,7 @@ fn free_block(block: &Block, bound: &mut HashSet<String>, free: &mut BTreeSet<St
 
 fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<String>) {
     match expression {
+        Expr::Spanned { expression, .. } => free_expr(expression, bound, free),
         Expr::Variable(name) => {
             if !bound.contains(name) {
                 free.insert(name.clone());
@@ -673,6 +744,7 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
 
 fn bind_pattern(pattern: &Pattern, bound: &mut HashSet<String>) {
     match pattern {
+        Pattern::Spanned { pattern, .. } => bind_pattern(pattern, bound),
         Pattern::Binding(name) => {
             bound.insert(name.clone());
         }
@@ -700,6 +772,7 @@ fn collect_runtime_names_block(block: &Block, names: &mut HashSet<String>) {
 
 fn collect_runtime_names(expression: &Expr, names: &mut HashSet<String>) {
     match expression {
+        Expr::Spanned { expression, .. } => collect_runtime_names(expression, names),
         Expr::Variable(name) => {
             names.insert(name.clone());
         }
@@ -808,8 +881,10 @@ mod tests {
 
     #[test]
     fn reports_unknown_bindings_and_arity_errors() {
-        let unknown = compile_source("test", "missing").unwrap_err();
+        let unknown = compile_source("test", "let present = 1;\nmissing").unwrap_err();
         assert!(unknown.message.contains("unknown binding"));
+        assert_eq!(unknown.location.line, 2);
+        assert_eq!(unknown.location.column, 1);
 
         let error = run("let f = fn(a) { a }; f(1, 2)").unwrap_err();
         let ExecutionError::Runtime(error) = error else {

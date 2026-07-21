@@ -20,17 +20,17 @@ import_binding: 'import' Identifier 'from' String ';';
 named_function: 'fn' Identifier parameters block;
 
 expression:
-  expression '|>' expression @pipeline_expr
-| expression ('==' | '<') expression @binary_expr
-| expression ('+' | '-') expression @binary_expr
-| expression ('*' | '/') expression @binary_expr
-| '-' expression @unary_expr
-| expression arguments @call_expr
+  expression arguments @call_expr
 | expression '.' Identifier @field_expr
+| '-' expression @unary_expr
+| expression ('*' | '/') expression @binary_expr
+| expression ('+' | '-') expression @binary_expr
+| expression ('<' | '==') expression @binary_expr
+| expression '|>' expression @pipeline_expr
 | primary ^
 ;
 
-primary^:
+primary:
   Int @int_expr
 | Float @float_expr
 | String @string_expr
@@ -57,7 +57,7 @@ arguments: '(' [expression (?1 ',' expression)* [',']] ')';
 if_expr: 'if' expression block 'else' block;
 match_expr: 'match' expression '{' match_arm (?1 ',' match_arm)* [','] '}';
 match_arm: pattern '=>' expression;
-pattern^:
+pattern:
   Identifier @identifier_pattern
 | Int @int_pattern
 | Float @float_pattern

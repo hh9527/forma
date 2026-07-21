@@ -101,13 +101,19 @@ The MVP operators, from stronger to weaker binding, are:
 -value
 *, /
 +, -
-<
-==
+<, ==
 |>
 ```
 
 `+`, `-`, `*`, `/`, `<`, and `==` compile to RFC 0001 instructions. `+` remains
 numeric; string concatenation is a library operation. Unary `-` is numeric.
+
+Amendment: comparison operators share one precedence level. Future comparison
+operators (`<=`, `>=`, `>`, and `!=`) join that level. The reserved full order
+is prefix, multiplicative, additive, comparison, bitwise `&`, bitwise `|`,
+logical `&&`, logical `||`, then pipeline. Dict merging has no operator.
+Comparisons are non-associative: chaining different or identical comparison
+operators requires explicit parentheses.
 
 ## Conditionals
 
