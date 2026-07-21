@@ -1,7 +1,7 @@
 # RFC 0004: Modules, JSON Data, and MVP CLI
 
 - Status: Accepted for MVP
-- Implementation: Pending
+- Implementation: Complete
 
 ## Summary
 
@@ -151,3 +151,10 @@ parser, recursive module loader, CLI binary, examples, and integration tests.
 9. README instructions describe the MVP and its known limits.
 10. Workspace tests, strict Clippy, and formatting checks pass.
 
+## Implementation result
+
+Implemented in the `xl` crate and binary. The dependency-free JSON parser,
+closed recursive module loader, explicit `input` boundary, three CLI commands,
+examples, and binary integration tests satisfy the acceptance criteria. The
+README commands have been exercised end to end; workspace tests, strict Clippy,
+and formatting checks pass.

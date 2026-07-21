@@ -64,6 +64,8 @@ pub(crate) enum TokenKind {
     If,
     Else,
     Match,
+    Import,
+    From,
     LeftParen,
     RightParen,
     LeftBrace,
@@ -319,6 +321,8 @@ impl<'a> Lexer<'a> {
             "if" => TokenKind::If,
             "else" => TokenKind::Else,
             "match" => TokenKind::Match,
+            "import" => TokenKind::Import,
+            "from" => TokenKind::From,
             identifier => TokenKind::Identifier(identifier.to_owned()),
         }
     }

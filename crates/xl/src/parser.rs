@@ -35,6 +35,8 @@ impl<'a> Parser<'a> {
                 bindings.push(self.parse_let()?);
             } else if self.at(&TokenKind::Type) {
                 bindings.push(self.parse_type()?);
+            } else if self.at(&TokenKind::Import) {
+                bindings.push(self.parse_import()?);
             } else if self.at(&TokenKind::Fn)
                 && matches!(self.peek_kind(1), Some(TokenKind::Identifier(_)))
             {
@@ -86,6 +88,27 @@ impl<'a> Parser<'a> {
             name,
             annotation: None,
             value,
+        })
+    }
+
+    fn parse_import(&mut self) -> Result<Binding, FrontendError> {
+        self.expect(TokenKind::Import, "expected 'import'")?;
+        let name = self.identifier("expected an import binding name")?;
+        self.expect(TokenKind::From, "expected 'from' after import name")?;
+        let token = self.advance().clone();
+        let TokenKind::String(path) = token.kind else {
+            return Err(FrontendError::new(
+                self.source_name,
+                token.location,
+                "import path must be a string literal",
+            ));
+        };
+        self.expect(TokenKind::Semicolon, "expected ';' after import")?;
+        Ok(Binding {
+            kind: BindingKind::Import,
+            name,
+            annotation: None,
+            value: Expr::String(path),
         })
     }
 

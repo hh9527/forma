@@ -1,0 +1,7 @@
+type Request = Struct({
+    action: String,
+    count: Int,
+});
+
+validate(Request, input)
+

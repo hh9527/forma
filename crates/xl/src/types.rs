@@ -4,7 +4,7 @@ use crate::lexer::{FrontendError, SourceLocation};
 use crate::parser::parse;
 use crate::value::{Atom, Callable, NativeError, NativeFunction, Value};
 use crate::{BuiltinAtom, Vm};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 const DEFAULT_TOOL_BUDGET: usize = 100_000;
@@ -119,6 +119,8 @@ pub struct Analysis {
     pub result_type: TypeDescriptor,
     pub(crate) resolved_types: HashMap<String, Value>,
     pub(crate) prelude: BTreeMap<String, Value>,
+    pub(crate) external_values: BTreeMap<String, Value>,
+    pub(crate) dynamic_bindings: HashSet<String>,
 }
 
 pub fn analyze_source(source_name: &str, source: &str) -> Result<Analysis, FrontendError> {
@@ -139,6 +141,22 @@ pub(crate) fn analyze_program(
     program: &Program,
     instruction_budget: usize,
 ) -> Result<Analysis, FrontendError> {
+    analyze_program_with_bindings(
+        source_name,
+        program,
+        instruction_budget,
+        &BTreeMap::new(),
+        &HashSet::new(),
+    )
+}
+
+pub(crate) fn analyze_program_with_bindings(
+    source_name: &str,
+    program: &Program,
+    instruction_budget: usize,
+    external_values: &BTreeMap<String, Value>,
+    dynamic_bindings: &HashSet<String>,
+) -> Result<Analysis, FrontendError> {
     let mut tool_vm = Vm::new();
     let prelude = core_prelude(&mut tool_vm);
     let mut tool_values = prelude.clone();
@@ -146,6 +164,17 @@ pub(crate) fn analyze_program(
     let mut declared_types = BTreeMap::new();
     let mut binding_types = BTreeMap::new();
     let mut resolved_types = HashMap::new();
+
+    for name in dynamic_bindings {
+        if !external_values.contains_key(name) {
+            return Err(frontend_error(
+                source_name,
+                format!("dynamic binding {name:?} has no value"),
+            ));
+        }
+        static_environment.insert(name.clone(), TypeDescriptor::Any);
+        binding_types.insert(name.clone(), TypeDescriptor::Any);
+    }
 
     for binding in &program.body.bindings {
         match binding.kind {
@@ -208,6 +237,18 @@ pub(crate) fn analyze_program(
                     tool_values.insert(binding.name.clone(), value);
                 }
             }
+            BindingKind::Import => {
+                let value = external_values.get(&binding.name).cloned().ok_or_else(|| {
+                    frontend_error(
+                        source_name,
+                        format!("import {} has not been resolved", binding.name),
+                    )
+                })?;
+                let inferred = infer_value(&value);
+                static_environment.insert(binding.name.clone(), inferred.clone());
+                binding_types.insert(binding.name.clone(), inferred);
+                tool_values.insert(binding.name.clone(), value);
+            }
         }
     }
 
@@ -218,7 +259,35 @@ pub(crate) fn analyze_program(
         result_type,
         resolved_types,
         prelude,
+        external_values: external_values.clone(),
+        dynamic_bindings: dynamic_bindings.clone(),
     })
+}
+
+pub(crate) fn infer_value(value: &Value) -> TypeDescriptor {
+    match value {
+        Value::Int(_) => TypeDescriptor::Int,
+        Value::Float(_) => TypeDescriptor::Float,
+        Value::String(_) => TypeDescriptor::String,
+        Value::Bytes(_) => TypeDescriptor::Bytes,
+        Value::Atom(atom) => TypeDescriptor::Atom(atom.clone()),
+        Value::Array(items) => {
+            let item =
+                common_type(items.iter().map(infer_value).collect()).unwrap_or(TypeDescriptor::Any);
+            TypeDescriptor::Array(Box::new(item))
+        }
+        Value::Tuple(items) => TypeDescriptor::Tuple(items.iter().map(infer_value).collect()),
+        Value::Dict(fields) => TypeDescriptor::Struct(
+            fields
+                .shape()
+                .fields()
+                .iter()
+                .zip(fields.values())
+                .map(|(name, value)| (name.clone(), infer_value(value)))
+                .collect(),
+        ),
+        Value::Func(_) => TypeDescriptor::Any,
+    }
 }
 
 fn evaluate_tool_expression(
@@ -543,7 +612,7 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
 fn infer_block(block: &Block, environment: &HashMap<String, TypeDescriptor>) -> TypeDescriptor {
     let mut environment = environment.clone();
     for binding in &block.bindings {
-        if binding.kind == BindingKind::Let {
+        if matches!(binding.kind, BindingKind::Let | BindingKind::Import) {
             let inferred = infer_expr(&binding.value, &environment);
             environment.insert(binding.name.clone(), inferred);
         }

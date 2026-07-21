@@ -21,6 +21,7 @@ pub struct Binding {
 pub enum BindingKind {
     Let,
     Type,
+    Import,
 }
 
 #[derive(Clone, Debug)]

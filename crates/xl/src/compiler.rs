@@ -43,7 +43,15 @@ impl From<RuntimeError> for ExecutionError {
 pub fn compile_source(source_name: &str, source: &str) -> Result<BytecodeFunction, FrontendError> {
     let program = parse(source_name, source)?;
     let analysis = analyze_program(source_name, &program, 100_000)?;
-    Compiler::program(source_name, &program, &analysis)
+    compile_program_analyzed(source_name, &program, &analysis)
+}
+
+pub(crate) fn compile_program_analyzed(
+    source_name: &str,
+    program: &Program,
+    analysis: &Analysis,
+) -> Result<BytecodeFunction, FrontendError> {
+    Compiler::program(source_name, program, analysis)
 }
 
 pub fn run_source(
@@ -73,6 +81,7 @@ pub(crate) fn compile_expression_with_bindings(
         closure_index: 0,
         resolved_types: HashMap::new(),
         retained_names: HashSet::new(),
+        external_values: BTreeMap::new(),
     };
     for (name, value) in bindings {
         let register = compiler.load_constant(value.clone());
@@ -97,6 +106,7 @@ struct Compiler<'a> {
     closure_index: usize,
     resolved_types: HashMap<String, Value>,
     retained_names: HashSet<String>,
+    external_values: BTreeMap<String, Value>,
 }
 
 impl<'a> Compiler<'a> {
@@ -119,10 +129,22 @@ impl<'a> Compiler<'a> {
             closure_index: 0,
             resolved_types: analysis.resolved_types.clone(),
             retained_names,
+            external_values: analysis.external_values.clone(),
         };
         for (name, value) in &analysis.prelude {
             if compiler.retained_names.contains(name) {
                 let register = compiler.load_constant(value.clone());
+                compiler.environment.insert(name.clone(), register);
+            }
+        }
+        for name in &analysis.dynamic_bindings {
+            if compiler.retained_names.contains(name) {
+                let value = analysis
+                    .external_values
+                    .get(name)
+                    .expect("analyzed dynamic binding")
+                    .clone();
+                let register = compiler.load_constant(value);
                 compiler.environment.insert(name.clone(), register);
             }
         }
@@ -166,6 +188,7 @@ impl<'a> Compiler<'a> {
             closure_index: 0,
             resolved_types: HashMap::new(),
             retained_names: HashSet::new(),
+            external_values: BTreeMap::new(),
         })
     }
 
@@ -183,22 +206,40 @@ impl<'a> Compiler<'a> {
     fn compile_block(&mut self, block: &Block) -> Result<Register, FrontendError> {
         let outer = self.environment.clone();
         for binding in &block.bindings {
-            if binding.kind == BindingKind::Type {
-                if self.retained_names.contains(&binding.name) {
-                    let value =
-                        self.resolved_types
-                            .get(&binding.name)
-                            .cloned()
-                            .ok_or_else(|| {
-                                frontend_error(
-                                    self.source_name,
-                                    "nested type declarations are not supported in the MVP",
-                                )
-                            })?;
+            match binding.kind {
+                BindingKind::Type => {
+                    if self.retained_names.contains(&binding.name) {
+                        let value =
+                            self.resolved_types
+                                .get(&binding.name)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    frontend_error(
+                                        self.source_name,
+                                        "nested type declarations are not supported in the MVP",
+                                    )
+                                })?;
+                        let register = self.load_constant(value);
+                        self.environment.insert(binding.name.clone(), register);
+                    }
+                    continue;
+                }
+                BindingKind::Import => {
+                    let value = self
+                        .external_values
+                        .get(&binding.name)
+                        .cloned()
+                        .ok_or_else(|| {
+                            frontend_error(
+                                self.source_name,
+                                format!("import {} has not been resolved", binding.name),
+                            )
+                        })?;
                     let register = self.load_constant(value);
                     self.environment.insert(binding.name.clone(), register);
+                    continue;
                 }
-                continue;
+                BindingKind::Let => {}
             }
             let value = self.compile_expr(&binding.value)?;
             self.environment.insert(binding.name.clone(), value);
