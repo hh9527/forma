@@ -1,5 +1,5 @@
 use crate::bytecode::{BytecodeFunction, Instruction, Register};
-use crate::value::{Atom, BuiltinAtom, Dict, Shape, Value};
+use crate::value::{Atom, BuiltinAtom, Closure, Dict, Shape, Value};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::{Arc, Weak};
@@ -11,6 +11,7 @@ pub enum RuntimeErrorKind {
     IntegerOverflow,
     InvalidBytecode,
     MissingField,
+    NoPatternMatched,
     TypeMismatch,
     UnsupportedEquality,
 }
@@ -66,12 +67,62 @@ impl Vm {
         function: &BytecodeFunction,
         instruction_budget: usize,
     ) -> Result<Value, RuntimeError> {
-        let mut registers = vec![None; function.register_count()];
-        let mut pc = 0usize;
+        self.execute_with_args(function, &[], instruction_budget)
+    }
+
+    pub fn execute_with_args(
+        &mut self,
+        function: &BytecodeFunction,
+        arguments: &[Value],
+        instruction_budget: usize,
+    ) -> Result<Value, RuntimeError> {
         let mut remaining = instruction_budget;
+        self.execute_frame(function, arguments, &[], &mut remaining)
+    }
+
+    fn execute_frame(
+        &mut self,
+        function: &BytecodeFunction,
+        arguments: &[Value],
+        captures: &[Value],
+        remaining: &mut usize,
+    ) -> Result<Value, RuntimeError> {
+        if arguments.len() != function.parameter_count() {
+            return Err(error(
+                RuntimeErrorKind::TypeMismatch,
+                format!(
+                    "expected {} arguments, got {}",
+                    function.parameter_count(),
+                    arguments.len()
+                ),
+                function,
+                0,
+            ));
+        }
+        if captures.len() != function.capture_count() {
+            return Err(error(
+                RuntimeErrorKind::InvalidBytecode,
+                "closure capture count does not match function signature",
+                function,
+                0,
+            ));
+        }
+        let mut registers = vec![None; function.register_count()];
+        for (index, value) in arguments.iter().chain(captures).enumerate() {
+            let Some(register) = registers.get_mut(index) else {
+                return Err(error(
+                    RuntimeErrorKind::InvalidBytecode,
+                    "function signature exceeds its register count",
+                    function,
+                    0,
+                ));
+            };
+            *register = Some(value.clone());
+        }
+        let mut pc = 0usize;
 
         loop {
-            if remaining == 0 {
+            if *remaining == 0 {
                 return Err(error(
                     RuntimeErrorKind::BudgetExceeded,
                     "instruction budget exhausted",
@@ -79,7 +130,7 @@ impl Vm {
                     pc,
                 ));
             }
-            remaining -= 1;
+            *remaining -= 1;
 
             let instruction = function.instructions().get(pc).ok_or_else(|| {
                 error(
@@ -250,6 +301,61 @@ impl Vm {
                     })?;
                     write_register(&mut registers, *dst, value, function, pc)?;
                 }
+                Instruction::TupleLengthEquals { dst, value, length } => {
+                    let matches = matches!(
+                        read_register(&registers, *value, function, pc)?,
+                        Value::Tuple(items) if items.len() == *length
+                    );
+                    write_register(&mut registers, *dst, Value::bool(matches), function, pc)?;
+                }
+                Instruction::GetTuple { dst, tuple, index } => {
+                    let tuple = read_register(&registers, *tuple, function, pc)?;
+                    let Value::Tuple(items) = tuple else {
+                        return Err(type_error("Tuple", tuple, function, pc));
+                    };
+                    let value = items.get(*index).cloned().ok_or_else(|| {
+                        error(
+                            RuntimeErrorKind::InvalidBytecode,
+                            format!("tuple index {index} is out of bounds"),
+                            function,
+                            pc,
+                        )
+                    })?;
+                    write_register(&mut registers, *dst, value, function, pc)?;
+                }
+                Instruction::MakeClosure {
+                    dst,
+                    function: closure_function,
+                    captures,
+                } => {
+                    let captures = read_many(&registers, captures, function, pc)?;
+                    let closure = Closure::new(closure_function.clone(), captures);
+                    write_register(
+                        &mut registers,
+                        *dst,
+                        Value::Func(Arc::new(closure)),
+                        function,
+                        pc,
+                    )?;
+                }
+                Instruction::Call {
+                    dst,
+                    callee,
+                    arguments,
+                } => {
+                    let callee = read_register(&registers, *callee, function, pc)?.clone();
+                    let Value::Func(closure) = callee else {
+                        return Err(type_error("Func", &callee, function, pc));
+                    };
+                    let arguments = read_many(&registers, arguments, function, pc)?;
+                    let value = self.execute_frame(
+                        closure.function(),
+                        &arguments,
+                        closure.captures(),
+                        remaining,
+                    )?;
+                    write_register(&mut registers, *dst, value, function, pc)?;
+                }
                 Instruction::Jump { target } => {
                     validate_jump(*target, function, pc)?;
                     pc = *target;
@@ -270,6 +376,14 @@ impl Vm {
                 }
                 Instruction::Return { src } => {
                     return Ok(read_register(&registers, *src, function, pc)?.clone());
+                }
+                Instruction::Fail { message } => {
+                    return Err(error(
+                        RuntimeErrorKind::NoPatternMatched,
+                        message,
+                        function,
+                        pc,
+                    ));
                 }
             }
             pc += 1;

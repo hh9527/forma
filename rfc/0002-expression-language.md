@@ -1,7 +1,7 @@
 # RFC 0002: Expression Language and Functions
 
 - Status: Accepted for MVP
-- Implementation: Pending
+- Implementation: Complete
 
 ## Summary
 
@@ -204,3 +204,10 @@ function and a convenience `run_source` function for tests and later CLI use.
 8. Dict field access works independently of source field order.
 9. Lexer, parser, compiler, and runtime failures are covered by tests.
 10. `cargo test --workspace` and strict Clippy pass.
+
+## Implementation result
+
+Implemented in the `xl` crate with lexer, parser, AST, compiler, immutable
+closures, nested VM call frames, tuple-pattern lowering, and source execution
+helpers. The acceptance suite passes under `cargo test --workspace`, and strict
+Clippy reports no warnings.

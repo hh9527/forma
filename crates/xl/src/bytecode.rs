@@ -65,6 +65,26 @@ pub enum Instruction {
         dict: Register,
         field: String,
     },
+    TupleLengthEquals {
+        dst: Register,
+        value: Register,
+        length: usize,
+    },
+    GetTuple {
+        dst: Register,
+        tuple: Register,
+        index: usize,
+    },
+    MakeClosure {
+        dst: Register,
+        function: Arc<BytecodeFunction>,
+        captures: Vec<Register>,
+    },
+    Call {
+        dst: Register,
+        callee: Register,
+        arguments: Vec<Register>,
+    },
     Jump {
         target: usize,
     },
@@ -75,11 +95,16 @@ pub enum Instruction {
     Return {
         src: Register,
     },
+    Fail {
+        message: String,
+    },
 }
 
 #[derive(Clone, Debug)]
 pub struct BytecodeFunction {
     name: Arc<str>,
+    parameter_count: usize,
+    capture_count: usize,
     register_count: usize,
     constants: Vec<Value>,
     instructions: Vec<Instruction>,
@@ -92,8 +117,21 @@ impl BytecodeFunction {
         constants: Vec<Value>,
         instructions: Vec<Instruction>,
     ) -> Self {
+        Self::with_signature(name, 0, 0, register_count, constants, instructions)
+    }
+
+    pub fn with_signature(
+        name: impl Into<Arc<str>>,
+        parameter_count: usize,
+        capture_count: usize,
+        register_count: usize,
+        constants: Vec<Value>,
+        instructions: Vec<Instruction>,
+    ) -> Self {
         Self {
             name: name.into(),
+            parameter_count,
+            capture_count,
             register_count,
             constants,
             instructions,
@@ -106,6 +144,14 @@ impl BytecodeFunction {
 
     pub fn register_count(&self) -> usize {
         self.register_count
+    }
+
+    pub fn parameter_count(&self) -> usize {
+        self.parameter_count
+    }
+
+    pub fn capture_count(&self) -> usize {
+        self.capture_count
     }
 
     pub fn constants(&self) -> &[Value] {

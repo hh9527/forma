@@ -78,6 +78,29 @@ pub struct Dict {
     values: Arc<[Value]>,
 }
 
+#[derive(Clone, Debug)]
+pub struct Closure {
+    function: Arc<BytecodeFunction>,
+    captures: Arc<[Value]>,
+}
+
+impl Closure {
+    pub fn new(function: Arc<BytecodeFunction>, captures: Vec<Value>) -> Self {
+        Self {
+            function,
+            captures: captures.into(),
+        }
+    }
+
+    pub fn function(&self) -> &Arc<BytecodeFunction> {
+        &self.function
+    }
+
+    pub fn captures(&self) -> &[Value] {
+        &self.captures
+    }
+}
+
 impl Dict {
     pub(crate) fn new(shape: Arc<Shape>, values: Vec<Value>) -> Self {
         debug_assert_eq!(shape.fields().len(), values.len());
@@ -116,7 +139,7 @@ pub enum Value {
     Array(Arc<[Value]>),
     Atom(Atom),
     Tuple(Arc<[Value]>),
-    Func(Arc<BytecodeFunction>),
+    Func(Arc<Closure>),
 }
 
 impl Value {
@@ -189,7 +212,7 @@ impl fmt::Display for Value {
             Self::Array(values) => format_sequence(formatter, "[", "]", values),
             Self::Atom(atom) => write!(formatter, "'{}", atom.name()),
             Self::Tuple(values) => format_sequence(formatter, "(", ")", values),
-            Self::Func(function) => write!(formatter, "<fn {}>", function.name()),
+            Self::Func(closure) => write!(formatter, "<fn {}>", closure.function().name()),
         }
     }
 }
