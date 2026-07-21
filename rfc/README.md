@@ -22,3 +22,4 @@ semantics from an earlier RFC.
 4. Modules, JSON data modules, external JSON input, and the MVP CLI.
 5. Unified sources, lossless XL and JSON parsing, spans, and provenance.
 6. Located syntax nodes, compact source ranges, and synthetic origins.
+7. Structured lossless strings and restricted expression interpolation.
