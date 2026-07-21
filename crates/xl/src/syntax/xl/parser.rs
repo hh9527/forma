@@ -6,6 +6,12 @@ use super::lexer::{Token, tokenize};
 use codespan_reporting::diagnostic::Label;
 pub type Diagnostic = codespan_reporting::diagnostic::Diagnostic<()>;
 
+#[derive(Clone, Copy)]
+enum StringLookahead {
+    String,
+    Interpolation { brace_depth: usize },
+}
+
 include!(concat!(env!("OUT_DIR"), "/xl/generated.rs"));
 
 impl<'a> ParserCallbacks<'a> for Parser<'a> {
@@ -44,10 +50,43 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
             return false;
         }
         let mut lookahead = 2;
-        while !matches!(self.peek(lookahead), Token::DoubleQuote | Token::EOF) {
+        let mut contexts = vec![StringLookahead::String];
+        loop {
+            let token = self.peek(lookahead);
+            let context = *contexts.last().expect("lookahead has a string context");
+            match (context, token) {
+                (_, Token::EOF) => return false,
+                (StringLookahead::String, Token::DoubleQuote) => {
+                    contexts.pop();
+                    if contexts.is_empty() {
+                        return self.peek(lookahead + 1) == Token::Colon;
+                    }
+                }
+                (StringLookahead::String, Token::InterpolationStart) => {
+                    contexts.push(StringLookahead::Interpolation { brace_depth: 0 });
+                }
+                (StringLookahead::Interpolation { .. }, Token::DoubleQuote) => {
+                    contexts.push(StringLookahead::String);
+                }
+                (StringLookahead::Interpolation { brace_depth }, Token::LBrace) => {
+                    *contexts.last_mut().expect("interpolation lookahead") =
+                        StringLookahead::Interpolation {
+                            brace_depth: brace_depth + 1,
+                        };
+                }
+                (StringLookahead::Interpolation { brace_depth: 0 }, Token::RBrace) => {
+                    contexts.pop();
+                }
+                (StringLookahead::Interpolation { brace_depth }, Token::RBrace) => {
+                    *contexts.last_mut().expect("interpolation lookahead") =
+                        StringLookahead::Interpolation {
+                            brace_depth: brace_depth - 1,
+                        };
+                }
+                _ => {}
+            }
             lookahead += 1;
         }
-        self.peek(lookahead) == Token::DoubleQuote && self.peek(lookahead + 1) == Token::Colon
     }
     fn predicate_braced_2(&self) -> bool {
         self.peek(1) != Token::RBrace

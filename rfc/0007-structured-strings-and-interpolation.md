@@ -199,7 +199,9 @@ Debug display is not stable language semantics. The deliberately narrow
 ## Implementation result
 
 Implemented for XL and JSON. Their lexers now use separate Logos normal and
-string modes, producing only token kinds and source ranges. Lelwel CSTs retain
+string modes over one continuous cursor, using `Lexer::morph` and shared
+`Extras` state rather than restarting on source suffixes. They produce only
+token kinds and source ranges. Lelwel CSTs retain
 opening and closing quotes, maximal text tokens, individual escape tokens, and
 XL interpolation nodes while remaining byte-for-byte reconstructable. Empty
 strings require no zero-width token, JSON Unicode behavior is preserved, and

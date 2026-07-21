@@ -935,6 +935,9 @@ mod tests {
     fn rejects_interpolation_in_plain_string_contexts() {
         let error = parse("test", r#"match "x" { "\{1}" => 1 }"#).unwrap_err();
         assert!(error.message.contains("not allowed in string pattern"));
+
+        let key_error = parse("test", r#"{"\{"x"}": 1}"#).unwrap_err();
+        assert!(key_error.message.contains("not allowed in Dict field name"));
     }
 
     #[test]

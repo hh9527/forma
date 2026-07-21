@@ -1,6 +1,6 @@
 use super::parser::{Diagnostic, Span};
 use codespan_reporting::diagnostic::Label;
-use logos::Logos;
+use logos::{Lexer, Logos};
 
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum LexerError {
@@ -64,7 +64,7 @@ pub enum Token {
 }
 
 #[derive(Logos, Debug, PartialEq, Copy, Clone)]
-#[logos(error = LexerError)]
+#[logos(error = LexerError, extras = LexerState)]
 enum NormalToken {
     #[token("let")]
     Let,
@@ -139,7 +139,7 @@ enum NormalToken {
 }
 
 #[derive(Logos, Debug, PartialEq, Copy, Clone)]
-#[logos(error = LexerError)]
+#[logos(error = LexerError, extras = LexerState)]
 enum StringToken {
     #[token("\"")]
     DoubleQuote,
@@ -151,84 +151,122 @@ enum StringToken {
     StringText,
 }
 
-#[derive(Clone, Copy)]
-enum Mode {
-    Normal,
+#[derive(Clone, Copy, Debug)]
+enum Context {
+    Root,
     Interpolation { brace_depth: usize },
     String,
+}
+
+#[derive(Debug)]
+struct LexerState {
+    contexts: Vec<Context>,
+}
+
+impl Default for LexerState {
+    fn default() -> Self {
+        Self {
+            contexts: vec![Context::Root],
+        }
+    }
+}
+
+enum ActiveLexer<'source> {
+    Normal(Lexer<'source, NormalToken>),
+    String(Lexer<'source, StringToken>),
 }
 
 pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<Span>) {
     let mut tokens = Vec::new();
     let mut spans = Vec::new();
-    let mut modes = vec![Mode::Normal];
-    let mut offset = 0;
+    let mut active = ActiveLexer::Normal(NormalToken::lexer(source));
 
-    while offset < source.len() {
-        let mode = *modes.last().expect("lexer has a root mode");
-        let (token, length, error) = match mode {
-            Mode::String => lex_string(&source[offset..]),
-            Mode::Normal | Mode::Interpolation { .. } => lex_normal(&source[offset..]),
+    loop {
+        let (token, span, error, next) = match active {
+            ActiveLexer::Normal(mut lexer) => {
+                let Some(result) = lexer.next() else {
+                    break;
+                };
+                let span = lexer.span();
+                let (token, error) = match result {
+                    Ok(token) => (normal_token(token), false),
+                    Err(_) => (Token::Error, true),
+                };
+                let context = *lexer
+                    .extras
+                    .contexts
+                    .last()
+                    .expect("lexer has a root context");
+                let next = match (context, token) {
+                    (Context::Root | Context::Interpolation { .. }, Token::DoubleQuote) => {
+                        lexer.extras.contexts.push(Context::String);
+                        ActiveLexer::String(lexer.morph())
+                    }
+                    (Context::Interpolation { brace_depth }, Token::LBrace) => {
+                        *lexer
+                            .extras
+                            .contexts
+                            .last_mut()
+                            .expect("interpolation context") = Context::Interpolation {
+                            brace_depth: brace_depth + 1,
+                        };
+                        ActiveLexer::Normal(lexer)
+                    }
+                    (Context::Interpolation { brace_depth: 0 }, Token::RBrace) => {
+                        lexer.extras.contexts.pop();
+                        ActiveLexer::String(lexer.morph())
+                    }
+                    (Context::Interpolation { brace_depth }, Token::RBrace) => {
+                        *lexer
+                            .extras
+                            .contexts
+                            .last_mut()
+                            .expect("interpolation context") = Context::Interpolation {
+                            brace_depth: brace_depth - 1,
+                        };
+                        ActiveLexer::Normal(lexer)
+                    }
+                    _ => ActiveLexer::Normal(lexer),
+                };
+                (token, span, error, next)
+            }
+            ActiveLexer::String(mut lexer) => {
+                let Some(result) = lexer.next() else {
+                    break;
+                };
+                let span = lexer.span();
+                let (token, error) = match result {
+                    Ok(StringToken::DoubleQuote) => (Token::DoubleQuote, false),
+                    Ok(StringToken::InterpolationStart) => (Token::InterpolationStart, false),
+                    Ok(StringToken::EscapeSequence) => (Token::EscapeSequence, false),
+                    Ok(StringToken::StringText) => (Token::StringText, false),
+                    Err(_) => (Token::Error, true),
+                };
+                let next = match token {
+                    Token::DoubleQuote => {
+                        lexer.extras.contexts.pop();
+                        ActiveLexer::Normal(lexer.morph())
+                    }
+                    Token::InterpolationStart => {
+                        lexer
+                            .extras
+                            .contexts
+                            .push(Context::Interpolation { brace_depth: 0 });
+                        ActiveLexer::Normal(lexer.morph())
+                    }
+                    _ => ActiveLexer::String(lexer),
+                };
+                (token, span, error, next)
+            }
         };
-        let span = offset..offset + length;
         if error {
             diags.push(LexerError::Invalid.into_diagnostic(span.clone()));
         }
-
-        match (mode, token) {
-            (Mode::Normal | Mode::Interpolation { .. }, Token::DoubleQuote) => {
-                modes.push(Mode::String);
-            }
-            (Mode::String, Token::DoubleQuote) => {
-                modes.pop();
-            }
-            (Mode::String, Token::InterpolationStart) => {
-                modes.push(Mode::Interpolation { brace_depth: 0 });
-            }
-            (Mode::Interpolation { brace_depth }, Token::LBrace) => {
-                *modes.last_mut().expect("interpolation mode") = Mode::Interpolation {
-                    brace_depth: brace_depth + 1,
-                };
-            }
-            (Mode::Interpolation { brace_depth: 0 }, Token::RBrace) => {
-                modes.pop();
-            }
-            (Mode::Interpolation { brace_depth }, Token::RBrace) => {
-                *modes.last_mut().expect("interpolation mode") = Mode::Interpolation {
-                    brace_depth: brace_depth - 1,
-                };
-            }
-            _ => {}
-        }
-
         tokens.push(token);
         spans.push(span);
-        offset += length;
+        active = next;
     }
     (tokens, spans)
-}
-
-fn lex_normal(source: &str) -> (Token, usize, bool) {
-    let mut lexer = NormalToken::lexer(source);
-    let result = lexer.next().expect("non-empty lexer input");
-    let length = lexer.span().end;
-    match result {
-        Ok(token) => (normal_token(token), length, false),
-        Err(_) => (Token::Error, length, true),
-    }
-}
-
-fn lex_string(source: &str) -> (Token, usize, bool) {
-    let mut lexer = StringToken::lexer(source);
-    let result = lexer.next().expect("non-empty lexer input");
-    let length = lexer.span().end;
-    match result {
-        Ok(StringToken::DoubleQuote) => (Token::DoubleQuote, length, false),
-        Ok(StringToken::InterpolationStart) => (Token::InterpolationStart, length, false),
-        Ok(StringToken::EscapeSequence) => (Token::EscapeSequence, length, false),
-        Ok(StringToken::StringText) => (Token::StringText, length, false),
-        Err(_) => (Token::Error, length, true),
-    }
 }
 
 fn normal_token(token: NormalToken) -> Token {
@@ -295,5 +333,14 @@ mod tests {
         assert_eq!(spans[1], 1..5);
         assert_eq!(spans[2], 5..7);
         assert_eq!(spans[5], 12..14);
+
+        let (tokens, spans) = tokenize(r#"let x = "text""#, &mut diagnostics);
+        let quote = tokens
+            .iter()
+            .position(|token| *token == Token::DoubleQuote)
+            .unwrap();
+        assert_eq!(spans[quote], 8..9);
+        assert_eq!(spans[quote + 1], 9..13);
+        assert_eq!(spans[quote + 2], 13..14);
     }
 }

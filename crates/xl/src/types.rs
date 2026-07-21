@@ -789,6 +789,9 @@ fn check_block_interpolations(
     let mut environment = environment.clone();
     for binding in &block.value.bindings {
         check_interpolations(&binding.value.value, &environment, sources)?;
+        if let Some(annotation) = &binding.value.annotation {
+            check_interpolations(annotation, &environment, sources)?;
+        }
         if matches!(binding.value.kind, BindingKind::Let | BindingKind::Import) {
             let inferred = infer_expr(&binding.value.value, &environment);
             environment.insert(binding.value.name.value.clone(), inferred);
@@ -1060,6 +1063,13 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message.contains("not assignable"));
+    }
+
+    #[test]
+    fn checks_interpolation_inside_nested_binding_annotations() {
+        let error = analyze_source("test", r#"let outer = { let x: "\{[1]}" = "x"; x }; outer"#)
+            .unwrap_err();
+        assert!(error.message.contains("does not support Array<Int>"));
     }
 
     #[test]
