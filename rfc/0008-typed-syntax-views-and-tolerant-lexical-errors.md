@@ -1,7 +1,7 @@
 # RFC 0008: Typed Syntax Views and Tolerant Lexical Errors
 
 - Status: Accepted
-- Implementation: Pending
+- Implementation: Complete
 
 ## Summary
 
@@ -83,10 +83,12 @@ pub enum SyntaxIssueKind {
 ```
 
 The first validator covers required program bodies, binding names and values,
-function names/parameters/bodies, and required expression children that are
-needed for useful binding and expression queries. Lelwel's own diagnostics
-remain authoritative for unexpected-token recovery. Syntax validation must
-avoid duplicating an equivalent parser diagnostic at the same recovery point.
+named-function parameters/bodies on nodes retained by recovery, and required
+expression children that are needed for useful binding and expression queries.
+Lelwel's own diagnostics remain authoritative for unexpected-token recovery.
+Syntax validation must avoid duplicating an equivalent parser diagnostic at the
+same recovery point. A missing name after `fn` can be grammatically
+indistinguishable from a valid closure and is not reclassified heuristically.
 
 ## Tolerant lexical errors
 
@@ -209,8 +211,8 @@ enough, and avoids confusing source-preserving tools.
 2. Query getters are pure and return `Option<T>` for missing children/tokens.
 3. `let x = ; let y = 2; y` retains queryable `x`, `y`, and final `y` structure
    while reporting the missing value at a zero-width location.
-4. Missing binding/function names and required bodies produce structured syntax
-   issues without invented tokens.
+4. Missing binding names and required slots on retained binding/function nodes
+   produce structured syntax issues without invented tokens.
 5. Lelwel `Rule::Error` subtrees remain visible and lossless.
 6. Unknown XL escapes and unknown/malformed JSON escapes are valid CST tokens
    with precise diagnostics and do not break their containing string node.
@@ -219,3 +221,25 @@ enough, and avoids confusing source-preserving tools.
 9. Typed queries work on every CST produced for arbitrary UTF-8 input without
    panicking.
 10. Workspace tests, formatting, strict Clippy, and diff checks pass.
+
+## Implementation result
+
+Implemented an XL typed-syntax facade over Lelwel `CstData`. `SyntaxNode`,
+`SyntaxToken`, and the `AstNode` trait support typed program, body, binding,
+expression, and string-literal views without allocating a parallel tree.
+Required getters return `Option`, preserve grammar-slot order, and remain pure
+across repeated queries.
+
+The syntax validator reports missing names, values, paths, parameters, bodies,
+and result expressions with zero-width locations. Existing parser diagnostics
+at the same recovery offset take precedence, preventing duplicate user-facing
+errors. Later valid bindings and result expressions remain queryable after an
+earlier missing value, and `Rule::Error` subtrees stay visible and lossless.
+
+XL strings now preserve unsupported and unterminated escapes as dedicated CST
+tokens. JSON likewise preserves unknown escapes, malformed Unicode escapes,
+and unterminated escapes. Each produces a precise lexer diagnostic while the
+containing string remains structurally valid for Lelwel and typed queries.
+Strict semantic AST, JSON decoding, module loading, compilation, and runtime
+entry points remain gated on the merged diagnostics and retain their previous
+behavior.

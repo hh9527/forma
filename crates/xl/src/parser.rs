@@ -943,7 +943,7 @@ mod tests {
     #[test]
     fn reports_invalid_and_unterminated_string_parts() {
         let invalid = parse("test", r#""bad\q""#).unwrap_err();
-        assert!(invalid.message.contains("unsupported escape"));
+        assert!(invalid.message.contains("unsupported string escape"));
         assert_eq!(invalid.location.offset, 4);
 
         let unterminated = parse("test", r#""unfinished"#).unwrap_err();

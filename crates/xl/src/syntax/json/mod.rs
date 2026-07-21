@@ -70,6 +70,33 @@ mod tests {
         assert_eq!(reconstructed, source);
     }
 
+    #[test]
+    fn malformed_escape_is_diagnosed_without_breaking_the_string_cst() {
+        let source = r#""a\u12xxb""#;
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("escape.json", source);
+        let parsed = parse(id, source);
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert_eq!(
+            parsed.diagnostics[0].labels[0].location.range.to_usize(),
+            2..8
+        );
+        let tokens = collect_tokens(&parsed.syntax, NodeRef::ROOT);
+        assert_eq!(
+            tokens,
+            [
+                Token::DoubleQuote,
+                Token::StringText,
+                Token::MalformedUnicodeEscape,
+                Token::StringText,
+                Token::DoubleQuote,
+            ]
+        );
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+    }
+
     fn collect_tokens(cst: &CstData, node: NodeRef) -> Vec<Token> {
         match cst.get(node) {
             Node::Token(token, _) => vec![token],

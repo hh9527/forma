@@ -54,6 +54,8 @@ pub enum Token {
     DoubleQuote,
     StringText,
     EscapeSequence,
+    UnknownEscapeSequence,
+    UnterminatedEscapeSequence,
     InterpolationStart,
     Bytes,
     Atom,
@@ -145,8 +147,12 @@ enum StringToken {
     DoubleQuote,
     #[token("\\{", priority = 5)]
     InterpolationStart,
-    #[regex(r#"\\."#)]
+    #[regex(r#"\\[nrt"\\]"#, priority = 4)]
     EscapeSequence,
+    #[regex(r#"\\[^\r\n]"#, priority = 3)]
+    UnknownEscapeSequence,
+    #[token("\\", priority = 1)]
+    UnterminatedEscapeSequence,
     #[regex(r#"[^\"\\]+"#)]
     StringText,
 }
@@ -256,8 +262,18 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
                 (token, span, error, next)
             }
         };
+        let error = error || token_is_invalid_escape(token);
         if error {
-            diags.push(LexerError::Invalid.into_diagnostic(span.clone()));
+            let message = match token {
+                Token::UnknownEscapeSequence => "unsupported string escape",
+                Token::UnterminatedEscapeSequence => "unterminated string escape",
+                _ => "invalid token",
+            };
+            diags.push(
+                Diagnostic::error()
+                    .with_message(message)
+                    .with_label(Label::primary((), span.clone())),
+            );
         }
         tokens.push(token);
         spans.push(span);
@@ -314,9 +330,18 @@ impl From<StringToken> for Token {
             StringToken::DoubleQuote => Self::DoubleQuote,
             StringToken::InterpolationStart => Self::InterpolationStart,
             StringToken::EscapeSequence => Self::EscapeSequence,
+            StringToken::UnknownEscapeSequence => Self::UnknownEscapeSequence,
+            StringToken::UnterminatedEscapeSequence => Self::UnterminatedEscapeSequence,
             StringToken::StringText => Self::StringText,
         }
     }
+}
+
+fn token_is_invalid_escape(token: Token) -> bool {
+    matches!(
+        token,
+        Token::UnknownEscapeSequence | Token::UnterminatedEscapeSequence
+    )
 }
 
 #[cfg(test)]
@@ -352,5 +377,20 @@ mod tests {
         assert_eq!(spans[quote], 8..9);
         assert_eq!(spans[quote + 1], 9..13);
         assert_eq!(spans[quote + 2], 13..14);
+    }
+
+    #[test]
+    fn preserves_unknown_and_unterminated_escapes_as_tokens() {
+        let mut diagnostics = Vec::new();
+        let (tokens, spans) = tokenize(r#""a\(b""#, &mut diagnostics);
+        assert_eq!(tokens[2], Token::UnknownEscapeSequence);
+        assert_eq!(spans[2], 2..4);
+        assert_eq!(diagnostics.len(), 1);
+
+        diagnostics.clear();
+        let (tokens, spans) = tokenize("\"a\\", &mut diagnostics);
+        assert_eq!(tokens.last(), Some(&Token::UnterminatedEscapeSequence));
+        assert_eq!(spans.last(), Some(&(2..3)));
+        assert_eq!(diagnostics.len(), 1);
     }
 }

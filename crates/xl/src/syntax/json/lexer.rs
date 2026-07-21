@@ -32,6 +32,9 @@ pub enum Token {
     DoubleQuote,
     StringText,
     EscapeSequence,
+    UnknownEscapeSequence,
+    MalformedUnicodeEscape,
+    UnterminatedEscapeSequence,
     Number,
     Whitespace,
     Error,
@@ -71,8 +74,14 @@ enum NormalToken {
 enum StringToken {
     #[token("\"")]
     DoubleQuote,
-    #[regex(r#"\\(u[0-9A-Fa-f]{4}|.)"#)]
+    #[regex(r#"\\(u[0-9A-Fa-f]{4}|["\\/bfnrt])"#, priority = 5)]
     EscapeSequence,
+    #[regex(r#"\\u[^"\\\x00-\x1f]{0,4}"#, priority = 4)]
+    MalformedUnicodeEscape,
+    #[regex(r#"\\."#, priority = 3)]
+    UnknownEscapeSequence,
+    #[token("\\", priority = 1)]
+    UnterminatedEscapeSequence,
     #[regex(r#"[^\"\\\x00-\x1f]+"#)]
     StringText,
 }
@@ -135,8 +144,19 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
                 (token, span, error, next)
             }
         };
+        let error = error || token_is_invalid_escape(token);
         if error {
-            diags.push(LexerError::Invalid.into_diagnostic(span.clone()));
+            let message = match token {
+                Token::UnknownEscapeSequence => "unknown JSON escape",
+                Token::MalformedUnicodeEscape => "malformed JSON Unicode escape",
+                Token::UnterminatedEscapeSequence => "unterminated JSON escape",
+                _ => "invalid token",
+            };
+            diags.push(
+                Diagnostic::error()
+                    .with_message(message)
+                    .with_label(Label::primary((), span.clone())),
+            );
         }
         tokens.push(token);
         spans.push(span);
@@ -169,9 +189,21 @@ impl From<StringToken> for Token {
         match token {
             StringToken::DoubleQuote => Self::DoubleQuote,
             StringToken::EscapeSequence => Self::EscapeSequence,
+            StringToken::UnknownEscapeSequence => Self::UnknownEscapeSequence,
+            StringToken::MalformedUnicodeEscape => Self::MalformedUnicodeEscape,
+            StringToken::UnterminatedEscapeSequence => Self::UnterminatedEscapeSequence,
             StringToken::StringText => Self::StringText,
         }
     }
+}
+
+fn token_is_invalid_escape(token: Token) -> bool {
+    matches!(
+        token,
+        Token::UnknownEscapeSequence
+            | Token::MalformedUnicodeEscape
+            | Token::UnterminatedEscapeSequence
+    )
 }
 
 #[cfg(test)]
@@ -202,5 +234,16 @@ mod tests {
         assert_eq!(spans[1], 1..2);
         assert_eq!(spans[2], 2..6);
         assert_eq!(spans[3], 6..7);
+    }
+
+    #[test]
+    fn preserves_unknown_and_malformed_escapes_as_tokens() {
+        let mut diagnostics = Vec::new();
+        let (tokens, spans) = tokenize(r#""a\q\u12xxb""#, &mut diagnostics);
+        assert_eq!(tokens[2], Token::UnknownEscapeSequence);
+        assert_eq!(tokens[3], Token::MalformedUnicodeEscape);
+        assert_eq!(spans[2], 2..4);
+        assert_eq!(spans[3], 4..10);
+        assert_eq!(diagnostics.len(), 2);
     }
 }

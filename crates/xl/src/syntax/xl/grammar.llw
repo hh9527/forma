@@ -6,6 +6,7 @@ token Plus='+' Minus='-' Star='*' Slash='/' Less='<' EqualEqual='==' Equal='=';
 token FatArrow='=>' Pipe='|>';
 token Int='<integer>' Float='<float>' Bytes='<bytes>';
 token DoubleQuote='"' StringText='<string text>' EscapeSequence='<escape>';
+token UnknownEscapeSequence='<unknown escape>' UnterminatedEscapeSequence='<unterminated escape>';
 token InterpolationStart='<interpolation start>';
 token Atom='<atom>' Identifier='<identifier>';
 token Whitespace Comment;
@@ -68,5 +69,11 @@ pattern:
 | '(' [pattern (?1 ',' pattern)* [',']] ')' @tuple_pattern
 ;
 string_literal: DoubleQuote string_part* DoubleQuote;
-string_part^: StringText | EscapeSequence | interpolation;
+string_part^:
+  StringText
+| EscapeSequence
+| UnknownEscapeSequence
+| UnterminatedEscapeSequence
+| interpolation
+;
 interpolation: InterpolationStart expression RBrace;

@@ -1,6 +1,8 @@
 token True='true' False='false' Null='null';
 token LBrace='{' RBrace='}' LBracket='[' RBracket=']' Comma=',' Colon=':';
 token DoubleQuote='"' StringText='<string text>' EscapeSequence='<escape>' Number='<number>';
+token UnknownEscapeSequence='<unknown escape>' MalformedUnicodeEscape='<malformed unicode escape>';
+token UnterminatedEscapeSequence='<unterminated escape>';
 token Whitespace;
 
 skip Whitespace;
@@ -12,4 +14,8 @@ object: '{' [member (',' member)*] '}';
 member: string_literal ':' value;
 array: '[' [value (',' value)*] ']';
 literal: string_literal | Number | 'true' | 'false' | 'null';
-string_literal: DoubleQuote (StringText | EscapeSequence)* DoubleQuote;
+string_literal:
+  DoubleQuote
+  (StringText | EscapeSequence | UnknownEscapeSequence | MalformedUnicodeEscape | UnterminatedEscapeSequence)*
+  DoubleQuote
+;
