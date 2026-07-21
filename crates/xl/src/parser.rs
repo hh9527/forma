@@ -4,7 +4,140 @@ use crate::ast::{
 use crate::lexer::{FrontendError, Token, TokenKind, lex};
 
 pub fn parse(source_name: &str, source: &str) -> Result<Program, FrontendError> {
-    Parser::new(source_name, lex(source_name, source)?).parse_program()
+    let mut sources = crate::source::SourceDatabase::default();
+    let source_id = sources.add(source_name, source);
+    let syntax = crate::syntax::xl::parse(source_id, source);
+    let lowered_tokens =
+        lower_cst_tokens(source_name, source, sources.get(source_id), &syntax.syntax);
+    if let Some(diagnostic) = syntax.diagnostics.first() {
+        if let Ok(tokens) = &lowered_tokens
+            && let Err(specific) = Parser::new(source_name, tokens.clone()).parse_program()
+        {
+            return Err(specific);
+        }
+        let location = diagnostic
+            .labels
+            .first()
+            .map(|label| sources.get(source_id).position(label.span.range.start))
+            .unwrap_or(crate::source::Position { line: 1, column: 1 });
+        return Err(FrontendError::new(
+            source_name,
+            crate::lexer::SourceLocation {
+                offset: diagnostic
+                    .labels
+                    .first()
+                    .map_or(0, |label| label.span.range.start),
+                line: location.line,
+                column: location.column,
+            },
+            &diagnostic.message,
+        ));
+    }
+    Parser::new(source_name, lowered_tokens?).parse_program()
+}
+
+fn lower_cst_tokens(
+    source_name: &str,
+    source: &str,
+    source_file: &crate::source::SourceFile,
+    cst: &crate::syntax::xl::CstData,
+) -> Result<Vec<Token>, FrontendError> {
+    use crate::syntax::xl::lexer::Token as SyntaxToken;
+    use crate::syntax::xl::parser::{Node, NodeRef};
+
+    fn visit(
+        source_name: &str,
+        source: &str,
+        source_file: &crate::source::SourceFile,
+        cst: &crate::syntax::xl::CstData,
+        node: NodeRef,
+        output: &mut Vec<Token>,
+    ) -> Result<(), FrontendError> {
+        match cst.get(node) {
+            Node::Rule(..) => {
+                for child in cst.children(node) {
+                    visit(source_name, source, source_file, cst, child, output)?;
+                }
+            }
+            Node::Token(kind, _) => {
+                if matches!(kind, SyntaxToken::Whitespace | SyntaxToken::Comment) {
+                    return Ok(());
+                }
+                let range = cst.span(node);
+                let position = source_file.position(range.start);
+                let location = crate::lexer::SourceLocation {
+                    offset: range.start,
+                    line: position.line,
+                    column: position.column,
+                };
+                let semantic = match kind {
+                    SyntaxToken::Let => TokenKind::Let,
+                    SyntaxToken::Type => TokenKind::Type,
+                    SyntaxToken::Fn => TokenKind::Fn,
+                    SyntaxToken::If => TokenKind::If,
+                    SyntaxToken::Else => TokenKind::Else,
+                    SyntaxToken::Match => TokenKind::Match,
+                    SyntaxToken::Import => TokenKind::Import,
+                    SyntaxToken::From => TokenKind::From,
+                    SyntaxToken::LParen => TokenKind::LeftParen,
+                    SyntaxToken::RParen => TokenKind::RightParen,
+                    SyntaxToken::LBrace => TokenKind::LeftBrace,
+                    SyntaxToken::RBrace => TokenKind::RightBrace,
+                    SyntaxToken::LBracket => TokenKind::LeftBracket,
+                    SyntaxToken::RBracket => TokenKind::RightBracket,
+                    SyntaxToken::Comma => TokenKind::Comma,
+                    SyntaxToken::Colon => TokenKind::Colon,
+                    SyntaxToken::Semicolon => TokenKind::Semicolon,
+                    SyntaxToken::Dot => TokenKind::Dot,
+                    SyntaxToken::Plus => TokenKind::Plus,
+                    SyntaxToken::Minus => TokenKind::Minus,
+                    SyntaxToken::Star => TokenKind::Star,
+                    SyntaxToken::Slash => TokenKind::Slash,
+                    SyntaxToken::Less => TokenKind::Less,
+                    SyntaxToken::EqualEqual => TokenKind::EqualEqual,
+                    SyntaxToken::Equal => TokenKind::Equal,
+                    SyntaxToken::FatArrow => TokenKind::FatArrow,
+                    SyntaxToken::Pipe => TokenKind::Pipe,
+                    SyntaxToken::Int
+                    | SyntaxToken::Float
+                    | SyntaxToken::String
+                    | SyntaxToken::Bytes
+                    | SyntaxToken::Atom
+                    | SyntaxToken::Identifier => {
+                        let mut decoded = lex(source_name, &source[range.clone()])?;
+                        decoded.remove(0).kind
+                    }
+                    SyntaxToken::Error | SyntaxToken::EOF => return Ok(()),
+                    SyntaxToken::Whitespace | SyntaxToken::Comment => unreachable!(),
+                };
+                output.push(Token {
+                    kind: semantic,
+                    location,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    let mut tokens = Vec::new();
+    visit(
+        source_name,
+        source,
+        source_file,
+        cst,
+        NodeRef::ROOT,
+        &mut tokens,
+    )?;
+    let position = source_file.position(source.len());
+    tokens.push(Token {
+        kind: TokenKind::Eof,
+        location: crate::lexer::SourceLocation {
+            offset: source.len(),
+            line: position.line,
+            column: position.column,
+        },
+    });
+    Ok(tokens)
 }
 
 struct Parser<'a> {

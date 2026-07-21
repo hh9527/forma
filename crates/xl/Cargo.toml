@@ -10,3 +10,9 @@ path = "src/lib.rs"
 name = "xl"
 path = "src/main.rs"
 
+[dependencies]
+codespan-reporting = "0.13"
+logos = "0.16"
+
+[build-dependencies]
+lelwel = "0.10"

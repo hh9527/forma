@@ -14,6 +14,8 @@ The current MVP demonstrates:
 - structural annotations and runtime validation from the same metadata;
 - `.xl` and `.json` modules in a closed dependency graph;
 - explicit external JSON input through the CLI.
+- Logos + Lelwel lossless CSTs shared by compilation and future editor tooling;
+- byte-range diagnostics and path-addressable JSON source provenance.
 
 ## Try it
 
@@ -58,6 +60,15 @@ The MVP has no effects, recursion, package manager, LSP server, traits, HKT,
 YAML/TOML modules, normalization protocol, or production garbage collector.
 Function signatures are dynamically checked and static inference deliberately
 falls back to `Any` where the focused checker has no precise model.
+
+## Parsing substrate
+
+Both XL and JSON use Logos lexers and Lelwel-generated resilient parsers. Their
+owned lossless CSTs preserve trivia and byte ranges, while `SourceDatabase`
+converts ranges to display positions. Parsing always reparses the complete
+file. JSON lowering can additionally return a provenance side table through
+`parse_json_with_provenance`; provenance is deliberately not stored in runtime
+`Value` objects.
 
 Run all verification with:
 

@@ -1,0 +1,14 @@
+token True='true' False='false' Null='null';
+token LBrace='{' RBrace='}' LBracket='[' RBracket=']' Comma=',' Colon=':';
+token String='<string>' Number='<number>';
+token Whitespace;
+
+skip Whitespace;
+start document;
+
+document: value;
+value^: object | array | literal;
+object: '{' [member (',' member)*] '}';
+member: String ':' value;
+array: '[' [value (',' value)*] ']';
+literal: String | Number | 'true' | 'false' | 'null';

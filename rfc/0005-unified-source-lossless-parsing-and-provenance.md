@@ -1,7 +1,7 @@
 # RFC 0005: Unified Source, Lossless Parsing, and Provenance
 
 - Status: Accepted
-- Implementation: Pending
+- Implementation: Complete
 
 ## Summary
 
@@ -205,3 +205,17 @@ semantics pure while preserving source information for tools.
 11. Existing tests plus focused CST, recovery, span, provenance, and diagnostic
     tests pass; formatting and strict Clippy checks pass.
 
+## Implementation result
+
+Implemented with separate XL and JSON Logos lexers and Lelwel grammars generated
+into isolated build output directories. Both expose owned lossless `CstData`,
+recoverable diagnostics, and exact byte ranges through the shared source model.
+The existing semantic XL lowering consumes tokens from the authoritative CST,
+and JSON keeps its strict value decoding while retaining a path-addressable
+provenance side table. Unified diagnostics support primary data and secondary
+rule labels without changing VM values. Focused tests cover losslessness,
+multiple recovery diagnostics, UTF-8 location conversion, provenance, and
+cross-source labels; an ignored test provides a repeatable full-parse baseline.
+
+The LSP server and propagation of provenance through arbitrary runtime
+transformations remain deferred as specified above.

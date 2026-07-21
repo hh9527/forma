@@ -1,0 +1,67 @@
+token Let='let' Type='type' Fn='fn' If='if' Else='else' Match='match';
+token Import='import' From='from';
+token LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
+token Comma=',' Colon=':' Semicolon=';' Dot='.';
+token Plus='+' Minus='-' Star='*' Slash='/' Less='<' EqualEqual='==' Equal='=';
+token FatArrow='=>' Pipe='|>';
+token Int='<integer>' Float='<float>' String='<string>' Bytes='<bytes>';
+token Atom='<atom>' Identifier='<identifier>';
+token Whitespace Comment;
+
+skip Whitespace Comment;
+start program;
+
+program: body;
+body: (?1 binding)* expression;
+binding^: let_binding | type_binding | import_binding | named_function;
+let_binding: 'let' Identifier [':' expression] '=' expression ';';
+type_binding: 'type' Identifier '=' expression ';';
+import_binding: 'import' Identifier 'from' String ';';
+named_function: 'fn' Identifier parameters block;
+
+expression:
+  expression '|>' expression @pipeline_expr
+| expression ('==' | '<') expression @binary_expr
+| expression ('+' | '-') expression @binary_expr
+| expression ('*' | '/') expression @binary_expr
+| '-' expression @unary_expr
+| expression arguments @call_expr
+| expression '.' Identifier @field_expr
+| primary ^
+;
+
+primary^:
+  Int @int_expr
+| Float @float_expr
+| String @string_expr
+| Bytes @bytes_expr
+| Atom @atom_expr
+| Identifier @variable_expr
+| '(' [expression (?1 ',' expression)* [',']] ')' @paren_expr
+| '[' [expression (?2 ',' expression)* [',']] ']' @array_expr
+| braced
+| closure
+| if_expr
+| match_expr
+;
+
+braced:
+  ?1 '{' [dict_field (?2 ',' dict_field)* [',']] '}' @dict_expr
+| ?t block
+;
+dict_field: (Identifier | String) ':' expression;
+block: '{' body '}';
+closure: 'fn' parameters block;
+parameters: '(' [Identifier (?1 ',' Identifier)* [',']] ')';
+arguments: '(' [expression (?1 ',' expression)* [',']] ')';
+if_expr: 'if' expression block 'else' block;
+match_expr: 'match' expression '{' match_arm (?1 ',' match_arm)* [','] '}';
+match_arm: pattern '=>' expression;
+pattern^:
+  Identifier @identifier_pattern
+| Int @int_pattern
+| Float @float_pattern
+| String @string_pattern
+| Atom @atom_pattern
+| '(' [pattern (?1 ',' pattern)* [',']] ')' @tuple_pattern
+;

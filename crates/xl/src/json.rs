@@ -1,3 +1,4 @@
+use crate::source::{SourceDatabase, SourceId, Span};
 use crate::{BuiltinAtom, Value, Vm};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -8,6 +9,27 @@ pub struct JsonError {
     pub line: usize,
     pub column: usize,
     pub message: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ValuePathSegment {
+    Index(usize),
+    Key(String),
+}
+
+pub type ValuePath = Vec<ValuePathSegment>;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Provenance {
+    pub values: BTreeMap<ValuePath, Span>,
+    pub keys: BTreeMap<ValuePath, Span>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SourcedValue {
+    pub value: Value,
+    pub provenance: Provenance,
+    pub sources: SourceDatabase,
 }
 
 impl fmt::Display for JsonError {
@@ -23,35 +45,69 @@ impl fmt::Display for JsonError {
 impl std::error::Error for JsonError {}
 
 pub fn parse_json(source_name: &str, source: &str) -> Result<Value, JsonError> {
+    parse_json_with_provenance(source_name, source).map(|parsed| parsed.value)
+}
+
+pub fn parse_json_with_provenance(
+    source_name: &str,
+    source: &str,
+) -> Result<SourcedValue, JsonError> {
+    let mut sources = SourceDatabase::default();
+    let source_id = sources.add(source_name, source);
+    let syntax = crate::syntax::json::parse(source_id, source);
+    if let Some(diagnostic) = syntax.diagnostics.first() {
+        let offset = diagnostic
+            .labels
+            .first()
+            .map_or(0, |label| label.span.range.start);
+        let position = sources.get(source_id).position(offset);
+        return Err(JsonError {
+            source_name: source_name.to_owned(),
+            line: position.line,
+            column: position.column,
+            message: diagnostic.message.clone(),
+        });
+    }
     let mut parser = JsonParser {
         source_name,
         source,
+        source_id,
         offset: 0,
         line: 1,
         column: 1,
         vm: Vm::new(),
+        path: Vec::new(),
+        provenance: Provenance::default(),
     };
     let value = parser.value()?;
     parser.whitespace();
     if parser.peek().is_some() {
         return Err(parser.error("unexpected content after JSON value"));
     }
-    Ok(value)
+    Ok(SourcedValue {
+        value,
+        provenance: parser.provenance,
+        sources,
+    })
 }
 
 struct JsonParser<'a> {
     source_name: &'a str,
     source: &'a str,
+    source_id: SourceId,
     offset: usize,
     line: usize,
     column: usize,
     vm: Vm,
+    path: ValuePath,
+    provenance: Provenance,
 }
 
 impl JsonParser<'_> {
     fn value(&mut self) -> Result<Value, JsonError> {
         self.whitespace();
-        match self.peek() {
+        let start = self.offset;
+        let value = match self.peek() {
             Some('n') => {
                 self.keyword("null")?;
                 Ok(Value::none())
@@ -70,7 +126,15 @@ impl JsonParser<'_> {
             Some('-' | '0'..='9') => self.number(),
             Some(character) => Err(self.error(format!("unexpected character {character:?}"))),
             None => Err(self.error("expected a JSON value")),
-        }
+        }?;
+        self.provenance.values.insert(
+            self.path.clone(),
+            Span {
+                source: self.source_id,
+                range: start..self.offset,
+            },
+        );
+        Ok(value)
     }
 
     fn array(&mut self) -> Result<Value, JsonError> {
@@ -81,7 +145,10 @@ impl JsonParser<'_> {
             return Ok(Value::Array(values.into()));
         }
         loop {
-            values.push(self.value()?);
+            self.path.push(ValuePathSegment::Index(values.len()));
+            let value = self.value()?;
+            self.path.pop();
+            values.push(value);
             self.whitespace();
             if self.consume(']') {
                 break;
@@ -106,10 +173,21 @@ impl JsonParser<'_> {
             if self.peek() != Some('"') {
                 return Err(self.error("JSON object keys must be strings"));
             }
+            let key_start = self.offset;
             let field = self.string()?;
+            let key_end = self.offset;
             self.whitespace();
             self.expect(':')?;
+            self.path.push(ValuePathSegment::Key(field.clone()));
+            self.provenance.keys.insert(
+                self.path.clone(),
+                Span {
+                    source: self.source_id,
+                    range: key_start..key_end,
+                },
+            );
             let value = self.value()?;
+            self.path.pop();
             if fields.insert(field.clone(), value).is_some() {
                 return Err(self.error(format!("duplicate JSON object key {field:?}")));
             }
@@ -334,5 +412,27 @@ mod tests {
     fn decodes_unicode_surrogate_pairs() {
         let value = parse_json("unicode.json", r#""\ud83d\ude00""#).unwrap();
         assert_eq!(value.to_string(), "\"😀\"");
+    }
+
+    #[test]
+    fn records_path_addressable_value_and_key_provenance() {
+        let parsed =
+            parse_json_with_provenance("data.json", r#"{"users":[{"name":"Ada"}]}"#).unwrap();
+        let path = vec![
+            ValuePathSegment::Key("users".into()),
+            ValuePathSegment::Index(0),
+            ValuePathSegment::Key("name".into()),
+        ];
+        assert_eq!(parsed.provenance.values[&path].range, 18..23);
+        assert_eq!(parsed.provenance.keys[&path].range, 11..17);
+        assert_eq!(
+            parsed
+                .sources
+                .get(parsed.provenance.values[&path].source)
+                .name
+                .as_ref(),
+            "data.json"
+        );
+        assert!(matches!(parsed.value, Value::Dict(_)));
     }
 }
