@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use crate::{
     Atom, BuiltinAtom, BytecodeFunction, Closure, Dict, FuncByteCode, NativeFunction, Prototype,
     Shape, Value,
@@ -138,10 +136,7 @@ impl Heap {
         }
     }
 
-    pub(crate) const fn id(&self) -> HeapId {
-        self.id
-    }
-
+    #[cfg(test)]
     pub(crate) fn counts(&self) -> (usize, usize, usize) {
         (
             self.objects.len(),
@@ -337,14 +332,6 @@ impl Heap {
                 }))
             }
         })
-    }
-
-    pub(crate) fn link_bytecode(
-        &mut self,
-        background: Option<&Heap>,
-        function: &BytecodeFunction,
-    ) -> Result<Handle, HeapError> {
-        self.link_bytecode_resolved(background, function, &HashMap::new())
     }
 
     pub(crate) fn link_bytecode_resolved(

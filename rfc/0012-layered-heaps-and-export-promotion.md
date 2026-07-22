@@ -1,7 +1,27 @@
 # RFC 0012: Layered Heaps and Export Promotion
 
 - Status: Accepted
-- Implementation: Pending
+- Implementation: Complete
+
+## Implementation result
+
+The implementation uses owner-tagged runtime handles, one read-only world heap,
+and one writable arena per execution. Bytecode and native calls share a
+`RuntimeValue` register stack; public `Value` conversion occurs only at API and
+serialization boundaries. Promotion uses a failure-atomic pending copy with
+shared forwarding for all roots and shallow-shares `Arc<FuncByteCode>` while
+rebuilding heap-relative links.
+
+Module initialization publishes its reachable export as a `Ready` root in the
+shared world. Import instructions use external value slots in the linking table
+and are resolved directly to those persistent roots. They do not reconstruct
+imports through owned public values. The dependency-diamond test verifies that
+`a -> c` and `b -> c` retain the exact same persistent root and that initializing
+`b` does not grow the world when its export is only `c`.
+
+The current ordinary loader keeps the world append-only for its lifetime. It
+does not perform module tree shaking or reclamation. Session results are read
+through their mixed world/arena view and exported directly without publication.
 
 ## Summary
 
