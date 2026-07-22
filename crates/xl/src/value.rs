@@ -88,26 +88,39 @@ pub struct Closure {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeError {
     pub message: String,
-    resource_limit: bool,
+    limit: Option<NativeLimit>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum NativeLimit {
+    Stack,
+    Allocation,
 }
 
 impl NativeError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            resource_limit: false,
+            limit: None,
         }
     }
 
-    pub(crate) fn resource_limit(message: impl Into<String>) -> Self {
+    pub(crate) fn stack_limit(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
-            resource_limit: true,
+            limit: Some(NativeLimit::Stack),
         }
     }
 
-    pub(crate) const fn is_resource_limit(&self) -> bool {
-        self.resource_limit
+    pub(crate) fn allocation_limit(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            limit: Some(NativeLimit::Allocation),
+        }
+    }
+
+    pub(crate) const fn limit(&self) -> Option<NativeLimit> {
+        self.limit
     }
 }
 

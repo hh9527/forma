@@ -9,7 +9,7 @@ use crate::lir::RegisterId;
 use crate::parser::parse_registered;
 use crate::source::{Diagnostic, SourceDatabase};
 use crate::value::{Atom, Closure, NativeError, NativeFunction, Value};
-use crate::{BuiltinAtom, CallContext, ValueKind, ValueRef, Vm};
+use crate::{BuiltinAtom, CallContext, Quota, QuotaAccount, ValueKind, ValueRef, Vm};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 const DEFAULT_TOOL_FUEL: usize = 100_000;
@@ -137,6 +137,14 @@ pub fn analyze_source_with_fuel(
     source: &str,
     evaluation_fuel: usize,
 ) -> Result<Analysis, FrontendError> {
+    analyze_source_with_quota(source_name, source, Quota::with_fuel(evaluation_fuel))
+}
+
+pub fn analyze_source_with_quota(
+    source_name: &str,
+    source: &str,
+    quota: Quota,
+) -> Result<Analysis, FrontendError> {
     let mut sources = SourceDatabase::default();
     let source_id = sources.add(source_name, source);
     let parsed = parse_registered(&sources, source_id);
@@ -150,10 +158,11 @@ pub fn analyze_source_with_fuel(
                 .expect("failed parse has a diagnostic"),
         )
     })?;
+    let mut account = QuotaAccount::new(quota);
     analyze_program_with_bindings(
         source_name,
         &program,
-        evaluation_fuel,
+        &mut account,
         &BTreeMap::new(),
         &HashSet::new(),
         &sources,
@@ -167,10 +176,11 @@ pub(crate) fn analyze_program_registered(
     program: &Program,
     evaluation_fuel: usize,
 ) -> Result<Analysis, FrontendError> {
+    let mut account = QuotaAccount::new(Quota::with_fuel(evaluation_fuel));
     analyze_program_with_bindings(
         source_name,
         program,
-        evaluation_fuel,
+        &mut account,
         &BTreeMap::new(),
         &HashSet::new(),
         sources,
@@ -181,7 +191,7 @@ pub(crate) fn analyze_program_registered(
 pub(crate) fn analyze_program_with_bindings(
     source_name: &str,
     program: &Program,
-    evaluation_fuel: usize,
+    account: &mut QuotaAccount,
     external_values: &BTreeMap<String, Value>,
     dynamic_bindings: &HashSet<String>,
     sources: &SourceDatabase,
@@ -218,7 +228,7 @@ pub(crate) fn analyze_program_with_bindings(
                     source_name,
                     &binding.value.value,
                     &tool_values,
-                    evaluation_fuel,
+                    account,
                     sources,
                 )?;
                 let descriptor = TypeDescriptor::from_value(&value).map_err(|message| {
@@ -242,7 +252,7 @@ pub(crate) fn analyze_program_with_bindings(
                         source_name,
                         annotation,
                         &tool_values,
-                        evaluation_fuel,
+                        account,
                         sources,
                     )?;
                     let expected = TypeDescriptor::from_value(&metadata).map_err(|message| {
@@ -300,7 +310,7 @@ pub(crate) fn analyze_program_with_bindings(
                     source_name,
                     &binding.value.value,
                     &tool_values,
-                    evaluation_fuel,
+                    account,
                     sources,
                 ) {
                     tool_values.insert(binding.value.name.value.clone(), value);
@@ -371,7 +381,7 @@ fn evaluate_tool_expression(
     source_name: &str,
     expression: &Expr,
     bindings: &BTreeMap<String, Value>,
-    evaluation_fuel: usize,
+    account: &mut QuotaAccount,
     sources: &SourceDatabase,
 ) -> Result<Value, FrontendError> {
     let function = compile_expression_with_bindings(
@@ -382,7 +392,7 @@ fn evaluate_tool_expression(
         sources.get(expression.location.source),
     )?;
     Vm::new()
-        .execute(&function, evaluation_fuel)
+        .execute_with_account(&function, &[], account)
         .map_err(|error| {
             frontend_error(
                 source_name,
@@ -1273,6 +1283,17 @@ mod tests {
     #[test]
     fn tool_stage_respects_evaluation_fuel() {
         let error = analyze_source_with_fuel("test", "type Number = Array(Int); 0", 0).unwrap_err();
+        assert!(error.message.contains("fuel"));
+    }
+
+    #[test]
+    fn tool_expressions_share_one_module_account() {
+        let error = analyze_source_with_quota(
+            "test",
+            "type First = Array(Int); type Second = Array(Int); 0",
+            Quota::new(1, 1_000, u64::MAX),
+        )
+        .unwrap_err();
         assert!(error.message.contains("fuel"));
     }
 

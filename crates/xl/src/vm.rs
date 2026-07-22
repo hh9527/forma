@@ -1,6 +1,8 @@
 use crate::bytecode::{BytecodeFunction, Instruction, Register};
 use crate::lir::RegisterId;
-use crate::value::{Atom, BuiltinAtom, Closure, Dict, NativeError, Prototype, Shape, Value};
+use crate::value::{
+    Atom, BuiltinAtom, Closure, Dict, NativeError, NativeLimit, Prototype, Shape, Value,
+};
 use crate::{Diagnostic, Origin, SourceDatabase};
 use std::collections::HashMap;
 use std::fmt;
@@ -9,6 +11,72 @@ use std::sync::{Arc, Weak};
 
 const MAX_CALL_DEPTH: usize = 1_024;
 const MAX_STACK_SLOTS: usize = 1_048_576;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Quota {
+    pub fuel: usize,
+    pub stack_slots: usize,
+    pub allocation_bytes: u64,
+}
+
+impl Quota {
+    pub const fn new(fuel: usize, stack_slots: usize, allocation_bytes: u64) -> Self {
+        Self {
+            fuel,
+            stack_slots,
+            allocation_bytes,
+        }
+    }
+
+    pub const fn with_fuel(fuel: usize) -> Self {
+        Self::new(fuel, MAX_STACK_SLOTS, u64::MAX)
+    }
+}
+
+#[derive(Debug)]
+pub struct QuotaAccount {
+    quota: Quota,
+    remaining_fuel: usize,
+    requested_allocation_bytes: u64,
+}
+
+impl QuotaAccount {
+    pub fn new(quota: Quota) -> Self {
+        Self {
+            remaining_fuel: quota.fuel,
+            quota,
+            requested_allocation_bytes: 0,
+        }
+    }
+
+    pub const fn quota(&self) -> Quota {
+        self.quota
+    }
+
+    pub const fn remaining_fuel(&self) -> usize {
+        self.remaining_fuel
+    }
+
+    pub const fn requested_allocation_bytes(&self) -> u64 {
+        self.requested_allocation_bytes
+    }
+
+    fn stack_limit(&self) -> usize {
+        self.quota.stack_slots.min(MAX_STACK_SLOTS)
+    }
+
+    fn charge_allocation(&mut self, bytes: u64) -> Result<(), ()> {
+        let requested = self
+            .requested_allocation_bytes
+            .checked_add(bytes)
+            .ok_or(())?;
+        if requested > self.quota.allocation_bytes {
+            return Err(());
+        }
+        self.requested_allocation_bytes = requested;
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValueKind {
@@ -98,6 +166,7 @@ impl<'a> ValueRef<'a> {
 pub struct CallContext<'vm, 'stack> {
     vm: &'vm mut Vm,
     stack: &'stack mut Vec<Option<Value>>,
+    account: &'stack mut QuotaAccount,
     base: usize,
     argument_count: usize,
     upvalue_base: usize,
@@ -109,6 +178,7 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
     fn new(
         vm: &'vm mut Vm,
         stack: &'stack mut Vec<Option<Value>>,
+        account: &'stack mut QuotaAccount,
         arguments: Vec<Value>,
         upvalues: &[Value],
     ) -> Result<Self, NativeError> {
@@ -117,12 +187,12 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
         let window_size = argument_count
             .checked_add(upvalues.len())
             .and_then(|size| size.checked_add(1))
-            .ok_or_else(|| NativeError::resource_limit("native stack window is too large"))?;
+            .ok_or_else(|| NativeError::stack_limit("native stack window is too large"))?;
         let end = base
             .checked_add(window_size)
-            .ok_or_else(|| NativeError::resource_limit("XL stack size overflowed"))?;
-        if end > MAX_STACK_SLOTS || window_size > u32::MAX as usize {
-            return Err(NativeError::resource_limit(
+            .ok_or_else(|| NativeError::stack_limit("XL stack size overflowed"))?;
+        if end > account.stack_limit() || window_size > u32::MAX as usize {
+            return Err(NativeError::stack_limit(
                 "native call exceeds the XL stack-slot limit",
             ));
         }
@@ -135,14 +205,14 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
         Ok(Self {
             vm,
             stack,
+            account,
             base,
             argument_count,
             upvalue_base,
             upvalue_count,
             result: RegisterId(
-                u32::try_from(result_index).map_err(|_| {
-                    NativeError::resource_limit("native register count exceeds u32")
-                })?,
+                u32::try_from(result_index)
+                    .map_err(|_| NativeError::stack_limit("native register count exceeds u32"))?,
             ),
         })
     }
@@ -154,7 +224,7 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
             )));
         }
         Ok(RegisterId(u32::try_from(index).map_err(|_| {
-            NativeError::resource_limit("argument register exceeds u32")
+            NativeError::stack_limit("argument register exceeds u32")
         })?))
     }
 
@@ -170,7 +240,7 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
         }
         Ok(RegisterId(
             u32::try_from(self.upvalue_base + index)
-                .map_err(|_| NativeError::resource_limit("upvalue register exceeds u32"))?,
+                .map_err(|_| NativeError::stack_limit("upvalue register exceeds u32"))?,
         ))
     }
 
@@ -185,14 +255,14 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
     }
 
     pub fn scratch(&mut self) -> Result<RegisterId, NativeError> {
-        if self.stack.len() >= MAX_STACK_SLOTS {
-            return Err(NativeError::resource_limit(
+        if self.stack.len() >= self.account.stack_limit() {
+            return Err(NativeError::stack_limit(
                 "native scratch register exceeds the XL stack-slot limit",
             ));
         }
         let register = RegisterId(
             u32::try_from(self.stack.len() - self.base)
-                .map_err(|_| NativeError::resource_limit("native scratch register exceeds u32"))?,
+                .map_err(|_| NativeError::stack_limit("native scratch register exceeds u32"))?,
         );
         self.stack.push(None);
         Ok(register)
@@ -219,7 +289,9 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
         destination: RegisterId,
         value: impl Into<String>,
     ) -> Result<(), NativeError> {
-        self.set(destination, Value::string(value.into()))
+        let value = value.into();
+        self.charge_allocation(value.len())?;
+        self.set(destination, Value::string(value))
     }
 
     pub fn copy(&mut self, destination: RegisterId, source: RegisterId) -> Result<(), NativeError> {
@@ -236,6 +308,7 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
             .iter()
             .map(|item| self.owned(*item))
             .collect::<Result<Vec<_>, _>>()?;
+        self.charge_sequence(values.len())?;
         self.set(destination, Value::Array(values.into()))
     }
 
@@ -248,6 +321,7 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
             .iter()
             .map(|item| self.owned(*item))
             .collect::<Result<Vec<_>, _>>()?;
+        self.charge_sequence(values.len())?;
         self.set(destination, Value::Tuple(values.into()))
     }
 
@@ -260,8 +334,39 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
             .iter()
             .map(|(name, register)| Ok((name.clone(), self.owned(*register)?)))
             .collect::<Result<Vec<_>, NativeError>>()?;
+        self.charge_dict(&entries)?;
         let value = self.vm.make_dict(entries).map_err(NativeError::new)?;
         self.set(destination, value)
+    }
+
+    fn charge_sequence(&mut self, count: usize) -> Result<(), NativeError> {
+        let bytes = logical_value_bytes(count)?;
+        self.account
+            .charge_allocation(bytes)
+            .map_err(|()| NativeError::allocation_limit("native allocation quota exceeded"))
+    }
+
+    fn charge_dict(&mut self, entries: &[(String, Value)]) -> Result<(), NativeError> {
+        let field_bytes = entries.iter().try_fold(0u64, |total, (field, _)| {
+            total.checked_add(field.len() as u64).ok_or_else(|| {
+                NativeError::allocation_limit("native Dict allocation size overflowed")
+            })
+        })?;
+        let value_bytes = logical_value_bytes(entries.len())?;
+        let bytes = field_bytes.checked_add(value_bytes).ok_or_else(|| {
+            NativeError::allocation_limit("native Dict allocation size overflowed")
+        })?;
+        self.account
+            .charge_allocation(bytes)
+            .map_err(|()| NativeError::allocation_limit("native allocation quota exceeded"))
+    }
+
+    fn charge_allocation(&mut self, bytes: usize) -> Result<(), NativeError> {
+        let bytes = u64::try_from(bytes)
+            .map_err(|_| NativeError::allocation_limit("native allocation size overflowed"))?;
+        self.account
+            .charge_allocation(bytes)
+            .map_err(|()| NativeError::allocation_limit("native allocation quota exceeded"))
     }
 
     fn owned(&self, register: RegisterId) -> Result<Value, NativeError> {
@@ -287,7 +392,7 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
 
     fn take_result(self) -> Result<Value, NativeError> {
         let index = usize::try_from(self.result.0)
-            .map_err(|_| NativeError::resource_limit("result register does not fit usize"))?;
+            .map_err(|_| NativeError::stack_limit("result register does not fit usize"))?;
         let slot = self
             .base
             .checked_add(index)
@@ -316,6 +421,7 @@ fn atom_from_name(name: &str) -> Atom {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimeErrorKind {
     FuelExhausted,
+    AllocationQuotaExceeded,
     CallDepthExceeded,
     DivisionByZero,
     IntegerOverflow,
@@ -439,8 +545,34 @@ impl Vm {
         arguments: &[Value],
         evaluation_fuel: usize,
     ) -> Result<Value, RuntimeError> {
-        let mut remaining_fuel = evaluation_fuel;
-        self.execute_frame(function, arguments, &[], &mut remaining_fuel)
+        self.execute_with_quota_and_args(function, arguments, Quota::with_fuel(evaluation_fuel))
+    }
+
+    pub fn execute_with_quota(
+        &mut self,
+        function: &BytecodeFunction,
+        quota: Quota,
+    ) -> Result<Value, RuntimeError> {
+        self.execute_with_quota_and_args(function, &[], quota)
+    }
+
+    pub fn execute_with_quota_and_args(
+        &mut self,
+        function: &BytecodeFunction,
+        arguments: &[Value],
+        quota: Quota,
+    ) -> Result<Value, RuntimeError> {
+        let mut account = QuotaAccount::new(quota);
+        self.execute_with_account(function, arguments, &mut account)
+    }
+
+    pub(crate) fn execute_with_account(
+        &mut self,
+        function: &BytecodeFunction,
+        arguments: &[Value],
+        account: &mut QuotaAccount,
+    ) -> Result<Value, RuntimeError> {
+        self.execute_frame(function, arguments, &[], account)
     }
 
     #[allow(clippy::needless_borrow)]
@@ -449,7 +581,7 @@ impl Vm {
         function: &BytecodeFunction,
         arguments: &[Value],
         captures: &[Value],
-        remaining_fuel: &mut usize,
+        account: &mut QuotaAccount,
     ) -> Result<Value, RuntimeError> {
         let mut stack = Vec::new();
         let mut frames = vec![make_execution_frame(
@@ -458,6 +590,7 @@ impl Vm {
             captures,
             None,
             &mut stack,
+            account.stack_limit(),
         )?];
 
         let mut result = (|| -> Result<Value, RuntimeError> {
@@ -583,6 +716,10 @@ impl Vm {
                     }
                     Instruction::MakeArray { dst, items } => {
                         let values = read_many(&registers, items, function, pc)?;
+                        let bytes = logical_value_bytes(values.len()).map_err(|native_error| {
+                            allocation_error(native_error.message, function, pc)
+                        })?;
+                        charge_allocation(account, bytes, function, pc)?;
                         write_register(
                             &mut registers,
                             *dst,
@@ -593,6 +730,10 @@ impl Vm {
                     }
                     Instruction::MakeTuple { dst, items } => {
                         let values = read_many(&registers, items, function, pc)?;
+                        let bytes = logical_value_bytes(values.len()).map_err(|native_error| {
+                            allocation_error(native_error.message, function, pc)
+                        })?;
+                        charge_allocation(account, bytes, function, pc)?;
                         write_register(
                             &mut registers,
                             *dst,
@@ -619,6 +760,10 @@ impl Vm {
                                 }
                             };
                         }
+                        let bytes = u64::try_from(length).map_err(|_| {
+                            allocation_error("String allocation size overflowed", function, pc)
+                        })?;
+                        charge_allocation(account, bytes, function, pc)?;
                         let mut output = String::with_capacity(length);
                         for part in parts {
                             let value = read_register(&registers, *part, function, pc)?;
@@ -654,6 +799,19 @@ impl Vm {
                             ));
                         }
                         let (fields, values): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+                        let field_bytes = fields.iter().try_fold(0u64, |total, field| {
+                            total.checked_add(field.len() as u64).ok_or_else(|| {
+                                allocation_error("Dict allocation size overflowed", function, pc)
+                            })
+                        })?;
+                        let value_bytes =
+                            logical_value_bytes(values.len()).map_err(|native_error| {
+                                allocation_error(native_error.message, function, pc)
+                            })?;
+                        let bytes = field_bytes.checked_add(value_bytes).ok_or_else(|| {
+                            allocation_error("Dict allocation size overflowed", function, pc)
+                        })?;
+                        charge_allocation(account, bytes, function, pc)?;
                         let shape = self.shapes.intern(fields);
                         write_register(
                             &mut registers,
@@ -706,6 +864,11 @@ impl Vm {
                         captures,
                     } => {
                         let captures = read_many(&registers, captures, function, pc)?;
+                        let bytes =
+                            logical_value_bytes(captures.len()).map_err(|native_error| {
+                                allocation_error(native_error.message, function, pc)
+                            })?;
+                        charge_allocation(account, bytes, function, pc)?;
                         let closure = Closure::new(closure_function.clone(), captures);
                         write_register(
                             &mut registers,
@@ -724,7 +887,7 @@ impl Vm {
                         let Value::Func(callable) = callee else {
                             return Err(type_error("Func", &callee, function, pc));
                         };
-                        consume_fuel(remaining_fuel, function, pc)?;
+                        consume_fuel(account, function, pc)?;
                         let arguments = read_many(&registers, arguments, function, pc)?;
                         match callable.prototype() {
                             Prototype::Bytecode(callee_function) => {
@@ -745,6 +908,7 @@ impl Vm {
                                     callable.upvalues(),
                                     Some(*dst),
                                     &mut stack,
+                                    account.stack_limit(),
                                 )
                                 .map_err(|mut runtime_error| {
                                     runtime_error.trace_includes_active_frame = false;
@@ -772,6 +936,7 @@ impl Vm {
                                 let mut context = CallContext::new(
                                     self,
                                     &mut stack,
+                                    account,
                                     arguments,
                                     callable.upvalues(),
                                 )
@@ -785,10 +950,14 @@ impl Vm {
                                 })?;
                                 (native.callback())(&mut context).map_err(|native_error| {
                                     error(
-                                        if native_error.is_resource_limit() {
-                                            RuntimeErrorKind::StackLimitExceeded
-                                        } else {
-                                            RuntimeErrorKind::TypeMismatch
+                                        match native_error.limit() {
+                                            Some(NativeLimit::Stack) => {
+                                                RuntimeErrorKind::StackLimitExceeded
+                                            }
+                                            Some(NativeLimit::Allocation) => {
+                                                RuntimeErrorKind::AllocationQuotaExceeded
+                                            }
+                                            None => RuntimeErrorKind::TypeMismatch,
                                         },
                                         format!("{}: {}", native.name(), native_error.message),
                                         function,
@@ -812,7 +981,7 @@ impl Vm {
                     Instruction::Jump { target } => {
                         validate_jump(*target, function, pc)?;
                         if *target <= pc {
-                            consume_fuel(remaining_fuel, function, pc)?;
+                            consume_fuel(account, function, pc)?;
                         }
                         frames.last_mut().expect("execution frame").pc = *target;
                         continue;
@@ -823,7 +992,7 @@ impl Vm {
                             Value::Atom(Atom::Builtin(BuiltinAtom::False)) => {
                                 validate_jump(*target, function, pc)?;
                                 if *target <= pc {
-                                    consume_fuel(remaining_fuel, function, pc)?;
+                                    consume_fuel(account, function, pc)?;
                                 }
                                 frames.last_mut().expect("execution frame").pc = *target;
                                 continue;
@@ -891,6 +1060,7 @@ fn make_execution_frame(
     captures: &[Value],
     return_destination: Option<Register>,
     stack: &mut Vec<Option<Value>>,
+    stack_limit: usize,
 ) -> Result<ExecutionFrame, RuntimeError> {
     if arguments.len() != function.parameter_count() {
         return Err(error(
@@ -921,10 +1091,10 @@ fn make_execution_frame(
             0,
         )
     })?;
-    if end > MAX_STACK_SLOTS {
+    if end > stack_limit {
         return Err(error(
             RuntimeErrorKind::StackLimitExceeded,
-            format!("XL stack exceeds the limit of {MAX_STACK_SLOTS} slots"),
+            format!("XL stack exceeds the limit of {stack_limit} slots"),
             &function,
             0,
         ));
@@ -1134,12 +1304,53 @@ fn sequences_equal(
     Ok(true)
 }
 
-fn consume_fuel(
-    remaining_fuel: &mut usize,
+fn logical_value_bytes(count: usize) -> Result<u64, NativeError> {
+    let count = u64::try_from(count)
+        .map_err(|_| NativeError::allocation_limit("allocation item count overflowed"))?;
+    let value_size = u64::try_from(std::mem::size_of::<Value>())
+        .map_err(|_| NativeError::allocation_limit("Value size overflowed"))?;
+    count
+        .checked_mul(value_size)
+        .ok_or_else(|| NativeError::allocation_limit("allocation size overflowed"))
+}
+
+fn allocation_error(
+    message: impl Into<String>,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> RuntimeError {
+    error(
+        RuntimeErrorKind::AllocationQuotaExceeded,
+        message,
+        function,
+        pc,
+    )
+}
+
+fn charge_allocation(
+    account: &mut QuotaAccount,
+    bytes: u64,
     function: &BytecodeFunction,
     pc: usize,
 ) -> Result<(), RuntimeError> {
-    if *remaining_fuel == 0 {
+    account.charge_allocation(bytes).map_err(|()| {
+        allocation_error(
+            format!(
+                "allocation quota of {} bytes exceeded",
+                account.quota.allocation_bytes
+            ),
+            function,
+            pc,
+        )
+    })
+}
+
+fn consume_fuel(
+    account: &mut QuotaAccount,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> Result<(), RuntimeError> {
+    if account.remaining_fuel == 0 {
         return Err(error(
             RuntimeErrorKind::FuelExhausted,
             "evaluation fuel exhausted",
@@ -1147,7 +1358,7 @@ fn consume_fuel(
             pc,
         ));
     }
-    *remaining_fuel -= 1;
+    account.remaining_fuel -= 1;
     Ok(())
 }
 
@@ -1793,5 +2004,20 @@ mod tests {
         let error = Vm::new().execute(&function, 100).unwrap_err();
         assert_eq!(error.trace.len(), 3);
         assert!(error.trace.iter().all(|frame| frame.function == "same"));
+    }
+
+    #[test]
+    fn dict_allocation_charge_does_not_depend_on_shape_cache_hits() {
+        let function = crate::compile_source("test", "{answer: 42}").unwrap();
+        let mut vm = Vm::new();
+        let mut account = QuotaAccount::new(Quota::new(0, 100, u64::MAX));
+        vm.execute_with_account(&function, &[], &mut account)
+            .unwrap();
+        let first = account.requested_allocation_bytes();
+        vm.execute_with_account(&function, &[], &mut account)
+            .unwrap();
+        let second = account.requested_allocation_bytes() - first;
+        assert_eq!(first, second);
+        assert!(first > 0);
     }
 }

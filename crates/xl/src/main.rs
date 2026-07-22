@@ -3,9 +3,18 @@ use std::env;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
-use xl::{Value, load_module, parse_json};
+use xl::{Engine, EngineConfig, Quota, Value, parse_json};
 
 const EVALUATION_FUEL: usize = 1_000_000;
+const STACK_SLOTS: usize = 65_536;
+const ALLOCATION_BYTES: u64 = 256 * 1024 * 1024;
+
+const fn engine() -> Engine {
+    Engine::new(EngineConfig {
+        module_quota: Quota::new(EVALUATION_FUEL, STACK_SLOTS, ALLOCATION_BYTES),
+        session_quota: Quota::new(EVALUATION_FUEL, STACK_SLOTS, ALLOCATION_BYTES),
+    })
+}
 
 fn main() {
     if let Err(error) = run_cli(env::args().skip(1).collect()) {
@@ -42,11 +51,11 @@ fn run_command(arguments: &[String]) -> Result<(), String> {
         }
         _ => return Err(format!("invalid run arguments\n{}", usage())),
     }
-    let module =
-        load_module(module_path, bindings, EVALUATION_FUEL).map_err(|error| error.to_string())?;
-    let result = module
-        .execute(EVALUATION_FUEL)
+    let engine = engine();
+    let module = engine
+        .load_module(module_path, bindings)
         .map_err(|error| error.to_string())?;
+    let result = engine.execute(&module).map_err(|error| error.to_string())?;
     println!("{result}");
     Ok(())
 }
@@ -55,7 +64,8 @@ fn check_command(arguments: &[String]) -> Result<(), String> {
     let [module_path] = arguments else {
         return Err(format!("check requires one module path\n{}", usage()));
     };
-    let module = load_module(module_path, BTreeMap::new(), EVALUATION_FUEL)
+    let module = engine()
+        .load_module(module_path, BTreeMap::new())
         .map_err(|error| error.to_string())?;
     println!("ok ({} dependencies)", module.dependencies.len());
     Ok(())
@@ -65,7 +75,8 @@ fn types_command(arguments: &[String]) -> Result<(), String> {
     let [module_path] = arguments else {
         return Err(format!("types requires one module path\n{}", usage()));
     };
-    let module = load_module(module_path, BTreeMap::new(), EVALUATION_FUEL)
+    let module = engine()
+        .load_module(module_path, BTreeMap::new())
         .map_err(|error| error.to_string())?;
     for (name, descriptor) in &module.analysis.declared_types {
         println!("type {name} = {}", descriptor.display_name());

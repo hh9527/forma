@@ -1,7 +1,7 @@
 # RFC 0011: Execution Quotas
 
 - Status: Accepted
-- Implementation: Pending
+- Implementation: Complete
 
 ## Summary
 
@@ -316,3 +316,32 @@ and approved against host maxima.
 12. Existing language results are unchanged when quotas are sufficient.
 13. Workspace tests, strict Clippy, formatting, and diff checks pass.
 
+## Implementation result
+
+The public API now provides `Quota`, `EngineConfig`, and `Engine`. The CLI uses
+explicit built-in module and session policies, while compatibility entry points
+that accept only evaluation fuel translate to an otherwise unrestricted quota.
+The VM creates one `QuotaAccount` per execution and threads it through nested
+bytecode frames and the native register window without exposing whether the
+account came from module initialization or a runtime session.
+
+Fuel remains governed by RFC 0010. Stack frame creation, native windows, and
+scratch registers use the quota's peak slot limit capped by the engine hard
+maximum. Runtime string interpolation, arrays, tuples, Dict shapes and values,
+closures, and corresponding native construction methods charge deterministic
+logical payload bytes before constructing the final XL payload. Allocation
+exhaustion has its own runtime kind and preserves normal debug origins and
+traces. Dict tests demonstrate identical charges for interner hits and misses.
+
+All tool expressions in one XL module now share its account. Each imported XL
+module gets a fresh module account, and its tool evaluation and module-value
+evaluation share that account. The root module uses a module account while it
+is loaded and analyzed; executing its compiled entry receives a fresh session
+account on every invocation. Tests independently exhaust module fuel and
+session allocation, and prove that repeated sessions do not share counters.
+
+The existing runtime still represents heap values with `Arc` and initializes
+the root source as a compiled entry rather than publishing a module value in an
+explicit `ModuleRegistry`. The quota ABI does not depend on those transitional
+choices. A shared heap/registry and the later `module value -> exported entry`
+split remain deferred as stated above.

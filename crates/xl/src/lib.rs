@@ -19,13 +19,20 @@ pub use json::{
     parse_json_registered, parse_json_with_provenance,
 };
 pub use lexer::{FrontendError, SourceLocation};
-pub use module::{LoadedModule, ModuleError, load_module};
+pub use module::{
+    Engine, EngineConfig, LoadedModule, ModuleError, load_module, load_module_with_quota,
+};
 pub use source::{
     Diagnostic, Label, Located, Location, Origin, SourceDatabase, SourceId, TextRange, WithOrigin,
 };
-pub use types::{Analysis, TypeDescriptor, analyze_source, analyze_source_with_fuel};
+pub use types::{
+    Analysis, TypeDescriptor, analyze_source, analyze_source_with_fuel, analyze_source_with_quota,
+};
 pub use value::{
     Atom, BuiltinAtom, Callable, Closure, Dict, NativeError, NativeFunction, Prototype, Shape,
     Value,
 };
-pub use vm::{CallContext, RuntimeError, RuntimeErrorKind, RuntimeFrame, ValueKind, ValueRef, Vm};
+pub use vm::{
+    CallContext, Quota, QuotaAccount, RuntimeError, RuntimeErrorKind, RuntimeFrame, ValueKind,
+    ValueRef, Vm,
+};

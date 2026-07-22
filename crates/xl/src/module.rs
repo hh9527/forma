@@ -4,7 +4,7 @@ use crate::json::{Provenance, SourcedValue, parse_json_registered};
 use crate::parser::parse_registered;
 use crate::source::SourceDatabase;
 use crate::types::{Analysis, analyze_program_with_bindings};
-use crate::{BytecodeFunction, Value, Vm};
+use crate::{BytecodeFunction, Quota, QuotaAccount, Value, Vm};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
@@ -50,12 +50,59 @@ impl LoadedModule {
             .execute(&self.function, evaluation_fuel)
             .map_err(|error| error.with_sources(&self.sources))
     }
+
+    pub fn execute_with_quota(&self, quota: Quota) -> Result<Value, crate::RuntimeError> {
+        Vm::new()
+            .execute_with_quota(&self.function, quota)
+            .map_err(|error| error.with_sources(&self.sources))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EngineConfig {
+    pub module_quota: Quota,
+    pub session_quota: Quota,
+}
+
+#[derive(Debug)]
+pub struct Engine {
+    config: EngineConfig,
+}
+
+impl Engine {
+    pub const fn new(config: EngineConfig) -> Self {
+        Self { config }
+    }
+
+    pub const fn config(&self) -> EngineConfig {
+        self.config
+    }
+
+    pub fn load_module(
+        &self,
+        path: impl AsRef<Path>,
+        external_bindings: BTreeMap<String, Value>,
+    ) -> Result<LoadedModule, ModuleError> {
+        load_module_with_quota(path, external_bindings, self.config.module_quota)
+    }
+
+    pub fn execute(&self, module: &LoadedModule) -> Result<Value, crate::RuntimeError> {
+        module.execute_with_quota(self.config.session_quota)
+    }
 }
 
 pub fn load_module(
     path: impl AsRef<Path>,
     external_bindings: BTreeMap<String, Value>,
     evaluation_fuel: usize,
+) -> Result<LoadedModule, ModuleError> {
+    load_module_with_quota(path, external_bindings, Quota::with_fuel(evaluation_fuel))
+}
+
+pub fn load_module_with_quota(
+    path: impl AsRef<Path>,
+    external_bindings: BTreeMap<String, Value>,
+    module_quota: Quota,
 ) -> Result<LoadedModule, ModuleError> {
     let root = canonicalize(path.as_ref())?;
     if root.extension().and_then(|extension| extension.to_str()) != Some("xl") {
@@ -65,7 +112,7 @@ pub fn load_module(
         cache: HashMap::new(),
         visiting: Vec::new(),
         dependencies: BTreeSet::new(),
-        evaluation_fuel,
+        module_quota,
         sources: SourceDatabase::default(),
     };
     loader.load_root(root, external_bindings)
@@ -75,7 +122,7 @@ struct ModuleLoader {
     cache: HashMap<PathBuf, SourcedValue>,
     visiting: Vec<PathBuf>,
     dependencies: BTreeSet<PathBuf>,
-    evaluation_fuel: usize,
+    module_quota: Quota,
     sources: SourceDatabase,
 }
 
@@ -86,7 +133,8 @@ impl ModuleLoader {
         external_bindings: BTreeMap<String, Value>,
     ) -> Result<LoadedModule, ModuleError> {
         self.enter(&path)?;
-        let result = self.compile_xl(&path, external_bindings, true);
+        let mut account = QuotaAccount::new(self.module_quota);
+        let result = self.compile_xl(&path, external_bindings, true, &mut account);
         self.leave(&path);
         let (analysis, function) = result?;
         Ok(LoadedModule {
@@ -121,10 +169,11 @@ impl ModuleLoader {
                 })
             }
             Some("xl") => {
-                self.compile_xl(&path, BTreeMap::new(), false)
+                let mut account = QuotaAccount::new(self.module_quota);
+                self.compile_xl(&path, BTreeMap::new(), false, &mut account)
                     .and_then(|(_, function)| {
                         Vm::new()
-                            .execute(&function, self.evaluation_fuel)
+                            .execute_with_account(&function, &[], &mut account)
                             .map(|value| SourcedValue {
                                 value,
                                 provenance: Provenance::default(),
@@ -154,6 +203,7 @@ impl ModuleLoader {
         path: &Path,
         mut external_bindings: BTreeMap<String, Value>,
         is_root: bool,
+        account: &mut QuotaAccount,
     ) -> Result<(Analysis, BytecodeFunction), ModuleError> {
         let source = read(path)?;
         let source_name = path.display().to_string();
@@ -204,7 +254,7 @@ impl ModuleLoader {
         let analysis = analyze_program_with_bindings(
             &source_name,
             &program,
-            self.evaluation_fuel,
+            account,
             &external_bindings,
             &dynamic_bindings,
             &self.sources,
@@ -459,6 +509,42 @@ mod tests {
         assert_eq!(
             call.execute(0).unwrap_err().kind,
             crate::RuntimeErrorKind::FuelExhausted
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn engine_applies_module_and_session_quotas_at_separate_boundaries() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("typed.xl"),
+            "type First = Array(Int); type Second = Array(Int); 0",
+        )
+        .unwrap();
+        let module_limited = Engine::new(EngineConfig {
+            module_quota: Quota::new(1, 1_000, u64::MAX),
+            session_quota: Quota::new(100, 1_000, u64::MAX),
+        });
+        let error = module_limited
+            .load_module(directory.join("typed.xl"), BTreeMap::new())
+            .unwrap_err();
+        assert!(error.message().contains("fuel"));
+
+        fs::write(directory.join("value.xl"), "[1]").unwrap();
+        let session_limited = Engine::new(EngineConfig {
+            module_quota: Quota::new(100, 1_000, u64::MAX),
+            session_quota: Quota::new(100, 1_000, 0),
+        });
+        let module = session_limited
+            .load_module(directory.join("value.xl"), BTreeMap::new())
+            .unwrap();
+        assert_eq!(
+            session_limited.execute(&module).unwrap_err().kind,
+            crate::RuntimeErrorKind::AllocationQuotaExceeded
+        );
+        assert_eq!(
+            session_limited.execute(&module).unwrap_err().kind,
+            crate::RuntimeErrorKind::AllocationQuotaExceeded
         );
         fs::remove_dir_all(directory).unwrap();
     }
