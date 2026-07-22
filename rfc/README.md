@@ -36,3 +36,5 @@ semantics from an earlier RFC.
 17. Uniform reverse-application pipeline semantics.
 18. Explicit placeholder application and call sections.
 19. Structured debug observation through an explicit core module and host sink.
+20. Derived structural codecs, an explicit Result boundary, and strict JSON
+    output.
