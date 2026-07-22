@@ -31,3 +31,4 @@ semantics from an earlier RFC.
 13. Single-assignment definition slots, recursive definitions, and focused
     function contracts.
 14. Contiguous call windows and proper tail calls.
+15. Core Array functions and VM-managed native continuations.
