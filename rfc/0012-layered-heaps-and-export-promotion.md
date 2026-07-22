@@ -67,7 +67,7 @@ struct VmState {
 }
 
 struct Execution<'vm> {
-    vm: &'vm VmState,
+    background: &'vm WorldHeap,
     current: ExecutionArena,
     stack: ValueStack,
     quota: QuotaAccount,
@@ -78,6 +78,21 @@ Existing persistent objects are read-only to an execution. The publication
 operation is the only component permitted to append a validated result graph to
 the world and install its root in the module registry. XL and native callbacks
 cannot mutate either heap directly.
+
+An execution resolves a mixed graph through both heaps. Its stack and current
+objects may contain local and background references. New objects, text, and
+shapes are allocated only in `current`; a background lookup miss never appends
+to the world:
+
+```text
+current    -> current       allowed
+current    -> background    allowed
+background -> background    allowed
+background -> current       forbidden
+```
+
+The VM and native `CallContext` use this combined read view and a current-only
+allocator. They receive no operation that mutates `background`.
 
 The MVP loader remains sequential. Parallel module evaluation and atomic
 multi-writer publication are deferred; the ownership and publication contract
@@ -103,7 +118,7 @@ enum ExecutionValue {
     Atom(ExecutionInternRef),
     String(ExecutionString),
     Local(LocalHandle),
-    Persistent(PersistentHandle),
+    Background(PersistentHandle),
 }
 ```
 
@@ -141,8 +156,9 @@ Prototype
 ```
 
 An execution object may contain immediate values, local references, and
-persistent references. A persistent object may contain immediate values and
-persistent references only.
+background references. A persistent object may contain immediate values and
+persistent references only. Copying a background value into a register copies
+its tagged value, not its persistent object graph.
 
 Closures retain their prototype and immutable upvalues. Bytecode prototypes
 retain constants, nested prototypes, instructions, and debug-origin tables.
@@ -182,10 +198,34 @@ Dict field names are interned text. Shapes contain sorted intern references and
 are interned per heap. Shape equality and Dict field ordering remain content-
 based and deterministic.
 
-## Export promotion
+## Root copying and export promotion
 
-Publication starts from one or more execution roots and creates a pending,
-unpublished persistent delta:
+The primitive operation copies one or more roots into a target heap:
+
+```rust
+fn copy_roots(
+    to: &mut Heap,
+    from: &HeapView,
+    roots: impl IntoIterator<Item = ValueRef>,
+) -> Result<Vec<OwnedRoot>, CopyError>;
+```
+
+`HeapView` resolves the source execution's current and background references.
+Returned roots and their complete reachable graphs are self-contained in `to`:
+no source-local handle, intern ID, or shape ID remains. A register wrapper may
+select a source stack slot and write the returned root to a target stack, but
+stacks are root carriers rather than part of the collector.
+
+Multiple roots copied in one operation share forwarding tables. When a
+reference already belongs to `to`, it is retained without rescanning; a
+reference owned by any other heap is copied. Module publication is the common
+special case where the source background is the target world, so background
+references are retained and only current objects require copying. Snapshot
+compaction copies roots into a different empty image heap, so all reachable
+source-world objects are copied and renumbered.
+
+Export promotion is `copy_roots` used at a module publication boundary. It
+creates a pending, unpublished persistent delta:
 
 ```rust
 struct PromotionContext {
@@ -195,11 +235,11 @@ struct PromotionContext {
 }
 ```
 
-Promotion follows these rules:
+Root copying follows these rules for normal module promotion:
 
 ```text
 immediate value       copy unchanged
-persistent reference retain unchanged and do not rescan
+target-world reference retain unchanged and do not rescan
 local object          copy once through the object forwarding table
 local intern          resolve bytes and re-intern in the destination
 local shape           promote its field text, then re-intern the shape
@@ -210,8 +250,9 @@ before scanning children. This preserves shared subgraphs and supports future
 recursive closures or other cycles.
 
 Destination intern IDs need not equal source IDs. Existing destination text or
-shapes are reused by content. Promotion output must contain no local handles,
-local intern IDs, or local shape IDs.
+shapes are reused by content. Copy output must contain no reference or
+auxiliary ID owned by a source heap, except references already owned by the
+target.
 
 The collector writes a `PendingHeapDelta`, not the visible world. After the
 complete graph and invariants have been validated, the runtime atomically
@@ -248,6 +289,22 @@ persistent `c` root as background data; neither copies it during its own
 promotion. The world is one logical append-only heap, so a module-heap tree or
 DAG is not exposed by the runtime.
 
+Every `Ready` entry is a root in the same shared `WorldHeap`. The dependency
+API returns only its `PersistentValue`; it never exposes the dependency's old
+execution arena, stack, or local handles. Consequently `a` and `b` observe the
+same `c` root, and all data reachable from it is known to be persistent.
+
+The MVP retains every initialized module export until its `VmState` is dropped:
+
+```text
+world roots = all ModuleCache::Ready values
+```
+
+There is no module unloading, module-level reclamation, or main-root tree
+shaking in the ordinary engine. A later snapshot optimizer may select only
+`main` and other configured entries as roots copied into an image heap. That
+optimization does not change ordinary initialize-once or retention semantics.
+
 The current source loader may continue to reject import cycles. Recursive
 bindings and future cyclic module semantics require a separate RFC.
 
@@ -260,10 +317,12 @@ the registry's initialize-once publication path.
 ## Sessions
 
 A runtime session reads the completed world and allocates into a fresh arena.
-Its ordinary result may be consumed by the host while the session remains
-alive, then discarded with the arena. If an embedding needs an owned result
-beyond that lifetime, it explicitly requests result promotion into a separate
-owned root; sessions never append implicitly to the module world.
+Its ordinary result is normally encoded as JSON, YAML, TOML, JSONL, or text
+while its stack and mixed heap view remain alive, then discarded with the
+arena. Serialization traverses local and background references read-only and
+does not copy the result to the module world. If an embedding needs an owned
+result beyond that lifetime, it explicitly copies the root into a separate
+result heap; sessions never append implicitly to the module world.
 
 The MVP may keep the session arena until return rather than collecting dead
 temporaries online. Allocation quota bounds such growth. A future local,
@@ -320,6 +379,13 @@ the export. Export-root collection is the principal benefit of the design.
 It duplicates diamond dependencies and breaks initialize-once sharing.
 Persistent references remain references to the same world objects.
 
+### Require an execution heap to be self-contained
+
+Copying a large persistent data module into every binding module would defeat
+the capability/data/binding pattern this design is intended to support. Mixed
+execution graphs are allowed; only values crossing a publication or owned-
+result boundary must become self-contained in their target heap.
+
 ### Maintain one sealed heap per module
 
 That creates a heap dependency DAG, complicates lookup and final compaction,
@@ -357,13 +423,14 @@ implementation freedom.
    native code retain register-only access through value views.
 3. Add per-heap deterministic text and shape interning. Represent atoms as
    typed intern references and eligible short strings through the same entries.
-4. Implement export-root promotion with object/text/shape forwarding and an
-   unpublished pending delta.
+4. Implement multi-root heap copying with object/text/shape forwarding,
+   target-owner reuse, and an unpublished pending delta; expose module
+   promotion as a specialized caller.
 5. Make persistent publication reject every local reference before attaching
    the delta.
-6. Introduce initialize-once module registry states and route dependency XL
-   modules through persistent publication; preserve current root-entry
-   compatibility.
+6. Introduce initialize-once module registry states, retain every `Ready` value
+   as a shared world root, and route dependency XL modules through persistent
+   publication; preserve current root-entry compatibility.
 7. Keep public owned values and borrowed views independent of raw handles.
 8. Add collector, diamond dependency, failure atomicity, quota, equality,
    interning, closure-capture, and source-diagnostic tests.
@@ -372,12 +439,14 @@ implementation freedom.
 
 1. Every runtime compound allocation is owned by an execution arena or the
    persistent world; arbitrary runtime `Arc` value graphs are eliminated.
-2. Stack values distinguish local and persistent references internally while
-   native callbacks remain register-only.
+2. Stack and current-heap values may mix local and background references while
+   all background access remains read-only and native callbacks remain
+   register-only.
 3. Persistent objects and registry roots cannot contain local handles, intern
    IDs, or shape IDs.
-4. Export promotion copies only local objects reachable from its roots and
-   preserves existing persistent references without copying them.
+4. `copy_roots` produces target-self-contained roots, shares one forwarding
+   context across all roots, and copies every foreign reference while retaining
+   references already owned by the target.
 5. Shared subgraphs and cycles are preserved through forwarding entries.
 6. String and Atom promotion re-interns text in the target while preserving
    their distinct XL types and content equality.
@@ -385,14 +454,16 @@ implementation freedom.
 8. A failed promotion changes neither persistent objects nor persistent
    interner/shape counts.
 9. The dependency diamond initializes `c` once and gives `a` and `b` the same
-   persistent export.
+   persistent export from `ModuleCache`; neither can observe a private c heap.
 10. Initialization temporaries unreachable from the module export are absent
     from the persistent world.
-11. Session-local allocations and intern entries are discarded without growing
-    the module world unless explicit result promotion is requested.
+11. Session results can be serialized directly through their mixed heap view;
+    local allocations and intern entries are then discarded without growing
+    the module world unless explicit result copying is requested.
 12. Allocation quota behavior remains based on RFC 0011 logical payload sizes
     and does not vary with interner cache hits.
-13. Public APIs expose owned roots and borrowed views, never raw handles.
-14. Existing XL results and diagnostics are unchanged when resources suffice.
-15. Workspace tests, strict Clippy, formatting, and diff checks pass.
-
+13. Every initialized module export remains rooted by the ordinary engine until
+    its `VmState` is dropped; module-level tree shaking is not performed.
+14. Public APIs expose owned roots and borrowed views, never raw handles.
+15. Existing XL results and diagnostics are unchanged when resources suffice.
+16. Workspace tests, strict Clippy, formatting, and diff checks pass.
