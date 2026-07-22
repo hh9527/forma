@@ -151,6 +151,61 @@ pub(crate) enum CoreDebugFunction {
     DbgWith,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreCodecFunction {
+    Decode,
+    Encode,
+}
+
+impl CoreCodecFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Decode => "core:codec.decode",
+            Self::Encode => "core:codec.encode",
+        }
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        2
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreResultFunction {
+    Unwrap,
+}
+
+impl CoreResultFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        "core:result.unwrap"
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        1
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreJsonFunction {
+    Stringify,
+    StringifyPretty,
+    StringifyPrettyValue,
+}
+
+impl CoreJsonFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Stringify => "core:json.stringify",
+            Self::StringifyPretty => "core:json.stringify_pretty",
+            Self::StringifyPrettyValue => "core:json.stringify_pretty.configured",
+        }
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        1
+    }
+}
+
 impl CoreDebugFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
@@ -212,6 +267,9 @@ pub(crate) enum NativeKind {
     CoreArray(CoreArrayFunction),
     CoreDict(CoreDictFunction),
     CoreDebug(CoreDebugFunction),
+    CoreCodec(CoreCodecFunction),
+    CoreResult(CoreResultFunction),
+    CoreJson(CoreJsonFunction),
 }
 
 #[derive(Clone, Copy)]
@@ -256,6 +314,33 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreDebug(function),
+        }
+    }
+
+    pub(crate) const fn core_codec(function: CoreCodecFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreCodec(function),
+        }
+    }
+
+    pub(crate) const fn core_result(function: CoreResultFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreResult(function),
+        }
+    }
+
+    pub(crate) const fn core_json(function: CoreJsonFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreJson(function),
         }
     }
 

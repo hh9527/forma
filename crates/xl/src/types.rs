@@ -811,7 +811,11 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
         }
         "Tuple" | "Union" => {
             let field = if kind == "Tuple" { "items" } else { "variants" };
-            require(&[field, "kind"])?;
+            if kind == "Tuple" {
+                require(&["items", "kind"])?;
+            } else {
+                require(&["kind", "variants"])?;
+            }
             let sequence = value
                 .dict_get(field)
                 .ok_or_else(|| format!("{path}.{field} is missing"))?;

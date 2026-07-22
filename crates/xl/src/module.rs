@@ -1,8 +1,9 @@
 use crate::ast::{BindingKind, Expr, ExprKind, Program, StringPartKind};
 use crate::compiler::compile_program_analyzed_in;
 use crate::core::{
-    ARRAY_MODULE, DEBUG_MODULE, DICT_MODULE, array_module_value, debug_module_value,
-    dict_module_value,
+    ARRAY_MODULE, CODEC_MODULE, DEBUG_MODULE, DICT_MODULE, JSON_MODULE, RESULT_MODULE,
+    array_module_value, codec_module_value, debug_module_value, dict_module_value,
+    json_module_value, result_module_value,
 };
 use crate::heap::{Heap, PersistentValue, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
@@ -425,6 +426,9 @@ impl ModuleLoader {
             ARRAY_MODULE => (ARRAY_MODULE, array_module_value()),
             DICT_MODULE => (DICT_MODULE, dict_module_value()),
             DEBUG_MODULE => (DEBUG_MODULE, debug_module_value()),
+            CODEC_MODULE => (CODEC_MODULE, codec_module_value()),
+            RESULT_MODULE => (RESULT_MODULE, result_module_value()),
+            JSON_MODULE => (JSON_MODULE, json_module_value()),
             _ => return Err(ModuleError::new(format!("unknown core module {name:?}"))),
         };
         let root = publish_value(&mut self.world, &value)
@@ -713,6 +717,115 @@ mod tests {
                 .expect("debug call must consume fuel")
                 .kind,
             crate::RuntimeErrorKind::FuelExhausted
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn derived_codec_normalizes_options_and_pretty_prints_json() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("User.xl"),
+            r#"import codec from "core:codec";
+               import result from "core:result";
+               fn Optional(item) {
+                   Union([Atom('None), Tuple([Atom('Some), item])])
+               }
+               type Type = Struct({v: Optional(String)});
+               let decode = fn(value) { codec.decode(Type, value) };
+               let encode = fn(value) {
+                   codec.encode(Type, value) |> result.unwrap
+               };
+               {Type: Type, decode: decode, encode: encode}"#,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import data from "./abc.json";
+               import User from "./User.xl";
+               import result from "core:result";
+               import json from "core:json";
+               let user = data |> User.decode |> result.unwrap;
+               user |> User.encode |> json.stringify_pretty(2)"#,
+        )
+        .unwrap();
+
+        let expected = [
+            (r#"{"v":"abc"}"#, "{\n  \"v\": \"abc\"\n}"),
+            (r#"{"v":null}"#, "{\n  \"v\": null\n}"),
+            (r#"{}"#, "{\n  \"v\": null\n}"),
+        ];
+        for (source, output) in expected {
+            fs::write(directory.join("abc.json"), source).unwrap();
+            let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000)
+                .unwrap_or_else(|error| panic!("failed to load {source}: {error}"));
+            assert_eq!(
+                module.execute(100_000).unwrap().to_string(),
+                format!("{output:?}")
+            );
+        }
+
+        fs::write(directory.join("abc.json"), r#"{"v":1}"#).unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let failure = module.execute(100_000).unwrap_err();
+        assert!(failure.message.contains("$.v"), "{}", failure.message);
+        assert!(failure.message.contains("String"), "{}", failure.message);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn codec_rejects_struct_shape_errors_and_json_is_strict() {
+        let directory = fixture_dir();
+        let cases = [
+            (
+                r#"import codec from "core:codec";
+                   import result from "core:result";
+                   type T = Struct({name: String});
+                   codec.decode(T, {}) |> result.unwrap"#,
+                "$.name: missing required field",
+            ),
+            (
+                r#"import codec from "core:codec";
+                   import result from "core:result";
+                   type T = Struct({name: String});
+                   codec.decode(T, {name: "Ada", extra: 1}) |> result.unwrap"#,
+                "$.extra: unknown field",
+            ),
+            (
+                r#"import json from "core:json"; json.stringify((1, 2))"#,
+                "JSON cannot encode Tuple",
+            ),
+            (
+                r#"import json from "core:json"; json.stringify_pretty(17)"#,
+                "indent must be between 0 and 16",
+            ),
+        ];
+        for (index, (source, expected)) in cases.into_iter().enumerate() {
+            let path = directory.join(format!("case-{index}.xl"));
+            fs::write(&path, source).unwrap();
+            let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
+            let failure = module.execute(100_000).unwrap_err();
+            assert!(failure.message.contains(expected), "{}", failure.message);
+        }
+
+        let path = directory.join("compact.xl");
+        fs::write(
+            &path,
+            r#"import json from "core:json";
+               json.stringify({z: [1, 'True], a: "line\nnext"})"#,
+        )
+        .unwrap();
+        let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            module.execute(100_000).unwrap().to_string(),
+            r#""{\"a\":\"line\\nnext\",\"z\":[1,true]}""#
+        );
+        assert_eq!(
+            module
+                .execute_with_quota(Quota::new(100_000, 1_000, 1))
+                .unwrap_err()
+                .kind,
+            crate::RuntimeErrorKind::AllocationQuotaExceeded
         );
         fs::remove_dir_all(directory).unwrap();
     }

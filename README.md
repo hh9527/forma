@@ -110,6 +110,23 @@ host observer and return the exact input value. The CLI writes debug events to
 stderr, leaving the final program value on stdout. Source-reflection forms such
 as `file!()`, `line!()`, and `dbg!()` are intentionally deferred.
 
+Derived codecs make the external-data boundary explicit:
+
+```text
+import data from "./abc.json";
+import User from "./User.xl";
+import result from "core:result";
+import json from "core:json";
+
+let user = data |> User.decode |> result.unwrap;
+user |> User.encode |> json.stringify_pretty(2)
+```
+
+See `examples/codec`. `User.decode` normalizes the standard Option metadata
+shape, including missing and null fields, while `User.encode` returns a strict
+JSON-domain value. JSON serialization is deterministic and rejects XL-only
+values that have not crossed an explicit codec.
+
 ## Current limits
 
 The MVP has no effects, package manager, LSP server, traits, HKT, YAML/TOML

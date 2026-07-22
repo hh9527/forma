@@ -2,11 +2,11 @@ use crate::bytecode::{BytecodeFunction, Opcode, Register};
 use crate::heap::{Handle, Heap, HeapView, Object, PersistentValue, RuntimeValue, publish_root};
 use crate::lir::RegisterId;
 use crate::value::{
-    BuiltinAtom, CoreArrayFunction, CoreDebugFunction, CoreDictFunction, Dict, NativeError,
-    NativeKind, NativeLimit, Shape, Value,
+    BuiltinAtom, CoreArrayFunction, CoreCodecFunction, CoreDebugFunction, CoreDictFunction,
+    CoreJsonFunction, CoreResultFunction, Dict, NativeError, NativeKind, NativeLimit, Shape, Value,
 };
 use crate::{Diagnostic, Origin, SourceDatabase};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::fmt::Write;
 use std::sync::{Arc, Weak};
@@ -1846,6 +1846,36 @@ fn drive_vm_action(
                             background,
                             debug_sink,
                         )?,
+                        NativeKind::CoreCodec(operation) => run_core_codec(
+                            operation,
+                            &arguments,
+                            return_target,
+                            &call_function,
+                            call_pc,
+                            current,
+                            background,
+                            account,
+                        )?,
+                        NativeKind::CoreResult(operation) => run_core_result(
+                            operation,
+                            &arguments,
+                            return_target,
+                            &call_function,
+                            call_pc,
+                            current,
+                            background,
+                        )?,
+                        NativeKind::CoreJson(operation) => run_core_json(
+                            operation,
+                            &arguments,
+                            &upvalues,
+                            return_target,
+                            &call_function,
+                            call_pc,
+                            current,
+                            background,
+                            account,
+                        )?,
                     },
                 }
             }
@@ -2455,6 +2485,787 @@ fn core_dict_heap_error(
         function,
         pc,
     )
+}
+
+#[derive(Clone, Debug)]
+enum CodecType {
+    Any,
+    Int,
+    Float,
+    String,
+    Bytes,
+    Atom(String),
+    Array(Box<Self>),
+    Tuple(Vec<Self>),
+    Struct(BTreeMap<String, Self>),
+    Union(Vec<Self>),
+    Function,
+}
+
+#[derive(Clone, Debug)]
+enum CodecNode {
+    Existing(RuntimeValue),
+    Atom(BuiltinAtom),
+    Array(Vec<Self>),
+    Tuple(Vec<Self>),
+    Dict(Vec<(String, Self)>),
+    String(String),
+}
+
+#[derive(Clone, Copy)]
+enum CodecDirection {
+    Decode,
+    Encode,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_core_codec(
+    operation: CoreCodecFunction,
+    arguments: &[RuntimeValue],
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let schema = decode_runtime_type(arguments[0], current, background)
+        .map_err(|message| error(RuntimeErrorKind::TypeMismatch, message, function, pc))?;
+    let direction = match operation {
+        CoreCodecFunction::Decode => CodecDirection::Decode,
+        CoreCodecFunction::Encode => CodecDirection::Encode,
+    };
+    let result = transform_codec(&schema, arguments[1], direction, "$", current, background);
+    let (tag, payload) = match result {
+        Ok(node) => (BuiltinAtom::Ok, node),
+        Err(message) => (BuiltinAtom::Err, CodecNode::String(message)),
+    };
+    let bytes = codec_node_bytes(&payload)
+        .and_then(|bytes| {
+            bytes
+                .checked_add(logical_value_bytes(2)?)
+                .ok_or_else(|| NativeError::allocation_limit("codec Result size overflowed"))
+        })
+        .map_err(|native_error| allocation_error(native_error.message, function, pc))?;
+    charge_allocation(account, bytes, function, pc)?;
+    let payload = materialize_codec_node(payload, current, background);
+    let value = RuntimeValue::Tuple(current.allocate(Object::Tuple(
+        vec![RuntimeValue::BuiltinAtom(tag), payload].into(),
+    )));
+    Ok(VmAction::Return {
+        value,
+        return_target,
+    })
+}
+
+fn decode_runtime_type(
+    value: RuntimeValue,
+    current: &Heap,
+    background: &Heap,
+) -> Result<CodecType, String> {
+    decode_runtime_type_at(value, "Type", current, background)
+}
+
+fn decode_runtime_type_at(
+    value: RuntimeValue,
+    path: &str,
+    current: &Heap,
+    background: &Heap,
+) -> Result<CodecType, String> {
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let RuntimeValue::Dict(handle) = value else {
+        return Err(format!("{path} must be Type metadata"));
+    };
+    let kind = view
+        .dict_get_text(handle, "kind")
+        .map_err(|error| error.to_string())?
+        .and_then(|kind| view.atom_text(kind).ok().flatten())
+        .ok_or_else(|| format!("{path}.kind must be an Atom"))?;
+    Ok(match kind {
+        "Any" => CodecType::Any,
+        "Int" => CodecType::Int,
+        "Float" => CodecType::Float,
+        "String" => CodecType::String,
+        "Bytes" => CodecType::Bytes,
+        "Atom" => {
+            let tag = view
+                .dict_get_text(handle, "tag")
+                .map_err(|error| error.to_string())?
+                .and_then(|tag| view.atom_text(tag).ok().flatten())
+                .ok_or_else(|| format!("{path}.tag must be an Atom"))?;
+            CodecType::Atom(tag.to_owned())
+        }
+        "Array" => {
+            let item = view
+                .dict_get_text(handle, "item")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("{path}.item is missing"))?;
+            CodecType::Array(Box::new(decode_runtime_type_at(
+                item,
+                &format!("{path}.item"),
+                current,
+                background,
+            )?))
+        }
+        "Tuple" | "Union" => {
+            let field = if kind == "Tuple" { "items" } else { "variants" };
+            let items = view
+                .dict_get_text(handle, field)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("{path}.{field} is missing"))?;
+            let RuntimeValue::Array(items) = items else {
+                return Err(format!("{path}.{field} must be an Array"));
+            };
+            let items = view
+                .sequence(items, false)
+                .map_err(|error| error.to_string())?
+                .to_vec();
+            let decoded = items
+                .into_iter()
+                .enumerate()
+                .map(|(index, item)| {
+                    decode_runtime_type_at(
+                        item,
+                        &format!("{path}.{field}[{index}]"),
+                        current,
+                        background,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if kind == "Tuple" {
+                CodecType::Tuple(decoded)
+            } else {
+                CodecType::Union(decoded)
+            }
+        }
+        "Struct" => {
+            let fields = view
+                .dict_get_text(handle, "fields")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("{path}.fields is missing"))?;
+            let RuntimeValue::Dict(fields) = fields else {
+                return Err(format!("{path}.fields must be a Dict"));
+            };
+            let (names, values) = view.dict_parts(fields).map_err(|error| error.to_string())?;
+            let entries = names
+                .iter()
+                .zip(values)
+                .map(|(name, value)| Ok((view.text(*name)?.to_owned(), *value)))
+                .collect::<Result<Vec<_>, crate::heap::HeapError>>()
+                .map_err(|error| error.to_string())?;
+            CodecType::Struct(
+                entries
+                    .into_iter()
+                    .map(|(name, value)| {
+                        let field = decode_runtime_type_at(
+                            value,
+                            &format!("{path}.fields.{name}"),
+                            current,
+                            background,
+                        )?;
+                        Ok((name, field))
+                    })
+                    .collect::<Result<_, String>>()?,
+            )
+        }
+        "Function" => CodecType::Function,
+        other => return Err(format!("{path}.kind has unsupported value '{other}")),
+    })
+}
+
+fn option_item(schema: &CodecType) -> Option<&CodecType> {
+    let CodecType::Union(variants) = schema else {
+        return None;
+    };
+    if variants.len() != 2 {
+        return None;
+    }
+    let none = variants
+        .iter()
+        .any(|variant| matches!(variant, CodecType::Atom(tag) if tag == "None"));
+    let some = variants.iter().find_map(|variant| {
+        let CodecType::Tuple(items) = variant else {
+            return None;
+        };
+        match items.as_slice() {
+            [CodecType::Atom(tag), item] if tag == "Some" => Some(item),
+            _ => None,
+        }
+    });
+    none.then_some(some).flatten()
+}
+
+fn transform_codec(
+    schema: &CodecType,
+    value: RuntimeValue,
+    direction: CodecDirection,
+    path: &str,
+    current: &Heap,
+    background: &Heap,
+) -> Result<CodecNode, String> {
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    match schema {
+        CodecType::Any => Ok(CodecNode::Existing(value)),
+        CodecType::Int if matches!(value, RuntimeValue::Int(_)) => Ok(CodecNode::Existing(value)),
+        CodecType::Float if matches!(value, RuntimeValue::Float(_)) => {
+            Ok(CodecNode::Existing(value))
+        }
+        CodecType::String
+            if view
+                .string_text(value)
+                .map_err(|e| e.to_string())?
+                .is_some() =>
+        {
+            Ok(CodecNode::Existing(value))
+        }
+        CodecType::Atom(expected) => {
+            let actual = view.atom_text(value).map_err(|e| e.to_string())?;
+            if actual == Some(expected) {
+                Ok(CodecNode::Existing(value))
+            } else {
+                Err(format!("{path}: expected '{expected}"))
+            }
+        }
+        CodecType::Array(item) => {
+            let RuntimeValue::Array(handle) = value else {
+                return Err(format!("{path}: expected Array"));
+            };
+            let values = view
+                .sequence(handle, false)
+                .map_err(|error| error.to_string())?
+                .to_vec();
+            values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    transform_codec(
+                        item,
+                        value,
+                        direction,
+                        &format!("{path}[{index}]"),
+                        current,
+                        background,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(CodecNode::Array)
+        }
+        CodecType::Tuple(items) => {
+            let (handle, input_is_tuple) = match (direction, value) {
+                (CodecDirection::Decode, RuntimeValue::Array(handle)) => (handle, false),
+                (CodecDirection::Encode, RuntimeValue::Tuple(handle)) => (handle, true),
+                (CodecDirection::Decode, _) => return Err(format!("{path}: expected Array")),
+                (CodecDirection::Encode, _) => return Err(format!("{path}: expected Tuple")),
+            };
+            let values = view
+                .sequence(handle, input_is_tuple)
+                .map_err(|error| error.to_string())?
+                .to_vec();
+            if values.len() != items.len() {
+                return Err(format!("{path}: expected {} items", items.len()));
+            }
+            let nodes = items
+                .iter()
+                .zip(values)
+                .enumerate()
+                .map(|(index, (item, value))| {
+                    transform_codec(
+                        item,
+                        value,
+                        direction,
+                        &format!("{path}[{index}]"),
+                        current,
+                        background,
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(match direction {
+                CodecDirection::Decode => CodecNode::Tuple(nodes),
+                CodecDirection::Encode => CodecNode::Array(nodes),
+            })
+        }
+        CodecType::Struct(fields) => {
+            transform_codec_struct(fields, value, direction, path, current, background)
+        }
+        CodecType::Union(variants) => {
+            let mut errors = Vec::new();
+            for variant in variants {
+                match transform_codec(variant, value, direction, path, current, background) {
+                    Ok(node) => return Ok(node),
+                    Err(message) => errors.push(message),
+                }
+            }
+            Err(format!(
+                "{path}: value matches no Union variant ({})",
+                errors.join("; ")
+            ))
+        }
+        CodecType::Bytes => Err(format!("{path}: Bytes has no JSON codec")),
+        CodecType::Function => Err(format!("{path}: Function has no JSON codec")),
+        expected => Err(format!("{path}: expected {}", codec_type_name(expected))),
+    }
+}
+
+fn transform_codec_struct(
+    fields: &BTreeMap<String, CodecType>,
+    value: RuntimeValue,
+    direction: CodecDirection,
+    path: &str,
+    current: &Heap,
+    background: &Heap,
+) -> Result<CodecNode, String> {
+    let RuntimeValue::Dict(handle) = value else {
+        return Err(format!("{path}: expected Dict"));
+    };
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let (names, values) = view.dict_parts(handle).map_err(|error| error.to_string())?;
+    let input = names
+        .iter()
+        .zip(values)
+        .map(|(name, value)| Ok((view.text(*name)?.to_owned(), *value)))
+        .collect::<Result<BTreeMap<_, _>, crate::heap::HeapError>>()
+        .map_err(|error| error.to_string())?;
+    if let Some(unknown) = input.keys().find(|name| !fields.contains_key(*name)) {
+        return Err(format!("{path}.{unknown}: unknown field"));
+    }
+    let mut output = Vec::with_capacity(fields.len());
+    for (name, field) in fields {
+        let field_path = format!("{path}.{name}");
+        let node = match (direction, input.get(name).copied(), option_item(field)) {
+            (CodecDirection::Decode, None, Some(_)) => CodecNode::Atom(BuiltinAtom::None),
+            (_, None, _) => return Err(format!("{field_path}: missing required field")),
+            (
+                CodecDirection::Decode,
+                Some(RuntimeValue::BuiltinAtom(BuiltinAtom::None)),
+                Some(_),
+            ) => CodecNode::Atom(BuiltinAtom::None),
+            (CodecDirection::Decode, Some(value), Some(item)) => CodecNode::Tuple(vec![
+                CodecNode::Atom(BuiltinAtom::Some),
+                transform_codec(item, value, direction, &field_path, current, background)?,
+            ]),
+            (
+                CodecDirection::Encode,
+                Some(RuntimeValue::BuiltinAtom(BuiltinAtom::None)),
+                Some(_),
+            ) => CodecNode::Atom(BuiltinAtom::None),
+            (CodecDirection::Encode, Some(RuntimeValue::Tuple(handle)), Some(item)) => {
+                let tuple = view
+                    .sequence(handle, true)
+                    .map_err(|error| error.to_string())?;
+                if tuple.len() != 2
+                    || view.atom_text(tuple[0]).map_err(|e| e.to_string())? != Some("Some")
+                {
+                    return Err(format!("{field_path}: expected Option"));
+                }
+                transform_codec(item, tuple[1], direction, &field_path, current, background)?
+            }
+            (CodecDirection::Encode, Some(_), Some(_)) => {
+                return Err(format!("{field_path}: expected Option"));
+            }
+            (_, Some(value), None) => {
+                transform_codec(field, value, direction, &field_path, current, background)?
+            }
+        };
+        output.push((name.clone(), node));
+    }
+    Ok(CodecNode::Dict(output))
+}
+
+fn codec_type_name(schema: &CodecType) -> &'static str {
+    match schema {
+        CodecType::Any => "Any",
+        CodecType::Int => "Int",
+        CodecType::Float => "Float",
+        CodecType::String => "String",
+        CodecType::Bytes => "Bytes",
+        CodecType::Atom(_) => "Atom",
+        CodecType::Array(_) => "Array",
+        CodecType::Tuple(_) => "Tuple",
+        CodecType::Struct(_) => "Struct",
+        CodecType::Union(_) => "Union",
+        CodecType::Function => "Function",
+    }
+}
+
+fn codec_node_bytes(node: &CodecNode) -> Result<u64, NativeError> {
+    match node {
+        CodecNode::Existing(_) | CodecNode::Atom(_) => Ok(0),
+        CodecNode::String(value) => Ok(value.len() as u64),
+        CodecNode::Array(items) | CodecNode::Tuple(items) => {
+            let own = logical_value_bytes(items.len())?;
+            items.iter().try_fold(own, |total, item| {
+                total
+                    .checked_add(codec_node_bytes(item)?)
+                    .ok_or_else(|| NativeError::allocation_limit("codec output size overflowed"))
+            })
+        }
+        CodecNode::Dict(fields) => {
+            let own = logical_value_bytes(fields.len())?;
+            fields.iter().try_fold(own, |total, (name, value)| {
+                let value_bytes = codec_node_bytes(value)?;
+                total
+                    .checked_add(name.len() as u64)
+                    .and_then(|total| total.checked_add(value_bytes))
+                    .ok_or_else(|| NativeError::allocation_limit("codec output size overflowed"))
+            })
+        }
+    }
+}
+
+fn materialize_codec_node(node: CodecNode, current: &mut Heap, background: &Heap) -> RuntimeValue {
+    match node {
+        CodecNode::Existing(value) => value,
+        CodecNode::Atom(atom) => RuntimeValue::BuiltinAtom(atom),
+        CodecNode::String(value) => current.string(Some(background), &value),
+        CodecNode::Array(items) => {
+            let items = items
+                .into_iter()
+                .map(|item| materialize_codec_node(item, current, background))
+                .collect::<Box<_>>();
+            RuntimeValue::Array(current.allocate(Object::Array(items)))
+        }
+        CodecNode::Tuple(items) => {
+            let items = items
+                .into_iter()
+                .map(|item| materialize_codec_node(item, current, background))
+                .collect::<Box<_>>();
+            RuntimeValue::Tuple(current.allocate(Object::Tuple(items)))
+        }
+        CodecNode::Dict(fields) => {
+            let (fields, values): (Vec<_>, Vec<_>) = fields
+                .into_iter()
+                .map(|(name, value)| {
+                    (
+                        current.intern(&name),
+                        materialize_codec_node(value, current, background),
+                    )
+                })
+                .unzip();
+            let shape = current.intern_shape(fields);
+            RuntimeValue::Dict(current.allocate(Object::Dict {
+                shape,
+                values: values.into(),
+            }))
+        }
+    }
+}
+
+fn run_core_result(
+    _operation: CoreResultFunction,
+    arguments: &[RuntimeValue],
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &Heap,
+    background: &Heap,
+) -> Result<VmAction, RuntimeError> {
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let RuntimeValue::Tuple(handle) = arguments[0] else {
+        return Err(error(
+            RuntimeErrorKind::TypeMismatch,
+            "core:result.unwrap expects ('Ok, value) or ('Err, message)",
+            function,
+            pc,
+        ));
+    };
+    let tuple = view
+        .sequence(handle, true)
+        .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?;
+    if tuple.len() != 2 {
+        return Err(error(
+            RuntimeErrorKind::TypeMismatch,
+            "core:result.unwrap expects a two-element Result",
+            function,
+            pc,
+        ));
+    }
+    match view.atom_text(tuple[0]).map_err(|heap_error| {
+        error(
+            RuntimeErrorKind::InvalidBytecode,
+            heap_error.to_string(),
+            function,
+            pc,
+        )
+    })? {
+        Some("Ok") => Ok(VmAction::Return {
+            value: tuple[1],
+            return_target,
+        }),
+        Some("Err") => {
+            let message = view
+                .string_text(tuple[1])
+                .map_err(|heap_error| {
+                    error(
+                        RuntimeErrorKind::InvalidBytecode,
+                        heap_error.to_string(),
+                        function,
+                        pc,
+                    )
+                })?
+                .ok_or_else(|| {
+                    error(
+                        RuntimeErrorKind::TypeMismatch,
+                        "core:result.unwrap Err payload must be a String",
+                        function,
+                        pc,
+                    )
+                })?;
+            Err(error(RuntimeErrorKind::TypeMismatch, message, function, pc))
+        }
+        _ => Err(error(
+            RuntimeErrorKind::TypeMismatch,
+            "core:result.unwrap expects ('Ok, value) or ('Err, message)",
+            function,
+            pc,
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_core_json(
+    operation: CoreJsonFunction,
+    arguments: &[RuntimeValue],
+    upvalues: &[RuntimeValue],
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    if operation == CoreJsonFunction::StringifyPretty {
+        let RuntimeValue::Int(indent) = arguments[0] else {
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            return Err(runtime_type_error(
+                "Int",
+                &arguments[0],
+                &view,
+                function,
+                pc,
+            ));
+        };
+        if !(0..=16).contains(&indent) {
+            return Err(error(
+                RuntimeErrorKind::TypeMismatch,
+                "core:json.stringify_pretty indent must be between 0 and 16",
+                function,
+                pc,
+            ));
+        }
+        charge_allocation(
+            account,
+            logical_value_bytes(1).map_err(|e| allocation_error(e.message, function, pc))?,
+            function,
+            pc,
+        )?;
+        let closure = RuntimeValue::Func(current.allocate(Object::Closure {
+            identity: Arc::new(()),
+            prototype: crate::heap::RuntimePrototype::Native(crate::NativeFunction::core_json(
+                CoreJsonFunction::StringifyPrettyValue,
+            )),
+            upvalues: vec![RuntimeValue::Int(indent)].into(),
+        }));
+        return Ok(VmAction::Return {
+            value: closure,
+            return_target,
+        });
+    }
+    let indent = match operation {
+        CoreJsonFunction::Stringify => None,
+        CoreJsonFunction::StringifyPrettyValue => match upvalues {
+            [RuntimeValue::Int(indent)] => Some(*indent as usize),
+            _ => {
+                return Err(error(
+                    RuntimeErrorKind::InvalidBytecode,
+                    "configured JSON formatter has invalid upvalues",
+                    function,
+                    pc,
+                ));
+            }
+        },
+        CoreJsonFunction::StringifyPretty => unreachable!(),
+    };
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let mut writer = JsonWriter::new(view, indent);
+    writer
+        .value(arguments[0], 0)
+        .map_err(|message| error(RuntimeErrorKind::TypeMismatch, message, function, pc))?;
+    let output = writer.output;
+    charge_allocation(account, output.len() as u64, function, pc)?;
+    let value = current.string(Some(background), &output);
+    Ok(VmAction::Return {
+        value,
+        return_target,
+    })
+}
+
+struct JsonWriter<'a> {
+    view: HeapView<'a>,
+    indent: Option<usize>,
+    output: String,
+    active: HashSet<Handle>,
+}
+
+impl<'a> JsonWriter<'a> {
+    fn new(view: HeapView<'a>, indent: Option<usize>) -> Self {
+        Self {
+            view,
+            indent,
+            output: String::new(),
+            active: HashSet::new(),
+        }
+    }
+
+    fn value(&mut self, value: RuntimeValue, depth: usize) -> Result<(), String> {
+        match value {
+            RuntimeValue::Int(value) => self.output.push_str(&value.to_string()),
+            RuntimeValue::Float(value) if value.is_finite() => {
+                self.output.push_str(&value.to_string())
+            }
+            RuntimeValue::Float(_) => return Err("JSON cannot encode a non-finite Float".into()),
+            RuntimeValue::BuiltinAtom(BuiltinAtom::None) => self.output.push_str("null"),
+            RuntimeValue::BuiltinAtom(BuiltinAtom::True) => self.output.push_str("true"),
+            RuntimeValue::BuiltinAtom(BuiltinAtom::False) => self.output.push_str("false"),
+            RuntimeValue::ShortString(id) => {
+                self.string(self.view.text(id).map_err(|e| e.to_string())?)
+            }
+            RuntimeValue::String(handle) => {
+                match self.view.object(handle).map_err(|e| e.to_string())? {
+                    Object::String(value) => self.string(value),
+                    _ => return Err("invalid String handle".into()),
+                }
+            }
+            RuntimeValue::Array(handle) => self.array(handle, depth)?,
+            RuntimeValue::Dict(handle) => self.dict(handle, depth)?,
+            RuntimeValue::BuiltinAtom(atom) => {
+                return Err(format!("JSON cannot encode '{}", atom.name()));
+            }
+            RuntimeValue::Atom(id) => {
+                return Err(format!(
+                    "JSON cannot encode '{}",
+                    self.view.text(id).map_err(|e| e.to_string())?
+                ));
+            }
+            RuntimeValue::Bytes(_) => return Err("JSON cannot encode Bytes".into()),
+            RuntimeValue::Tuple(_) => {
+                return Err("JSON cannot encode Tuple; use a codec first".into());
+            }
+            RuntimeValue::Func(_) => return Err("JSON cannot encode Func".into()),
+            RuntimeValue::UpLink(_) => return Err("JSON cannot encode an internal up-link".into()),
+        }
+        Ok(())
+    }
+
+    fn array(&mut self, handle: Handle, depth: usize) -> Result<(), String> {
+        if !self.active.insert(handle) {
+            return Err("JSON cannot encode cyclic values".into());
+        }
+        let values = self
+            .view
+            .sequence(handle, false)
+            .map_err(|e| e.to_string())?
+            .to_vec();
+        self.output.push('[');
+        for (index, value) in values.into_iter().enumerate() {
+            self.separator(index, depth + 1);
+            self.value(value, depth + 1)?;
+        }
+        self.close_collection(values_len_hint(handle, &self.view, false)?, depth, ']');
+        self.active.remove(&handle);
+        Ok(())
+    }
+
+    fn dict(&mut self, handle: Handle, depth: usize) -> Result<(), String> {
+        if !self.active.insert(handle) {
+            return Err("JSON cannot encode cyclic values".into());
+        }
+        let (fields, values) = self.view.dict_parts(handle).map_err(|e| e.to_string())?;
+        let entries = fields
+            .iter()
+            .zip(values)
+            .map(|(field, value)| Ok((self.view.text(*field)?.to_owned(), *value)))
+            .collect::<Result<Vec<_>, crate::heap::HeapError>>()
+            .map_err(|e| e.to_string())?;
+        self.output.push('{');
+        for (index, (field, value)) in entries.iter().enumerate() {
+            self.separator(index, depth + 1);
+            self.string(field);
+            self.output.push(':');
+            if self.indent.is_some() {
+                self.output.push(' ');
+            }
+            self.value(*value, depth + 1)?;
+        }
+        self.close_collection(entries.len(), depth, '}');
+        self.active.remove(&handle);
+        Ok(())
+    }
+
+    fn separator(&mut self, index: usize, depth: usize) {
+        if index > 0 {
+            self.output.push(',');
+        }
+        if let Some(indent) = self.indent {
+            self.output.push('\n');
+            self.output
+                .extend(std::iter::repeat_n(' ', indent.saturating_mul(depth)));
+        }
+    }
+
+    fn close_collection(&mut self, len: usize, depth: usize, close: char) {
+        if len > 0
+            && let Some(indent) = self.indent
+        {
+            self.output.push('\n');
+            self.output
+                .extend(std::iter::repeat_n(' ', indent.saturating_mul(depth)));
+        }
+        self.output.push(close);
+    }
+
+    fn string(&mut self, value: &str) {
+        self.output.push('"');
+        for character in value.chars() {
+            match character {
+                '"' => self.output.push_str("\\\""),
+                '\\' => self.output.push_str("\\\\"),
+                '\u{08}' => self.output.push_str("\\b"),
+                '\u{0c}' => self.output.push_str("\\f"),
+                '\n' => self.output.push_str("\\n"),
+                '\r' => self.output.push_str("\\r"),
+                '\t' => self.output.push_str("\\t"),
+                c if c <= '\u{1f}' => {
+                    let _ = write!(self.output, "\\u{:04x}", c as u32);
+                }
+                c => self.output.push(c),
+            }
+        }
+        self.output.push('"');
+    }
+}
+
+fn values_len_hint(handle: Handle, view: &HeapView<'_>, tuple: bool) -> Result<usize, String> {
+    view.sequence(handle, tuple)
+        .map(|values| values.len())
+        .map_err(|e| e.to_string())
 }
 
 const DEBUG_MAX_DEPTH: usize = 8;
@@ -3844,5 +4655,29 @@ mod tests {
         .unwrap();
         assert!(bytes_text.starts_with("b\"\\x00\\x01"));
         assert!(bytes_text.contains("..."));
+    }
+
+    #[test]
+    fn json_writer_rejects_internal_cycles() {
+        let background = Heap::persistent();
+        let mut current = Heap::local();
+        let cycle = current.reserve();
+        current
+            .initialize(
+                cycle,
+                Object::Array(vec![RuntimeValue::Array(cycle)].into()),
+            )
+            .unwrap();
+        let mut writer = JsonWriter::new(
+            HeapView {
+                current: &current,
+                background: Some(&background),
+            },
+            None,
+        );
+        assert_eq!(
+            writer.value(RuntimeValue::Array(cycle), 0).unwrap_err(),
+            "JSON cannot encode cyclic values"
+        );
     }
 }

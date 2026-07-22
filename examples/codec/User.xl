@@ -1,0 +1,25 @@
+import codec from "core:codec";
+import result from "core:result";
+
+fn Optional(item) {
+    Union([
+        Atom('None),
+        Tuple([Atom('Some), item]),
+    ])
+}
+
+type Type = Struct({v: Optional(String)});
+
+let decode = fn(value) {
+    codec.decode(Type, value)
+};
+
+let encode = fn(value) {
+    codec.encode(Type, value) |> result.unwrap
+};
+
+{
+    Type: Type,
+    decode: decode,
+    encode: encode,
+}

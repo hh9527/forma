@@ -1,0 +1,8 @@
+import data from "./abc.json";
+import User from "./User.xl";
+import result from "core:result";
+import json from "core:json";
+
+let user = data |> User.decode |> result.unwrap;
+let text = user |> User.encode |> json.stringify_pretty(2);
+text

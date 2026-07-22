@@ -1,6 +1,6 @@
 # RFC 0020: Derived Codecs, Result Boundary, and JSON Output
 
-- Status: Accepted for implementation
+- Status: Implemented
 
 ## Summary
 
@@ -245,3 +245,32 @@ application with no argument insertion rule.
    charge all produced XL allocations.
 9. Existing library APIs, module initialization, session quotas, and debug
    observation remain compatible.
+
+## Implementation result
+
+Implemented with three ordinary reserved core modules and VM-managed native
+functions. `core:codec` decodes Type metadata directly through `HeapView` into
+an internal output plan, validates the complete transform, charges its logical
+allocation, and only then materializes the result in the local heap. No legacy
+`Value` export is used. Struct Option fields implement the specified
+present/null/missing normalization and encode canonically back to null or the
+contained JSON-domain value.
+
+`core:result.unwrap` provides the explicit fatal boundary. `core:json` contains
+strict compact and pretty writers that traverse heap handles directly, escape
+JSON strings, reject cycles and XL-only categories, preserve canonical Dict
+order, and charge the resulting XL String. `stringify_pretty` returns a native
+closure whose single Int upvalue stores the indentation width.
+
+The executable `examples/codec` directory contains the Summary flow. Module
+and VM tests cover all three Option inputs, invalid paths, required and unknown
+fields, compact and pretty output, escaping, invalid indentation, non-JSON
+Tuple rejection, internal cycles, and allocation quota failure.
+
+Implementation also corrected an existing canonical-order bug in tool-stage
+Union metadata validation: Union fields are `kind, variants`, not `variants,
+kind`. The bug affected the earlier MVP Optional example and was exposed by the
+new schema module.
+
+As specified, runtime codec errors currently carry logical paths but not JSON
+source spans. Connecting those paths to loader provenance remains deferred.
