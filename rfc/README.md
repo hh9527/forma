@@ -32,3 +32,5 @@ semantics from an earlier RFC.
     function contracts.
 14. Contiguous call windows and proper tail calls.
 15. Core Array functions and VM-managed native continuations.
+16. Core Dict enumeration, construction, and shallow merge functions.
+17. Uniform reverse-application pipeline semantics.

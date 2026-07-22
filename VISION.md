@@ -146,8 +146,8 @@ constraint semantics. Such policies are explicit functions:
 
 ```text
 input
-|> normalize(User)
-|> validate(User)
+|> fn(value) { normalize(User, value) }
+|> fn(value) { validate(User, value) }
 |> encode_json
 ```
 
@@ -161,7 +161,9 @@ The surface syntax is broadly Rust-like, without Rust ownership semantics.
 - Named functions use `fn name(args) { ... }`.
 - Closures use `fn(args) { ... }`, not `|args| { ... }`.
 - `|>` is a left-associative, low-precedence pipeline operator.
-- `value |> f(args)` passes `value` as the first argument to `f`.
+- `value |> f` is exactly equivalent to `f(value)`.
+- Configured pipeline stages use explicit unary closures until partial
+  application is introduced.
 - `if`, `match`, and blocks are expressions.
 - Bindings are immutable.
 
@@ -208,4 +210,3 @@ reimplement ordinary metadata functions in a separate hidden type language.
 Engineering quality for the MVP includes deterministic behavior, source-aware
 diagnostics, resource-bounded tool-stage execution, focused tests, and examples
 that exercise the complete two-stage path.
-

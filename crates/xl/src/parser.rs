@@ -1014,21 +1014,13 @@ impl<'a> Lowerer<'a> {
 }
 
 fn elaborate_pipeline(location: Location, left: Expr, right: Expr) -> Expr {
-    let expression = match &right.value {
-        ExprKind::Call { callee, arguments } => {
-            let mut arguments = arguments.clone();
-            arguments.insert(0, left);
-            ExprKind::Call {
-                callee: callee.clone(),
-                arguments,
-            }
-        }
-        _ => ExprKind::Call {
+    located(
+        ExprKind::Call {
             callee: Box::new(right),
             arguments: vec![left],
         },
-    };
-    located(expression, location)
+        location,
+    )
 }
 
 #[cfg(test)]

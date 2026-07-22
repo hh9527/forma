@@ -1570,9 +1570,17 @@ mod tests {
     }
 
     #[test]
-    fn pipeline_inserts_the_first_argument() {
-        let value = run("let add = fn(a, b) { a + b }; 40 |> add(2)").unwrap();
+    fn pipeline_is_uniform_reverse_application() {
+        let value = run("let add = fn(a) { fn(b) { a + b } }; 40 |> add(2)").unwrap();
         assert!(matches!(value, Value::Int(42)));
+
+        let chained = run("let ops = { increment: fn(value) { value + 1 } }; \
+             40 |> ops.increment |> fn(value) { value + 1 }")
+        .unwrap();
+        assert!(matches!(chained, Value::Int(42)));
+
+        let error = run("let add = fn(a, b) { a + b }; 40 |> add(2)").unwrap_err();
+        assert!(error.to_string().contains("expected 2 arguments, got 1"));
     }
 
     #[test]

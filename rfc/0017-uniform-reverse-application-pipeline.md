@@ -1,6 +1,6 @@
 # RFC 0017: Uniform Reverse-Application Pipeline
 
-- Status: Accepted for implementation
+- Status: Implemented
 
 ## Summary
 
@@ -188,3 +188,16 @@ library and prevent user functions from following the same rules.
 6. Pipeline errors retain useful source positions.
 7. Existing non-pipeline parser, compiler, VM, core-library, and CLI behavior
    remains unchanged.
+
+## Implementation result
+
+Pipeline lowering now always constructs one call whose callee is the complete
+right expression and whose sole argument is the left expression. The previous
+inspection and mutation of right-side call arguments has been removed.
+
+Tests cover a function variable, field access, an explicit closure, chained
+application, and a call expression that returns a function. The former
+first-argument insertion form now produces the same ordinary arity error as
+its explicit nested-call equivalent. Active examples use direct calls or unary
+closures until partial application is implemented; the VM, LIR, and bytecode
+formats required no changes.

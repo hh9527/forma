@@ -52,18 +52,20 @@ let user: User = imported_user;
 validate(User, user)
 ```
 
-`value |> f(arg)` passes `value` as the first argument. The built-in validator
-uses the order `validate(type, value)`, so it is called directly; placeholders
-for non-first pipeline insertion are deferred.
+`value |> f` is exactly equivalent to `f(value)`. Calls on the right retain
+their ordinary meaning, so `value |> factory(arg)` means
+`factory(arg)(value)`. Until partial application is introduced, configured
+pipeline stages use an explicit unary closure.
 
 Array operations are ordinary imported functions:
 
 ```text
 import arrays from "core:array";
 
-[1, 2, 3]
-    |> arrays.map(fn(value) { value + 1 })
-    |> arrays.filter(fn(value) { 2 < value })
+let incremented = arrays.map([1, 2, 3], fn(value) { value + 1 });
+incremented |> fn(values) {
+    arrays.filter(values, fn(value) { 2 < value })
+}
 ```
 
 The initial module exports `length`, `map`, `filter`, `flat_map`, and `fold`.
