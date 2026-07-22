@@ -1,6 +1,6 @@
 # RFC 0018: Explicit Placeholder Application
 
-- Status: Accepted for implementation
+- Status: Implemented
 
 ## Summary
 
@@ -315,3 +315,24 @@ ordinary closure expansion. XL uses the direct syntactic elaboration semantics.
 8. CST reconstruction and tolerant parsing retain all placeholder source text.
 9. Existing calls, closures, pipelines, VM behavior, and CLI tests remain
    unchanged.
+
+## Implementation result
+
+Logos now emits dedicated `SectionLParen`, `Placeholder`, and
+`IndexedPlaceholder` tokens. Lelwel gives ordinary calls and explicit call
+sections separate grammar rules, while retaining bare `_` as the existing
+match wildcard. Lossless CST reconstruction preserves the complete `\(` and
+placeholder source text.
+
+The semantic lowerer validates each section independently, rejects sections
+without holes, mixed modes, index gaps, overflow, ordinary-call holes, and
+reserved placeholder names, then produces only existing located `Closure`,
+`Block`, `Call`, and `Variable` nodes. Generated names contain a source-
+unrepresentable prefix, so they cannot capture or shadow user bindings.
+
+Tests cover bare multi-argument sections, indexed reorder and reuse, nested
+sections, pipelines, free evaluation timing, native and `core:array` calls,
+match-wildcard compatibility, malformed sections, source-positioned
+diagnostics, and lossless CST reconstruction. No AST variant, LIR operation,
+opcode, runtime callable, heap representation, or native ABI change was
+required.

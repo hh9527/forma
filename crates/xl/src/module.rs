@@ -729,6 +729,7 @@ mod tests {
                        arrays.fold([value, value], 0, fn(total, item) { total + item })
                    }),
                    native_callback: arrays.map([Int], Array),
+                   pipelined: values |> arrays.map\(_, fn(value) { value + 20 }),
                }"#,
         )
         .unwrap();
@@ -751,6 +752,7 @@ mod tests {
         assert_eq!(result.get("empty_flat_map").unwrap().to_string(), "[]");
         assert_eq!(result.get("empty_fold").unwrap().to_string(), "42");
         assert_eq!(result.get("nested").unwrap().to_string(), "[2, 4, 6]");
+        assert_eq!(result.get("pipelined").unwrap().to_string(), "[21, 22, 23]");
         let Value::Array(native) = result.get("native_callback").unwrap() else {
             panic!("expected native callback Array")
         };

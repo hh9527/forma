@@ -1,6 +1,6 @@
 token Let='let' Decl='decl' Def='def' Type='type' Fn='fn' If='if' Else='else' Match='match';
 token Import='import' From='from';
-token LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
+token SectionLParen='\\(' LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
 token Comma=',' Colon=':' Semicolon=';' Dot='.';
 token Plus='+' Minus='-' Star='*' Slash='/' Less='<' EqualEqual='==' Equal='=';
 token Arrow='->' FatArrow='=>' Pipe='|>';
@@ -8,7 +8,7 @@ token Int='<integer>' Float='<float>' Bytes='<bytes>';
 token DoubleQuote='"' StringText='<string text>' EscapeSequence='<escape>';
 token UnknownEscapeSequence='<unknown escape>' UnterminatedEscapeSequence='<unterminated escape>';
 token InterpolationStart='<interpolation start>';
-token Atom='<atom>' Identifier='<identifier>';
+token Atom='<atom>' Placeholder='_' IndexedPlaceholder='<indexed placeholder>' Identifier='<identifier>';
 token Whitespace Comment;
 
 skip Whitespace Comment;
@@ -26,6 +26,7 @@ named_function: 'fn' Identifier annotated_parameters ['->' contract] block;
 
 expression:
   expression arguments @call_expr
+| expression section_arguments @section_expr
 | expression '.' Identifier @field_expr
 | '-' expression @unary_expr
 | expression ('*' | '/') expression @binary_expr
@@ -64,11 +65,13 @@ parameters: '(' [Identifier (?1 ',' Identifier)* [',']] ')';
 annotated_parameters: '(' [annotated_parameter (?1 ',' annotated_parameter)* [',']] ')';
 annotated_parameter: Identifier [':' contract];
 arguments: '(' [expression (?1 ',' expression)* [',']] ')';
+section_arguments: '\\(' [argument (?1 ',' argument)* [',']] ')';
+argument: expression | Placeholder | IndexedPlaceholder;
 if_expr: 'if' expression block 'else' block;
 match_expr: 'match' expression '{' match_arm (?1 ',' match_arm)* [','] '}';
 match_arm: pattern '=>' expression;
 pattern:
-  Identifier @identifier_pattern
+  (Identifier | Placeholder) @identifier_pattern
 | Int @int_pattern
 | Float @float_pattern
 | string_literal @string_pattern

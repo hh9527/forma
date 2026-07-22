@@ -146,8 +146,8 @@ constraint semantics. Such policies are explicit functions:
 
 ```text
 input
-|> fn(value) { normalize(User, value) }
-|> fn(value) { validate(User, value) }
+|> normalize\(_, User)
+|> validate\(User, _)
 |> encode_json
 ```
 
@@ -162,8 +162,8 @@ The surface syntax is broadly Rust-like, without Rust ownership semantics.
 - Closures use `fn(args) { ... }`, not `|args| { ... }`.
 - `|>` is a left-associative, low-precedence pipeline operator.
 - `value |> f` is exactly equivalent to `f(value)`.
-- Configured pipeline stages use explicit unary closures until partial
-  application is introduced.
+- `f\(_, value)` constructs an ordinary closure by explicit placeholder
+  application; indexed placeholders such as `_1` can reorder arguments.
 - `if`, `match`, and blocks are expressions.
 - Bindings are immutable.
 

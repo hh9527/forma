@@ -94,6 +94,25 @@ mod tests {
     }
 
     #[test]
+    fn cst_preserves_explicit_call_sections() {
+        let source = r"value |> transform\(_1, 123, _0)";
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("section.xl", source);
+        let parsed = parse(id, source);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+        let tokens = parsed
+            .syntax
+            .children(NodeRef::ROOT)
+            .flat_map(|node| collect_tokens(&parsed.syntax, node))
+            .collect::<Vec<_>>();
+        assert!(tokens.contains(&Token::SectionLParen));
+        assert!(tokens.contains(&Token::IndexedPlaceholder));
+    }
+
+    #[test]
     fn typed_views_query_later_syntax_around_a_missing_value() {
         let source = "let x = ; let y = 2; y";
         let mut sources = crate::source::SourceDatabase::default();

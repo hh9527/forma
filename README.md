@@ -54,18 +54,28 @@ validate(User, user)
 
 `value |> f` is exactly equivalent to `f(value)`. Calls on the right retain
 their ordinary meaning, so `value |> factory(arg)` means
-`factory(arg)(value)`. Until partial application is introduced, configured
-pipeline stages use an explicit unary closure.
+`factory(arg)(value)`. Explicit call sections use `\(` and placeholders to
+construct ordinary closures:
+
+```text
+transform\(_, option)
+// equivalent to fn(value) { transform(value, option) }
+
+reorder\(_1, fixed, _0)
+// equivalent to fn(a, b) { reorder(b, fixed, a) }
+```
+
+Bare placeholders create parameters in source order. Indexed placeholders may
+reorder or reuse parameters and must form a continuous range from `_0`.
 
 Array operations are ordinary imported functions:
 
 ```text
 import arrays from "core:array";
 
-let incremented = arrays.map([1, 2, 3], fn(value) { value + 1 });
-incremented |> fn(values) {
-    arrays.filter(values, fn(value) { 2 < value })
-}
+[1, 2, 3]
+    |> arrays.map\(_, fn(value) { value + 1 })
+    |> arrays.filter\(_, fn(value) { 2 < value })
 ```
 
 The initial module exports `length`, `map`, `filter`, `flat_map`, and `fold`.

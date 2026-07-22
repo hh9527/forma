@@ -32,6 +32,7 @@ pub enum Token {
     Match,
     Import,
     From,
+    SectionLParen,
     LParen,
     RParen,
     LBrace,
@@ -62,6 +63,8 @@ pub enum Token {
     InterpolationStart,
     Bytes,
     Atom,
+    Placeholder,
+    IndexedPlaceholder,
     Identifier,
     Whitespace,
     Comment,
@@ -91,6 +94,8 @@ enum NormalToken {
     Import,
     #[token("from")]
     From,
+    #[token("\\(")]
+    SectionLParen,
     #[token("(")]
     LParen,
     #[token(")")]
@@ -141,6 +146,10 @@ enum NormalToken {
     Bytes,
     #[regex(r"'[A-Za-z_][A-Za-z0-9_]*")]
     Atom,
+    #[token("_", priority = 4)]
+    Placeholder,
+    #[regex(r"_[0-9]+", priority = 4)]
+    IndexedPlaceholder,
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
     Identifier,
     #[regex(r"[ \t\r\n]+")]
@@ -304,6 +313,7 @@ impl From<NormalToken> for Token {
             NormalToken::Match => Self::Match,
             NormalToken::Import => Self::Import,
             NormalToken::From => Self::From,
+            NormalToken::SectionLParen => Self::SectionLParen,
             NormalToken::LParen => Self::LParen,
             NormalToken::RParen => Self::RParen,
             NormalToken::LBrace => Self::LBrace,
@@ -329,6 +339,8 @@ impl From<NormalToken> for Token {
             NormalToken::DoubleQuote => Self::DoubleQuote,
             NormalToken::Bytes => Self::Bytes,
             NormalToken::Atom => Self::Atom,
+            NormalToken::Placeholder => Self::Placeholder,
+            NormalToken::IndexedPlaceholder => Self::IndexedPlaceholder,
             NormalToken::Identifier => Self::Identifier,
             NormalToken::Whitespace => Self::Whitespace,
             NormalToken::Comment => Self::Comment,
@@ -389,6 +401,34 @@ mod tests {
         assert_eq!(spans[quote], 8..9);
         assert_eq!(spans[quote + 1], 9..13);
         assert_eq!(spans[quote + 2], 13..14);
+    }
+
+    #[test]
+    fn recognizes_bare_and_indexed_placeholders_as_dedicated_tokens() {
+        let mut diagnostics = Vec::new();
+        let (tokens, spans) = tokenize(r"f\(_, _1, _0, _name)", &mut diagnostics);
+        assert!(diagnostics.is_empty());
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Identifier,
+                Token::SectionLParen,
+                Token::Placeholder,
+                Token::Comma,
+                Token::Whitespace,
+                Token::IndexedPlaceholder,
+                Token::Comma,
+                Token::Whitespace,
+                Token::IndexedPlaceholder,
+                Token::Comma,
+                Token::Whitespace,
+                Token::Identifier,
+                Token::RParen,
+            ]
+        );
+        assert_eq!(spans[2], 3..4);
+        assert_eq!(spans[5], 6..8);
+        assert_eq!(spans[11], 14..19);
     }
 
     #[test]

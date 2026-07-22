@@ -1584,6 +1584,50 @@ mod tests {
     }
 
     #[test]
+    fn call_sections_elaborate_to_ordinary_closures() {
+        let bare = run("let combine = fn(a, middle, b) { a + middle + b }; \
+             let section = combine\\(_, 10, _); section(1, 2)")
+        .unwrap();
+        assert!(matches!(bare, Value::Int(13)));
+
+        let reordered = run("let subtract = fn(a, b) { a - b }; \
+             let flipped = subtract\\(_1, _0); flipped(2, 10)")
+        .unwrap();
+        assert!(matches!(reordered, Value::Int(8)));
+
+        let repeated =
+            run("let add = fn(a, b) { a + b }; let twice = add\\(_0, _0); twice(21)").unwrap();
+        assert!(matches!(repeated, Value::Int(42)));
+
+        let nested = run("let increment = fn(value) { value + 1 }; \
+             let apply = fn(callback, value) { callback(value) }; \
+             apply(increment\\(_), 41)")
+        .unwrap();
+        assert!(matches!(nested, Value::Int(42)));
+
+        let piped = run("let add = fn(a, b) { a + b }; \
+             40 |> add\\(_, 2)")
+        .unwrap();
+        assert!(matches!(piped, Value::Int(42)));
+
+        let native = run("let array_type = Array\\(_); array_type(Int)").unwrap();
+        let Value::Dict(metadata) = native else {
+            panic!("expected Array metadata")
+        };
+        assert_eq!(metadata.get("kind").unwrap().to_string(), "'Array");
+
+        let reevaluated = run("let second = fn(first, second) { second }; \
+             let make = fn() { fn(value) { value } }; \
+             let section = second\\(_, make()); \
+             section(1) == section(2)")
+        .unwrap();
+        assert!(matches!(
+            reevaluated,
+            Value::Atom(Atom::Builtin(BuiltinAtom::False))
+        ));
+    }
+
+    #[test]
     fn interpolates_strings_ints_and_atoms() {
         let value = run(
             r#"let name = "Ada"; let count = 3; let state = 'Ok; "hi, \{name} count=\{count} state=\{state}""#,

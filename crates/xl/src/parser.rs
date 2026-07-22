@@ -79,6 +79,19 @@ struct Lowerer<'a> {
     cst: &'a CstData,
 }
 
+enum CallArgument {
+    Expression(Expr),
+    Bare {
+        node: NodeRef,
+        location: Location,
+    },
+    Indexed {
+        node: NodeRef,
+        index: usize,
+        location: Location,
+    },
+}
+
 impl<'a> Lowerer<'a> {
     fn new(source_id: SourceId, source: &'a str, cst: &'a CstData) -> Self {
         Self {
@@ -534,6 +547,18 @@ impl<'a> Lowerer<'a> {
                     arguments,
                 }
             }
+            Rule::SectionExpr => {
+                let callee_node = self
+                    .children(node)
+                    .find(|child| self.is_expression(*child))
+                    .ok_or_else(|| self.error(node, "call section has no callee"))?;
+                let callee = self.expression(callee_node)?;
+                let arguments_node = rules
+                    .iter()
+                    .find(|child| self.rule(**child) == Some(Rule::SectionArguments))
+                    .copied();
+                return self.section_expression(callee, arguments_node, node, location);
+            }
             Rule::PipelineExpr => {
                 let values = self.expression_children(node)?;
                 return Ok(elaborate_pipeline(
@@ -604,7 +629,7 @@ impl<'a> Lowerer<'a> {
     fn pattern(&self, node: NodeRef) -> Result<Pattern, Diagnostic> {
         if let Node::Token(token, _) = self.cst.get(node) {
             let inner = match token {
-                Token::Identifier => {
+                Token::Identifier | Token::Placeholder => {
                     let name = self.text(node);
                     if name == "_" {
                         PatternKind::Wildcard
@@ -640,8 +665,11 @@ impl<'a> Lowerer<'a> {
         }
         let inner = match rule {
             Rule::IdentifierPattern => {
-                let name = self.text(self.first_token(node, Token::Identifier)?);
-                if name == "_" {
+                if self
+                    .token_children(node, Token::Placeholder)
+                    .next()
+                    .is_some()
+                {
                     PatternKind::Wildcard
                 } else {
                     PatternKind::Binding(
@@ -792,6 +820,50 @@ impl<'a> Lowerer<'a> {
             .map(|child| self.expression(child))
             .collect()
     }
+
+    fn section_expression(
+        &self,
+        callee: Expr,
+        arguments_node: Option<NodeRef>,
+        section_node: NodeRef,
+        location: Location,
+    ) -> Result<Expr, Diagnostic> {
+        let Some(arguments_node) = arguments_node else {
+            return Err(self.error(section_node, "call section has no arguments"));
+        };
+        let arguments = self
+            .rule_children(arguments_node)
+            .filter(|child| self.rule(*child) == Some(Rule::Argument))
+            .map(|argument| self.call_argument(argument))
+            .collect::<Result<Vec<_>, _>>()?;
+        elaborate_call_section(callee, arguments, section_node, location)
+            .map_err(|(node, message)| self.error(node, message))
+    }
+
+    fn call_argument(&self, node: NodeRef) -> Result<CallArgument, Diagnostic> {
+        if let Some(placeholder) = self.token_children(node, Token::Placeholder).next() {
+            return Ok(CallArgument::Bare {
+                node: placeholder,
+                location: self.location(placeholder),
+            });
+        }
+        if let Some(placeholder) = self.token_children(node, Token::IndexedPlaceholder).next() {
+            let text = self.text(placeholder);
+            let index = text[1..].parse::<usize>().map_err(|_| {
+                self.error(placeholder, "placeholder index exceeds the supported range")
+            })?;
+            return Ok(CallArgument::Indexed {
+                node: placeholder,
+                index,
+                location: self.location(placeholder),
+            });
+        }
+        let expression = self
+            .children(node)
+            .find(|child| self.is_expression(*child))
+            .ok_or_else(|| self.error(node, "call argument has no expression"))?;
+        Ok(CallArgument::Expression(self.expression(expression)?))
+    }
     fn is_expression(&self, node: NodeRef) -> bool {
         matches!(
             self.cst.get(node),
@@ -821,6 +893,7 @@ impl<'a> Lowerer<'a> {
                     | Rule::MatchExpr
                     | Rule::ParenExpr
                     | Rule::PipelineExpr
+                    | Rule::SectionExpr
                     | Rule::StringExpr
                     | Rule::UnaryExpr
                     | Rule::VariableExpr
@@ -831,7 +904,7 @@ impl<'a> Lowerer<'a> {
         matches!(
             self.cst.get(node),
             Node::Token(
-                Token::Identifier | Token::Int | Token::Float | Token::Atom,
+                Token::Identifier | Token::Placeholder | Token::Int | Token::Float | Token::Atom,
                 _
             )
         ) || matches!(
@@ -1023,6 +1096,143 @@ fn elaborate_pipeline(location: Location, left: Expr, right: Expr) -> Expr {
     )
 }
 
+const MAX_PLACEHOLDER_PARAMETERS: usize = u16::MAX as usize;
+
+fn elaborate_call_section(
+    callee: Expr,
+    arguments: Vec<CallArgument>,
+    section_node: NodeRef,
+    location: Location,
+) -> Result<Expr, (NodeRef, String)> {
+    let first_bare = arguments.iter().find_map(|argument| match argument {
+        CallArgument::Bare { node, .. } => Some(*node),
+        _ => None,
+    });
+    let first_indexed = arguments.iter().find_map(|argument| match argument {
+        CallArgument::Indexed { node, .. } => Some(*node),
+        _ => None,
+    });
+    if first_bare.is_some()
+        && let Some(indexed) = first_indexed
+    {
+        return Err((
+            indexed,
+            "cannot mix '_' and indexed placeholders in one call".into(),
+        ));
+    }
+
+    if first_bare.is_none() && first_indexed.is_none() {
+        return Err((
+            section_node,
+            "call section requires at least one placeholder".into(),
+        ));
+    }
+
+    let mut parameter_locations = Vec::new();
+    if first_bare.is_some() {
+        parameter_locations.extend(arguments.iter().filter_map(|argument| match argument {
+            CallArgument::Bare { location, .. } => Some(Some(*location)),
+            _ => None,
+        }));
+    } else {
+        let max = arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                CallArgument::Indexed { index, .. } => Some(*index),
+                _ => None,
+            })
+            .max()
+            .expect("indexed placeholder exists");
+        if max >= MAX_PLACEHOLDER_PARAMETERS {
+            let node = arguments
+                .iter()
+                .find_map(|argument| match argument {
+                    CallArgument::Indexed { node, index, .. } if *index == max => Some(*node),
+                    _ => None,
+                })
+                .expect("maximum placeholder has a node");
+            return Err((
+                node,
+                format!(
+                    "placeholder index exceeds the limit of {} parameters",
+                    MAX_PLACEHOLDER_PARAMETERS
+                ),
+            ));
+        }
+        parameter_locations.resize(max + 1, None);
+        for argument in &arguments {
+            if let CallArgument::Indexed {
+                index, location, ..
+            } = argument
+            {
+                parameter_locations[*index].get_or_insert(*location);
+            }
+        }
+        if let Some(missing) = parameter_locations.iter().position(Option::is_none) {
+            return Err((
+                first_indexed.expect("indexed placeholder exists"),
+                format!("indexed placeholders are missing _{missing}"),
+            ));
+        }
+    }
+
+    let parameter_locations = parameter_locations
+        .into_iter()
+        .map(|location| location.expect("placeholder location was assigned"))
+        .collect::<Vec<_>>();
+    let parameters = parameter_locations
+        .iter()
+        .enumerate()
+        .map(|(index, location)| located(placeholder_parameter(index), *location))
+        .collect::<Vec<_>>();
+    let mut next_bare = 0usize;
+    let arguments = arguments
+        .into_iter()
+        .map(|argument| match argument {
+            CallArgument::Expression(expression) => expression,
+            CallArgument::Bare { location, .. } => {
+                let index = next_bare;
+                next_bare += 1;
+                placeholder_variable(index, location)
+            }
+            CallArgument::Indexed {
+                index, location, ..
+            } => placeholder_variable(index, location),
+        })
+        .collect();
+    let call = located(
+        ExprKind::Call {
+            callee: Box::new(callee),
+            arguments,
+        },
+        location,
+    );
+    Ok(located(
+        ExprKind::Closure {
+            parameters,
+            body: located(
+                BlockKind {
+                    bindings: Vec::new(),
+                    result: Box::new(call),
+                },
+                location,
+            ),
+        },
+        location,
+    ))
+}
+
+fn placeholder_parameter(index: usize) -> String {
+    format!("\0xl_placeholder_{index}")
+}
+
+fn placeholder_variable(index: usize, location: Location) -> Expr {
+    located(
+        ExprKind::Variable(located(placeholder_parameter(index), location)),
+        location,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1053,6 +1263,73 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn diagnoses_invalid_placeholder_sections_with_source_locations() {
+        let cases = [
+            (
+                "mixed.xl",
+                "let f = fn(a, b) { a }; f\\(_0, _)",
+                "cannot mix",
+            ),
+            (
+                "gap.xl",
+                "let f = fn(a, b) { a }; f\\(_2, _0)",
+                "missing _1",
+            ),
+            (
+                "limit.xl",
+                "let f = fn(a) { a }; f\\(_65535)",
+                "exceeds the limit",
+            ),
+            (
+                "overflow.xl",
+                "let f = fn(a) { a }; f\\(_999999999999999999999999999999999)",
+                "exceeds the supported range",
+            ),
+        ];
+        for (name, source, expected) in cases {
+            let mut sources = SourceDatabase::default();
+            let id = sources.add(name, source);
+            let parsed = parse_registered(&sources, id);
+            assert!(parsed.program.is_none(), "{name} unexpectedly lowered");
+            let rendered = parsed
+                .diagnostics
+                .iter()
+                .map(|diagnostic| sources.render(diagnostic))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(rendered.contains(expected), "{rendered}");
+            assert!(rendered.contains(&format!("{name}:1:")), "{rendered}");
+        }
+
+        let mut sources = SourceDatabase::default();
+        let id = sources.add("outside.xl", "let value = _; value");
+        let parsed = parse_registered(&sources, id);
+        assert!(parsed.program.is_none());
+        assert!(!parsed.diagnostics.is_empty());
+
+        for (name, source) in [
+            ("ordinary-call.xl", "let f = fn(a, b) { a }; f(_, 1)"),
+            ("reserved-name.xl", "let _0 = 1; _0"),
+        ] {
+            let mut sources = SourceDatabase::default();
+            let id = sources.add(name, source);
+            let parsed = parse_registered(&sources, id);
+            assert!(parsed.program.is_none(), "{name} unexpectedly lowered");
+            assert!(!parsed.diagnostics.is_empty(), "{name} has no diagnostic");
+        }
+
+        let mut sources = SourceDatabase::default();
+        let id = sources.add("empty-section.xl", "let f = fn(a) { a }; f\\(1)");
+        let parsed = parse_registered(&sources, id);
+        assert!(parsed.program.is_none());
+        assert!(
+            parsed.diagnostics[0]
+                .message
+                .contains("requires at least one placeholder")
+        );
     }
 
     #[test]
