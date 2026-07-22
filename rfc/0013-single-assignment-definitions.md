@@ -34,10 +34,11 @@ def walk = make_walker(fn(value) {
 {walk}
 ```
 
-A module remains a function evaluated once. `decl` allocates its relocation
-slots, `def` fills them, successful completion seals them, and the module result
-is published into the persistent world. Missing definitions are therefore a
-module-evaluation contract failure rather than a separate linker language.
+A module remains a function evaluated once. `decl` allocates its runtime
+up-links, `def` fills them, successful completion seals them, and the module
+result is published into the persistent world. Missing definitions are
+therefore a module-evaluation contract failure rather than a separate linker
+language.
 
 ## Surface syntax
 
@@ -204,8 +205,11 @@ correct implementation. Frozen private up-links preserve XL immutability.
 ## Deferred work
 
 - `let rec` syntax sugar;
-- up-link elimination, `CallUpLink` fusion, and recursive-group closure-handle
-  optimization;
+- symbolic definition references and link-time relocation. The current model
+  retains real cyclic up-link graphs in the execution and persistent heaps; it
+  does not construct an acyclic symbolic graph for a linker to tie;
+- persistent up-link elimination, `CallUpLink` fusion, and recursive-group
+  closure-handle optimization;
 - module interface files generated from declarations;
 - polymorphic and recursive function contracts;
 - dynamic checks on selected public function-call boundaries;
