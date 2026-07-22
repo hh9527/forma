@@ -1,6 +1,6 @@
 use crate::ast::{BindingKind, Expr, ExprKind, Program, StringPartKind};
 use crate::compiler::compile_program_analyzed_in;
-use crate::heap::{Heap, RuntimeValue, promote_roots};
+use crate::heap::{Heap, PersistentValue, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
 use crate::parser::parse_registered;
 use crate::source::SourceDatabase;
@@ -49,7 +49,7 @@ pub struct LoadedModule {
 
 struct ModuleRuntime {
     world: Heap,
-    externals: HashMap<String, RuntimeValue>,
+    externals: HashMap<String, PersistentValue>,
 }
 
 impl fmt::Debug for ModuleRuntime {
@@ -76,12 +76,9 @@ impl LoadedModule {
                 &mut account,
             )
             .map_err(|error| error.with_sources(&self.sources))?;
-        crate::heap::HeapView {
-            current: &arena.heap,
-            background: Some(&self.runtime.world),
-        }
-        .export_value(arena.root)
-        .map_err(|error| crate::RuntimeError::from_heap_error(&self.function, error))
+        arena
+            .export(&self.runtime.world)
+            .map_err(|error| crate::RuntimeError::from_heap_error(&self.function, error))
     }
 }
 
@@ -137,7 +134,7 @@ pub fn load_module_with_quota(
     }
     let mut loader = ModuleLoader {
         cache: HashMap::new(),
-        world: Heap::new(0),
+        world: Heap::persistent(),
         visiting: Vec::new(),
         dependencies: BTreeSet::new(),
         module_quota,
@@ -158,7 +155,7 @@ struct ModuleLoader {
 #[derive(Clone)]
 enum ModuleState {
     Ready {
-        root: RuntimeValue,
+        root: PersistentValue,
         sourced: SourcedValue,
     },
 }
@@ -174,7 +171,7 @@ impl ModuleLoader {
         let result = self.compile_xl(&path, external_bindings, true, &mut account);
         self.leave(&path);
         let (analysis, function, externals) = result?;
-        let world = std::mem::replace(&mut self.world, Heap::new(0));
+        let world = std::mem::replace(&mut self.world, Heap::persistent());
         Ok(LoadedModule {
             path,
             dependencies: self.dependencies.iter().cloned().collect(),
@@ -192,7 +189,7 @@ impl ModuleLoader {
             return Ok(sourced.clone());
         }
         self.enter(&path)?;
-        let result: Result<(SourcedValue, RuntimeValue), ModuleError> =
+        let result: Result<(SourcedValue, PersistentValue), ModuleError> =
             match path.extension().and_then(|extension| extension.to_str()) {
                 Some("json") => {
                     let source = read(&path)?;
@@ -211,12 +208,8 @@ impl ModuleLoader {
                             )
                         })
                         .and_then(|sourced| {
-                            let mut current = Heap::new(1);
-                            let root = current
-                                .import_value(Some(&self.world), &sourced.value)
+                            let root = publish_value(&mut self.world, &sourced.value)
                                 .map_err(|error| ModuleError::new(error.to_string()))?;
-                            let root = promote_roots(&mut self.world, &current, &[root])
-                                .map_err(|error| ModuleError::new(error.to_string()))?[0];
                             Ok((sourced, root))
                         })
                 }
@@ -235,14 +228,12 @@ impl ModuleLoader {
                                 .map_err(|error| {
                                     ModuleError::new(error.with_sources(&self.sources).to_string())
                                 })?;
-                            let value = crate::heap::HeapView {
-                                current: &arena.heap,
-                                background: Some(&self.world),
-                            }
-                            .export_value(arena.root)
-                            .map_err(|error| ModuleError::new(error.to_string()))?;
-                            let root = promote_roots(&mut self.world, &arena.heap, &[arena.root])
-                                .map_err(|error| ModuleError::new(error.to_string()))?[0];
+                            let value = arena
+                                .export(&self.world)
+                                .map_err(|error| ModuleError::new(error.to_string()))?;
+                            let root = arena
+                                .publish(&mut self.world)
+                                .map_err(|error| ModuleError::new(error.to_string()))?;
                             Ok((
                                 SourcedValue {
                                     value,
@@ -279,7 +270,7 @@ impl ModuleLoader {
         mut external_bindings: BTreeMap<String, Value>,
         is_root: bool,
         account: &mut QuotaAccount,
-    ) -> Result<(Analysis, BytecodeFunction, HashMap<String, RuntimeValue>), ModuleError> {
+    ) -> Result<(Analysis, BytecodeFunction, HashMap<String, PersistentValue>), ModuleError> {
         let source = read(path)?;
         let source_name = path.display().to_string();
         let source_id = self.sources.add(source_name.clone(), source);
@@ -638,7 +629,7 @@ mod tests {
         fs::write(&data, r#"{"name":"Ada","items":[1,2,3]}"#).unwrap();
         let mut loader = ModuleLoader {
             cache: HashMap::new(),
-            world: Heap::new(0),
+            world: Heap::persistent(),
             visiting: Vec::new(),
             dependencies: BTreeSet::new(),
             module_quota: Quota::with_fuel(100_000),
@@ -672,7 +663,7 @@ mod tests {
         fs::write(&b, r#"import c from "./c.xl"; c"#).unwrap();
         let mut loader = ModuleLoader {
             cache: HashMap::new(),
-            world: Heap::new(0),
+            world: Heap::persistent(),
             visiting: Vec::new(),
             dependencies: BTreeSet::new(),
             module_quota: Quota::with_fuel(100_000),

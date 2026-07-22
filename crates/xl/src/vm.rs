@@ -1,5 +1,5 @@
 use crate::bytecode::{BytecodeFunction, Opcode, Register};
-use crate::heap::{Handle, Heap, HeapView, Object, RuntimeValue};
+use crate::heap::{Handle, Heap, HeapView, Object, PersistentValue, RuntimeValue, publish_root};
 use crate::lir::RegisterId;
 use crate::value::{BuiltinAtom, Dict, NativeError, NativeLimit, Shape, Value};
 use crate::{Diagnostic, Origin, SourceDatabase};
@@ -556,8 +556,25 @@ struct ExecutionFrame {
 }
 
 pub(crate) struct ExecutionArena {
-    pub(crate) heap: Heap,
-    pub(crate) root: RuntimeValue,
+    heap: Heap,
+    root: RuntimeValue,
+}
+
+impl ExecutionArena {
+    pub(crate) fn export(&self, world: &Heap) -> Result<Value, crate::heap::HeapError> {
+        HeapView {
+            current: &self.heap,
+            background: Some(world),
+        }
+        .export_value(self.root)
+    }
+
+    pub(crate) fn publish(
+        self,
+        world: &mut Heap,
+    ) -> Result<PersistentValue, crate::heap::HeapError> {
+        publish_root(world, &self.heap, self.root)
+    }
 }
 
 impl Vm {
@@ -620,7 +637,7 @@ impl Vm {
         arguments: &[Value],
         account: &mut QuotaAccount,
     ) -> Result<Value, RuntimeError> {
-        let background = Heap::new(0);
+        let background = Heap::persistent();
         let arena = self.execute_frame(
             &background,
             &HashMap::new(),
@@ -629,12 +646,7 @@ impl Vm {
             &[],
             account,
         )?;
-        HeapView {
-            current: &arena.heap,
-            background: Some(&background),
-        }
-        .export_value(arena.root)
-        .map_err(|heap_error| {
+        arena.export(&background).map_err(|heap_error| {
             error(
                 RuntimeErrorKind::InvalidBytecode,
                 heap_error.to_string(),
@@ -647,7 +659,7 @@ impl Vm {
     pub(crate) fn execute_in_background(
         &mut self,
         background: &Heap,
-        externals: &HashMap<String, RuntimeValue>,
+        externals: &HashMap<String, PersistentValue>,
         function: &BytecodeFunction,
         arguments: &[Value],
         account: &mut QuotaAccount,
@@ -659,7 +671,7 @@ impl Vm {
     fn execute_frame(
         &mut self,
         background: &Heap,
-        externals: &HashMap<String, RuntimeValue>,
+        externals: &HashMap<String, PersistentValue>,
         function: &BytecodeFunction,
         arguments: &[Value],
         captures: &[Value],
@@ -673,7 +685,7 @@ impl Vm {
                 .name("xl-bytecode-linker".into())
                 .stack_size(16 * 1024 * 1024)
                 .spawn_scoped(scope, || {
-                    let mut current = Heap::new(1);
+                    let mut current = Heap::local();
                     let prototype =
                         current.link_bytecode_resolved(Some(background), function, externals)?;
                     Ok::<_, crate::heap::HeapError>((current, prototype))

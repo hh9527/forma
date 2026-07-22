@@ -9,23 +9,26 @@ use std::sync::{Arc, Mutex};
 const SHORT_TEXT_BYTES: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct HeapId(u32);
+pub(crate) enum Storage {
+    Local,
+    Persistent,
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct Handle {
-    heap: HeapId,
+    storage: Storage,
     slot: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct InternId {
-    heap: HeapId,
+    storage: Storage,
     slot: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct ShapeId {
-    heap: HeapId,
+    storage: Storage,
     slot: u32,
 }
 
@@ -42,6 +45,15 @@ pub(crate) enum RuntimeValue {
     Tuple(Handle),
     Dict(Handle),
     Func(Handle),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct PersistentValue(RuntimeValue);
+
+impl PersistentValue {
+    pub(crate) const fn runtime(self) -> RuntimeValue {
+        self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -116,7 +128,7 @@ impl TextTable {
 }
 
 pub(crate) struct Heap {
-    id: HeapId,
+    storage: Storage,
     objects: Vec<Object>,
     text: TextTable,
     shapes: Vec<Box<[InternId]>>,
@@ -125,15 +137,23 @@ pub(crate) struct Heap {
 }
 
 impl Heap {
-    pub(crate) fn new(id: u32) -> Self {
+    fn new(storage: Storage) -> Self {
         Self {
-            id: HeapId(id),
+            storage,
             objects: Vec::new(),
             text: TextTable::default(),
             shapes: Vec::new(),
             shape_slots: HashMap::new(),
             exported_shapes: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub(crate) fn local() -> Self {
+        Self::new(Storage::Local)
+    }
+
+    pub(crate) fn persistent() -> Self {
+        Self::new(Storage::Persistent)
     }
 
     #[cfg(test)]
@@ -147,7 +167,7 @@ impl Heap {
 
     pub(crate) fn allocate(&mut self, object: Object) -> Handle {
         let handle = Handle {
-            heap: self.id,
+            storage: self.storage,
             slot: self.objects.len() as u32,
         };
         self.objects.push(object);
@@ -168,7 +188,7 @@ impl Heap {
     }
 
     pub(crate) fn object(&self, handle: Handle) -> Result<&Object, HeapError> {
-        if handle.heap != self.id {
+        if handle.storage != self.storage {
             return Err(HeapError("object handle belongs to another heap"));
         }
         self.objects
@@ -177,7 +197,7 @@ impl Heap {
     }
 
     fn object_mut(&mut self, handle: Handle) -> Result<&mut Object, HeapError> {
-        if handle.heap != self.id {
+        if handle.storage != self.storage {
             return Err(HeapError("object handle belongs to another heap"));
         }
         self.objects
@@ -187,20 +207,20 @@ impl Heap {
 
     pub(crate) fn intern(&mut self, text: &str) -> InternId {
         InternId {
-            heap: self.id,
+            storage: self.storage,
             slot: self.text.insert(text),
         }
     }
 
     pub(crate) fn find_text(&self, text: &str) -> Option<InternId> {
         self.text.find(text).map(|slot| InternId {
-            heap: self.id,
+            storage: self.storage,
             slot,
         })
     }
 
     pub(crate) fn resolve_text(&self, id: InternId) -> Result<&str, HeapError> {
-        if id.heap != self.id {
+        if id.storage != self.storage {
             return Err(HeapError("intern ID belongs to another heap"));
         }
         self.text
@@ -233,7 +253,7 @@ impl Heap {
     pub(crate) fn intern_shape(&mut self, fields: Vec<InternId>) -> ShapeId {
         if let Some(slot) = self.shape_slots.get(&fields) {
             return ShapeId {
-                heap: self.id,
+                storage: self.storage,
                 slot: *slot,
             };
         }
@@ -241,13 +261,13 @@ impl Heap {
         self.shapes.push(fields.clone().into());
         self.shape_slots.insert(fields, slot);
         ShapeId {
-            heap: self.id,
+            storage: self.storage,
             slot,
         }
     }
 
     fn shape(&self, id: ShapeId) -> Result<&[InternId], HeapError> {
-        if id.heap != self.id {
+        if id.storage != self.storage {
             return Err(HeapError("shape ID belongs to another heap"));
         }
         self.shapes
@@ -269,7 +289,7 @@ impl Heap {
         &mut self,
         background: Option<&Heap>,
         value: &Value,
-        externals: &HashMap<String, RuntimeValue>,
+        externals: &HashMap<String, PersistentValue>,
         prototypes: &mut HashMap<*const BytecodeFunction, Handle>,
     ) -> Result<RuntimeValue, HeapError> {
         Ok(match value {
@@ -338,7 +358,7 @@ impl Heap {
         &mut self,
         background: Option<&Heap>,
         function: &BytecodeFunction,
-        externals: &HashMap<String, RuntimeValue>,
+        externals: &HashMap<String, PersistentValue>,
     ) -> Result<Handle, HeapError> {
         self.link_bytecode_with(background, function, externals, &mut HashMap::new())
     }
@@ -347,7 +367,7 @@ impl Heap {
         &mut self,
         background: Option<&Heap>,
         function: &BytecodeFunction,
-        externals: &HashMap<String, RuntimeValue>,
+        externals: &HashMap<String, PersistentValue>,
         forwarded: &mut HashMap<*const BytecodeFunction, Handle>,
     ) -> Result<Handle, HeapError> {
         let identity = std::ptr::from_ref(function);
@@ -366,6 +386,7 @@ impl Heap {
                     return externals
                         .get(key)
                         .copied()
+                        .map(PersistentValue::runtime)
                         .ok_or(HeapError("external value link is unresolved"));
                 }
                 self.import_value_with(background, value, externals, forwarded)
@@ -417,25 +438,27 @@ type BytecodeLinks<'a> = (
 );
 
 impl<'a> HeapView<'a> {
-    fn heap(&self, id: HeapId) -> Result<&'a Heap, HeapError> {
-        if self.current.id == id {
-            return Ok(self.current);
+    fn heap(&self, storage: Storage) -> Result<&'a Heap, HeapError> {
+        match storage {
+            Storage::Local if self.current.storage == Storage::Local => Ok(self.current),
+            Storage::Persistent => self
+                .background
+                .filter(|heap| heap.storage == Storage::Persistent)
+                .ok_or(HeapError("persistent value has no background world")),
+            _ => Err(HeapError("value refers to a heap outside its view")),
         }
-        self.background
-            .filter(|heap| heap.id == id)
-            .ok_or(HeapError("value refers to a heap outside its view"))
     }
 
     pub(crate) fn object(&self, handle: Handle) -> Result<&'a Object, HeapError> {
-        self.heap(handle.heap)?.object(handle)
+        self.heap(handle.storage)?.object(handle)
     }
 
     pub(crate) fn text(&self, id: InternId) -> Result<&'a str, HeapError> {
-        self.heap(id.heap)?.resolve_text(id)
+        self.heap(id.storage)?.resolve_text(id)
     }
 
     fn shape(&self, id: ShapeId) -> Result<&'a [InternId], HeapError> {
-        self.heap(id.heap)?.shape(id)
+        self.heap(id.storage)?.shape(id)
     }
 
     pub(crate) fn bytecode(&self, handle: Handle) -> Result<BytecodeLinks<'a>, HeapError> {
@@ -584,7 +607,7 @@ impl<'a> HeapView<'a> {
                     .map(|value| self.export_value_with(*value, visiting))
                     .collect::<Result<Vec<_>, _>>()?;
                 visiting.remove(&handle);
-                let owner = self.heap(shape.heap)?;
+                let owner = self.heap(shape.storage)?;
                 let mut exported_shapes = owner
                     .exported_shapes
                     .lock()
@@ -678,7 +701,7 @@ impl<'a> HeapView<'a> {
     }
 }
 
-pub(crate) fn copy_roots(
+fn copy_roots(
     target: &mut Heap,
     source: HeapView<'_>,
     roots: &[RuntimeValue],
@@ -693,23 +716,38 @@ pub(crate) fn copy_roots(
     Ok(roots)
 }
 
-pub(crate) fn promote_roots(
+pub(crate) fn publish_root(
     target: &mut Heap,
     current: &Heap,
-    roots: &[RuntimeValue],
-) -> Result<Vec<RuntimeValue>, HeapError> {
-    copy_roots(
+    root: RuntimeValue,
+) -> Result<PersistentValue, HeapError> {
+    if target.storage != Storage::Persistent || current.storage != Storage::Local {
+        return Err(HeapError(
+            "publication requires a local arena and persistent world",
+        ));
+    }
+    let roots = copy_roots(
         target,
         HeapView {
             current,
             background: None,
         },
-        roots,
-    )
+        &[root],
+    )?;
+    Ok(PersistentValue(roots[0]))
+}
+
+pub(crate) fn publish_value(
+    target: &mut Heap,
+    value: &Value,
+) -> Result<PersistentValue, HeapError> {
+    let mut local = Heap::local();
+    let root = local.import_value(Some(target), value)?;
+    publish_root(target, &local, root)
 }
 
 struct PendingCopy {
-    target_id: HeapId,
+    target_storage: Storage,
     object_base: u32,
     objects: Vec<Object>,
     text_base: u32,
@@ -724,7 +762,7 @@ struct PendingCopy {
 impl PendingCopy {
     fn new(target: &Heap) -> Self {
         Self {
-            target_id: target.id,
+            target_storage: target.storage,
             object_base: target.objects.len() as u32,
             objects: Vec::new(),
             text_base: target.text.values.len() as u32,
@@ -776,7 +814,7 @@ impl PendingCopy {
         source: &HeapView<'_>,
         handle: Handle,
     ) -> Result<Handle, HeapError> {
-        if handle.heap == self.target_id {
+        if handle.storage == self.target_storage {
             target.object(handle)?;
             return Ok(handle);
         }
@@ -788,7 +826,7 @@ impl PendingCopy {
             return Err(HeapError("cannot copy an uninitialized object"));
         }
         let copied = Handle {
-            heap: self.target_id,
+            storage: self.target_storage,
             slot: self.object_base + self.objects.len() as u32,
         };
         self.objects_forwarded.insert(handle, copied);
@@ -867,7 +905,7 @@ impl PendingCopy {
         source: &HeapView<'_>,
         id: InternId,
     ) -> Result<InternId, HeapError> {
-        if id.heap == self.target_id {
+        if id.storage == self.target_storage {
             target.resolve_text(id)?;
             return Ok(id);
         }
@@ -879,13 +917,13 @@ impl PendingCopy {
             id
         } else if let Some(slot) = self.text.find(text) {
             InternId {
-                heap: self.target_id,
+                storage: self.target_storage,
                 slot: self.text_base + slot,
             }
         } else {
             let local_slot = self.text.insert(text);
             InternId {
-                heap: self.target_id,
+                storage: self.target_storage,
                 slot: self.text_base + local_slot,
             }
         };
@@ -899,7 +937,7 @@ impl PendingCopy {
         source: &HeapView<'_>,
         id: ShapeId,
     ) -> Result<ShapeId, HeapError> {
-        if id.heap == self.target_id {
+        if id.storage == self.target_storage {
             target.shape(id)?;
             return Ok(id);
         }
@@ -913,17 +951,17 @@ impl PendingCopy {
             .collect::<Result<Vec<_>, _>>()?;
         let copied = if let Some(slot) = target.shape_slots.get(&fields) {
             ShapeId {
-                heap: self.target_id,
+                storage: self.target_storage,
                 slot: *slot,
             }
         } else if let Some(index) = self.shapes.iter().position(|shape| **shape == fields) {
             ShapeId {
-                heap: self.target_id,
+                storage: self.target_storage,
                 slot: self.shape_base + index as u32,
             }
         } else {
             let copied = ShapeId {
-                heap: self.target_id,
+                storage: self.target_storage,
                 slot: self.shape_base + self.shapes.len() as u32,
             };
             self.shapes.push(fields.into());
@@ -937,7 +975,7 @@ impl PendingCopy {
         if self
             .objects
             .iter()
-            .any(|object| object_contains_foreign(object, self.target_id))
+            .any(|object| object_contains_foreign(object, self.target_storage))
         {
             return Err(HeapError(
                 "copied object graph is not target-self-contained",
@@ -957,27 +995,27 @@ impl PendingCopy {
     }
 }
 
-fn value_contains_foreign(value: RuntimeValue, target: HeapId) -> bool {
+fn value_contains_foreign(value: RuntimeValue, target: Storage) -> bool {
     match value {
-        RuntimeValue::Atom(id) | RuntimeValue::ShortString(id) => id.heap != target,
+        RuntimeValue::Atom(id) | RuntimeValue::ShortString(id) => id.storage != target,
         RuntimeValue::String(handle)
         | RuntimeValue::Bytes(handle)
         | RuntimeValue::Array(handle)
         | RuntimeValue::Tuple(handle)
         | RuntimeValue::Dict(handle)
-        | RuntimeValue::Func(handle) => handle.heap != target,
+        | RuntimeValue::Func(handle) => handle.storage != target,
         RuntimeValue::Int(_) | RuntimeValue::Float(_) | RuntimeValue::BuiltinAtom(_) => false,
     }
 }
 
-fn object_contains_foreign(object: &Object, target: HeapId) -> bool {
+fn object_contains_foreign(object: &Object, target: Storage) -> bool {
     match object {
         Object::Reserved => true,
         Object::Array(values) | Object::Tuple(values) => values
             .iter()
             .any(|value| value_contains_foreign(*value, target)),
         Object::Dict { shape, values } => {
-            shape.heap != target
+            shape.storage != target
                 || values
                     .iter()
                     .any(|value| value_contains_foreign(*value, target))
@@ -994,9 +1032,9 @@ fn object_contains_foreign(object: &Object, target: HeapId) -> bool {
             values
                 .iter()
                 .any(|value| value_contains_foreign(*value, target))
-                || text.iter().any(|id| id.heap != target)
+                || text.iter().any(|id| id.storage != target)
                 || prototypes.iter().any(|prototype| match prototype {
-                    RuntimePrototype::Bytecode(handle) => handle.heap != target,
+                    RuntimePrototype::Bytecode(handle) => handle.storage != target,
                     RuntimePrototype::Native(_) => false,
                 })
         }
@@ -1022,9 +1060,9 @@ mod tests {
 
     #[test]
     fn copy_is_reachable_reinterning_and_target_self_contained() {
-        let mut world = Heap::new(1);
+        let mut world = Heap::persistent();
         let shared = world.allocate(Object::Bytes(vec![9].into()));
-        let mut current = Heap::new(2);
+        let mut current = Heap::local();
         let atom = current.atom(Some(&world), "Custom");
         let string = current.string(Some(&world), "Custom");
         let root = current.allocate(Object::Tuple(
@@ -1053,14 +1091,14 @@ mod tests {
         assert!(
             !values
                 .iter()
-                .any(|value| value_contains_foreign(*value, world.id))
+                .any(|value| value_contains_foreign(*value, Storage::Persistent))
         );
     }
 
     #[test]
     fn copy_preserves_cycles_and_failure_is_atomic() {
-        let mut world = Heap::new(1);
-        let mut current = Heap::new(2);
+        let mut world = Heap::persistent();
+        let mut current = Heap::local();
         let cycle = current.reserve();
         current
             .initialize(
@@ -1081,7 +1119,7 @@ mod tests {
 
         let before = world.counts();
         let invalid = RuntimeValue::Array(Handle {
-            heap: current.id,
+            storage: Storage::Local,
             slot: 99,
         });
         assert!(
@@ -1100,8 +1138,8 @@ mod tests {
 
     #[test]
     fn multiple_roots_share_one_forwarding_context() {
-        let mut target = Heap::new(1);
-        let mut source = Heap::new(2);
+        let mut target = Heap::persistent();
+        let mut source = Heap::local();
         let shared = source.allocate(Object::Bytes(vec![1].into()));
         let roots = copy_roots(
             &mut target,
@@ -1123,9 +1161,9 @@ mod tests {
             Arc::clone(&function),
             vec![Value::string("capture")],
         )));
-        let mut current = Heap::new(2);
+        let mut current = Heap::local();
         let root = current.import_value(None, &closure).unwrap();
-        let mut world = Heap::new(1);
+        let mut world = Heap::persistent();
         let copied = copy_roots(
             &mut world,
             HeapView {
@@ -1135,9 +1173,10 @@ mod tests {
             &[root],
         )
         .unwrap()[0];
+        let local = Heap::local();
         let exported = HeapView {
-            current: &world,
-            background: None,
+            current: &local,
+            background: Some(&world),
         }
         .export_value(copied)
         .unwrap();
@@ -1164,7 +1203,7 @@ mod tests {
             ]
             .into(),
         );
-        let mut heap = Heap::new(1);
+        let mut heap = Heap::local();
         let runtime = heap.import_value(None, &value).unwrap();
         let exported = HeapView {
             current: &heap,
