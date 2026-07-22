@@ -1,7 +1,10 @@
 #![allow(dead_code)]
 
-use crate::{BuiltinAtom, BytecodeFunction, NativeFunction};
-use std::collections::HashMap;
+use crate::{
+    Atom, BuiltinAtom, BytecodeFunction, Closure, Dict, FuncByteCode, NativeFunction, Prototype,
+    Shape, Value,
+};
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -45,7 +48,7 @@ pub(crate) enum RuntimeValue {
 
 #[derive(Clone, Debug)]
 pub(crate) enum RuntimePrototype {
-    Bytecode(Arc<BytecodeFunction>),
+    Bytecode(Handle),
     Native(NativeFunction),
 }
 
@@ -63,6 +66,12 @@ pub(crate) enum Object {
     Closure {
         prototype: RuntimePrototype,
         upvalues: Box<[RuntimeValue]>,
+    },
+    ByteCodeProto {
+        code: Arc<FuncByteCode>,
+        values: Box<[RuntimeValue]>,
+        text: Box<[InternId]>,
+        prototypes: Box<[RuntimePrototype]>,
     },
 }
 
@@ -243,6 +252,140 @@ impl Heap {
             .map(AsRef::as_ref)
             .ok_or(HeapError("shape ID is out of bounds"))
     }
+
+    pub(crate) fn import_value(
+        &mut self,
+        background: Option<&Heap>,
+        value: &Value,
+    ) -> Result<RuntimeValue, HeapError> {
+        let mut prototypes = HashMap::new();
+        self.import_value_with(background, value, &mut prototypes)
+    }
+
+    fn import_value_with(
+        &mut self,
+        background: Option<&Heap>,
+        value: &Value,
+        prototypes: &mut HashMap<*const BytecodeFunction, Handle>,
+    ) -> Result<RuntimeValue, HeapError> {
+        Ok(match value {
+            Value::Int(value) => RuntimeValue::Int(*value),
+            Value::Float(value) => RuntimeValue::Float(*value),
+            Value::String(value) => self.string(background, value),
+            Value::Bytes(value) => {
+                RuntimeValue::Bytes(self.allocate(Object::Bytes(value.as_ref().into())))
+            }
+            Value::Atom(Atom::Builtin(atom)) => RuntimeValue::BuiltinAtom(*atom),
+            Value::Atom(Atom::Named(name)) => self.atom(background, name),
+            Value::Array(values) => {
+                let values = values
+                    .iter()
+                    .map(|value| self.import_value_with(background, value, prototypes))
+                    .collect::<Result<Box<[_]>, _>>()?;
+                RuntimeValue::Array(self.allocate(Object::Array(values)))
+            }
+            Value::Tuple(values) => {
+                let values = values
+                    .iter()
+                    .map(|value| self.import_value_with(background, value, prototypes))
+                    .collect::<Result<Box<[_]>, _>>()?;
+                RuntimeValue::Tuple(self.allocate(Object::Tuple(values)))
+            }
+            Value::Dict(dict) => {
+                let fields = dict
+                    .shape()
+                    .fields()
+                    .iter()
+                    .map(|field| {
+                        Ok(background
+                            .and_then(|heap| heap.find_text(field))
+                            .unwrap_or_else(|| self.intern(field)))
+                    })
+                    .collect::<Result<Vec<_>, HeapError>>()?;
+                let shape = self.intern_shape(fields);
+                let values = dict
+                    .values()
+                    .iter()
+                    .map(|value| self.import_value_with(background, value, prototypes))
+                    .collect::<Result<Box<[_]>, _>>()?;
+                RuntimeValue::Dict(self.allocate(Object::Dict { shape, values }))
+            }
+            Value::Func(closure) => {
+                let prototype = match closure.prototype() {
+                    Prototype::Bytecode(function) => RuntimePrototype::Bytecode(
+                        self.link_bytecode_with(background, function, prototypes)?,
+                    ),
+                    Prototype::Native(function) => RuntimePrototype::Native(*function),
+                };
+                let upvalues = closure
+                    .upvalues()
+                    .iter()
+                    .map(|value| self.import_value_with(background, value, prototypes))
+                    .collect::<Result<Box<[_]>, _>>()?;
+                RuntimeValue::Func(self.allocate(Object::Closure {
+                    prototype,
+                    upvalues,
+                }))
+            }
+        })
+    }
+
+    pub(crate) fn link_bytecode(
+        &mut self,
+        background: Option<&Heap>,
+        function: &BytecodeFunction,
+    ) -> Result<Handle, HeapError> {
+        self.link_bytecode_with(background, function, &mut HashMap::new())
+    }
+
+    fn link_bytecode_with(
+        &mut self,
+        background: Option<&Heap>,
+        function: &BytecodeFunction,
+        forwarded: &mut HashMap<*const BytecodeFunction, Handle>,
+    ) -> Result<Handle, HeapError> {
+        let identity = std::ptr::from_ref(function);
+        if let Some(handle) = forwarded.get(&identity) {
+            return Ok(*handle);
+        }
+        let handle = self.reserve();
+        forwarded.insert(identity, handle);
+        let values = function
+            .links()
+            .values()
+            .iter()
+            .map(|value| self.import_value_with(background, value, forwarded))
+            .collect::<Result<Box<[_]>, _>>()?;
+        let text = function
+            .links()
+            .text()
+            .iter()
+            .map(|text| {
+                background
+                    .and_then(|heap| heap.find_text(text))
+                    .unwrap_or_else(|| self.intern(text))
+            })
+            .collect::<Box<[_]>>();
+        let prototypes = function
+            .links()
+            .prototypes()
+            .iter()
+            .map(|prototype| {
+                self.link_bytecode_with(background, prototype, forwarded)
+                    .map(RuntimePrototype::Bytecode)
+            })
+            .collect::<Result<Box<[_]>, _>>()?;
+        self.initialize(
+            handle,
+            Object::ByteCodeProto {
+                code: Arc::clone(function.code()),
+                values,
+                text,
+                prototypes,
+            },
+        )?;
+        Ok(handle)
+    }
 }
 
 pub(crate) struct HeapView<'a> {
@@ -270,6 +413,154 @@ impl HeapView<'_> {
 
     fn shape(&self, id: ShapeId) -> Result<&[InternId], HeapError> {
         self.heap(id.heap)?.shape(id)
+    }
+
+    pub(crate) fn export_value(&self, value: RuntimeValue) -> Result<Value, HeapError> {
+        self.export_value_with(value, &mut HashSet::new())
+    }
+
+    fn export_value_with(
+        &self,
+        value: RuntimeValue,
+        visiting: &mut HashSet<Handle>,
+    ) -> Result<Value, HeapError> {
+        Ok(match value {
+            RuntimeValue::Int(value) => Value::Int(value),
+            RuntimeValue::Float(value) => Value::Float(value),
+            RuntimeValue::BuiltinAtom(atom) => Value::Atom(Atom::builtin(atom)),
+            RuntimeValue::Atom(id) => Value::atom(self.text(id)?),
+            RuntimeValue::ShortString(id) => Value::string(self.text(id)?),
+            RuntimeValue::String(handle) => {
+                let Object::String(value) = self.enter_object(handle, visiting)? else {
+                    return Err(HeapError("String handle refers to another object kind"));
+                };
+                let value = Value::string(value.as_ref());
+                visiting.remove(&handle);
+                value
+            }
+            RuntimeValue::Bytes(handle) => {
+                let Object::Bytes(value) = self.enter_object(handle, visiting)? else {
+                    return Err(HeapError("Bytes handle refers to another object kind"));
+                };
+                let value = Value::Bytes(value.clone().into());
+                visiting.remove(&handle);
+                value
+            }
+            RuntimeValue::Array(handle) | RuntimeValue::Tuple(handle) => {
+                let tuple = matches!(value, RuntimeValue::Tuple(_));
+                let object = self.enter_object(handle, visiting)?;
+                let values = match object {
+                    Object::Array(values) if !tuple => values,
+                    Object::Tuple(values) if tuple => values,
+                    _ => return Err(HeapError("sequence handle refers to another object kind")),
+                };
+                let values = values
+                    .iter()
+                    .map(|value| self.export_value_with(*value, visiting))
+                    .collect::<Result<Vec<_>, _>>()?;
+                visiting.remove(&handle);
+                if tuple {
+                    Value::Tuple(values.into())
+                } else {
+                    Value::Array(values.into())
+                }
+            }
+            RuntimeValue::Dict(handle) => {
+                let Object::Dict { shape, values } = self.enter_object(handle, visiting)? else {
+                    return Err(HeapError("Dict handle refers to another object kind"));
+                };
+                let fields = self
+                    .shape(*shape)?
+                    .iter()
+                    .map(|field| self.text(*field).map(str::to_owned))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let values = values
+                    .iter()
+                    .map(|value| self.export_value_with(*value, visiting))
+                    .collect::<Result<Vec<_>, _>>()?;
+                visiting.remove(&handle);
+                Value::Dict(Dict::new(
+                    Arc::new(Shape::from_sorted_fields(fields)),
+                    values,
+                ))
+            }
+            RuntimeValue::Func(handle) => {
+                let Object::Closure {
+                    prototype,
+                    upvalues,
+                } = self.enter_object(handle, visiting)?
+                else {
+                    return Err(HeapError("Func handle refers to another object kind"));
+                };
+                let prototype = self.export_prototype(prototype, visiting)?;
+                let upvalues = upvalues
+                    .iter()
+                    .map(|value| self.export_value_with(*value, visiting))
+                    .collect::<Result<Vec<_>, _>>()?;
+                visiting.remove(&handle);
+                Value::Func(Arc::new(Closure::from_parts(prototype, upvalues)))
+            }
+        })
+    }
+
+    fn enter_object<'a>(
+        &'a self,
+        handle: Handle,
+        visiting: &mut HashSet<Handle>,
+    ) -> Result<&'a Object, HeapError> {
+        if !visiting.insert(handle) {
+            return Err(HeapError(
+                "cyclic heap values cannot cross the legacy Value boundary",
+            ));
+        }
+        self.object(handle)
+    }
+
+    fn export_prototype(
+        &self,
+        prototype: &RuntimePrototype,
+        visiting: &mut HashSet<Handle>,
+    ) -> Result<Prototype, HeapError> {
+        Ok(match prototype {
+            RuntimePrototype::Native(function) => Prototype::Native(*function),
+            RuntimePrototype::Bytecode(handle) => {
+                let Object::ByteCodeProto {
+                    code,
+                    values,
+                    text,
+                    prototypes,
+                } = self.enter_object(*handle, visiting)?
+                else {
+                    return Err(HeapError("prototype handle refers to another object kind"));
+                };
+                let values = values
+                    .iter()
+                    .map(|value| self.export_value_with(*value, visiting))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let text = text
+                    .iter()
+                    .map(|id| self.text(*id).map(Arc::<str>::from))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let prototypes = prototypes
+                    .iter()
+                    .map(
+                        |prototype| match self.export_prototype(prototype, visiting)? {
+                            Prototype::Bytecode(function) => Ok(function),
+                            Prototype::Native(_) => Err(HeapError(
+                                "native prototype cannot occupy a bytecode link slot",
+                            )),
+                        },
+                    )
+                    .collect::<Result<Vec<_>, _>>()?;
+                visiting.remove(handle);
+                Prototype::Bytecode(Arc::new(BytecodeFunction::from_linked_parts(
+                    Arc::clone(code),
+                    values,
+                    text,
+                    prototypes,
+                )))
+            }
+        })
     }
 }
 
@@ -404,14 +695,40 @@ impl PendingCopy {
                 prototype,
                 upvalues,
             } => Object::Closure {
-                prototype: match prototype {
-                    RuntimePrototype::Bytecode(function) => {
-                        RuntimePrototype::Bytecode(Arc::new(function.relink()))
-                    }
-                    RuntimePrototype::Native(function) => RuntimePrototype::Native(*function),
-                },
+                prototype: self.copy_prototype(target, source, prototype)?,
                 upvalues: copy_values(self, upvalues)?,
             },
+            Object::ByteCodeProto {
+                code,
+                values,
+                text,
+                prototypes,
+            } => Object::ByteCodeProto {
+                code: Arc::clone(code),
+                values: copy_values(self, values)?,
+                text: text
+                    .iter()
+                    .map(|id| self.copy_text(target, source, *id))
+                    .collect::<Result<Box<[_]>, _>>()?,
+                prototypes: prototypes
+                    .iter()
+                    .map(|prototype| self.copy_prototype(target, source, prototype))
+                    .collect::<Result<Box<[_]>, _>>()?,
+            },
+        })
+    }
+
+    fn copy_prototype(
+        &mut self,
+        target: &Heap,
+        source: &HeapView<'_>,
+        prototype: &RuntimePrototype,
+    ) -> Result<RuntimePrototype, HeapError> {
+        Ok(match prototype {
+            RuntimePrototype::Bytecode(handle) => {
+                RuntimePrototype::Bytecode(self.copy_object(target, source, *handle)?)
+            }
+            RuntimePrototype::Native(function) => RuntimePrototype::Native(*function),
         })
     }
 
@@ -539,6 +856,21 @@ fn object_contains_foreign(object: &Object, target: HeapId) -> bool {
         Object::Closure { upvalues, .. } => upvalues
             .iter()
             .any(|value| value_contains_foreign(*value, target)),
+        Object::ByteCodeProto {
+            values,
+            text,
+            prototypes,
+            ..
+        } => {
+            values
+                .iter()
+                .any(|value| value_contains_foreign(*value, target))
+                || text.iter().any(|id| id.heap != target)
+                || prototypes.iter().any(|prototype| match prototype {
+                    RuntimePrototype::Bytecode(handle) => handle.heap != target,
+                    RuntimePrototype::Native(_) => false,
+                })
+        }
         Object::String(_) | Object::Bytes(_) => false,
     }
 }
@@ -653,5 +985,64 @@ mod tests {
         .unwrap();
         assert_eq!(roots[0], roots[1]);
         assert_eq!(target.counts().0, 1);
+    }
+
+    #[test]
+    fn linked_prototype_copy_shares_code_and_rebuilds_links() {
+        let function = Arc::new(crate::compile_source("test", "fn(value) { value }").unwrap());
+        let closure = Value::Func(Arc::new(Closure::new(
+            Arc::clone(&function),
+            vec![Value::string("capture")],
+        )));
+        let mut current = Heap::new(2);
+        let root = current.import_value(None, &closure).unwrap();
+        let mut world = Heap::new(1);
+        let copied = copy_roots(
+            &mut world,
+            HeapView {
+                current: &current,
+                background: None,
+            },
+            &[root],
+        )
+        .unwrap()[0];
+        let exported = HeapView {
+            current: &world,
+            background: None,
+        }
+        .export_value(copied)
+        .unwrap();
+        let Value::Func(exported) = exported else {
+            panic!("expected exported closure")
+        };
+        let Prototype::Bytecode(exported_function) = exported.prototype() else {
+            panic!("expected bytecode prototype")
+        };
+        assert!(Arc::ptr_eq(function.code(), exported_function.code()));
+        assert!(
+            matches!(exported.upvalues(), [Value::String(value)] if value.as_ref() == "capture")
+        );
+    }
+
+    #[test]
+    fn legacy_value_boundary_round_trips_heap_values() {
+        let value = Value::Tuple(
+            vec![
+                Value::Int(42),
+                Value::string("short"),
+                Value::Atom(Atom::named("Custom")),
+                Value::Array(vec![Value::Float(1.5)].into()),
+            ]
+            .into(),
+        );
+        let mut heap = Heap::new(1);
+        let runtime = heap.import_value(None, &value).unwrap();
+        let exported = HeapView {
+            current: &heap,
+            background: None,
+        }
+        .export_value(runtime)
+        .unwrap();
+        assert_eq!(exported.to_string(), value.to_string());
     }
 }

@@ -174,6 +174,13 @@ pub enum Prototype {
 pub type Callable = Prototype;
 
 impl Closure {
+    pub(crate) fn from_parts(prototype: Prototype, upvalues: Vec<Value>) -> Self {
+        Self {
+            prototype,
+            upvalues: upvalues.into(),
+        }
+    }
+
     pub fn new(function: Arc<BytecodeFunction>, captures: Vec<Value>) -> Self {
         Self {
             prototype: Prototype::Bytecode(function),

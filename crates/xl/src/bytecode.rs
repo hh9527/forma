@@ -230,6 +230,20 @@ pub struct LinkingTable {
     prototypes: Vec<Arc<BytecodeFunction>>,
 }
 
+impl LinkingTable {
+    pub(crate) fn values(&self) -> &[Value] {
+        &self.values
+    }
+
+    pub(crate) fn text(&self) -> &[Arc<str>] {
+        &self.text
+    }
+
+    pub(crate) fn prototypes(&self) -> &[Arc<BytecodeFunction>] {
+        &self.prototypes
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BytecodeFunction {
     code: Arc<FuncByteCode>,
@@ -244,6 +258,22 @@ pub struct DebugOriginRange {
 }
 
 impl BytecodeFunction {
+    pub(crate) fn from_linked_parts(
+        code: Arc<FuncByteCode>,
+        values: Vec<Value>,
+        text: Vec<Arc<str>>,
+        prototypes: Vec<Arc<BytecodeFunction>>,
+    ) -> Self {
+        Self {
+            code,
+            links: LinkingTable {
+                values,
+                text,
+                prototypes,
+            },
+        }
+    }
+
     pub fn new(
         name: impl Into<Arc<str>>,
         register_count: usize,
