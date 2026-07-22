@@ -160,16 +160,79 @@ background references. A persistent object may contain immediate values and
 persistent references only. Copying a background value into a register copies
 its tagged value, not its persistent object graph.
 
-Closures retain their prototype and immutable upvalues. Bytecode prototypes
-retain constants, nested prototypes, instructions, and debug-origin tables.
-Native prototypes retain a trusted callback identifier and immutable upvalues.
-Consequently an exported closure is a complete tracing root: its code,
-constants, generated nested functions, and captures survive exactly when they
-remain reachable.
+Closures retain their prototype and immutable upvalues. A bytecode prototype
+separates heap-independent code from heap-specific links:
 
-Instruction storage and trusted callback pointers may remain host-owned in the
-first implementation, provided the collector traces all XL values reachable
-through prototypes and no execution-local value can escape through them.
+```rust
+struct ByteCodeProto<L> {
+    code: Arc<FuncByteCode>,
+    links: LinkingTable<L>,
+}
+```
+
+`FuncByteCode` is an immutable, position-independent code blob. It contains
+opcodes, registers, jumps, arities, register counts, debug origins, and host
+diagnostic metadata. It contains no XL `Value`, object handle, intern ID, shape
+ID, or nested linked prototype. Instructions refer to typed link-table slots:
+
+```rust
+enum Instruction {
+    LoadConst { dst: Register, value: ValueLinkId },
+    GetField { dst: Register, dict: Register, field: TextLinkId },
+    MakeClosure {
+        dst: Register,
+        prototype: ProtoLinkId,
+        captures: Box<[Register]>,
+    },
+    // heap-independent operations
+}
+```
+
+Every item whose runtime representation may allocate, intern, or depend on a
+heap belongs to `LinkingTable`:
+
+```text
+String and Bytes constants
+Atom constants
+Array, Tuple, and Dict constants
+Dict field text and Shapes
+type metadata and other XL values
+nested bytecode or native prototypes
+```
+
+Immediate numeric constants may also use value links for a uniform constant-
+load instruction. Typed link IDs let assembly/link validation prove that an
+instruction cannot read a text slot as a prototype or a value slot as a shape.
+Execution treats a sealed linking table as immutable.
+
+The compiler first produces heap-independent code plus owned link
+specifications:
+
+```rust
+struct UnlinkedProto {
+    code: Arc<FuncByteCode>,
+    links: Box<[LinkSpec]>,
+}
+
+enum LinkSpec {
+    Value(FrozenValue),
+    Text(Box<str>),
+    Shape(Box<[Box<str>]>),
+    Prototype(Box<UnlinkedProto>),
+}
+```
+
+Linking injects these specifications into an execution heap and produces a
+local `ByteCodeProto`. Copying that prototype shallow-clones
+`Arc<FuncByteCode>` and rebuilds every linking-table entry in the target heap
+using the same value/text/shape/prototype forwarding context as ordinary root
+copying. Prototype forwarding is recorded before links are scanned, preserving
+shared nested prototypes and future recursive cycles.
+
+A native prototype follows the same boundary: its trusted static callback
+descriptor is shallow-copied while all bound XL values live in links or closure
+upvalues and are copied normally. Consequently an exported closure is a
+complete tracing root even though immutable instruction bytes are shared.
 
 ## Per-heap interning
 
@@ -232,6 +295,7 @@ struct PromotionContext {
     objects: Map<LocalHandle, PendingHandle>,
     text: Map<LocalInternId, PendingInternId>,
     shapes: Map<LocalShapeId, PendingShapeId>,
+    prototypes: Map<SourceProtoRef, PendingProtoRef>,
 }
 ```
 
@@ -243,6 +307,7 @@ target-world reference retain unchanged and do not rescan
 local object          copy once through the object forwarding table
 local intern          resolve bytes and re-intern in the destination
 local shape           promote its field text, then re-intern the shape
+linked prototype      shallow-clone code and recursively rebuild its links
 ```
 
 The collector reserves a destination object and records its forwarding entry
@@ -403,6 +468,12 @@ Handles are meaningful only with their owning heap and constrain future moving
 or memory-mapped implementations. Owned roots and borrowed views preserve
 implementation freedom.
 
+### Store constants or field strings in `FuncByteCode`
+
+Such operands would make an apparently shared code blob retain source-heap
+values or require instruction rewriting during every copy. Heap-dependent
+operands belong in the linking table; `FuncByteCode` remains shallow-clonable.
+
 ## Deferred work
 
 - snapshot file format and memory-mapped runtime images;
@@ -423,16 +494,19 @@ implementation freedom.
    native code retain register-only access through value views.
 3. Add per-heap deterministic text and shape interning. Represent atoms as
    typed intern references and eligible short strings through the same entries.
-4. Implement multi-root heap copying with object/text/shape forwarding,
-   target-owner reuse, and an unpublished pending delta; expose module
-   promotion as a specialized caller.
-5. Make persistent publication reject every local reference before attaching
+4. Split the current bytecode function into heap-independent `FuncByteCode`,
+   unlinked `LinkSpec`, and heap-specific sealed `LinkingTable`; move constants,
+   field text, shapes, and nested prototypes behind typed link IDs.
+5. Implement multi-root heap copying with object/text/shape/prototype
+   forwarding, target-owner reuse, code-blob shallow cloning, and an unpublished
+   pending delta; expose module promotion as a specialized caller.
+6. Make persistent publication reject every local reference before attaching
    the delta.
-6. Introduce initialize-once module registry states, retain every `Ready` value
+7. Introduce initialize-once module registry states, retain every `Ready` value
    as a shared world root, and route dependency XL modules through persistent
    publication; preserve current root-entry compatibility.
-7. Keep public owned values and borrowed views independent of raw handles.
-8. Add collector, diamond dependency, failure atomicity, quota, equality,
+8. Keep public owned values and borrowed views independent of raw handles.
+9. Add collector, diamond dependency, failure atomicity, quota, equality,
    interning, closure-capture, and source-diagnostic tests.
 
 ## Acceptance criteria
@@ -451,19 +525,24 @@ implementation freedom.
 6. String and Atom promotion re-interns text in the target while preserving
    their distinct XL types and content equality.
 7. Dict promotion re-interns field text and shapes with deterministic ordering.
-8. A failed promotion changes neither persistent objects nor persistent
+8. `FuncByteCode` contains no heap-relative data; copying a linked prototype
+   preserves the same `Arc<FuncByteCode>`, rebuilds all links in the target, and
+   preserves shared or recursive prototype graphs through forwarding.
+9. String, Bytes, Atom, aggregate constants, field text, shapes, type metadata,
+   and nested prototypes are all represented through typed linking-table slots.
+10. A failed promotion changes neither persistent objects nor persistent
    interner/shape counts.
-9. The dependency diamond initializes `c` once and gives `a` and `b` the same
+11. The dependency diamond initializes `c` once and gives `a` and `b` the same
    persistent export from `ModuleCache`; neither can observe a private c heap.
-10. Initialization temporaries unreachable from the module export are absent
+12. Initialization temporaries unreachable from the module export are absent
     from the persistent world.
-11. Session results can be serialized directly through their mixed heap view;
+13. Session results can be serialized directly through their mixed heap view;
     local allocations and intern entries are then discarded without growing
     the module world unless explicit result copying is requested.
-12. Allocation quota behavior remains based on RFC 0011 logical payload sizes
+14. Allocation quota behavior remains based on RFC 0011 logical payload sizes
     and does not vary with interner cache hits.
-13. Every initialized module export remains rooted by the ordinary engine until
+15. Every initialized module export remains rooted by the ordinary engine until
     its `VmState` is dropped; module-level tree shaking is not performed.
-14. Public APIs expose owned roots and borrowed views, never raw handles.
-15. Existing XL results and diagnostics are unchanged when resources suffice.
-16. Workspace tests, strict Clippy, formatting, and diff checks pass.
+16. Public APIs expose owned roots and borrowed views, never raw handles.
+17. Existing XL results and diagnostics are unchanged when resources suffice.
+18. Workspace tests, strict Clippy, formatting, and diff checks pass.
