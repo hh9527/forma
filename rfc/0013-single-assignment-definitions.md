@@ -18,8 +18,8 @@ without adding general mutable variables to XL.
 ## Motivation
 
 `let` is deliberately sequential and immutable. Making it implicitly
-recursive would obscure initialization order and turn every binding into a
-cell. Recognizing only statically adjacent function declarations would be
+recursive would obscure initialization order and turn every binding into an
+up-link. Recognizing only statically adjacent function declarations would be
 efficient, but would not cover a recursive function returned by a builder.
 
 The construction model is instead explicit:
@@ -88,7 +88,7 @@ named function acts as its `def`.
 
 ## Construction semantics
 
-Each declaration creates a slot with this abstract state machine:
+Each declaration creates a private up-link with this abstract state machine:
 
 ```text
 Uninitialized --def(value)--> Ready(value)
@@ -125,27 +125,34 @@ root, and requires no heap rollback.
 
 ## Runtime representation
 
-The heap gains a private definition-cell object. Runtime bytecode can:
+The heap gains a private up-link object. An up-link is not a general mutable
+cell: it is a construction link with exactly one permitted transition. Runtime
+bytecode can:
 
 ```text
-MakeDefinitionCell
-ReadDefinitionCell
-InitializeDefinitionCell
-AssertDefinitionCellReady
+MakeUpLink
+ReadUpLink
+InitializeUpLink
+AssertUpLinkReady
 ```
 
 The compiler environment distinguishes a direct register from a register that
-contains a cell reference. Variable evaluation emits a read for the latter;
-closure capture copies the cell reference itself. This distinction is never a
-runtime `Value` category exposed to XL or native functions.
+contains an up-link. Variable evaluation emits `ReadUpLink` for the latter;
+closure capture copies the up-link itself. The read is deliberately separate
+from `Call`: a definition remains a first-class value and may be returned,
+stored, or passed to a higher-order function. A future `CallUpLink` may fuse a
+read followed by a call, but is only an opcode optimization. This distinction
+is never a runtime `Value` category exposed to XL or native functions.
 
-Local cells may be initialized once. Persistent cells are always Ready and
-read-only. Promotion copies Ready cells and their reachable values, preserving
-cycles and function identities. Promotion rejects an uninitialized cell as an
-internal construction-contract violation.
+Local up-links may be initialized once. Persistent up-links are always Ready
+and read-only. Promotion copies Ready up-links and their reachable values
+without relocating or erasing the indirection, preserving cycles and function
+identities. Promotion rejects an uninitialized up-link as an internal
+construction-contract violation. The same bytecode therefore observes the
+same lookup semantics before and after promotion.
 
-After sealing, an optimizer may replace cell references with direct value
-references. This is not language semantics. Keeping frozen cells indefinitely
+After sealing, an optimizer may replace up-link references with direct value
+references. This is not language semantics. Keeping frozen up-links indefinitely
 is valid, and rewriting must not change equality, function identity, source
 diagnostics, quota determinism, or reachable module results.
 
@@ -155,7 +162,7 @@ Function metadata checks that a definition is a fixed-arity function with the
 declared arity. Parameter and result metadata are retained for static analysis.
 This RFC does not insert dynamic checks at every function call; explicit
 `validate` remains the runtime validation boundary. A later RFC may define
-checked public-call boundaries without changing definition-cell semantics.
+checked public-call boundaries without changing up-link semantics.
 
 ## Diagnostics
 
@@ -176,7 +183,7 @@ primary location.
 
 ### Make every `let` recursive
 
-This burdens ordinary bindings with cell semantics and makes initialization
+This burdens ordinary bindings with up-link semantics and makes initialization
 order less visible.
 
 ### Only recognize static recursive function groups
@@ -189,15 +196,16 @@ a recursive function returned by arbitrary higher-order computation.
 `let rec` is useful surface shorthand but does not expose the separate module
 contract and definition phases. It may later lower to `decl` plus `def`.
 
-### Require cells to be optimized away
+### Require up-links to be optimized away
 
 Graph rewriting is an optimization and is unnecessarily complex for the first
-correct implementation. Frozen private cells preserve XL immutability.
+correct implementation. Frozen private up-links preserve XL immutability.
 
 ## Deferred work
 
 - `let rec` syntax sugar;
-- cell-elimination and recursive-group closure-handle optimization;
+- up-link elimination, `CallUpLink` fusion, and recursive-group closure-handle
+  optimization;
 - module interface files generated from declarations;
 - polymorphic and recursive function contracts;
 - dynamic checks on selected public function-call boundaries;
@@ -211,11 +219,11 @@ correct implementation. Frozen private cells preserve XL immutability.
 2. Extend tool metadata and block analysis with function descriptors,
    declaration completeness, no-shadow definition rules, and named-function
    elaboration.
-3. Add verified LIR/bytecode operations and private heap cells.
-4. Compile declaration references as cell reads while closures capture cell
+3. Add verified LIR/bytecode operations and private heap up-links.
+4. Compile declaration references as up-link reads while closures capture up-link
    registers directly.
 5. Seal blocks, reject incomplete construction, and teach promotion/export to
-   traverse Ready cells.
+   traverse Ready up-links.
 
 ## Acceptance criteria
 
@@ -229,7 +237,7 @@ correct implementation. Frozen private cells preserve XL immutability.
 7. Named functions elaborate to the same behavior as explicit `decl`/`def`.
 8. Function contracts participate in tool-stage definition checking.
 9. Ready recursive graphs publish to the persistent heap and retain function
-   identity; uninitialized cells cannot publish.
+   identity; uninitialized up-links cannot publish.
 10. Quotas, call depth, fuel, and module init-once behavior remain effective.
 11. Existing tests, strict Clippy, and diff checks pass.
 
@@ -237,17 +245,17 @@ correct implementation. Frozen private cells preserve XL immutability.
 
 Implemented across the Logos/Lelwel frontend, located semantic AST, tool-stage
 metadata analysis, LIR assembler, bytecode VM, layered heap, and module loader.
-The compiler records direct and cell-backed bindings separately, so closure
-capture retains a cell while ordinary variable evaluation emits an explicit
-read. Named functions use the same cell path as explicit declarations.
+The compiler records direct and up-link-backed bindings separately, so closure
+capture retains an up-link while ordinary variable evaluation emits an explicit
+read. Named functions use the same up-link path as explicit declarations.
 
 Function metadata now represents fixed parameter contracts and one result
 contract. Definition initialization includes an arity assertion even when a
 higher-order RHS has statically degraded to `Any`; deeper parameter and result
 checking remains in the tool stage and explicit `validate` boundary.
 
-Ready definition-cell graphs copy through promotion with cycles and closure
-identity intact. Uninitialized cells cannot publish. The legacy tree-shaped
+Ready up-link graphs copy through promotion with cycles and closure identity
+intact. Uninitialized up-links cannot publish. The legacy tree-shaped
 `Value` adapter cannot represent recursive closures; when an XL dependency has
 such a root, the module cache retains the authoritative persistent root and
 uses an `Any` analysis shadow for that import. Other export failures remain
