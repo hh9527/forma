@@ -23,6 +23,29 @@ The current ordinary loader keeps the world append-only for its lifetime. It
 does not perform module tree shaking or reclamation. Session results are read
 through their mixed world/arena view and exported directly without publication.
 
+### Sealed execution amendment
+
+The implementation does not assign process-global identities to local heaps.
+A local heap is confined to one `ExecutionArena`; only the persistent world is
+shared. Runtime references distinguish the `Local` and `Persistent` storage
+domains, but local references do not carry an arena identity.
+
+The publication API consumes a sealed execution and returns `PersistentValue`
+roots. It does not accept caller-composed raw roots or an arbitrary source and
+target heap pair. `ExecutionArena` keeps its local heap and result private, and
+offers only two terminal operations:
+
+```text
+publish(world)   -> PersistentValue
+export(world)    -> public Value
+```
+
+Module cache entries and bytecode external-link resolvers store only
+`PersistentValue`. Consequently a local reference cannot enter a module cache,
+cross into another execution, or be supplied as an imported value. Persistent
+objects are validated to contain no local references before publication is
+committed.
+
 ## Summary
 
 This RFC defines the internal value-lifetime boundary used by XL executions.
