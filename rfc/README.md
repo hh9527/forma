@@ -34,3 +34,4 @@ semantics from an earlier RFC.
 15. Core Array functions and VM-managed native continuations.
 16. Core Dict enumeration, construction, and shallow merge functions.
 17. Uniform reverse-application pipeline semantics.
+18. Explicit placeholder application and call sections.
