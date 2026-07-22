@@ -866,7 +866,7 @@ impl Vm {
                             match equality_error {
                                 EqualityError::Unsupported => error(
                                     RuntimeErrorKind::UnsupportedEquality,
-                                    "Array, Tuple, Dict, and Func values do not support ==",
+                                    "functions cannot be compared for equality",
                                     function,
                                     pc,
                                 ),

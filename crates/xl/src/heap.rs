@@ -584,15 +584,19 @@ impl<'a> HeapView<'a> {
         left: RuntimeValue,
         right: RuntimeValue,
     ) -> Result<bool, EqualityError> {
+        self.values_equal_with(left, right, &mut HashSet::new())
+    }
+
+    fn values_equal_with(
+        &self,
+        left: RuntimeValue,
+        right: RuntimeValue,
+        visited: &mut HashSet<(Handle, Handle)>,
+    ) -> Result<bool, EqualityError> {
         match (left, right) {
-            (RuntimeValue::Array(_), _)
-            | (_, RuntimeValue::Array(_))
-            | (RuntimeValue::Tuple(_), _)
-            | (_, RuntimeValue::Tuple(_))
-            | (RuntimeValue::Dict(_), _)
-            | (_, RuntimeValue::Dict(_))
-            | (RuntimeValue::Func(_), _)
-            | (_, RuntimeValue::Func(_)) => Err(EqualityError::Unsupported),
+            (RuntimeValue::Func(_), _) | (_, RuntimeValue::Func(_)) => {
+                Err(EqualityError::Unsupported)
+            }
             (RuntimeValue::Int(left), RuntimeValue::Int(right)) => Ok(left == right),
             (RuntimeValue::Float(left), RuntimeValue::Float(right)) => Ok(left == right),
             (RuntimeValue::BuiltinAtom(left), RuntimeValue::BuiltinAtom(right)) => {
@@ -633,8 +637,88 @@ impl<'a> HeapView<'a> {
                 };
                 Ok(left == right)
             }
+            (RuntimeValue::Array(left), RuntimeValue::Array(right))
+            | (RuntimeValue::Tuple(left), RuntimeValue::Tuple(right)) => {
+                self.sequence_handles_equal(left, right, visited)
+            }
+            (RuntimeValue::Dict(left), RuntimeValue::Dict(right)) => {
+                self.dict_handles_equal(left, right, visited)
+            }
             _ => Ok(false),
         }
+    }
+
+    fn sequence_handles_equal(
+        &self,
+        left: Handle,
+        right: Handle,
+        visited: &mut HashSet<(Handle, Handle)>,
+    ) -> Result<bool, EqualityError> {
+        if !visited.insert((left, right)) {
+            return Ok(true);
+        }
+        let left_values = match self.object(left)? {
+            Object::Array(values) | Object::Tuple(values) => values,
+            _ => return Err(HeapError("sequence handle refers to another object kind").into()),
+        };
+        let right_values = match self.object(right)? {
+            Object::Array(values) | Object::Tuple(values) => values,
+            _ => return Err(HeapError("sequence handle refers to another object kind").into()),
+        };
+        self.value_slices_equal(left_values, right_values, visited)
+    }
+
+    fn dict_handles_equal(
+        &self,
+        left: Handle,
+        right: Handle,
+        visited: &mut HashSet<(Handle, Handle)>,
+    ) -> Result<bool, EqualityError> {
+        if !visited.insert((left, right)) {
+            return Ok(true);
+        }
+        let Object::Dict {
+            shape: left_shape,
+            values: left_values,
+        } = self.object(left)?
+        else {
+            return Err(HeapError("Dict handle refers to another object kind").into());
+        };
+        let Object::Dict {
+            shape: right_shape,
+            values: right_values,
+        } = self.object(right)?
+        else {
+            return Err(HeapError("Dict handle refers to another object kind").into());
+        };
+        let left_fields = self.shape(*left_shape)?;
+        let right_fields = self.shape(*right_shape)?;
+        if left_fields.len() != right_fields.len() {
+            return Ok(false);
+        }
+        for (left, right) in left_fields.iter().zip(right_fields) {
+            if self.text(*left)? != self.text(*right)? {
+                return Ok(false);
+            }
+        }
+        self.value_slices_equal(left_values, right_values, visited)
+    }
+
+    fn value_slices_equal(
+        &self,
+        left: &[RuntimeValue],
+        right: &[RuntimeValue],
+        visited: &mut HashSet<(Handle, Handle)>,
+    ) -> Result<bool, EqualityError> {
+        if left.len() != right.len() {
+            return Ok(false);
+        }
+        for (left, right) in left.iter().zip(right) {
+            if !self.values_equal_with(*left, *right, visited)? {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     pub(crate) fn export_value(&self, value: RuntimeValue) -> Result<Value, HeapError> {
@@ -1291,30 +1375,55 @@ mod tests {
     }
 
     #[test]
-    fn composite_equality_is_unsupported_even_for_the_same_handle() {
-        let function = Arc::new(crate::compile_source("test", "fn() { 1 }").unwrap());
-        let values = [
-            Value::Array(vec![Value::Int(1)].into()),
-            Value::Tuple(vec![Value::Int(1)].into()),
-            Value::Dict(Dict::new(
-                Arc::new(Shape::from_sorted_fields(vec!["value".into()])),
-                vec![Value::Int(1)],
-            )),
-            Value::Func(Arc::new(Closure::new(function, Vec::new()))),
-        ];
+    fn composite_equality_is_structural_and_rejects_nested_functions() {
+        let tagged =
+            Value::Tuple(vec![Value::atom("Ok"), Value::Array(vec![Value::Int(42)].into())].into());
+        let mut world = Heap::persistent();
+        let persistent = publish_value(&mut world, &tagged).unwrap().runtime();
         let mut local = Heap::local();
+        let local_tagged = local.import_value(Some(&world), &tagged).unwrap();
+        let function = Arc::new(crate::compile_source("test", "fn() { 1 }").unwrap());
+        let with_function = Value::Dict(Dict::new(
+            Arc::new(Shape::from_sorted_fields(vec!["value".into()])),
+            vec![Value::Array(
+                vec![Value::Func(Arc::new(Closure::new(function, Vec::new())))].into(),
+            )],
+        ));
+        let with_function = local.import_value(None, &with_function).unwrap();
+        let view = HeapView {
+            current: &local,
+            background: Some(&world),
+        };
+        assert!(view.values_equal(local_tagged, persistent).unwrap());
+        assert!(matches!(
+            view.values_equal(with_function, with_function),
+            Err(EqualityError::Unsupported)
+        ));
+    }
+
+    #[test]
+    fn structural_equality_terminates_on_internal_cycles() {
+        let mut local = Heap::local();
+        let left = local.reserve();
+        local
+            .initialize(left, Object::Array(vec![RuntimeValue::Array(left)].into()))
+            .unwrap();
+        let right = local.reserve();
+        local
+            .initialize(
+                right,
+                Object::Array(vec![RuntimeValue::Array(right)].into()),
+            )
+            .unwrap();
         let world = Heap::persistent();
-        for value in values {
-            let value = local.import_value(None, &value).unwrap();
-            let view = HeapView {
+        assert!(
+            HeapView {
                 current: &local,
                 background: Some(&world),
-            };
-            assert!(matches!(
-                view.values_equal(value, value),
-                Err(EqualityError::Unsupported)
-            ));
-        }
+            }
+            .values_equal(RuntimeValue::Array(left), RuntimeValue::Array(right))
+            .unwrap()
+        );
     }
 
     #[test]

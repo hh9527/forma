@@ -1053,6 +1053,18 @@ mod tests {
     }
 
     #[test]
+    fn compares_tagged_tuples_structurally() {
+        assert!(matches!(
+            run("('Ok, 42) == ('Ok, 42)").unwrap(),
+            Value::Atom(Atom::Builtin(BuiltinAtom::True))
+        ));
+        assert!(matches!(
+            run("('Ok, 42) == ('Err, 42)").unwrap(),
+            Value::Atom(Atom::Builtin(BuiltinAtom::False))
+        ));
+    }
+
+    #[test]
     fn allocation_and_stack_quotas_keep_source_origins() {
         let source = "[1, 2]";
         let function = compile_source("quota.xl", source).unwrap();
