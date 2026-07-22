@@ -1,5 +1,6 @@
 use crate::ast::{BindingKind, Expr, ExprKind, Program, StringPartKind};
 use crate::compiler::compile_program_analyzed_in;
+use crate::heap::{Heap, RuntimeValue, promote_roots};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
 use crate::parser::parse_registered;
 use crate::source::SourceDatabase;
@@ -110,6 +111,7 @@ pub fn load_module_with_quota(
     }
     let mut loader = ModuleLoader {
         cache: HashMap::new(),
+        world: Heap::new(0),
         visiting: Vec::new(),
         dependencies: BTreeSet::new(),
         module_quota,
@@ -119,11 +121,20 @@ pub fn load_module_with_quota(
 }
 
 struct ModuleLoader {
-    cache: HashMap<PathBuf, SourcedValue>,
+    cache: HashMap<PathBuf, ModuleState>,
+    world: Heap,
     visiting: Vec<PathBuf>,
     dependencies: BTreeSet<PathBuf>,
     module_quota: Quota,
     sources: SourceDatabase,
+}
+
+#[derive(Clone)]
+enum ModuleState {
+    Ready {
+        root: RuntimeValue,
+        sourced: SourcedValue,
+    },
 }
 
 impl ModuleLoader {
@@ -148,54 +159,84 @@ impl ModuleLoader {
 
     fn load_value(&mut self, path: &Path) -> Result<SourcedValue, ModuleError> {
         let path = canonicalize(path)?;
-        if let Some(value) = self.cache.get(&path) {
-            return Ok(value.clone());
+        if let Some(ModuleState::Ready { root, sourced }) = self.cache.get(&path) {
+            let _persistent_root = root;
+            return Ok(sourced.clone());
         }
         self.enter(&path)?;
-        let result = match path.extension().and_then(|extension| extension.to_str()) {
-            Some("json") => {
-                let source = read(&path)?;
-                let source_id = self.sources.add(path.display().to_string(), source);
-                let parsed = parse_json_registered(&self.sources, source_id);
-                parsed.value.ok_or_else(|| {
-                    ModuleError::new(
-                        parsed
-                            .diagnostics
-                            .iter()
-                            .map(|diagnostic| self.sources.render(diagnostic))
-                            .collect::<Vec<_>>()
-                            .join("\n"),
-                    )
-                })
-            }
-            Some("xl") => {
-                let mut account = QuotaAccount::new(self.module_quota);
-                self.compile_xl(&path, BTreeMap::new(), false, &mut account)
-                    .and_then(|(_, function)| {
-                        Vm::new()
-                            .execute_with_account(&function, &[], &mut account)
-                            .map(|value| SourcedValue {
-                                value,
-                                provenance: Provenance::default(),
-                            })
-                            .map_err(|error| {
-                                ModuleError::new(error.with_sources(&self.sources).to_string())
-                            })
-                    })
-            }
-            Some(extension) => Err(ModuleError::new(format!(
-                "unsupported module extension .{extension}: {}",
-                path.display()
-            ))),
-            None => Err(ModuleError::new(format!(
-                "module path has no extension: {}",
-                path.display()
-            ))),
-        };
+        let result: Result<(SourcedValue, RuntimeValue), ModuleError> =
+            match path.extension().and_then(|extension| extension.to_str()) {
+                Some("json") => {
+                    let source = read(&path)?;
+                    let source_id = self.sources.add(path.display().to_string(), source);
+                    let parsed = parse_json_registered(&self.sources, source_id);
+                    parsed
+                        .value
+                        .ok_or_else(|| {
+                            ModuleError::new(
+                                parsed
+                                    .diagnostics
+                                    .iter()
+                                    .map(|diagnostic| self.sources.render(diagnostic))
+                                    .collect::<Vec<_>>()
+                                    .join("\n"),
+                            )
+                        })
+                        .and_then(|sourced| {
+                            let mut current = Heap::new(1);
+                            let root = current
+                                .import_value(Some(&self.world), &sourced.value)
+                                .map_err(|error| ModuleError::new(error.to_string()))?;
+                            let root = promote_roots(&mut self.world, &current, &[root])
+                                .map_err(|error| ModuleError::new(error.to_string()))?[0];
+                            Ok((sourced, root))
+                        })
+                }
+                Some("xl") => {
+                    let mut account = QuotaAccount::new(self.module_quota);
+                    self.compile_xl(&path, BTreeMap::new(), false, &mut account)
+                        .and_then(|(_, function)| {
+                            let arena = Vm::new()
+                                .execute_in_background(&self.world, &function, &[], &mut account)
+                                .map_err(|error| {
+                                    ModuleError::new(error.with_sources(&self.sources).to_string())
+                                })?;
+                            let value = crate::heap::HeapView {
+                                current: &arena.heap,
+                                background: Some(&self.world),
+                            }
+                            .export_value(arena.root)
+                            .map_err(|error| ModuleError::new(error.to_string()))?;
+                            let root = promote_roots(&mut self.world, &arena.heap, &[arena.root])
+                                .map_err(|error| ModuleError::new(error.to_string()))?[0];
+                            Ok((
+                                SourcedValue {
+                                    value,
+                                    provenance: Provenance::default(),
+                                },
+                                root,
+                            ))
+                        })
+                }
+                Some(extension) => Err(ModuleError::new(format!(
+                    "unsupported module extension .{extension}: {}",
+                    path.display()
+                ))),
+                None => Err(ModuleError::new(format!(
+                    "module path has no extension: {}",
+                    path.display()
+                ))),
+            };
         self.leave(&path);
-        let value = result?;
-        self.cache.insert(path, value.clone());
-        Ok(value)
+        let (sourced, root) = result?;
+        self.cache.insert(
+            path,
+            ModuleState::Ready {
+                root,
+                sourced: sourced.clone(),
+            },
+        );
+        Ok(sourced)
     }
 
     fn compile_xl(
@@ -546,6 +587,36 @@ mod tests {
             session_limited.execute(&module).unwrap_err().kind,
             crate::RuntimeErrorKind::AllocationQuotaExceeded
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn ready_module_root_is_promoted_once_into_the_shared_world() {
+        let directory = fixture_dir();
+        let data = directory.join("data.json");
+        fs::write(&data, r#"{"name":"Ada","items":[1,2,3]}"#).unwrap();
+        let mut loader = ModuleLoader {
+            cache: HashMap::new(),
+            world: Heap::new(0),
+            visiting: Vec::new(),
+            dependencies: BTreeSet::new(),
+            module_quota: Quota::with_fuel(100_000),
+            sources: SourceDatabase::default(),
+        };
+
+        let first = loader.load_value(&data).unwrap();
+        let counts = loader.world.counts();
+        let first_root = match loader.cache.get(&canonicalize(&data).unwrap()).unwrap() {
+            ModuleState::Ready { root, .. } => *root,
+        };
+        let second = loader.load_value(&data).unwrap();
+        let second_root = match loader.cache.get(&canonicalize(&data).unwrap()).unwrap() {
+            ModuleState::Ready { root, .. } => *root,
+        };
+
+        assert_eq!(first.value.to_string(), second.value.to_string());
+        assert_eq!(first_root, second_root);
+        assert_eq!(counts, loader.world.counts());
         fs::remove_dir_all(directory).unwrap();
     }
 }

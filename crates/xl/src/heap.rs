@@ -4,10 +4,9 @@ use crate::{
     Atom, BuiltinAtom, BytecodeFunction, Closure, Dict, FuncByteCode, NativeFunction, Prototype,
     Shape, Value,
 };
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 const SHORT_TEXT_BYTES: usize = 32;
 
@@ -124,7 +123,7 @@ pub(crate) struct Heap {
     text: TextTable,
     shapes: Vec<Box<[InternId]>>,
     shape_slots: HashMap<Vec<InternId>, u32>,
-    exported_shapes: RefCell<HashMap<u32, Arc<Shape>>>,
+    exported_shapes: Mutex<HashMap<u32, Arc<Shape>>>,
 }
 
 impl Heap {
@@ -135,7 +134,7 @@ impl Heap {
             text: TextTable::default(),
             shapes: Vec::new(),
             shape_slots: HashMap::new(),
-            exported_shapes: RefCell::new(HashMap::new()),
+            exported_shapes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -579,14 +578,15 @@ impl<'a> HeapView<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 visiting.remove(&handle);
                 let owner = self.heap(shape.heap)?;
-                let shape = if let Some(shape) = owner.exported_shapes.borrow().get(&shape.slot) {
+                let mut exported_shapes = owner
+                    .exported_shapes
+                    .lock()
+                    .map_err(|_| HeapError("exported shape cache is poisoned"))?;
+                let shape = if let Some(shape) = exported_shapes.get(&shape.slot) {
                     Arc::clone(shape)
                 } else {
                     let shape_value = Arc::new(Shape::from_sorted_fields(fields));
-                    owner
-                        .exported_shapes
-                        .borrow_mut()
-                        .insert(shape.slot, Arc::clone(&shape_value));
+                    exported_shapes.insert(shape.slot, Arc::clone(&shape_value));
                     shape_value
                 };
                 Value::Dict(Dict::new(shape, values))
@@ -684,6 +684,21 @@ pub(crate) fn copy_roots(
     pending.validate()?;
     pending.commit(target);
     Ok(roots)
+}
+
+pub(crate) fn promote_roots(
+    target: &mut Heap,
+    current: &Heap,
+    roots: &[RuntimeValue],
+) -> Result<Vec<RuntimeValue>, HeapError> {
+    copy_roots(
+        target,
+        HeapView {
+            current,
+            background: None,
+        },
+        roots,
+    )
 }
 
 struct PendingCopy {

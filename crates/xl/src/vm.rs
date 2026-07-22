@@ -543,6 +543,11 @@ struct ExecutionFrame {
     return_destination: Option<Register>,
 }
 
+pub(crate) struct ExecutionArena {
+    pub(crate) heap: Heap,
+    pub(crate) root: RuntimeValue,
+}
+
 impl Vm {
     pub fn new() -> Self {
         Self::default()
@@ -603,29 +608,53 @@ impl Vm {
         arguments: &[Value],
         account: &mut QuotaAccount,
     ) -> Result<Value, RuntimeError> {
-        self.execute_frame(function, arguments, &[], account)
+        let background = Heap::new(0);
+        let arena = self.execute_frame(&background, function, arguments, &[], account)?;
+        HeapView {
+            current: &arena.heap,
+            background: Some(&background),
+        }
+        .export_value(arena.root)
+        .map_err(|heap_error| {
+            error(
+                RuntimeErrorKind::InvalidBytecode,
+                heap_error.to_string(),
+                function,
+                0,
+            )
+        })
+    }
+
+    pub(crate) fn execute_in_background(
+        &mut self,
+        background: &Heap,
+        function: &BytecodeFunction,
+        arguments: &[Value],
+        account: &mut QuotaAccount,
+    ) -> Result<ExecutionArena, RuntimeError> {
+        self.execute_frame(background, function, arguments, &[], account)
     }
 
     #[allow(clippy::needless_borrow)]
     fn execute_frame(
         &mut self,
+        background: &Heap,
         function: &BytecodeFunction,
         arguments: &[Value],
         captures: &[Value],
         account: &mut QuotaAccount,
-    ) -> Result<Value, RuntimeError> {
+    ) -> Result<ExecutionArena, RuntimeError> {
         // Linking recursively walks the immutable prototype graph. Keep that host
         // recursion off callers' often-small test or embedding threads; VM calls
         // themselves use the explicit frame stack below.
-        let (background, mut current, prototype) = std::thread::scope(|scope| {
+        let (mut current, prototype) = std::thread::scope(|scope| {
             std::thread::Builder::new()
                 .name("xl-bytecode-linker".into())
                 .stack_size(16 * 1024 * 1024)
                 .spawn_scoped(scope, || {
-                    let background = Heap::new(0);
                     let mut current = Heap::new(1);
-                    let prototype = current.link_bytecode(Some(&background), function)?;
-                    Ok::<_, crate::heap::HeapError>((background, current, prototype))
+                    let prototype = current.link_bytecode(Some(background), function)?;
+                    Ok::<_, crate::heap::HeapError>((current, prototype))
                 })
                 .map_err(|_| crate::heap::HeapError::new("failed to start bytecode linker"))?
                 .join()
@@ -641,7 +670,7 @@ impl Vm {
         })?;
         let arguments = arguments
             .iter()
-            .map(|value| current.import_value(Some(&background), value))
+            .map(|value| current.import_value(Some(background), value))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|heap_error| {
                 error(
@@ -653,7 +682,7 @@ impl Vm {
             })?;
         let captures = captures
             .iter()
-            .map(|value| current.import_value(Some(&background), value))
+            .map(|value| current.import_value(Some(background), value))
             .collect::<Result<Vec<_>, _>>()
             .map_err(|heap_error| {
                 error(
@@ -674,7 +703,7 @@ impl Vm {
             account.stack_limit(),
         )?];
 
-        let mut result = (|| -> Result<Value, RuntimeError> {
+        let mut result = (|| -> Result<RuntimeValue, RuntimeError> {
             loop {
                 let function_arc = frames
                     .last()
@@ -697,7 +726,7 @@ impl Vm {
                 let mut registers = &mut stack[base..end];
                 let view = HeapView {
                     current: &current,
-                    background: Some(&background),
+                    background: Some(background),
                 };
 
                 match instruction {
@@ -893,7 +922,7 @@ impl Vm {
                                 _ => unreachable!("interpolation values were validated"),
                             }
                         }
-                        let value = current.string(Some(&background), &output);
+                        let value = current.string(Some(background), &output);
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
                     Opcode::MakeDict { dst, fields } => {
@@ -1163,7 +1192,7 @@ impl Vm {
                                 let _ = registers;
                                 let mut context = CallContext::new(
                                     &mut current,
-                                    Some(&background),
+                                    Some(background),
                                     &mut stack,
                                     account,
                                     arguments,
@@ -1244,7 +1273,7 @@ impl Vm {
                         let completed = frames.pop().expect("execution frame");
                         stack.truncate(completed.base);
                         let Some(destination) = destination else {
-                            return export_runtime(&view, value, function, pc);
+                            return Ok(value);
                         };
                         let caller = frames.last_mut().expect("return has a caller");
                         let caller_function = caller.function.clone();
@@ -1285,7 +1314,10 @@ impl Vm {
             }
             runtime_error.trace_includes_active_frame = false;
         }
-        result
+        result.map(|root| ExecutionArena {
+            heap: current,
+            root,
+        })
     }
 }
 
