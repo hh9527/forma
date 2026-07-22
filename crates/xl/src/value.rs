@@ -145,6 +145,28 @@ pub(crate) enum CoreDictFunction {
     Merge,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreDebugFunction {
+    Dbg,
+    DbgWith,
+}
+
+impl CoreDebugFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Dbg => "core:debug.dbg",
+            Self::DbgWith => "core:debug.dbg_with",
+        }
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        match self {
+            Self::Dbg => 1,
+            Self::DbgWith => 2,
+        }
+    }
+}
+
 impl CoreDictFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
@@ -189,6 +211,7 @@ pub(crate) enum NativeKind {
     Synchronous,
     CoreArray(CoreArrayFunction),
     CoreDict(CoreDictFunction),
+    CoreDebug(CoreDebugFunction),
 }
 
 #[derive(Clone, Copy)]
@@ -224,6 +247,15 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreDict(function),
+        }
+    }
+
+    pub(crate) const fn core_debug(function: CoreDebugFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreDebug(function),
         }
     }
 

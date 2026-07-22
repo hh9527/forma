@@ -1,12 +1,15 @@
 use crate::ast::{BindingKind, Expr, ExprKind, Program, StringPartKind};
 use crate::compiler::compile_program_analyzed_in;
-use crate::core::{ARRAY_MODULE, DICT_MODULE, array_module_value, dict_module_value};
+use crate::core::{
+    ARRAY_MODULE, DEBUG_MODULE, DICT_MODULE, array_module_value, debug_module_value,
+    dict_module_value,
+};
 use crate::heap::{Heap, PersistentValue, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
 use crate::parser::parse_registered;
 use crate::source::SourceDatabase;
-use crate::types::{Analysis, analyze_program_with_bindings};
-use crate::{BytecodeFunction, Quota, QuotaAccount, Value, Vm};
+use crate::types::{Analysis, analyze_program_with_bindings_observed};
+use crate::{BytecodeFunction, DebugSink, DiscardDebugSink, Quota, QuotaAccount, Value, Vm};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
@@ -67,8 +70,17 @@ impl LoadedModule {
     }
 
     pub fn execute_with_quota(&self, quota: Quota) -> Result<Value, crate::RuntimeError> {
+        self.execute_with_quota_and_debug_sink(quota, Arc::new(DiscardDebugSink))
+    }
+
+    pub fn execute_with_quota_and_debug_sink(
+        &self,
+        quota: Quota,
+        debug_sink: Arc<dyn DebugSink>,
+    ) -> Result<Value, crate::RuntimeError> {
         let mut account = QuotaAccount::new(quota);
         let arena = Vm::new()
+            .with_debug_sink(debug_sink)
             .execute_in_background(
                 &self.runtime.world,
                 &self.runtime.externals,
@@ -89,14 +101,31 @@ pub struct EngineConfig {
     pub session_quota: Quota,
 }
 
-#[derive(Debug)]
 pub struct Engine {
     config: EngineConfig,
+    debug_sink: Arc<dyn DebugSink>,
+}
+
+impl fmt::Debug for Engine {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Engine")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Engine {
-    pub const fn new(config: EngineConfig) -> Self {
-        Self { config }
+    pub fn new(config: EngineConfig) -> Self {
+        Self {
+            config,
+            debug_sink: Arc::new(DiscardDebugSink),
+        }
+    }
+
+    pub fn with_debug_sink(mut self, debug_sink: Arc<dyn DebugSink>) -> Self {
+        self.debug_sink = debug_sink;
+        self
     }
 
     pub const fn config(&self) -> EngineConfig {
@@ -108,11 +137,19 @@ impl Engine {
         path: impl AsRef<Path>,
         external_bindings: BTreeMap<String, Value>,
     ) -> Result<LoadedModule, ModuleError> {
-        load_module_with_quota(path, external_bindings, self.config.module_quota)
+        load_module_with_quota_and_debug_sink(
+            path,
+            external_bindings,
+            self.config.module_quota,
+            Arc::clone(&self.debug_sink),
+        )
     }
 
     pub fn execute(&self, module: &LoadedModule) -> Result<Value, crate::RuntimeError> {
-        module.execute_with_quota(self.config.session_quota)
+        module.execute_with_quota_and_debug_sink(
+            self.config.session_quota,
+            Arc::clone(&self.debug_sink),
+        )
     }
 }
 
@@ -129,6 +166,20 @@ pub fn load_module_with_quota(
     external_bindings: BTreeMap<String, Value>,
     module_quota: Quota,
 ) -> Result<LoadedModule, ModuleError> {
+    load_module_with_quota_and_debug_sink(
+        path,
+        external_bindings,
+        module_quota,
+        Arc::new(DiscardDebugSink),
+    )
+}
+
+pub fn load_module_with_quota_and_debug_sink(
+    path: impl AsRef<Path>,
+    external_bindings: BTreeMap<String, Value>,
+    module_quota: Quota,
+    debug_sink: Arc<dyn DebugSink>,
+) -> Result<LoadedModule, ModuleError> {
     let root = canonicalize(path.as_ref())?;
     if root.extension().and_then(|extension| extension.to_str()) != Some("xl") {
         return Err(ModuleError::new("root module must have an .xl extension"));
@@ -140,6 +191,7 @@ pub fn load_module_with_quota(
         visiting: Vec::new(),
         dependencies: BTreeSet::new(),
         module_quota,
+        debug_sink,
         sources: SourceDatabase::default(),
     };
     loader.load_root(root, external_bindings)
@@ -152,6 +204,7 @@ struct ModuleLoader {
     visiting: Vec<PathBuf>,
     dependencies: BTreeSet<PathBuf>,
     module_quota: Quota,
+    debug_sink: Arc<dyn DebugSink>,
     sources: SourceDatabase,
 }
 
@@ -222,6 +275,7 @@ impl ModuleLoader {
                     self.compile_xl(&path, BTreeMap::new(), false, &mut account)
                         .and_then(|(_, function, externals)| {
                             let arena = Vm::new()
+                                .with_debug_sink(Arc::clone(&self.debug_sink))
                                 .execute_in_background(
                                     &self.world,
                                     &externals,
@@ -341,7 +395,7 @@ impl ModuleLoader {
         if is_root && external_bindings.contains_key("input") {
             dynamic_bindings.insert("input".to_owned());
         }
-        let analysis = analyze_program_with_bindings(
+        let analysis = analyze_program_with_bindings_observed(
             &source_name,
             &program,
             account,
@@ -349,6 +403,7 @@ impl ModuleLoader {
             &dynamic_bindings,
             &self.sources,
             &external_provenance,
+            &self.debug_sink,
         )
         .map_err(|error| {
             error.diagnostic.as_ref().map_or_else(
@@ -369,6 +424,7 @@ impl ModuleLoader {
         let (identity, value) = match name {
             ARRAY_MODULE => (ARRAY_MODULE, array_module_value()),
             DICT_MODULE => (DICT_MODULE, dict_module_value()),
+            DEBUG_MODULE => (DEBUG_MODULE, debug_module_value()),
             _ => return Err(ModuleError::new(format!("unknown core module {name:?}"))),
         };
         let root = publish_value(&mut self.world, &value)
@@ -512,6 +568,7 @@ fn read(path: &Path) -> Result<String, ModuleError> {
 mod tests {
     use super::*;
     use crate::parse_json;
+    use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn fixture_dir() -> PathBuf {
@@ -522,6 +579,142 @@ mod tests {
         let path = std::env::temp_dir().join(format!("xl-module-test-{unique}"));
         fs::create_dir(&path).unwrap();
         path
+    }
+
+    #[derive(Default)]
+    struct CapturingDebugSink {
+        events: Mutex<Vec<crate::DebugEvent>>,
+    }
+
+    impl crate::DebugSink for CapturingDebugSink {
+        fn emit(&self, event: crate::DebugEvent) {
+            self.events.lock().unwrap().push(event);
+        }
+    }
+
+    #[test]
+    fn core_debug_observes_values_without_changing_results() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import debug from "core:debug";
+               let identity = fn(value) { value };
+               let data = { text: "line\nnext", items: [1, 'Ok, (2,)] };
+               let observed = debug.dbg_with("loaded\nvalue", data);
+               let seen_identity = debug.dbg(identity);
+               let seen_value = debug.dbg(observed);
+               if seen_identity == identity { seen_value } else { data }"#,
+        )
+        .unwrap();
+        let sink = Arc::new(CapturingDebugSink::default());
+        let engine = Engine::new(EngineConfig {
+            module_quota: Quota::with_fuel(100_000),
+            session_quota: Quota::with_fuel(100_000),
+        })
+        .with_debug_sink(sink.clone());
+        let module = engine
+            .load_module(directory.join("main.xl"), BTreeMap::new())
+            .unwrap();
+        assert_eq!(
+            engine.execute(&module).unwrap().to_string(),
+            "{items: [1, 'Ok, (2)], text: \"line\\nnext\"}"
+        );
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 6);
+        for phase in events.chunks_exact(3) {
+            assert_eq!(phase[0].label.as_deref(), Some("loaded\nvalue"));
+            assert_eq!(
+                phase[0].value,
+                "{\"items\": [1, 'Ok, (2,)], \"text\": \"line\\nnext\"}"
+            );
+            assert!(phase[1].value.starts_with("<fn "));
+            assert_eq!(phase[2].value, phase[0].value);
+        }
+        drop(events);
+
+        fs::write(
+            directory.join("bad-label.xl"),
+            r#"import debug from "core:debug"; debug.dbg_with(1, 42)"#,
+        )
+        .unwrap();
+        let bad = engine
+            .load_module(directory.join("bad-label.xl"), BTreeMap::new())
+            .unwrap()
+            .execute(100_000)
+            .unwrap_err();
+        assert!(bad.message.contains("String"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn core_debug_uses_one_fuel_no_xl_allocation_and_observes_module_init() {
+        let directory = fixture_dir();
+        fs::write(directory.join("data.json"), r#"{"value":42}"#).unwrap();
+        fs::write(
+            directory.join("dependency.xl"),
+            r#"import debug from "core:debug"; debug.dbg_with("tool", 41)"#,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import debug from "core:debug";
+               import dependency from "./dependency.xl";
+               import data from "./data.json";
+               type Observed = debug.dbg(Int);
+               debug.dbg(data)"#,
+        )
+        .unwrap();
+        let sink = Arc::new(CapturingDebugSink::default());
+        let engine = Engine::new(EngineConfig {
+            module_quota: Quota::with_fuel(100_000),
+            session_quota: Quota::with_fuel(100_000),
+        })
+        .with_debug_sink(sink.clone());
+        let module = engine
+            .load_module(directory.join("main.xl"), BTreeMap::new())
+            .unwrap();
+        {
+            let events = sink.events.lock().unwrap();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].label.as_deref(), Some("tool"));
+            assert!(events[1].value.contains("\"kind\": 'Int"));
+        }
+
+        let mut exact = QuotaAccount::new(Quota::new(1, 1_000, 0));
+        let arena = Vm::new()
+            .with_debug_sink(sink.clone())
+            .execute_in_background(
+                &module.runtime.world,
+                &module.runtime.externals,
+                &module.function,
+                &[],
+                &mut exact,
+            )
+            .unwrap();
+        assert_eq!(exact.requested_allocation_bytes(), 0);
+        assert_eq!(
+            arena.export(&module.runtime.world).unwrap().to_string(),
+            "{value: 42}"
+        );
+        assert_eq!(sink.events.lock().unwrap().len(), 3);
+
+        let mut no_fuel = QuotaAccount::new(Quota::new(0, 1_000, 0));
+        assert_eq!(
+            Vm::new()
+                .with_debug_sink(sink)
+                .execute_in_background(
+                    &module.runtime.world,
+                    &module.runtime.externals,
+                    &module.function,
+                    &[],
+                    &mut no_fuel,
+                )
+                .err()
+                .expect("debug call must consume fuel")
+                .kind,
+            crate::RuntimeErrorKind::FuelExhausted
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -689,6 +882,7 @@ mod tests {
             visiting: Vec::new(),
             dependencies: BTreeSet::new(),
             module_quota: Quota::with_fuel(100_000),
+            debug_sink: Arc::new(DiscardDebugSink),
             sources: SourceDatabase::default(),
         };
 
@@ -1083,6 +1277,7 @@ mod tests {
             visiting: Vec::new(),
             dependencies: BTreeSet::new(),
             module_quota: Quota::with_fuel(100_000),
+            debug_sink: Arc::new(DiscardDebugSink),
             sources: SourceDatabase::default(),
         };
 

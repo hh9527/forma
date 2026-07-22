@@ -3,17 +3,30 @@ use std::env;
 use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
-use xl::{Engine, EngineConfig, Quota, Value, parse_json};
+use std::sync::Arc;
+use xl::{DebugEvent, DebugSink, Engine, EngineConfig, Quota, Value, parse_json};
 
 const EVALUATION_FUEL: usize = 1_000_000;
 const STACK_SLOTS: usize = 65_536;
 const ALLOCATION_BYTES: u64 = 256 * 1024 * 1024;
 
-const fn engine() -> Engine {
+fn engine() -> Engine {
     Engine::new(EngineConfig {
         module_quota: Quota::new(EVALUATION_FUEL, STACK_SLOTS, ALLOCATION_BYTES),
         session_quota: Quota::new(EVALUATION_FUEL, STACK_SLOTS, ALLOCATION_BYTES),
     })
+    .with_debug_sink(Arc::new(StderrDebugSink))
+}
+
+struct StderrDebugSink;
+
+impl DebugSink for StderrDebugSink {
+    fn emit(&self, event: DebugEvent) {
+        match event.label {
+            Some(label) => eprintln!("[debug] {label:?}: {}", event.value),
+            None => eprintln!("[debug] {}", event.value),
+        }
+    }
 }
 
 fn main() {

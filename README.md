@@ -94,6 +94,22 @@ dicts.merge(rebuilt, { a: 10 })
 rejects duplicate keys, while the shallow `merge(left, right)` gives precedence
 to the right Dict.
 
+Debug observation is also an ordinary core module:
+
+```text
+import debug from "core:debug";
+
+value
+    |> debug.dbg_with\("loaded", _)
+    |> transform
+    |> debug.dbg
+```
+
+`dbg(value)` and `dbg_with(label, value)` emit bounded representations to the
+host observer and return the exact input value. The CLI writes debug events to
+stderr, leaving the final program value on stdout. Source-reflection forms such
+as `file!()`, `line!()`, and `dbg!()` are intentionally deferred.
+
 ## Current limits
 
 The MVP has no effects, package manager, LSP server, traits, HKT, YAML/TOML

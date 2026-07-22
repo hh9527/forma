@@ -1,9 +1,12 @@
 use crate::Vm;
-use crate::value::{Closure, CoreArrayFunction, CoreDictFunction, NativeFunction, Value};
+use crate::value::{
+    Closure, CoreArrayFunction, CoreDebugFunction, CoreDictFunction, NativeFunction, Value,
+};
 use std::sync::Arc;
 
 pub(crate) const ARRAY_MODULE: &str = "core:array";
 pub(crate) const DICT_MODULE: &str = "core:dict";
+pub(crate) const DEBUG_MODULE: &str = "core:debug";
 
 pub(crate) fn array_module_value() -> Value {
     let functions = [
@@ -43,4 +46,21 @@ pub(crate) fn dict_module_value() -> Value {
             )
         }))
         .expect("core:dict fields are unique")
+}
+
+pub(crate) fn debug_module_value() -> Value {
+    let functions = [
+        ("dbg", CoreDebugFunction::Dbg),
+        ("dbg_with", CoreDebugFunction::DbgWith),
+    ];
+    Vm::new()
+        .make_dict(functions.into_iter().map(|(name, function)| {
+            (
+                name.to_owned(),
+                Value::Func(Arc::new(Closure::native(NativeFunction::core_debug(
+                    function,
+                )))),
+            )
+        }))
+        .expect("core:debug fields are unique")
 }

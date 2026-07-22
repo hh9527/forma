@@ -2,14 +2,31 @@ use crate::bytecode::{BytecodeFunction, Opcode, Register};
 use crate::heap::{Handle, Heap, HeapView, Object, PersistentValue, RuntimeValue, publish_root};
 use crate::lir::RegisterId;
 use crate::value::{
-    BuiltinAtom, CoreArrayFunction, CoreDictFunction, Dict, NativeError, NativeKind, NativeLimit,
-    Shape, Value,
+    BuiltinAtom, CoreArrayFunction, CoreDebugFunction, CoreDictFunction, Dict, NativeError,
+    NativeKind, NativeLimit, Shape, Value,
 };
 use crate::{Diagnostic, Origin, SourceDatabase};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fmt::Write;
 use std::sync::{Arc, Weak};
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DebugEvent {
+    pub label: Option<String>,
+    pub value: String,
+}
+
+pub trait DebugSink: Send + Sync {
+    fn emit(&self, event: DebugEvent);
+}
+
+#[derive(Debug, Default)]
+pub struct DiscardDebugSink;
+
+impl DebugSink for DiscardDebugSink {
+    fn emit(&self, _event: DebugEvent) {}
+}
 
 const MAX_CALL_DEPTH: usize = 1_024;
 const MAX_STACK_SLOTS: usize = 1_048_576;
@@ -556,9 +573,18 @@ impl ShapeInterner {
     }
 }
 
-#[derive(Default)]
 pub struct Vm {
     shapes: ShapeInterner,
+    debug_sink: Arc<dyn DebugSink>,
+}
+
+impl Default for Vm {
+    fn default() -> Self {
+        Self {
+            shapes: ShapeInterner::default(),
+            debug_sink: Arc::new(DiscardDebugSink),
+        }
+    }
 }
 
 struct ExecutionFrame {
@@ -634,6 +660,11 @@ impl ExecutionArena {
 impl Vm {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_debug_sink(mut self, sink: Arc<dyn DebugSink>) -> Self {
+        self.debug_sink = sink;
+        self
     }
 
     pub fn make_dict(
@@ -790,6 +821,7 @@ impl Vm {
             &mut stack,
             account.stack_limit(),
         )?];
+        let debug_sink = Arc::clone(&self.debug_sink);
 
         let mut result = (|| -> Result<RuntimeValue, RuntimeError> {
             loop {
@@ -1407,6 +1439,7 @@ impl Vm {
                             &mut current,
                             background,
                             account,
+                            debug_sink.as_ref(),
                         )? {
                             DriveOutcome::Pending => continue,
                             DriveOutcome::Root(value) => return Ok(value),
@@ -1440,6 +1473,7 @@ impl Vm {
                             &mut current,
                             background,
                             account,
+                            debug_sink.as_ref(),
                         )? {
                             DriveOutcome::Pending => continue,
                             DriveOutcome::Root(value) => return Ok(value),
@@ -1490,6 +1524,7 @@ impl Vm {
                             &mut current,
                             background,
                             account,
+                            debug_sink.as_ref(),
                         )? {
                             DriveOutcome::Pending => continue,
                             DriveOutcome::Root(value) => return Ok(value),
@@ -1604,6 +1639,7 @@ fn drive_vm_action(
     current: &mut Heap,
     background: &Heap,
     account: &mut QuotaAccount,
+    debug_sink: &dyn DebugSink,
 ) -> Result<DriveOutcome, RuntimeError> {
     loop {
         action = match action {
@@ -1799,6 +1835,16 @@ fn drive_vm_action(
                             current,
                             background,
                             account,
+                        )?,
+                        NativeKind::CoreDebug(function) => run_core_debug(
+                            function,
+                            &arguments,
+                            return_target,
+                            &call_function,
+                            call_pc,
+                            current,
+                            background,
+                            debug_sink,
                         )?,
                     },
                 }
@@ -2409,6 +2455,280 @@ fn core_dict_heap_error(
         function,
         pc,
     )
+}
+
+const DEBUG_MAX_DEPTH: usize = 8;
+const DEBUG_MAX_ITEMS: usize = 32;
+const DEBUG_MAX_BYTES: usize = 4_096;
+const DEBUG_MAX_LABEL_BYTES: usize = 256;
+
+#[allow(clippy::too_many_arguments)]
+fn run_core_debug(
+    operation: CoreDebugFunction,
+    arguments: &[RuntimeValue],
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &Heap,
+    background: &Heap,
+    sink: &dyn DebugSink,
+) -> Result<VmAction, RuntimeError> {
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let (label, value) = match operation {
+        CoreDebugFunction::Dbg => (None, arguments[0]),
+        CoreDebugFunction::DbgWith => {
+            let Some(label) = view
+                .string_text(arguments[0])
+                .map_err(|heap_error| core_debug_heap_error(heap_error, function, pc))?
+            else {
+                return Err(runtime_type_error(
+                    "String",
+                    &arguments[0],
+                    &view,
+                    function,
+                    pc,
+                ));
+            };
+            (Some(truncate_debug_label(label)), arguments[1])
+        }
+    };
+    let value_text = DebugValueFormatter::new(view)
+        .format(value)
+        .map_err(|heap_error| core_debug_heap_error(heap_error, function, pc))?;
+    sink.emit(DebugEvent {
+        label,
+        value: value_text,
+    });
+    Ok(VmAction::Return {
+        value,
+        return_target,
+    })
+}
+
+fn core_debug_heap_error(
+    heap_error: crate::heap::HeapError,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> RuntimeError {
+    error(
+        RuntimeErrorKind::InvalidBytecode,
+        format!("core:debug formatter: {heap_error}"),
+        function,
+        pc,
+    )
+}
+
+fn truncate_debug_label(label: &str) -> String {
+    if label.len() <= DEBUG_MAX_LABEL_BYTES {
+        return label.to_owned();
+    }
+    let mut end = DEBUG_MAX_LABEL_BYTES.saturating_sub(3);
+    while !label.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &label[..end])
+}
+
+struct DebugValueFormatter<'a> {
+    view: HeapView<'a>,
+    output: String,
+    active: HashSet<Handle>,
+    truncated: bool,
+}
+
+impl<'a> DebugValueFormatter<'a> {
+    fn new(view: HeapView<'a>) -> Self {
+        Self {
+            view,
+            output: String::new(),
+            active: HashSet::new(),
+            truncated: false,
+        }
+    }
+
+    fn format(mut self, value: RuntimeValue) -> Result<String, crate::heap::HeapError> {
+        self.value(value, 0)?;
+        if self.truncated {
+            self.output.push_str("...");
+        }
+        Ok(self.output)
+    }
+
+    fn value(&mut self, value: RuntimeValue, depth: usize) -> Result<(), crate::heap::HeapError> {
+        if self.truncated {
+            return Ok(());
+        }
+        match value {
+            RuntimeValue::Int(value) => self.push(&value.to_string()),
+            RuntimeValue::Float(value) => self.push(&format!("{value:?}")),
+            RuntimeValue::BuiltinAtom(atom) => {
+                self.push("'");
+                self.push(atom.name());
+            }
+            RuntimeValue::Atom(id) => {
+                self.push("'");
+                self.push(self.view.text(id)?);
+            }
+            RuntimeValue::ShortString(id) => self.quoted(self.view.text(id)?),
+            RuntimeValue::String(handle) => match self.view.object(handle)? {
+                Object::String(value) => self.quoted(value),
+                _ => return Err(crate::heap::HeapError::new("invalid String handle")),
+            },
+            RuntimeValue::Bytes(handle) => match self.view.object(handle)? {
+                Object::Bytes(value) => {
+                    self.push("b\"");
+                    for byte in value.iter().take(DEBUG_MAX_ITEMS) {
+                        self.push(&format!("\\x{byte:02x}"));
+                    }
+                    if value.len() > DEBUG_MAX_ITEMS {
+                        self.push("...");
+                    }
+                    self.push("\"");
+                }
+                _ => return Err(crate::heap::HeapError::new("invalid Bytes handle")),
+            },
+            RuntimeValue::Array(handle) => self.sequence(handle, false, depth, "[", "]")?,
+            RuntimeValue::Tuple(handle) => self.sequence(handle, true, depth, "(", ")")?,
+            RuntimeValue::Dict(handle) => self.dict(handle, depth)?,
+            RuntimeValue::Func(handle) => {
+                let (prototype, _) = self.view.closure(handle)?;
+                let name = match prototype {
+                    crate::heap::RuntimePrototype::Native(function) => function.name(),
+                    crate::heap::RuntimePrototype::Bytecode(prototype) => {
+                        self.view.bytecode(prototype)?.0.name()
+                    }
+                };
+                self.push("<fn ");
+                self.push(name);
+                self.push(">");
+            }
+            RuntimeValue::UpLink(handle) => {
+                if !self.enter(handle, depth) {
+                    return Ok(());
+                }
+                match self.view.up_link(handle)? {
+                    Some(value) => self.value(value, depth + 1)?,
+                    None => self.push("<uninitialized up-link>"),
+                }
+                self.active.remove(&handle);
+            }
+        }
+        Ok(())
+    }
+
+    fn sequence(
+        &mut self,
+        handle: Handle,
+        tuple: bool,
+        depth: usize,
+        open: &str,
+        close: &str,
+    ) -> Result<(), crate::heap::HeapError> {
+        if !self.enter(handle, depth) {
+            return Ok(());
+        }
+        self.push(open);
+        let (value_count, values) = {
+            let sequence = self.view.sequence(handle, tuple)?;
+            (
+                sequence.len(),
+                sequence
+                    .iter()
+                    .take(DEBUG_MAX_ITEMS)
+                    .copied()
+                    .collect::<Vec<_>>(),
+            )
+        };
+        for (index, value) in values.iter().take(DEBUG_MAX_ITEMS).enumerate() {
+            if index > 0 {
+                self.push(", ");
+            }
+            self.value(*value, depth + 1)?;
+        }
+        if value_count > DEBUG_MAX_ITEMS {
+            if DEBUG_MAX_ITEMS > 0 {
+                self.push(", ");
+            }
+            self.push("...");
+        }
+        if tuple && value_count == 1 {
+            self.push(",");
+        }
+        self.push(close);
+        self.active.remove(&handle);
+        Ok(())
+    }
+
+    fn dict(&mut self, handle: Handle, depth: usize) -> Result<(), crate::heap::HeapError> {
+        if !self.enter(handle, depth) {
+            return Ok(());
+        }
+        self.push("{");
+        let (fields, values) = self.view.dict_parts(handle)?;
+        let entries = fields
+            .iter()
+            .zip(values)
+            .take(DEBUG_MAX_ITEMS)
+            .map(|(field, value)| Ok((self.view.text(*field)?.to_owned(), *value)))
+            .collect::<Result<Vec<_>, crate::heap::HeapError>>()?;
+        for (index, (field, value)) in entries.into_iter().enumerate() {
+            if index > 0 {
+                self.push(", ");
+            }
+            self.quoted(&field);
+            self.push(": ");
+            self.value(value, depth + 1)?;
+        }
+        if values.len() > DEBUG_MAX_ITEMS {
+            if DEBUG_MAX_ITEMS > 0 {
+                self.push(", ");
+            }
+            self.push("...");
+        }
+        self.push("}");
+        self.active.remove(&handle);
+        Ok(())
+    }
+
+    fn enter(&mut self, handle: Handle, depth: usize) -> bool {
+        if depth >= DEBUG_MAX_DEPTH {
+            self.push("...");
+            return false;
+        }
+        if !self.active.insert(handle) {
+            self.push("<cycle>");
+            return false;
+        }
+        true
+    }
+
+    fn quoted(&mut self, text: &str) {
+        self.push("\"");
+        for character in text.chars() {
+            for escaped in character.escape_debug() {
+                let mut buffer = [0u8; 4];
+                self.push(escaped.encode_utf8(&mut buffer));
+            }
+        }
+        self.push("\"");
+    }
+
+    fn push(&mut self, text: &str) {
+        if self.truncated {
+            return;
+        }
+        let content_limit = DEBUG_MAX_BYTES.saturating_sub(3);
+        for character in text.chars() {
+            if self.output.len() + character.len_utf8() > content_limit {
+                self.truncated = true;
+                return;
+            }
+            self.output.push(character);
+        }
+    }
 }
 
 fn decimal_length(value: i64) -> usize {
@@ -3482,5 +3802,47 @@ mod tests {
         let second = account.requested_allocation_bytes() - first;
         assert_eq!(first, second);
         assert!(first > 0);
+    }
+
+    #[test]
+    fn debug_formatter_is_cycle_safe_and_bounded() {
+        let background = Heap::persistent();
+        let mut current = Heap::local();
+        let cycle = current.reserve();
+        current
+            .initialize(
+                cycle,
+                Object::Array(vec![RuntimeValue::Array(cycle)].into()),
+            )
+            .unwrap();
+        let cycle_text = DebugValueFormatter::new(HeapView {
+            current: &current,
+            background: Some(&background),
+        })
+        .format(RuntimeValue::Array(cycle))
+        .unwrap();
+        assert_eq!(cycle_text, "[<cycle>]");
+
+        let long = current.string(None, &"x".repeat(DEBUG_MAX_BYTES * 2));
+        let long_text = DebugValueFormatter::new(HeapView {
+            current: &current,
+            background: Some(&background),
+        })
+        .format(long)
+        .unwrap();
+        assert_eq!(long_text.len(), DEBUG_MAX_BYTES);
+        assert!(long_text.ends_with("..."));
+
+        let bytes = RuntimeValue::Bytes(current.allocate(Object::Bytes(
+            (0..64).map(|value| value as u8).collect::<Vec<_>>().into(),
+        )));
+        let bytes_text = DebugValueFormatter::new(HeapView {
+            current: &current,
+            background: Some(&background),
+        })
+        .format(bytes)
+        .unwrap();
+        assert!(bytes_text.starts_with("b\"\\x00\\x01"));
+        assert!(bytes_text.contains("..."));
     }
 }

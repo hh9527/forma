@@ -266,6 +266,10 @@ pub struct FuncByteCode {
 }
 
 impl FuncByteCode {
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
     pub(crate) const fn parameter_count(&self) -> usize {
         self.parameter_count
     }

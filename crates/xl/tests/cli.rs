@@ -115,3 +115,26 @@ fn run_evaluates_structured_string_interpolation() {
     );
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn run_writes_debug_events_only_to_stderr() {
+    let directory = fixture_dir();
+    fs::write(
+        directory.join("debug.xl"),
+        r#"import debug from "core:debug";
+           42 |> debug.dbg_with\("answer\nlabel", _)"#,
+    )
+    .unwrap();
+
+    let run = xl()
+        .args(["run", directory.join("debug.xl").to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(run.status.success());
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "42");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stderr).trim(),
+        r#"[debug] "answer\nlabel": 42"#
+    );
+    fs::remove_dir_all(directory).unwrap();
+}

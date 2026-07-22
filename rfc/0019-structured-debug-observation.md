@@ -1,6 +1,6 @@
 # RFC 0019: Structured Debug Observation
 
-- Status: Accepted for implementation
+- Status: Implemented
 
 ## Summary
 
@@ -261,5 +261,25 @@ debug observer is stable.
 8. CLI debug events go only to stderr with escaped labels/values; the final
    value remains on stdout.
 9. Sink behavior cannot alter XL results or errors.
+
+## Implementation result
+
+Implemented by adding `core:debug`, an owned `DebugEvent`, and an injected
+non-fallible `DebugSink`. The VM formats values directly through `HeapView`
+with fixed depth, item, and byte bounds; it detects active cycles without
+exporting or copying the observed value. Both debug functions return the
+original `RuntimeValue`, consume ordinary call fuel, and allocate no XL value.
+
+`Engine` threads one configured sink through dependency and root module
+initialization, tool-stage metadata evaluation, and explicit session
+execution. These are separate evaluations, so the same source-level debug call
+can emit once in module initialization and again when a loaded root is executed
+as a session. Events deliberately contain no phase or source-location field.
+The CLI installs a stderr renderer, while existing convenience library APIs
+retain a discard default.
+
+Tests cover core-module resolution, ordering, exact return identity, function
+formatting, label validation, dependency and tool-stage observation, fuel and
+allocation accounting, cycles and truncation, and CLI stdout/stderr separation.
 10. Existing language, module, core-library, VM, quota, and CLI tests remain
     unchanged.

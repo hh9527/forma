@@ -9,8 +9,12 @@ use crate::lir::RegisterId;
 use crate::parser::parse_registered;
 use crate::source::{Diagnostic, SourceDatabase};
 use crate::value::{Atom, Closure, NativeError, NativeFunction, Value};
-use crate::{BuiltinAtom, CallContext, Quota, QuotaAccount, ValueKind, ValueRef, Vm};
+use crate::{
+    BuiltinAtom, CallContext, DebugSink, DiscardDebugSink, Quota, QuotaAccount, ValueKind,
+    ValueRef, Vm,
+};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 const DEFAULT_TOOL_FUEL: usize = 100_000;
 
@@ -224,6 +228,30 @@ pub(crate) fn analyze_program_with_bindings(
     sources: &SourceDatabase,
     external_provenance: &BTreeMap<String, Provenance>,
 ) -> Result<Analysis, FrontendError> {
+    let debug_sink: Arc<dyn DebugSink> = Arc::new(DiscardDebugSink);
+    analyze_program_with_bindings_observed(
+        source_name,
+        program,
+        account,
+        external_values,
+        dynamic_bindings,
+        sources,
+        external_provenance,
+        &debug_sink,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn analyze_program_with_bindings_observed(
+    source_name: &str,
+    program: &Program,
+    account: &mut QuotaAccount,
+    external_values: &BTreeMap<String, Value>,
+    dynamic_bindings: &HashSet<String>,
+    sources: &SourceDatabase,
+    external_provenance: &BTreeMap<String, Provenance>,
+    debug_sink: &Arc<dyn DebugSink>,
+) -> Result<Analysis, FrontendError> {
     let mut tool_vm = Vm::new();
     let prelude = core_prelude(&mut tool_vm);
     let mut tool_values = prelude.clone();
@@ -269,8 +297,14 @@ pub(crate) fn analyze_program_with_bindings(
             .annotation
             .as_ref()
             .expect("declaration has a lowered contract");
-        let metadata =
-            evaluate_tool_expression(source_name, contract, &tool_values, account, sources)?;
+        let metadata = evaluate_tool_expression(
+            source_name,
+            contract,
+            &tool_values,
+            account,
+            sources,
+            debug_sink,
+        )?;
         let descriptor = TypeDescriptor::from_value(&metadata).map_err(|message| {
             frontend_error(
                 source_name,
@@ -290,8 +324,14 @@ pub(crate) fn analyze_program_with_bindings(
         let Some(contract) = &binding.value.annotation else {
             continue;
         };
-        let metadata =
-            evaluate_tool_expression(source_name, contract, &tool_values, account, sources)?;
+        let metadata = evaluate_tool_expression(
+            source_name,
+            contract,
+            &tool_values,
+            account,
+            sources,
+            debug_sink,
+        )?;
         let descriptor = TypeDescriptor::from_value(&metadata).map_err(|message| {
             frontend_error(
                 source_name,
@@ -342,6 +382,7 @@ pub(crate) fn analyze_program_with_bindings(
                     &tool_values,
                     account,
                     sources,
+                    debug_sink,
                 )?;
                 let descriptor = TypeDescriptor::from_value(&value).map_err(|message| {
                     frontend_error(
@@ -366,6 +407,7 @@ pub(crate) fn analyze_program_with_bindings(
                         &tool_values,
                         account,
                         sources,
+                        debug_sink,
                     )?;
                     let expected = TypeDescriptor::from_value(&metadata).map_err(|message| {
                         frontend_error(
@@ -424,6 +466,7 @@ pub(crate) fn analyze_program_with_bindings(
                     &tool_values,
                     account,
                     sources,
+                    debug_sink,
                 ) {
                     tool_values.insert(binding.value.name.value.clone(), value);
                 }
@@ -462,6 +505,7 @@ pub(crate) fn analyze_program_with_bindings(
                     &tool_values,
                     account,
                     sources,
+                    debug_sink,
                 ) {
                     tool_values.insert(name.clone(), value);
                 }
@@ -554,6 +598,7 @@ fn evaluate_tool_expression(
     bindings: &BTreeMap<String, Value>,
     account: &mut QuotaAccount,
     sources: &SourceDatabase,
+    debug_sink: &Arc<dyn DebugSink>,
 ) -> Result<Value, FrontendError> {
     let function = compile_expression_with_bindings(
         source_name,
@@ -563,6 +608,7 @@ fn evaluate_tool_expression(
         sources.get(expression.location.source),
     )?;
     Vm::new()
+        .with_debug_sink(Arc::clone(debug_sink))
         .execute_with_account(&function, &[], account)
         .map_err(|error| {
             frontend_error(

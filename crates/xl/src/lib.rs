@@ -26,6 +26,7 @@ pub use json::{
 pub use lexer::{FrontendError, SourceLocation};
 pub use module::{
     Engine, EngineConfig, LoadedModule, ModuleError, load_module, load_module_with_quota,
+    load_module_with_quota_and_debug_sink,
 };
 pub use source::{
     Diagnostic, Label, Located, Location, Origin, SourceDatabase, SourceId, TextRange, WithOrigin,
@@ -38,6 +39,6 @@ pub use value::{
     Value,
 };
 pub use vm::{
-    CallContext, Quota, QuotaAccount, RuntimeError, RuntimeErrorKind, RuntimeFrame, ValueKind,
-    ValueRef, Vm,
+    CallContext, DebugEvent, DebugSink, DiscardDebugSink, Quota, QuotaAccount, RuntimeError,
+    RuntimeErrorKind, RuntimeFrame, ValueKind, ValueRef, Vm,
 };
