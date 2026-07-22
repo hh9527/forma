@@ -75,6 +75,7 @@ pub(crate) enum Object {
         values: Box<[RuntimeValue]>,
     },
     Closure {
+        identity: Arc<()>,
         prototype: RuntimePrototype,
         upvalues: Box<[RuntimeValue]>,
     },
@@ -88,18 +89,6 @@ pub(crate) enum Object {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct HeapError(&'static str);
-
-#[derive(Debug)]
-pub(crate) enum EqualityError {
-    Heap(HeapError),
-    Unsupported,
-}
-
-impl From<HeapError> for EqualityError {
-    fn from(error: HeapError) -> Self {
-        Self::Heap(error)
-    }
-}
 
 impl HeapError {
     pub(crate) const fn new(message: &'static str) -> Self {
@@ -360,6 +349,7 @@ impl Heap {
                     .map(|value| self.import_value_with(background, value, externals, prototypes))
                     .collect::<Result<Box<[_]>, _>>()?;
                 RuntimeValue::Func(self.allocate(Object::Closure {
+                    identity: Arc::clone(closure.identity()),
                     prototype,
                     upvalues,
                 }))
@@ -494,6 +484,7 @@ impl<'a> HeapView<'a> {
         let Object::Closure {
             prototype,
             upvalues,
+            ..
         } = self.object(handle)?
         else {
             return Err(HeapError("handle is not a closure"));
@@ -583,7 +574,7 @@ impl<'a> HeapView<'a> {
         &self,
         left: RuntimeValue,
         right: RuntimeValue,
-    ) -> Result<bool, EqualityError> {
+    ) -> Result<bool, HeapError> {
         self.values_equal_with(left, right, &mut HashSet::new())
     }
 
@@ -592,10 +583,19 @@ impl<'a> HeapView<'a> {
         left: RuntimeValue,
         right: RuntimeValue,
         visited: &mut HashSet<(Handle, Handle)>,
-    ) -> Result<bool, EqualityError> {
+    ) -> Result<bool, HeapError> {
         match (left, right) {
-            (RuntimeValue::Func(_), _) | (_, RuntimeValue::Func(_)) => {
-                Err(EqualityError::Unsupported)
+            (RuntimeValue::Func(left), RuntimeValue::Func(right)) => {
+                let Object::Closure { identity: left, .. } = self.object(left)? else {
+                    return Err(HeapError("Func handle refers to another object kind"));
+                };
+                let Object::Closure {
+                    identity: right, ..
+                } = self.object(right)?
+                else {
+                    return Err(HeapError("Func handle refers to another object kind"));
+                };
+                Ok(Arc::ptr_eq(left, right))
             }
             (RuntimeValue::Int(left), RuntimeValue::Int(right)) => Ok(left == right),
             (RuntimeValue::Float(left), RuntimeValue::Float(right)) => Ok(left == right),
@@ -630,10 +630,10 @@ impl<'a> HeapView<'a> {
                     return Ok(true);
                 }
                 let Object::Bytes(left) = self.object(left)? else {
-                    return Err(HeapError("Bytes handle refers to another object kind").into());
+                    return Err(HeapError("Bytes handle refers to another object kind"));
                 };
                 let Object::Bytes(right) = self.object(right)? else {
-                    return Err(HeapError("Bytes handle refers to another object kind").into());
+                    return Err(HeapError("Bytes handle refers to another object kind"));
                 };
                 Ok(left == right)
             }
@@ -653,17 +653,20 @@ impl<'a> HeapView<'a> {
         left: Handle,
         right: Handle,
         visited: &mut HashSet<(Handle, Handle)>,
-    ) -> Result<bool, EqualityError> {
+    ) -> Result<bool, HeapError> {
+        if left == right {
+            return Ok(true);
+        }
         if !visited.insert((left, right)) {
             return Ok(true);
         }
         let left_values = match self.object(left)? {
             Object::Array(values) | Object::Tuple(values) => values,
-            _ => return Err(HeapError("sequence handle refers to another object kind").into()),
+            _ => return Err(HeapError("sequence handle refers to another object kind")),
         };
         let right_values = match self.object(right)? {
             Object::Array(values) | Object::Tuple(values) => values,
-            _ => return Err(HeapError("sequence handle refers to another object kind").into()),
+            _ => return Err(HeapError("sequence handle refers to another object kind")),
         };
         self.value_slices_equal(left_values, right_values, visited)
     }
@@ -673,7 +676,10 @@ impl<'a> HeapView<'a> {
         left: Handle,
         right: Handle,
         visited: &mut HashSet<(Handle, Handle)>,
-    ) -> Result<bool, EqualityError> {
+    ) -> Result<bool, HeapError> {
+        if left == right {
+            return Ok(true);
+        }
         if !visited.insert((left, right)) {
             return Ok(true);
         }
@@ -682,14 +688,14 @@ impl<'a> HeapView<'a> {
             values: left_values,
         } = self.object(left)?
         else {
-            return Err(HeapError("Dict handle refers to another object kind").into());
+            return Err(HeapError("Dict handle refers to another object kind"));
         };
         let Object::Dict {
             shape: right_shape,
             values: right_values,
         } = self.object(right)?
         else {
-            return Err(HeapError("Dict handle refers to another object kind").into());
+            return Err(HeapError("Dict handle refers to another object kind"));
         };
         let left_fields = self.shape(*left_shape)?;
         let right_fields = self.shape(*right_shape)?;
@@ -709,7 +715,7 @@ impl<'a> HeapView<'a> {
         left: &[RuntimeValue],
         right: &[RuntimeValue],
         visited: &mut HashSet<(Handle, Handle)>,
-    ) -> Result<bool, EqualityError> {
+    ) -> Result<bool, HeapError> {
         if left.len() != right.len() {
             return Ok(false);
         }
@@ -801,6 +807,7 @@ impl<'a> HeapView<'a> {
             }
             RuntimeValue::Func(handle) => {
                 let Object::Closure {
+                    identity,
                     prototype,
                     upvalues,
                 } = self.enter_object(handle, visiting)?
@@ -813,7 +820,11 @@ impl<'a> HeapView<'a> {
                     .map(|value| self.export_value_with(*value, visiting))
                     .collect::<Result<Vec<_>, _>>()?;
                 visiting.remove(&handle);
-                Value::Func(Arc::new(Closure::from_parts(prototype, upvalues)))
+                Value::Func(Arc::new(Closure::from_parts_with_identity(
+                    Arc::clone(identity),
+                    prototype,
+                    upvalues,
+                )))
             }
         })
     }
@@ -1037,9 +1048,11 @@ impl PendingCopy {
                 values: copy_values(self, values)?,
             },
             Object::Closure {
+                identity,
                 prototype,
                 upvalues,
             } => Object::Closure {
+                identity: Arc::clone(identity),
                 prototype: self.copy_prototype(target, source, prototype)?,
                 upvalues: copy_values(self, upvalues)?,
             },
@@ -1375,7 +1388,7 @@ mod tests {
     }
 
     #[test]
-    fn composite_equality_is_structural_and_rejects_nested_functions() {
+    fn composite_equality_uses_function_identity_at_func_leaves() {
         let tagged =
             Value::Tuple(vec![Value::atom("Ok"), Value::Array(vec![Value::Int(42)].into())].into());
         let mut world = Heap::persistent();
@@ -1383,22 +1396,46 @@ mod tests {
         let mut local = Heap::local();
         let local_tagged = local.import_value(Some(&world), &tagged).unwrap();
         let function = Arc::new(crate::compile_source("test", "fn() { 1 }").unwrap());
+        let closure = Arc::new(Closure::new(function, Vec::new()));
         let with_function = Value::Dict(Dict::new(
             Arc::new(Shape::from_sorted_fields(vec!["value".into()])),
-            vec![Value::Array(
-                vec![Value::Func(Arc::new(Closure::new(function, Vec::new())))].into(),
-            )],
+            vec![Value::Array(vec![Value::Func(Arc::clone(&closure))].into())],
         ));
         let with_function = local.import_value(None, &with_function).unwrap();
+        let same_identity = local
+            .import_value(None, &Value::Func(Arc::clone(&closure)))
+            .unwrap();
+        let same_identity_again = local
+            .import_value(None, &Value::Func(Arc::clone(&closure)))
+            .unwrap();
+        let promoted = publish_root(&mut world, &local, same_identity)
+            .unwrap()
+            .runtime();
+        let different_identity = local
+            .import_value(
+                None,
+                &Value::Func(Arc::new(Closure::new(
+                    Arc::new(crate::compile_source("test", "fn() { 1 }").unwrap()),
+                    Vec::new(),
+                ))),
+            )
+            .unwrap();
         let view = HeapView {
             current: &local,
             background: Some(&world),
         };
         assert!(view.values_equal(local_tagged, persistent).unwrap());
-        assert!(matches!(
-            view.values_equal(with_function, with_function),
-            Err(EqualityError::Unsupported)
-        ));
+        assert!(view.values_equal(with_function, with_function).unwrap());
+        assert!(
+            view.values_equal(same_identity, same_identity_again)
+                .unwrap()
+        );
+        assert!(view.values_equal(same_identity, promoted).unwrap());
+        assert!(
+            !view
+                .values_equal(same_identity, different_identity)
+                .unwrap()
+        );
     }
 
     #[test]

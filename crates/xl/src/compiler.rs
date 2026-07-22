@@ -1065,6 +1065,24 @@ mod tests {
     }
 
     #[test]
+    fn compares_functions_by_opaque_identity() {
+        let value = run(
+            "let f = fn(x) { x }; let same = f == f; let distinct = f == fn(x) { x }; (same, distinct)",
+        )
+        .unwrap();
+        let Value::Tuple(values) = value else {
+            panic!("expected tuple")
+        };
+        assert!(matches!(
+            values.as_ref(),
+            [
+                Value::Atom(Atom::Builtin(BuiltinAtom::True)),
+                Value::Atom(Atom::Builtin(BuiltinAtom::False))
+            ]
+        ));
+    }
+
+    #[test]
     fn allocation_and_stack_quotas_keep_source_origins() {
         let source = "[1, 2]";
         let function = compile_source("quota.xl", source).unwrap();

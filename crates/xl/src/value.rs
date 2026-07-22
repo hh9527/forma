@@ -81,6 +81,7 @@ pub struct Dict {
 
 #[derive(Clone, Debug)]
 pub struct Closure {
+    identity: Arc<()>,
     prototype: Prototype,
     upvalues: Arc<[Value]>,
 }
@@ -176,16 +177,26 @@ pub type Callable = Prototype;
 impl Closure {
     pub(crate) fn from_parts(prototype: Prototype, upvalues: Vec<Value>) -> Self {
         Self {
+            identity: Arc::new(()),
+            prototype,
+            upvalues: upvalues.into(),
+        }
+    }
+
+    pub(crate) fn from_parts_with_identity(
+        identity: Arc<()>,
+        prototype: Prototype,
+        upvalues: Vec<Value>,
+    ) -> Self {
+        Self {
+            identity,
             prototype,
             upvalues: upvalues.into(),
         }
     }
 
     pub fn new(function: Arc<BytecodeFunction>, captures: Vec<Value>) -> Self {
-        Self {
-            prototype: Prototype::Bytecode(function),
-            upvalues: captures.into(),
-        }
+        Self::from_parts(Prototype::Bytecode(function), captures)
     }
 
     pub fn native(function: NativeFunction) -> Self {
@@ -193,10 +204,7 @@ impl Closure {
     }
 
     pub fn native_with_upvalues(function: NativeFunction, upvalues: Vec<Value>) -> Self {
-        Self {
-            prototype: Prototype::Native(function),
-            upvalues: upvalues.into(),
-        }
+        Self::from_parts(Prototype::Native(function), upvalues)
     }
 
     pub fn prototype(&self) -> &Prototype {
@@ -205,6 +213,10 @@ impl Closure {
 
     pub fn upvalues(&self) -> &[Value] {
         &self.upvalues
+    }
+
+    pub(crate) fn identity(&self) -> &Arc<()> {
+        &self.identity
     }
 }
 

@@ -1,7 +1,5 @@
 use crate::bytecode::{BytecodeFunction, Opcode, Register};
-use crate::heap::{
-    EqualityError, Handle, Heap, HeapView, Object, PersistentValue, RuntimeValue, publish_root,
-};
+use crate::heap::{Handle, Heap, HeapView, Object, PersistentValue, RuntimeValue, publish_root};
 use crate::lir::RegisterId;
 use crate::value::{BuiltinAtom, Dict, NativeError, NativeLimit, Shape, Value};
 use crate::{Diagnostic, Origin, SourceDatabase};
@@ -462,7 +460,6 @@ pub enum RuntimeErrorKind {
     NoPatternMatched,
     StackLimitExceeded,
     TypeMismatch,
-    UnsupportedEquality,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -862,21 +859,13 @@ impl Vm {
                     Opcode::Equal { dst, left, right } => {
                         let left = *read_register(&registers, *left, function, pc)?;
                         let right = *read_register(&registers, *right, function, pc)?;
-                        let equal = view.values_equal(left, right).map_err(|equality_error| {
-                            match equality_error {
-                                EqualityError::Unsupported => error(
-                                    RuntimeErrorKind::UnsupportedEquality,
-                                    "functions cannot be compared for equality",
-                                    function,
-                                    pc,
-                                ),
-                                EqualityError::Heap(heap_error) => error(
-                                    RuntimeErrorKind::InvalidBytecode,
-                                    heap_error.to_string(),
-                                    function,
-                                    pc,
-                                ),
-                            }
+                        let equal = view.values_equal(left, right).map_err(|heap_error| {
+                            error(
+                                RuntimeErrorKind::InvalidBytecode,
+                                heap_error.to_string(),
+                                function,
+                                pc,
+                            )
                         })?;
                         write_register(&mut registers, *dst, runtime_bool(equal), function, pc)?;
                     }
@@ -1183,6 +1172,7 @@ impl Vm {
                         charge_allocation(account, bytes, function, pc)?;
                         let closure =
                             RuntimeValue::Func(current.allocate(crate::heap::Object::Closure {
+                                identity: Arc::new(()),
                                 prototype: closure_prototype,
                                 upvalues: captures.into(),
                             }));
