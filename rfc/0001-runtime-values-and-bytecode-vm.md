@@ -108,8 +108,19 @@ Return
 Bytecode construction validates constant and register indexes before execution
 where practical. Malformed bytecode must return an error rather than panic.
 
-`Equal` supports all data values recursively except functions. Comparing a
-function is a runtime error. Numeric equality does not coerce Int and Float.
+`Equal` compares scalar values by value and Array, Tuple, and Dict recursively
+by structure. Numeric equality does not coerce Int and Float.
+
+Functions use opaque identity equality. Reusing one closure value compares
+equal; evaluating another closure construction compares unequal even when its
+prototype and captures have the same contents. Function identity has no
+numeric or textual representation and cannot be ordered. Runtime storage
+changes, including local-to-persistent publication, must preserve it. A Func
+inside a structured value participates in recursive equality by this same
+identity rule.
+
+The runtime may use equal handles as a fast path, but handle numbers and heap
+ownership are not themselves language-visible identity.
 
 ## Execution budget
 
