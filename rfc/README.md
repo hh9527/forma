@@ -26,3 +26,4 @@ semantics from an earlier RFC.
 8. Typed CST views, missing-slot validation, and tolerant lexical errors.
 9. Register LIR, VM call context, unified closures, and debug origins.
 10. Evaluation fuel for calls and control-flow back edges.
+11. Unified execution quotas for module initialization and runtime sessions.
