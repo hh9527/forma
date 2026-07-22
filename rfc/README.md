@@ -35,3 +35,4 @@ semantics from an earlier RFC.
 16. Core Dict enumeration, construction, and shallow merge functions.
 17. Uniform reverse-application pipeline semantics.
 18. Explicit placeholder application and call sections.
+19. Structured debug observation through an explicit core module and host sink.
