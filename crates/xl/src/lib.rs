@@ -12,7 +12,10 @@ pub mod types;
 pub mod value;
 pub mod vm;
 
-pub use bytecode::{BytecodeFunction, DebugOriginRange, Instruction, Register};
+pub use bytecode::{
+    BytecodeFunction, DebugOriginRange, FuncByteCode, Instruction, LinkingTable, Opcode,
+    ProtoLinkId, Register, TextLinkId, ValueLinkId,
+};
 pub use compiler::{ExecutionError, compile_source, run_source};
 pub use json::{
     JsonError, JsonParse, Provenance, SourcedValue, ValuePath, ValuePathSegment, parse_json,

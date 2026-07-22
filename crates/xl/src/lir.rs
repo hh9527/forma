@@ -420,7 +420,7 @@ mod tests {
         let bytecode = assemble(function).unwrap();
         assert!(matches!(
             bytecode.instructions()[1],
-            Instruction::Jump { target: 2 }
+            crate::bytecode::Opcode::Jump { target: 2 }
         ));
         assert_eq!(bytecode.debug_origins().len(), 1);
         assert_eq!(bytecode.debug_origins()[0].end, 3);

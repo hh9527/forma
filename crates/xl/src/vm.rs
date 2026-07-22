@@ -1,4 +1,4 @@
-use crate::bytecode::{BytecodeFunction, Instruction, Register};
+use crate::bytecode::{BytecodeFunction, Opcode, Register};
 use crate::lir::RegisterId;
 use crate::value::{
     Atom, BuiltinAtom, Closure, Dict, NativeError, NativeLimit, Prototype, Shape, Value,
@@ -616,27 +616,22 @@ impl Vm {
                 let mut registers = &mut stack[base..end];
 
                 match instruction {
-                    Instruction::LoadConst { dst, constant } => {
-                        let value =
-                            function
-                                .constants()
-                                .get(*constant)
-                                .cloned()
-                                .ok_or_else(|| {
-                                    error(
-                                        RuntimeErrorKind::InvalidBytecode,
-                                        format!("constant index {constant} is out of bounds"),
-                                        function,
-                                        pc,
-                                    )
-                                })?;
+                    Opcode::LoadConst { dst, value } => {
+                        let value = function.value_link(*value).cloned().ok_or_else(|| {
+                            error(
+                                RuntimeErrorKind::InvalidBytecode,
+                                format!("value link {} is out of bounds", value.0),
+                                function,
+                                pc,
+                            )
+                        })?;
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
-                    Instruction::Move { dst, src } => {
+                    Opcode::Move { dst, src } => {
                         let value = read_register(&registers, *src, function, pc)?.clone();
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
-                    Instruction::Add { dst, left, right } => {
+                    Opcode::Add { dst, left, right } => {
                         let value = numeric_binary(
                             read_register(&registers, *left, function, pc)?,
                             read_register(&registers, *right, function, pc)?,
@@ -646,7 +641,7 @@ impl Vm {
                         )?;
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
-                    Instruction::Subtract { dst, left, right } => {
+                    Opcode::Subtract { dst, left, right } => {
                         let value = numeric_binary(
                             read_register(&registers, *left, function, pc)?,
                             read_register(&registers, *right, function, pc)?,
@@ -656,7 +651,7 @@ impl Vm {
                         )?;
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
-                    Instruction::Multiply { dst, left, right } => {
+                    Opcode::Multiply { dst, left, right } => {
                         let value = numeric_binary(
                             read_register(&registers, *left, function, pc)?,
                             read_register(&registers, *right, function, pc)?,
@@ -666,7 +661,7 @@ impl Vm {
                         )?;
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
-                    Instruction::Divide { dst, left, right } => {
+                    Opcode::Divide { dst, left, right } => {
                         let value = numeric_binary(
                             read_register(&registers, *left, function, pc)?,
                             read_register(&registers, *right, function, pc)?,
@@ -676,7 +671,7 @@ impl Vm {
                         )?;
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
-                    Instruction::Negate { dst, src } => {
+                    Opcode::Negate { dst, src } => {
                         let value = match read_register(&registers, *src, function, pc)? {
                             Value::Int(value) => {
                                 Value::Int(value.checked_neg().ok_or_else(|| {
@@ -695,7 +690,7 @@ impl Vm {
                         };
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
-                    Instruction::Equal { dst, left, right } => {
+                    Opcode::Equal { dst, left, right } => {
                         let equal = values_equal(
                             read_register(&registers, *left, function, pc)?,
                             read_register(&registers, *right, function, pc)?,
@@ -704,7 +699,7 @@ impl Vm {
                         )?;
                         write_register(&mut registers, *dst, Value::bool(equal), function, pc)?;
                     }
-                    Instruction::LessThan { dst, left, right } => {
+                    Opcode::LessThan { dst, left, right } => {
                         let left = read_register(&registers, *left, function, pc)?;
                         let right = read_register(&registers, *right, function, pc)?;
                         let less = match (left, right) {
@@ -714,7 +709,7 @@ impl Vm {
                         };
                         write_register(&mut registers, *dst, Value::bool(less), function, pc)?;
                     }
-                    Instruction::MakeArray { dst, items } => {
+                    Opcode::MakeArray { dst, items } => {
                         let values = read_many(&registers, items, function, pc)?;
                         let bytes = logical_value_bytes(values.len()).map_err(|native_error| {
                             allocation_error(native_error.message, function, pc)
@@ -728,7 +723,7 @@ impl Vm {
                             pc,
                         )?;
                     }
-                    Instruction::MakeTuple { dst, items } => {
+                    Opcode::MakeTuple { dst, items } => {
                         let values = read_many(&registers, items, function, pc)?;
                         let bytes = logical_value_bytes(values.len()).map_err(|native_error| {
                             allocation_error(native_error.message, function, pc)
@@ -742,7 +737,7 @@ impl Vm {
                             pc,
                         )?;
                     }
-                    Instruction::InterpolateString { dst, parts } => {
+                    Opcode::InterpolateString { dst, parts } => {
                         let mut length = 0usize;
                         for part in parts {
                             let value = read_register(&registers, *part, function, pc)?;
@@ -779,12 +774,20 @@ impl Vm {
                         }
                         write_register(&mut registers, *dst, Value::string(output), function, pc)?;
                     }
-                    Instruction::MakeDict { dst, fields } => {
+                    Opcode::MakeDict { dst, fields } => {
                         let mut entries = fields
                             .iter()
                             .map(|(field, register)| {
+                                let field = function.text_link(*field).ok_or_else(|| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        format!("text link {} is out of bounds", field.0),
+                                        function,
+                                        pc,
+                                    )
+                                })?;
                                 Ok((
-                                    field.clone(),
+                                    field.to_owned(),
                                     read_register(&registers, *register, function, pc)?.clone(),
                                 ))
                             })
@@ -821,7 +824,15 @@ impl Vm {
                             pc,
                         )?;
                     }
-                    Instruction::GetField { dst, dict, field } => {
+                    Opcode::GetField { dst, dict, field } => {
+                        let field = function.text_link(*field).ok_or_else(|| {
+                            error(
+                                RuntimeErrorKind::InvalidBytecode,
+                                format!("text link {} is out of bounds", field.0),
+                                function,
+                                pc,
+                            )
+                        })?;
                         let dict = read_register(&registers, *dict, function, pc)?;
                         let Value::Dict(dict) = dict else {
                             return Err(type_error("Dict", dict, function, pc));
@@ -836,14 +847,14 @@ impl Vm {
                         })?;
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
-                    Instruction::TupleLengthEquals { dst, value, length } => {
+                    Opcode::TupleLengthEquals { dst, value, length } => {
                         let matches = matches!(
                             read_register(&registers, *value, function, pc)?,
                             Value::Tuple(items) if items.len() == *length
                         );
                         write_register(&mut registers, *dst, Value::bool(matches), function, pc)?;
                     }
-                    Instruction::GetTuple { dst, tuple, index } => {
+                    Opcode::GetTuple { dst, tuple, index } => {
                         let tuple = read_register(&registers, *tuple, function, pc)?;
                         let Value::Tuple(items) = tuple else {
                             return Err(type_error("Tuple", tuple, function, pc));
@@ -858,11 +869,20 @@ impl Vm {
                         })?;
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
-                    Instruction::MakeClosure {
+                    Opcode::MakeClosure {
                         dst,
-                        function: closure_function,
+                        prototype,
                         captures,
                     } => {
+                        let closure_function =
+                            function.prototype_link(*prototype).ok_or_else(|| {
+                                error(
+                                    RuntimeErrorKind::InvalidBytecode,
+                                    format!("prototype link {} is out of bounds", prototype.0),
+                                    function,
+                                    pc,
+                                )
+                            })?;
                         let captures = read_many(&registers, captures, function, pc)?;
                         let bytes =
                             logical_value_bytes(captures.len()).map_err(|native_error| {
@@ -878,7 +898,7 @@ impl Vm {
                             pc,
                         )?;
                     }
-                    Instruction::Call {
+                    Opcode::Call {
                         dst,
                         callee,
                         arguments,
@@ -978,7 +998,7 @@ impl Vm {
                             }
                         }
                     }
-                    Instruction::Jump { target } => {
+                    Opcode::Jump { target } => {
                         validate_jump(*target, function, pc)?;
                         if *target <= pc {
                             consume_fuel(account, function, pc)?;
@@ -986,7 +1006,7 @@ impl Vm {
                         frames.last_mut().expect("execution frame").pc = *target;
                         continue;
                     }
-                    Instruction::JumpIfFalse { condition, target } => {
+                    Opcode::JumpIfFalse { condition, target } => {
                         match read_register(&registers, *condition, function, pc)? {
                             Value::Atom(Atom::Builtin(BuiltinAtom::True)) => {}
                             Value::Atom(Atom::Builtin(BuiltinAtom::False)) => {
@@ -1002,7 +1022,7 @@ impl Vm {
                             }
                         }
                     }
-                    Instruction::Return { src } => {
+                    Opcode::Return { src } => {
                         let value = read_register(&registers, *src, function, pc)?.clone();
                         let destination =
                             frames.last().expect("execution frame").return_destination;
@@ -1023,7 +1043,7 @@ impl Vm {
                         )?;
                         continue;
                     }
-                    Instruction::Fail { message } => {
+                    Opcode::Fail { message } => {
                         return Err(error(
                             RuntimeErrorKind::NoPatternMatched,
                             message,
