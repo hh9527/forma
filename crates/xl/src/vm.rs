@@ -1,5 +1,7 @@
 use crate::bytecode::{BytecodeFunction, Opcode, Register};
-use crate::heap::{Handle, Heap, HeapView, Object, PersistentValue, RuntimeValue, publish_root};
+use crate::heap::{
+    EqualityError, Handle, Heap, HeapView, Object, PersistentValue, RuntimeValue, publish_root,
+};
 use crate::lir::RegisterId;
 use crate::value::{BuiltinAtom, Dict, NativeError, NativeLimit, Shape, Value};
 use crate::{Diagnostic, Origin, SourceDatabase};
@@ -858,19 +860,24 @@ impl Vm {
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
                     Opcode::Equal { dst, left, right } => {
-                        let left = export_runtime(
-                            &view,
-                            *read_register(&registers, *left, function, pc)?,
-                            function,
-                            pc,
-                        )?;
-                        let right = export_runtime(
-                            &view,
-                            *read_register(&registers, *right, function, pc)?,
-                            function,
-                            pc,
-                        )?;
-                        let equal = values_equal(&left, &right, function, pc)?;
+                        let left = *read_register(&registers, *left, function, pc)?;
+                        let right = *read_register(&registers, *right, function, pc)?;
+                        let equal = view.values_equal(left, right).map_err(|equality_error| {
+                            match equality_error {
+                                EqualityError::Unsupported => error(
+                                    RuntimeErrorKind::UnsupportedEquality,
+                                    "Array, Tuple, Dict, and Func values do not support ==",
+                                    function,
+                                    pc,
+                                ),
+                                EqualityError::Heap(heap_error) => error(
+                                    RuntimeErrorKind::InvalidBytecode,
+                                    heap_error.to_string(),
+                                    function,
+                                    pc,
+                                ),
+                            }
+                        })?;
                         write_register(&mut registers, *dst, runtime_bool(equal), function, pc)?;
                     }
                     Opcode::LessThan { dst, left, right } => {
@@ -920,24 +927,40 @@ impl Vm {
                         )?;
                     }
                     Opcode::InterpolateString { dst, parts } => {
-                        let values = read_many(&registers, parts, function, pc)?
-                            .into_iter()
-                            .map(|value| export_runtime(&view, value, function, pc))
-                            .collect::<Result<Vec<_>, _>>()?;
+                        let values = read_many(&registers, parts, function, pc)?;
                         let mut length = 0usize;
                         for value in &values {
-                            length += match value {
-                                Value::String(value) => value.len(),
-                                Value::Int(value) => decimal_length(*value),
-                                Value::Atom(value) => value.name().len(),
-                                value => {
-                                    return Err(type_error(
-                                        "String, Int, or Atom interpolation value",
-                                        value,
+                            length += if let RuntimeValue::Int(value) = value {
+                                decimal_length(*value)
+                            } else if let Some(value) =
+                                view.string_text(*value).map_err(|heap_error| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        heap_error.to_string(),
                                         function,
                                         pc,
-                                    ));
-                                }
+                                    )
+                                })?
+                            {
+                                value.len()
+                            } else if let Some(value) =
+                                view.atom_text(*value).map_err(|heap_error| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        heap_error.to_string(),
+                                        function,
+                                        pc,
+                                    )
+                                })?
+                            {
+                                value.len()
+                            } else {
+                                return Err(runtime_shallow_type_error(
+                                    "String, Int, or Atom interpolation value",
+                                    *value,
+                                    function,
+                                    pc,
+                                ));
                             };
                         }
                         let bytes = u64::try_from(length).map_err(|_| {
@@ -946,14 +969,32 @@ impl Vm {
                         charge_allocation(account, bytes, function, pc)?;
                         let mut output = String::with_capacity(length);
                         for value in &values {
-                            match value {
-                                Value::String(value) => output.push_str(value),
-                                Value::Int(value) => {
-                                    write!(output, "{value}")
-                                        .expect("writing to String cannot fail");
-                                }
-                                Value::Atom(value) => output.push_str(value.name()),
-                                _ => unreachable!("interpolation values were validated"),
+                            if let RuntimeValue::Int(value) = value {
+                                write!(output, "{value}").expect("writing to String cannot fail");
+                            } else if let Some(value) =
+                                view.string_text(*value).map_err(|heap_error| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        heap_error.to_string(),
+                                        function,
+                                        pc,
+                                    )
+                                })?
+                            {
+                                output.push_str(value);
+                            } else if let Some(value) =
+                                view.atom_text(*value).map_err(|heap_error| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        heap_error.to_string(),
+                                        function,
+                                        pc,
+                                    )
+                                })?
+                            {
+                                output.push_str(value);
+                            } else {
+                                unreachable!("interpolation values were validated");
                             }
                         }
                         let value = current.string(Some(background), &output);
@@ -1552,22 +1593,6 @@ fn runtime_bool(value: bool) -> RuntimeValue {
     })
 }
 
-fn export_runtime(
-    view: &HeapView<'_>,
-    value: RuntimeValue,
-    function: &BytecodeFunction,
-    pc: usize,
-) -> Result<Value, RuntimeError> {
-    view.export_value(value).map_err(|heap_error| {
-        error(
-            RuntimeErrorKind::InvalidBytecode,
-            heap_error.to_string(),
-            function,
-            pc,
-        )
-    })
-}
-
 fn runtime_type_error(
     expected: &str,
     actual: &RuntimeValue,
@@ -1584,6 +1609,31 @@ fn runtime_type_error(
             pc,
         ),
     }
+}
+
+fn runtime_shallow_type_error(
+    expected: &str,
+    actual: RuntimeValue,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> RuntimeError {
+    let actual = match actual {
+        RuntimeValue::Int(_) => "Int",
+        RuntimeValue::Float(_) => "Float",
+        RuntimeValue::BuiltinAtom(_) | RuntimeValue::Atom(_) => "Atom",
+        RuntimeValue::ShortString(_) | RuntimeValue::String(_) => "String",
+        RuntimeValue::Bytes(_) => "Bytes",
+        RuntimeValue::Array(_) => "Array",
+        RuntimeValue::Tuple(_) => "Tuple",
+        RuntimeValue::Dict(_) => "Dict",
+        RuntimeValue::Func(_) => "Func",
+    };
+    error(
+        RuntimeErrorKind::TypeMismatch,
+        format!("expected {expected}, got {actual}"),
+        function,
+        pc,
+    )
 }
 
 fn runtime_numeric_type_error(
@@ -1620,54 +1670,6 @@ fn numeric_type_error(
         function,
         pc,
     )
-}
-
-fn values_equal(
-    left: &Value,
-    right: &Value,
-    function: &BytecodeFunction,
-    pc: usize,
-) -> Result<bool, RuntimeError> {
-    match (left, right) {
-        (Value::Func(_), _) | (_, Value::Func(_)) => Err(error(
-            RuntimeErrorKind::UnsupportedEquality,
-            "functions cannot be compared for equality",
-            function,
-            pc,
-        )),
-        (Value::Int(left), Value::Int(right)) => Ok(left == right),
-        (Value::Float(left), Value::Float(right)) => Ok(left == right),
-        (Value::String(left), Value::String(right)) => Ok(left == right),
-        (Value::Bytes(left), Value::Bytes(right)) => Ok(left == right),
-        (Value::Atom(left), Value::Atom(right)) => Ok(left == right),
-        (Value::Array(left), Value::Array(right)) | (Value::Tuple(left), Value::Tuple(right)) => {
-            sequences_equal(left, right, function, pc)
-        }
-        (Value::Dict(left), Value::Dict(right)) => {
-            if left.shape().fields() != right.shape().fields() {
-                return Ok(false);
-            }
-            sequences_equal(left.values(), right.values(), function, pc)
-        }
-        _ => Ok(false),
-    }
-}
-
-fn sequences_equal(
-    left: &[Value],
-    right: &[Value],
-    function: &BytecodeFunction,
-    pc: usize,
-) -> Result<bool, RuntimeError> {
-    if left.len() != right.len() {
-        return Ok(false);
-    }
-    for (left, right) in left.iter().zip(right) {
-        if !values_equal(left, right, function, pc)? {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 fn logical_value_bytes(count: usize) -> Result<u64, NativeError> {

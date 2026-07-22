@@ -2,6 +2,7 @@ use crate::{
     Atom, BuiltinAtom, BytecodeFunction, Closure, Dict, FuncByteCode, NativeFunction, Prototype,
     Shape, Value,
 };
+use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
@@ -87,6 +88,18 @@ pub(crate) enum Object {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct HeapError(&'static str);
+
+#[derive(Debug)]
+pub(crate) enum EqualityError {
+    Heap(HeapError),
+    Unsupported,
+}
+
+impl From<HeapError> for EqualityError {
+    fn from(error: HeapError) -> Self {
+        Self::Heap(error)
+    }
+}
 
 impl HeapError {
     pub(crate) const fn new(message: &'static str) -> Self {
@@ -509,12 +522,17 @@ impl<'a> HeapView<'a> {
             return Err(HeapError("handle is not a Dict"));
         };
         let wanted = self.text(field)?;
-        for (index, candidate) in self.shape(*shape)?.iter().enumerate() {
-            if self.text(*candidate)? == wanted {
-                return Ok(values.get(index).copied());
-            }
-        }
-        Ok(None)
+        let fields = self.shape(*shape)?;
+        let index = fields
+            .binary_search_by(|candidate| {
+                if *candidate == field {
+                    Ordering::Equal
+                } else {
+                    self.text(*candidate).unwrap_or("").cmp(wanted)
+                }
+            })
+            .ok();
+        Ok(index.and_then(|index| values.get(index).copied()))
     }
 
     pub(crate) fn dict_fields(&self, handle: Handle) -> Result<Vec<&'a str>, HeapError> {
@@ -535,12 +553,88 @@ impl<'a> HeapView<'a> {
         let Object::Dict { shape, values } = self.object(handle)? else {
             return Err(HeapError("handle is not a Dict"));
         };
-        for (index, candidate) in self.shape(*shape)?.iter().enumerate() {
-            if self.text(*candidate)? == field {
-                return Ok(values.get(index).copied());
-            }
+        let fields = self.shape(*shape)?;
+        let index = fields
+            .binary_search_by(|candidate| self.text(*candidate).unwrap_or("").cmp(field))
+            .ok();
+        Ok(index.and_then(|index| values.get(index).copied()))
+    }
+
+    pub(crate) fn string_text(&self, value: RuntimeValue) -> Result<Option<&'a str>, HeapError> {
+        match value {
+            RuntimeValue::ShortString(id) => Ok(Some(self.text(id)?)),
+            RuntimeValue::String(handle) => match self.object(handle)? {
+                Object::String(value) => Ok(Some(value)),
+                _ => Err(HeapError("String handle refers to another object kind")),
+            },
+            _ => Ok(None),
         }
-        Ok(None)
+    }
+
+    pub(crate) fn atom_text(&self, value: RuntimeValue) -> Result<Option<&'a str>, HeapError> {
+        match value {
+            RuntimeValue::BuiltinAtom(atom) => Ok(Some(atom.name())),
+            RuntimeValue::Atom(id) => Ok(Some(self.text(id)?)),
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn values_equal(
+        &self,
+        left: RuntimeValue,
+        right: RuntimeValue,
+    ) -> Result<bool, EqualityError> {
+        match (left, right) {
+            (RuntimeValue::Array(_), _)
+            | (_, RuntimeValue::Array(_))
+            | (RuntimeValue::Tuple(_), _)
+            | (_, RuntimeValue::Tuple(_))
+            | (RuntimeValue::Dict(_), _)
+            | (_, RuntimeValue::Dict(_))
+            | (RuntimeValue::Func(_), _)
+            | (_, RuntimeValue::Func(_)) => Err(EqualityError::Unsupported),
+            (RuntimeValue::Int(left), RuntimeValue::Int(right)) => Ok(left == right),
+            (RuntimeValue::Float(left), RuntimeValue::Float(right)) => Ok(left == right),
+            (RuntimeValue::BuiltinAtom(left), RuntimeValue::BuiltinAtom(right)) => {
+                Ok(left == right)
+            }
+            (RuntimeValue::Atom(left), RuntimeValue::Atom(right))
+            | (RuntimeValue::ShortString(left), RuntimeValue::ShortString(right)) => {
+                if left.storage == right.storage {
+                    Ok(left == right)
+                } else {
+                    Ok(self.text(left)? == self.text(right)?)
+                }
+            }
+            (left @ RuntimeValue::BuiltinAtom(_), right @ RuntimeValue::Atom(_))
+            | (left @ RuntimeValue::Atom(_), right @ RuntimeValue::BuiltinAtom(_)) => {
+                Ok(self.atom_text(left)? == self.atom_text(right)?)
+            }
+            (
+                left @ (RuntimeValue::ShortString(_) | RuntimeValue::String(_)),
+                right @ (RuntimeValue::ShortString(_) | RuntimeValue::String(_)),
+            ) => {
+                if let (RuntimeValue::String(left), RuntimeValue::String(right)) = (left, right)
+                    && left == right
+                {
+                    return Ok(true);
+                }
+                Ok(self.string_text(left)? == self.string_text(right)?)
+            }
+            (RuntimeValue::Bytes(left), RuntimeValue::Bytes(right)) => {
+                if left == right {
+                    return Ok(true);
+                }
+                let Object::Bytes(left) = self.object(left)? else {
+                    return Err(HeapError("Bytes handle refers to another object kind").into());
+                };
+                let Object::Bytes(right) = self.object(right)? else {
+                    return Err(HeapError("Bytes handle refers to another object kind").into());
+                };
+                Ok(left == right)
+            }
+            _ => Ok(false),
+        }
     }
 
     pub(crate) fn export_value(&self, value: RuntimeValue) -> Result<Value, HeapError> {
@@ -1152,6 +1246,105 @@ mod tests {
         .unwrap();
         assert_eq!(roots[0], roots[1]);
         assert_eq!(target.counts().0, 1);
+    }
+
+    #[test]
+    fn scalar_equality_compares_contents_across_storage() {
+        let value = Value::string("same string that is too long for the short string form");
+        let mut world = Heap::persistent();
+        let persistent = publish_value(&mut world, &value).unwrap().runtime();
+        let mut local = Heap::local();
+        let local_value = local.import_value(Some(&world), &value).unwrap();
+        assert!(
+            HeapView {
+                current: &local,
+                background: Some(&world),
+            }
+            .values_equal(local_value, persistent)
+            .unwrap()
+        );
+
+        let persistent_atom = publish_value(&mut world, &Value::atom("custom"))
+            .unwrap()
+            .runtime();
+        let local_atom = local.import_value(None, &Value::atom("custom")).unwrap();
+        assert!(
+            HeapView {
+                current: &local,
+                background: Some(&world),
+            }
+            .values_equal(local_atom, persistent_atom)
+            .unwrap()
+        );
+
+        let bytes = Value::Bytes(Arc::from(&b"same bytes"[..]));
+        let persistent_bytes = publish_value(&mut world, &bytes).unwrap().runtime();
+        let local_bytes = local.import_value(None, &bytes).unwrap();
+        assert!(
+            HeapView {
+                current: &local,
+                background: Some(&world),
+            }
+            .values_equal(local_bytes, persistent_bytes)
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn composite_equality_is_unsupported_even_for_the_same_handle() {
+        let function = Arc::new(crate::compile_source("test", "fn() { 1 }").unwrap());
+        let values = [
+            Value::Array(vec![Value::Int(1)].into()),
+            Value::Tuple(vec![Value::Int(1)].into()),
+            Value::Dict(Dict::new(
+                Arc::new(Shape::from_sorted_fields(vec!["value".into()])),
+                vec![Value::Int(1)],
+            )),
+            Value::Func(Arc::new(Closure::new(function, Vec::new()))),
+        ];
+        let mut local = Heap::local();
+        let world = Heap::persistent();
+        for value in values {
+            let value = local.import_value(None, &value).unwrap();
+            let view = HeapView {
+                current: &local,
+                background: Some(&world),
+            };
+            assert!(matches!(
+                view.values_equal(value, value),
+                Err(EqualityError::Unsupported)
+            ));
+        }
+    }
+
+    #[test]
+    fn dict_lookup_binary_searches_across_storage() {
+        let value = Value::Dict(Dict::new(
+            Arc::new(Shape::from_sorted_fields(vec![
+                "a".into(),
+                "b".into(),
+                "c".into(),
+            ])),
+            vec![Value::Int(1), Value::Int(2), Value::Int(3)],
+        ));
+        let mut world = Heap::persistent();
+        let RuntimeValue::Dict(dict) = publish_value(&mut world, &value).unwrap().runtime() else {
+            panic!("expected persistent Dict")
+        };
+        let mut local = Heap::local();
+        let field = local.intern("b");
+        let view = HeapView {
+            current: &local,
+            background: Some(&world),
+        };
+        assert_eq!(
+            view.dict_get(dict, field).unwrap(),
+            Some(RuntimeValue::Int(2))
+        );
+        assert_eq!(
+            view.dict_get_text(dict, "c").unwrap(),
+            Some(RuntimeValue::Int(3))
+        );
     }
 
     #[test]
