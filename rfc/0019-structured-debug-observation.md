@@ -78,10 +78,8 @@ The embedding boundary exposes the conceptual types:
 
 ```text
 DebugEvent {
-    stage: Tool | Runtime,
     label: Option<String>,
     value: String,
-    location: Option<Location>,
 }
 
 DebugSink.emit(event)
@@ -101,30 +99,20 @@ Events are emitted synchronously in evaluation order. A sink must not retain
 references into the XL stack or heaps; event fields are owned or compact copied
 metadata.
 
-## Stages
+## No source reflection
 
-An event identifies whether it was emitted during:
+The initial functions receive no implicit call origin, source ID, file name,
+line, column, module identity, or execution-stage value. An event means only
+that the observed value reached the debug function in sink order.
 
-- `Tool`: module initialization and type-metadata evaluation;
-- `Runtime`: execution of the loaded root module/session.
+Source reflection is deferred to explicit compile-time forms such as `file!()`,
+`line!()`, and a future `dbg!(expression)` expansion. Those forms may later pass
+ordinary source values to another debug function; they are not hidden inputs to
+`dbg` or `dbg_with`.
 
-Each module initialization has its own execution, but all initialization
-events use the `Tool` stage in this RFC. Module identity remains available from
-the source location when present.
-
-The same core functions and formatter are used in both stages. Debug calls do
-not change closed-world analysis or make external data available.
-
-## Locations
-
-The VM records the initiating call instruction's debug origin. When it maps to
-a source `Location`, the event carries that location. Synthetic or unavailable
-origins yield `None` rather than inventing a byte offset.
-
-The VM does not own source text and does not convert locations to line/column.
-Engine and CLI layers that own the shared `SourceDatabase` render locations as
-`source:line:column`. Direct low-level VM embedding may use the raw location or
-omit source rendering.
+The same core functions, formatter, and sink work during module initialization,
+tool-stage metadata evaluation, and runtime execution. The host knows which
+execution it initiated, but that context is not placed in `DebugEvent`.
 
 ## Debug representation
 
@@ -161,11 +149,10 @@ The CLI writes events to stderr and final program values to stdout. A compact
 event is rendered as:
 
 ```text
-[debug runtime] path/main.xl:12:8 "loaded": {count: 3, state: 'Ready}
+[debug] "loaded": {count: 3, state: 'Ready}
 ```
 
-An unlabeled event omits the quoted label and colon. Tool events use
-`[debug tool]`. Missing source locations omit the location segment.
+An unlabeled event omits the quoted label and colon.
 
 Labels are escaped as strings so embedded newlines cannot forge additional log
 records. Each event occupies one physical stderr line; control characters in
@@ -195,8 +182,9 @@ only and cannot be consumed by metadata computation.
 ## Diagnostics
 
 XL-visible failures are limited to ordinary module, function-arity, fuel, and
-`dbg_with` label type errors. The latter retains the XL call origin and names
-`core:debug.dbg_with`.
+`dbg_with` label type errors. The latter follows the ordinary runtime-error
+debug-origin path and names `core:debug.dbg_with`; successful events themselves
+contain no location.
 
 Formatter corruption caused by an invalid trusted heap edge is an internal
 runtime error rather than silently returning a changed value. Ordinary cycles,
@@ -239,6 +227,7 @@ debug observer is stable.
 - structured logging levels and fields;
 - trace spans, profiling, breakpoints, and debugger protocols;
 - source snippets in debug output;
+- compile-time `file!()`, `line!()`, `column!()`, and `dbg!()` forms;
 - user-defined format/display protocols;
 - asynchronous or fallible sinks;
 - a general XL effect capability system.
@@ -246,16 +235,15 @@ debug observer is stable.
 ## Implementation plan
 
 1. Add `core:debug` and fixed-arity VM-managed debug function identities.
-2. Add an owned debug event, stage, and non-fallible sink boundary with a
-   discard default.
+2. Add an owned debug event and non-fallible sink boundary with a discard
+   default.
 3. Thread the observer through module initialization and runtime VM execution
    without placing it in `CallContext` or XL-visible state.
 4. Implement a bounded, cycle-safe `HeapView` formatter for every runtime value.
 5. Preserve the input `RuntimeValue` as the return and validate only the label.
-6. Add observed Engine/module APIs and CLI stderr rendering with source
-   positions.
-7. Add identity, ordering, stage, capture, truncation, cycle, label-error,
-   tool-stage, quota, and CLI stdout/stderr tests.
+6. Add observed Engine/module APIs and CLI stderr rendering.
+7. Add identity, ordering, capture, truncation, cycle, label-error, tool-stage,
+   quota, and CLI stdout/stderr tests.
 
 ## Acceptance criteria
 
@@ -264,14 +252,14 @@ debug observer is stable.
 2. Both functions emit one event and return the exact input runtime value.
 3. `dbg_with` accepts only a String label and preserves configured pipeline
    behavior through `debug.dbg_with\("label", _)`.
-4. Events preserve evaluation order and distinguish tool/runtime stages.
+4. Events preserve evaluation order without implicit source or stage fields.
 5. Every runtime value category has a deterministic, bounded representation;
    cycles and truncation never panic or deep-export.
 6. Debug calls consume ordinary call fuel but allocate no XL result value.
 7. Existing convenience embedding APIs discard events; observed APIs capture
    them without granting the sink access to stack or heap references.
-8. CLI debug events go only to stderr with escaped labels/values and useful
-   source positions; the final value remains on stdout.
+8. CLI debug events go only to stderr with escaped labels/values; the final
+   value remains on stdout.
 9. Sink behavior cannot alter XL results or errors.
 10. Existing language, module, core-library, VM, quota, and CLI tests remain
     unchanged.
