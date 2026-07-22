@@ -46,7 +46,7 @@ pub(crate) enum RuntimeValue {
     Tuple(Handle),
     Dict(Handle),
     Func(Handle),
-    DefinitionCell(Handle),
+    UpLink(Handle),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -80,7 +80,7 @@ pub(crate) enum Object {
         prototype: RuntimePrototype,
         upvalues: Box<[RuntimeValue]>,
     },
-    DefinitionCell {
+    UpLink {
         value: Option<RuntimeValue>,
     },
     ByteCodeProto {
@@ -200,19 +200,19 @@ impl Heap {
         Ok(())
     }
 
-    pub(crate) fn initialize_definition_cell(
+    pub(crate) fn initialize_up_link(
         &mut self,
         handle: Handle,
         value: RuntimeValue,
     ) -> Result<(), HeapError> {
         if handle.storage != Storage::Local {
-            return Err(HeapError("persistent definition cells are read-only"));
+            return Err(HeapError("persistent up-links are read-only"));
         }
-        let Object::DefinitionCell { value: slot } = self.object_mut(handle)? else {
-            return Err(HeapError("handle is not a definition cell"));
+        let Object::UpLink { value: slot } = self.object_mut(handle)? else {
+            return Err(HeapError("handle is not an up-link"));
         };
         if slot.is_some() {
-            return Err(HeapError("definition cell is already initialized"));
+            return Err(HeapError("up-link is already initialized"));
         }
         *slot = Some(value);
         Ok(())
@@ -534,12 +534,9 @@ impl<'a> HeapView<'a> {
         }
     }
 
-    pub(crate) fn definition_cell(
-        &self,
-        handle: Handle,
-    ) -> Result<Option<RuntimeValue>, HeapError> {
-        let Object::DefinitionCell { value } = self.object(handle)? else {
-            return Err(HeapError("handle is not a definition cell"));
+    pub(crate) fn up_link(&self, handle: Handle) -> Result<Option<RuntimeValue>, HeapError> {
+        let Object::UpLink { value } = self.object(handle)? else {
+            return Err(HeapError("handle is not an up-link"));
         };
         Ok(*value)
     }
@@ -649,8 +646,8 @@ impl<'a> HeapView<'a> {
                 };
                 Ok(Arc::ptr_eq(left, right))
             }
-            (RuntimeValue::DefinitionCell(_), _) | (_, RuntimeValue::DefinitionCell(_)) => {
-                Err(HeapError("definition cell escaped into equality"))
+            (RuntimeValue::UpLink(_), _) | (_, RuntimeValue::UpLink(_)) => {
+                Err(HeapError("up-link escaped into equality"))
             }
             (RuntimeValue::Int(left), RuntimeValue::Int(right)) => Ok(left == right),
             (RuntimeValue::Float(left), RuntimeValue::Float(right)) => Ok(left == right),
@@ -881,15 +878,15 @@ impl<'a> HeapView<'a> {
                     upvalues,
                 )))
             }
-            RuntimeValue::DefinitionCell(handle) => {
+            RuntimeValue::UpLink(handle) => {
                 if !visiting.insert(handle) {
                     return Err(HeapError(
                         "cyclic heap values cannot cross the legacy Value boundary",
                     ));
                 }
                 let value = self
-                    .definition_cell(handle)?
-                    .ok_or(HeapError("definition cell is uninitialized"))?;
+                    .up_link(handle)?
+                    .ok_or(HeapError("up-link is uninitialized"))?;
                 let value = self.export_value_with(value, visiting)?;
                 visiting.remove(&handle);
                 value
@@ -1062,8 +1059,8 @@ impl PendingCopy {
             RuntimeValue::Func(handle) => {
                 RuntimeValue::Func(self.copy_object(target, source, handle)?)
             }
-            RuntimeValue::DefinitionCell(handle) => {
-                RuntimeValue::DefinitionCell(self.copy_object(target, source, handle)?)
+            RuntimeValue::UpLink(handle) => {
+                RuntimeValue::UpLink(self.copy_object(target, source, handle)?)
             }
         })
     }
@@ -1127,11 +1124,11 @@ impl PendingCopy {
                 prototype: self.copy_prototype(target, source, prototype)?,
                 upvalues: copy_values(self, upvalues)?,
             },
-            Object::DefinitionCell { value } => Object::DefinitionCell {
+            Object::UpLink { value } => Object::UpLink {
                 value: Some(self.copy_value(
                     target,
                     source,
-                    value.ok_or(HeapError("cannot publish an uninitialized definition cell"))?,
+                    value.ok_or(HeapError("cannot publish an uninitialized up-link"))?,
                 )?),
             },
             Object::ByteCodeProto {
@@ -1273,7 +1270,7 @@ fn value_contains_foreign(value: RuntimeValue, target: Storage) -> bool {
         | RuntimeValue::Tuple(handle)
         | RuntimeValue::Dict(handle)
         | RuntimeValue::Func(handle)
-        | RuntimeValue::DefinitionCell(handle) => handle.storage != target,
+        | RuntimeValue::UpLink(handle) => handle.storage != target,
         RuntimeValue::Int(_) | RuntimeValue::Float(_) | RuntimeValue::BuiltinAtom(_) => false,
     }
 }
@@ -1293,9 +1290,7 @@ fn object_contains_foreign(object: &Object, target: Storage) -> bool {
         Object::Closure { upvalues, .. } => upvalues
             .iter()
             .any(|value| value_contains_foreign(*value, target)),
-        Object::DefinitionCell { value } => {
-            value.is_none_or(|value| value_contains_foreign(value, target))
-        }
+        Object::UpLink { value } => value.is_none_or(|value| value_contains_foreign(value, target)),
         Object::ByteCodeProto {
             values,
             text,
@@ -1546,22 +1541,20 @@ mod tests {
     }
 
     #[test]
-    fn promotion_copies_ready_definition_cells_and_rejects_uninitialized_cells() {
+    fn promotion_copies_ready_up_links_and_rejects_uninitialized_links() {
         let mut local = Heap::local();
-        let cell = local.allocate(Object::DefinitionCell { value: None });
-        let array = local.allocate(Object::Array(
-            vec![RuntimeValue::DefinitionCell(cell)].into(),
-        ));
+        let link = local.allocate(Object::UpLink { value: None });
+        let array = local.allocate(Object::Array(vec![RuntimeValue::UpLink(link)].into()));
         local
-            .initialize_definition_cell(cell, RuntimeValue::Array(array))
+            .initialize_up_link(link, RuntimeValue::Array(array))
             .unwrap();
         let mut world = Heap::persistent();
-        let RuntimeValue::DefinitionCell(persistent_cell) =
-            publish_root(&mut world, &local, RuntimeValue::DefinitionCell(cell))
+        let RuntimeValue::UpLink(persistent_link) =
+            publish_root(&mut world, &local, RuntimeValue::UpLink(link))
                 .unwrap()
                 .runtime()
         else {
-            panic!("expected persistent definition cell")
+            panic!("expected persistent up-link")
         };
         let reader = Heap::local();
         let view = HeapView {
@@ -1569,27 +1562,20 @@ mod tests {
             background: Some(&world),
         };
         let RuntimeValue::Array(array) = view
-            .definition_cell(persistent_cell)
+            .up_link(persistent_link)
             .unwrap()
-            .expect("published cell is ready")
+            .expect("published up-link is ready")
         else {
             panic!("expected Array")
         };
         assert_eq!(
             view.sequence(array, false).unwrap(),
-            &[RuntimeValue::DefinitionCell(persistent_cell)]
+            &[RuntimeValue::UpLink(persistent_link)]
         );
 
         let mut uninitialized = Heap::local();
-        let cell = uninitialized.allocate(Object::DefinitionCell { value: None });
-        assert!(
-            publish_root(
-                &mut world,
-                &uninitialized,
-                RuntimeValue::DefinitionCell(cell)
-            )
-            .is_err()
-        );
+        let link = uninitialized.allocate(Object::UpLink { value: None });
+        assert!(publish_root(&mut world, &uninitialized, RuntimeValue::UpLink(link)).is_err());
     }
 
     #[test]

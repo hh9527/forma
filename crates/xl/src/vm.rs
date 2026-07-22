@@ -108,8 +108,8 @@ impl<'a> ValueRef<'a> {
             RuntimeValue::BuiltinAtom(_) | RuntimeValue::Atom(_) => ValueKind::Atom,
             RuntimeValue::Tuple(_) => ValueKind::Tuple,
             RuntimeValue::Func(_) => ValueKind::Func,
-            RuntimeValue::DefinitionCell(_) => {
-                unreachable!("definition cells are private VM values")
+            RuntimeValue::UpLink(_) => {
+                unreachable!("up-links are private VM values")
             }
         }
     }
@@ -799,7 +799,7 @@ impl Vm {
                         let value = *read_register(&registers, *src, function, pc)?;
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
-                    Opcode::MakeDefinitionCell { dst } => {
+                    Opcode::MakeUpLink { dst } => {
                         charge_allocation(
                             account,
                             logical_value_bytes(1).map_err(|native_error| {
@@ -808,24 +808,24 @@ impl Vm {
                             function,
                             pc,
                         )?;
-                        let cell = RuntimeValue::DefinitionCell(
-                            current.allocate(crate::heap::Object::DefinitionCell { value: None }),
+                        let link = RuntimeValue::UpLink(
+                            current.allocate(crate::heap::Object::UpLink { value: None }),
                         );
-                        write_register(&mut registers, *dst, cell, function, pc)?;
+                        write_register(&mut registers, *dst, link, function, pc)?;
                     }
-                    Opcode::ReadDefinitionCell { dst, cell } => {
-                        let RuntimeValue::DefinitionCell(handle) =
-                            *read_register(&registers, *cell, function, pc)?
+                    Opcode::ReadUpLink { dst, link } => {
+                        let RuntimeValue::UpLink(handle) =
+                            *read_register(&registers, *link, function, pc)?
                         else {
                             return Err(error(
                                 RuntimeErrorKind::InvalidBytecode,
-                                "definition-cell read operand is not a cell",
+                                "up-link read operand is not an up-link",
                                 function,
                                 pc,
                             ));
                         };
                         let value = view
-                            .definition_cell(handle)
+                            .up_link(handle)
                             .map_err(|heap_error| {
                                 error(
                                     RuntimeErrorKind::InvalidBytecode,
@@ -844,19 +844,19 @@ impl Vm {
                             })?;
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
-                    Opcode::InitializeDefinitionCell { cell, src } => {
-                        let RuntimeValue::DefinitionCell(handle) =
-                            *read_register(&registers, *cell, function, pc)?
+                    Opcode::InitializeUpLink { link, src } => {
+                        let RuntimeValue::UpLink(handle) =
+                            *read_register(&registers, *link, function, pc)?
                         else {
                             return Err(error(
                                 RuntimeErrorKind::InvalidBytecode,
-                                "definition-cell initialization operand is not a cell",
+                                "up-link initialization operand is not an up-link",
                                 function,
                                 pc,
                             ));
                         };
                         if view
-                            .definition_cell(handle)
+                            .up_link(handle)
                             .map_err(|heap_error| {
                                 error(
                                     RuntimeErrorKind::InvalidBytecode,
@@ -875,30 +875,30 @@ impl Vm {
                             ));
                         }
                         let value = *read_register(&registers, *src, function, pc)?;
-                        current.initialize_definition_cell(handle, value).map_err(
-                            |heap_error| {
+                        current
+                            .initialize_up_link(handle, value)
+                            .map_err(|heap_error| {
                                 error(
                                     RuntimeErrorKind::InvalidBytecode,
                                     heap_error.to_string(),
                                     function,
                                     pc,
                                 )
-                            },
-                        )?;
+                            })?;
                     }
-                    Opcode::AssertDefinitionCellReady { cell } => {
-                        let RuntimeValue::DefinitionCell(handle) =
-                            *read_register(&registers, *cell, function, pc)?
+                    Opcode::AssertUpLinkReady { link } => {
+                        let RuntimeValue::UpLink(handle) =
+                            *read_register(&registers, *link, function, pc)?
                         else {
                             return Err(error(
                                 RuntimeErrorKind::InvalidBytecode,
-                                "definition-cell assertion operand is not a cell",
+                                "up-link assertion operand is not an up-link",
                                 function,
                                 pc,
                             ));
                         };
                         if view
-                            .definition_cell(handle)
+                            .up_link(handle)
                             .map_err(|heap_error| {
                                 error(
                                     RuntimeErrorKind::InvalidBytecode,
@@ -1776,7 +1776,7 @@ fn runtime_shallow_type_error(
         RuntimeValue::Tuple(_) => "Tuple",
         RuntimeValue::Dict(_) => "Dict",
         RuntimeValue::Func(_) => "Func",
-        RuntimeValue::DefinitionCell(_) => "internal definition cell",
+        RuntimeValue::UpLink(_) => "internal up-link",
     };
     error(
         RuntimeErrorKind::TypeMismatch,

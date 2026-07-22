@@ -97,7 +97,7 @@ pub(crate) fn compile_expression_with_bindings(
         source_name,
         function_name: function_name.to_owned(),
         environment: HashMap::new(),
-        cell_bindings: HashSet::new(),
+        up_link_bindings: HashSet::new(),
         definition_bindings: HashSet::new(),
         constants: Vec::new(),
         external_constant_links: Vec::new(),
@@ -125,7 +125,7 @@ struct Compiler<'a> {
     source_name: &'a str,
     function_name: String,
     environment: HashMap<String, RegisterId>,
-    cell_bindings: HashSet<String>,
+    up_link_bindings: HashSet<String>,
     definition_bindings: HashSet<String>,
     constants: Vec<Value>,
     external_constant_links: Vec<(usize, String)>,
@@ -174,7 +174,7 @@ impl<'a> Compiler<'a> {
             source_name,
             function_name: source_name.to_owned(),
             environment: HashMap::new(),
-            cell_bindings: HashSet::new(),
+            up_link_bindings: HashSet::new(),
             definition_bindings: HashSet::new(),
             constants: Vec::new(),
             external_constant_links: Vec::new(),
@@ -217,7 +217,7 @@ impl<'a> Compiler<'a> {
         function_name: String,
         parameters: &[Identifier],
         captures: &[String],
-        captured_cells: &HashSet<String>,
+        captured_up_links: &HashSet<String>,
         captured_definitions: &HashSet<String>,
     ) -> Result<Self, FrontendError> {
         let mut environment = HashMap::new();
@@ -258,7 +258,7 @@ impl<'a> Compiler<'a> {
             source_name,
             function_name,
             environment,
-            cell_bindings: captured_cells.clone(),
+            up_link_bindings: captured_up_links.clone(),
             definition_bindings: captured_definitions.clone(),
             constants: Vec::new(),
             external_constant_links: Vec::new(),
@@ -302,7 +302,7 @@ impl<'a> Compiler<'a> {
 
     fn compile_block(&mut self, block: &Block) -> Result<RegisterId, FrontendError> {
         let outer = self.environment.clone();
-        let outer_cells = self.cell_bindings.clone();
+        let outer_up_links = self.up_link_bindings.clone();
         let outer_definitions = self.definition_bindings.clone();
         let mut declared = HashMap::<String, (RegisterId, Location, Option<u32>)>::new();
         let mut definition_counts = HashMap::<String, usize>::new();
@@ -327,20 +327,17 @@ impl<'a> Compiler<'a> {
                         format!("definition {name:?} cannot shadow an outer definition"),
                     ));
                 }
-                let cell = self.allocate();
-                self.emit(
-                    Operation::MakeDefinitionCell { dst: cell },
-                    binding.location,
-                );
-                self.environment.insert(name.clone(), cell);
-                self.cell_bindings.insert(name.clone());
+                let link = self.allocate();
+                self.emit(Operation::MakeUpLink { dst: link }, binding.location);
+                self.environment.insert(name.clone(), link);
+                self.up_link_bindings.insert(name.clone());
                 self.definition_bindings.insert(name.clone());
                 let arity = binding
                     .value
                     .annotation
                     .as_ref()
                     .and_then(function_contract_arity);
-                declared.insert(name.clone(), (cell, binding.location, arity));
+                declared.insert(name.clone(), (link, binding.location, arity));
             }
         }
         for binding in &block.value.bindings {
@@ -357,20 +354,17 @@ impl<'a> Compiler<'a> {
                     format!("definition {name:?} cannot shadow an outer definition"),
                 ));
             }
-            let cell = self.allocate();
-            self.emit(
-                Operation::MakeDefinitionCell { dst: cell },
-                binding.location,
-            );
-            self.environment.insert(name.clone(), cell);
-            self.cell_bindings.insert(name.clone());
+            let link = self.allocate();
+            self.emit(Operation::MakeUpLink { dst: link }, binding.location);
+            self.environment.insert(name.clone(), link);
+            self.up_link_bindings.insert(name.clone());
             self.definition_bindings.insert(name.clone());
             let arity = binding
                 .value
                 .annotation
                 .as_ref()
                 .and_then(function_contract_arity);
-            declared.insert(name.clone(), (cell, binding.location, arity));
+            declared.insert(name.clone(), (link, binding.location, arity));
         }
         for (name, count) in &definition_counts {
             if *count > 1 {
@@ -458,7 +452,7 @@ impl<'a> Compiler<'a> {
             if matches!(
                 binding.value.kind,
                 BindingKind::Def | BindingKind::NamedFunction
-            ) && let Some((cell, _, arity)) = declared.get(&name)
+            ) && let Some((link, _, arity)) = declared.get(&name)
             {
                 if let Some(arity) = arity {
                     self.emit(
@@ -470,15 +464,15 @@ impl<'a> Compiler<'a> {
                     );
                 }
                 self.emit(
-                    Operation::InitializeDefinitionCell {
-                        cell: *cell,
+                    Operation::InitializeUpLink {
+                        link: *link,
                         src: value,
                     },
                     binding.location,
                 );
             } else {
                 self.environment.insert(name.clone(), value);
-                self.cell_bindings.remove(&name);
+                self.up_link_bindings.remove(&name);
                 if binding.value.kind == BindingKind::Def {
                     self.definition_bindings.insert(name);
                 } else if binding.value.kind == BindingKind::Let {
@@ -486,15 +480,12 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        for (cell, location, _) in declared.values() {
-            self.emit(
-                Operation::AssertDefinitionCellReady { cell: *cell },
-                *location,
-            );
+        for (link, location, _) in declared.values() {
+            self.emit(Operation::AssertUpLinkReady { link: *link }, *location);
         }
         let result = self.compile_expr(&block.value.result)?;
         self.environment = outer;
-        self.cell_bindings = outer_cells;
+        self.up_link_bindings = outer_up_links;
         self.definition_bindings = outer_definitions;
         Ok(result)
     }
@@ -539,12 +530,12 @@ impl<'a> Compiler<'a> {
                         format!("unknown binding {:?}", name.value),
                     )
                 })?;
-                if self.cell_bindings.contains(&name.value) {
+                if self.up_link_bindings.contains(&name.value) {
                     let dst = self.allocate();
                     self.emit(
-                        Operation::ReadDefinitionCell {
+                        Operation::ReadUpLink {
                             dst,
-                            cell: register,
+                            link: register,
                         },
                         expression.location,
                     );
@@ -723,9 +714,9 @@ impl<'a> Compiler<'a> {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let captured_cells = captures
+        let captured_up_links = captures
             .iter()
-            .filter(|name| self.cell_bindings.contains(*name))
+            .filter(|name| self.up_link_bindings.contains(*name))
             .cloned()
             .collect::<HashSet<_>>();
         let captured_definitions = captures
@@ -742,7 +733,7 @@ impl<'a> Compiler<'a> {
             name,
             parameters,
             &captures,
-            &captured_cells,
+            &captured_up_links,
             &captured_definitions,
         )?;
         let result = nested.compile_block(body)?;
@@ -1308,6 +1299,12 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(higher_order, Value::Int(0)));
+
+        let passed_as_value = run(
+            "decl countdown: fn(Int) -> Int; def countdown = fn(n) { if n < 1 { 0 } else { countdown(n - 1) } }; let invoke = fn(f, n) { f(n) }; invoke(countdown, 4)",
+        )
+        .unwrap();
+        assert!(matches!(passed_as_value, Value::Int(0)));
 
         let named = run("fn loop(n) { if n < 1 { 0 } else { loop(n - 1) } } loop(3)").unwrap();
         assert!(matches!(named, Value::Int(0)));

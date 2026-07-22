@@ -23,19 +23,19 @@ pub enum Operation {
         dst: RegisterId,
         src: RegisterId,
     },
-    MakeDefinitionCell {
+    MakeUpLink {
         dst: RegisterId,
     },
-    ReadDefinitionCell {
+    ReadUpLink {
         dst: RegisterId,
-        cell: RegisterId,
+        link: RegisterId,
     },
-    InitializeDefinitionCell {
-        cell: RegisterId,
+    InitializeUpLink {
+        link: RegisterId,
         src: RegisterId,
     },
-    AssertDefinitionCellReady {
-        cell: RegisterId,
+    AssertUpLinkReady {
+        link: RegisterId,
     },
     AssertFunctionArity {
         value: RegisterId,
@@ -262,21 +262,19 @@ fn lower_operation(
             dst: register(dst)?,
             src: register(src)?,
         },
-        Operation::MakeDefinitionCell { dst } => Instruction::MakeDefinitionCell {
+        Operation::MakeUpLink { dst } => Instruction::MakeUpLink {
             dst: register(dst)?,
         },
-        Operation::ReadDefinitionCell { dst, cell } => Instruction::ReadDefinitionCell {
+        Operation::ReadUpLink { dst, link } => Instruction::ReadUpLink {
             dst: register(dst)?,
-            cell: register(cell)?,
+            link: register(link)?,
         },
-        Operation::InitializeDefinitionCell { cell, src } => {
-            Instruction::InitializeDefinitionCell {
-                cell: register(cell)?,
-                src: register(src)?,
-            }
-        }
-        Operation::AssertDefinitionCellReady { cell } => Instruction::AssertDefinitionCellReady {
-            cell: register(cell)?,
+        Operation::InitializeUpLink { link, src } => Instruction::InitializeUpLink {
+            link: register(link)?,
+            src: register(src)?,
+        },
+        Operation::AssertUpLinkReady { link } => Instruction::AssertUpLinkReady {
+            link: register(link)?,
         },
         Operation::AssertFunctionArity { value, arity } => Instruction::AssertFunctionArity {
             value: register(value)?,

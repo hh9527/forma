@@ -23,19 +23,19 @@ pub enum Instruction {
         dst: Register,
         src: Register,
     },
-    MakeDefinitionCell {
+    MakeUpLink {
         dst: Register,
     },
-    ReadDefinitionCell {
+    ReadUpLink {
         dst: Register,
-        cell: Register,
+        link: Register,
     },
-    InitializeDefinitionCell {
-        cell: Register,
+    InitializeUpLink {
+        link: Register,
         src: Register,
     },
-    AssertDefinitionCellReady {
-        cell: Register,
+    AssertUpLinkReady {
+        link: Register,
     },
     AssertFunctionArity {
         value: Register,
@@ -141,19 +141,19 @@ pub enum Opcode {
         dst: Register,
         src: Register,
     },
-    MakeDefinitionCell {
+    MakeUpLink {
         dst: Register,
     },
-    ReadDefinitionCell {
+    ReadUpLink {
         dst: Register,
-        cell: Register,
+        link: Register,
     },
-    InitializeDefinitionCell {
-        cell: Register,
+    InitializeUpLink {
+        link: Register,
         src: Register,
     },
-    AssertDefinitionCellReady {
-        cell: Register,
+    AssertUpLinkReady {
+        link: Register,
     },
     AssertFunctionArity {
         value: Register,
@@ -492,14 +492,10 @@ fn link_instruction(instruction: Instruction, links: &mut LinkingTable) -> Opcod
             value: ValueLinkId(constant),
         },
         Instruction::Move { dst, src } => Opcode::Move { dst, src },
-        Instruction::MakeDefinitionCell { dst } => Opcode::MakeDefinitionCell { dst },
-        Instruction::ReadDefinitionCell { dst, cell } => Opcode::ReadDefinitionCell { dst, cell },
-        Instruction::InitializeDefinitionCell { cell, src } => {
-            Opcode::InitializeDefinitionCell { cell, src }
-        }
-        Instruction::AssertDefinitionCellReady { cell } => {
-            Opcode::AssertDefinitionCellReady { cell }
-        }
+        Instruction::MakeUpLink { dst } => Opcode::MakeUpLink { dst },
+        Instruction::ReadUpLink { dst, link } => Opcode::ReadUpLink { dst, link },
+        Instruction::InitializeUpLink { link, src } => Opcode::InitializeUpLink { link, src },
+        Instruction::AssertUpLinkReady { link } => Opcode::AssertUpLinkReady { link },
         Instruction::AssertFunctionArity { value, arity } => {
             Opcode::AssertFunctionArity { value, arity }
         }
