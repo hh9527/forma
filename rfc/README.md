@@ -25,3 +25,4 @@ semantics from an earlier RFC.
 7. Structured lossless strings and restricted expression interpolation.
 8. Typed CST views, missing-slot validation, and tolerant lexical errors.
 9. Register LIR, VM call context, unified closures, and debug origins.
+10. Evaluation fuel for calls and control-flow back edges.
