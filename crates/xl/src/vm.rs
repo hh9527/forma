@@ -1,7 +1,9 @@
 use crate::bytecode::{BytecodeFunction, Opcode, Register};
 use crate::heap::{Handle, Heap, HeapView, Object, PersistentValue, RuntimeValue, publish_root};
 use crate::lir::RegisterId;
-use crate::value::{BuiltinAtom, Dict, NativeError, NativeLimit, Shape, Value};
+use crate::value::{
+    BuiltinAtom, CoreArrayFunction, Dict, NativeError, NativeKind, NativeLimit, Shape, Value,
+};
 use crate::{Diagnostic, Origin, SourceDatabase};
 use std::collections::HashMap;
 use std::fmt;
@@ -563,7 +565,47 @@ struct ExecutionFrame {
     prototype: Handle,
     base: usize,
     pc: usize,
-    return_destination: Option<Register>,
+    return_target: ReturnTarget,
+}
+
+#[derive(Debug)]
+enum ReturnTarget {
+    Root,
+    Register(Register),
+    Native(Box<ArrayContinuation>),
+}
+
+#[derive(Debug)]
+struct ArrayContinuation {
+    function: CoreArrayFunction,
+    source: RuntimeValue,
+    callback: RuntimeValue,
+    next_index: usize,
+    accumulator: Option<RuntimeValue>,
+    output: Vec<RuntimeValue>,
+    return_target: ReturnTarget,
+    call_function: Arc<BytecodeFunction>,
+    call_pc: usize,
+    trace_frame: RuntimeFrame,
+}
+
+enum VmAction {
+    Call {
+        callee: RuntimeValue,
+        arguments: Vec<RuntimeValue>,
+        return_target: ReturnTarget,
+        call_function: Arc<BytecodeFunction>,
+        call_pc: usize,
+    },
+    Return {
+        value: RuntimeValue,
+        return_target: ReturnTarget,
+    },
+}
+
+enum DriveOutcome {
+    Pending,
+    Root(RuntimeValue),
 }
 
 pub(crate) struct ExecutionArena {
@@ -743,7 +785,7 @@ impl Vm {
             prototype,
             &arguments,
             &captures,
-            None,
+            ReturnTarget::Root,
             &mut stack,
             account.stack_limit(),
         )?];
@@ -1342,20 +1384,6 @@ impl Vm {
                         argument_count,
                     } => {
                         let callee = *read_register(&registers, *call_base, function, pc)?;
-                        let RuntimeValue::Func(closure_handle) = callee else {
-                            return Err(runtime_type_error("Func", &callee, &view, function, pc));
-                        };
-                        let (runtime_prototype, upvalues) =
-                            view.closure(closure_handle).map_err(|heap_error| {
-                                error(
-                                    RuntimeErrorKind::InvalidBytecode,
-                                    heap_error.to_string(),
-                                    function,
-                                    pc,
-                                )
-                            })?;
-                        let upvalues = upvalues.to_vec();
-                        consume_fuel(account, function, pc)?;
                         let arguments = read_call_arguments(
                             &registers,
                             *call_base,
@@ -1363,112 +1391,24 @@ impl Vm {
                             function,
                             pc,
                         )?;
-                        match runtime_prototype {
-                            crate::heap::RuntimePrototype::Bytecode(prototype) => {
-                                if frames.len() >= MAX_CALL_DEPTH {
-                                    return Err(error(
-                                        RuntimeErrorKind::CallDepthExceeded,
-                                        format!(
-                                            "call depth exceeds the limit of {MAX_CALL_DEPTH} frames"
-                                        ),
-                                        function,
-                                        pc,
-                                    ));
-                                }
-                                let (code, _, _, _) =
-                                    view.bytecode(prototype).map_err(|heap_error| {
-                                        error(
-                                            RuntimeErrorKind::InvalidBytecode,
-                                            heap_error.to_string(),
-                                            function,
-                                            pc,
-                                        )
-                                    })?;
-                                let callee_function =
-                                    Arc::new(BytecodeFunction::from_linked_code(Arc::clone(code)));
-                                frames.last_mut().expect("caller frame").pc += 1;
-                                let next = make_execution_frame(
-                                    callee_function.clone(),
-                                    prototype,
-                                    &arguments,
-                                    &upvalues,
-                                    Some(*call_base),
-                                    &mut stack,
-                                    account.stack_limit(),
-                                )
-                                .map_err(|mut runtime_error| {
-                                    runtime_error.trace_includes_active_frame = false;
-                                    runtime_error
-                                })?;
-                                frames.push(next);
-                                continue;
-                            }
-                            crate::heap::RuntimePrototype::Native(native) => {
-                                if arguments.len() != native.arity() {
-                                    return Err(error(
-                                        RuntimeErrorKind::TypeMismatch,
-                                        format!(
-                                            "expected {} arguments, got {}",
-                                            native.arity(),
-                                            arguments.len()
-                                        ),
-                                        function,
-                                        pc,
-                                    ));
-                                }
-                                // Native scratch slots extend the same stack, so end the
-                                // current frame-window borrow before creating its context.
-                                let _ = registers;
-                                let mut context = CallContext::new(
-                                    &mut current,
-                                    Some(background),
-                                    &mut stack,
-                                    account,
-                                    arguments,
-                                    &upvalues,
-                                )
-                                .map_err(|native_error| {
-                                    error(
-                                        RuntimeErrorKind::StackLimitExceeded,
-                                        format!("{}: {}", native.name(), native_error.message),
-                                        function,
-                                        pc,
-                                    )
-                                })?;
-                                (native.callback())(&mut context).map_err(|native_error| {
-                                    error(
-                                        match native_error.limit() {
-                                            Some(NativeLimit::Stack) => {
-                                                RuntimeErrorKind::StackLimitExceeded
-                                            }
-                                            Some(NativeLimit::Allocation) => {
-                                                RuntimeErrorKind::AllocationQuotaExceeded
-                                            }
-                                            None => RuntimeErrorKind::TypeMismatch,
-                                        },
-                                        format!("{}: {}", native.name(), native_error.message),
-                                        function,
-                                        pc,
-                                    )
-                                })?;
-                                let value = context.take_result().map_err(|native_error| {
-                                    error(
-                                        RuntimeErrorKind::InvalidBytecode,
-                                        format!("{}: {}", native.name(), native_error.message),
-                                        function,
-                                        pc,
-                                    )
-                                })?;
-                                write_register(
-                                    &mut stack[base..end],
-                                    *call_base,
-                                    value,
-                                    function,
-                                    pc,
-                                )?;
-                                frames.last_mut().expect("execution frame").pc += 1;
-                                continue;
-                            }
+                        frames.last_mut().expect("caller frame").pc += 1;
+                        let _ = registers;
+                        match drive_vm_action(
+                            VmAction::Call {
+                                callee,
+                                arguments,
+                                return_target: ReturnTarget::Register(*call_base),
+                                call_function: function_arc,
+                                call_pc: pc,
+                            },
+                            &mut frames,
+                            &mut stack,
+                            &mut current,
+                            background,
+                            account,
+                        )? {
+                            DriveOutcome::Pending => continue,
+                            DriveOutcome::Root(value) => return Ok(value),
                         }
                     }
                     Opcode::TailCall {
@@ -1476,20 +1416,6 @@ impl Vm {
                         argument_count,
                     } => {
                         let callee = *read_register(&registers, *call_base, function, pc)?;
-                        let RuntimeValue::Func(closure_handle) = callee else {
-                            return Err(runtime_type_error("Func", &callee, &view, function, pc));
-                        };
-                        let (runtime_prototype, upvalues) =
-                            view.closure(closure_handle).map_err(|heap_error| {
-                                error(
-                                    RuntimeErrorKind::InvalidBytecode,
-                                    heap_error.to_string(),
-                                    function,
-                                    pc,
-                                )
-                            })?;
-                        let upvalues = upvalues.to_vec();
-                        consume_fuel(account, function, pc)?;
                         let arguments = read_call_arguments(
                             &registers,
                             *call_base,
@@ -1497,112 +1423,25 @@ impl Vm {
                             function,
                             pc,
                         )?;
-                        match runtime_prototype {
-                            crate::heap::RuntimePrototype::Bytecode(prototype) => {
-                                let (code, _, _, _) =
-                                    view.bytecode(prototype).map_err(|heap_error| {
-                                        error(
-                                            RuntimeErrorKind::InvalidBytecode,
-                                            heap_error.to_string(),
-                                            function,
-                                            pc,
-                                        )
-                                    })?;
-                                let callee_function =
-                                    Arc::new(BytecodeFunction::from_linked_code(Arc::clone(code)));
-                                let current_frame = frames.last().expect("tail caller frame");
-                                let frame_base = current_frame.base;
-                                let return_destination = current_frame.return_destination;
-                                let _ = registers;
-                                stack.truncate(frame_base);
-                                let next = make_execution_frame(
-                                    callee_function,
-                                    prototype,
-                                    &arguments,
-                                    &upvalues,
-                                    return_destination,
-                                    &mut stack,
-                                    account.stack_limit(),
-                                )
-                                .map_err(|runtime_error| {
-                                    error(runtime_error.kind, runtime_error.message, function, pc)
-                                })?;
-                                *frames.last_mut().expect("tail caller frame") = next;
-                                continue;
-                            }
-                            crate::heap::RuntimePrototype::Native(native) => {
-                                if arguments.len() != native.arity() {
-                                    return Err(error(
-                                        RuntimeErrorKind::TypeMismatch,
-                                        format!(
-                                            "expected {} arguments, got {}",
-                                            native.arity(),
-                                            arguments.len()
-                                        ),
-                                        function,
-                                        pc,
-                                    ));
-                                }
-                                let completed = frames.last().expect("tail caller frame");
-                                let frame_base = completed.base;
-                                let _ = registers;
-                                stack.truncate(frame_base);
-                                let mut context = CallContext::new(
-                                    &mut current,
-                                    Some(background),
-                                    &mut stack,
-                                    account,
-                                    arguments,
-                                    &upvalues,
-                                )
-                                .map_err(|native_error| {
-                                    error(
-                                        RuntimeErrorKind::StackLimitExceeded,
-                                        format!("{}: {}", native.name(), native_error.message),
-                                        function,
-                                        pc,
-                                    )
-                                })?;
-                                (native.callback())(&mut context).map_err(|native_error| {
-                                    error(
-                                        match native_error.limit() {
-                                            Some(NativeLimit::Stack) => {
-                                                RuntimeErrorKind::StackLimitExceeded
-                                            }
-                                            Some(NativeLimit::Allocation) => {
-                                                RuntimeErrorKind::AllocationQuotaExceeded
-                                            }
-                                            None => RuntimeErrorKind::TypeMismatch,
-                                        },
-                                        format!("{}: {}", native.name(), native_error.message),
-                                        function,
-                                        pc,
-                                    )
-                                })?;
-                                let value = context.take_result().map_err(|native_error| {
-                                    error(
-                                        RuntimeErrorKind::InvalidBytecode,
-                                        format!("{}: {}", native.name(), native_error.message),
-                                        function,
-                                        pc,
-                                    )
-                                })?;
-                                let completed = frames.pop().expect("tail caller frame");
-                                let Some(destination) = completed.return_destination else {
-                                    return Ok(value);
-                                };
-                                let caller = frames.last().expect("tail call has a caller");
-                                let caller_function = caller.function.clone();
-                                let caller_end = caller.base + caller.function.register_count();
-                                write_register(
-                                    &mut stack[caller.base..caller_end],
-                                    destination,
-                                    value,
-                                    &caller_function,
-                                    caller.pc.saturating_sub(1),
-                                )?;
-                                continue;
-                            }
+                        let completed = frames.pop().expect("tail caller frame");
+                        let _ = registers;
+                        stack.truncate(completed.base);
+                        match drive_vm_action(
+                            VmAction::Call {
+                                callee,
+                                arguments,
+                                return_target: completed.return_target,
+                                call_function: function_arc,
+                                call_pc: pc,
+                            },
+                            &mut frames,
+                            &mut stack,
+                            &mut current,
+                            background,
+                            account,
+                        )? {
+                            DriveOutcome::Pending => continue,
+                            DriveOutcome::Root(value) => return Ok(value),
                         }
                     }
                     Opcode::Jump { target } => {
@@ -1637,24 +1476,23 @@ impl Vm {
                     }
                     Opcode::Return { src } => {
                         let value = *read_register(&registers, *src, function, pc)?;
-                        let destination =
-                            frames.last().expect("execution frame").return_destination;
                         let completed = frames.pop().expect("execution frame");
+                        let _ = registers;
                         stack.truncate(completed.base);
-                        let Some(destination) = destination else {
-                            return Ok(value);
-                        };
-                        let caller = frames.last_mut().expect("return has a caller");
-                        let caller_function = caller.function.clone();
-                        let caller_end = caller.base + caller.function.register_count();
-                        write_register(
-                            &mut stack[caller.base..caller_end],
-                            destination,
-                            value,
-                            &caller_function,
-                            caller.pc.saturating_sub(1),
-                        )?;
-                        continue;
+                        match drive_vm_action(
+                            VmAction::Return {
+                                value,
+                                return_target: completed.return_target,
+                            },
+                            &mut frames,
+                            &mut stack,
+                            &mut current,
+                            background,
+                            account,
+                        )? {
+                            DriveOutcome::Pending => continue,
+                            DriveOutcome::Root(value) => return Ok(value),
+                        }
                     }
                     Opcode::Fail { message } => {
                         return Err(error(
@@ -1669,17 +1507,18 @@ impl Vm {
             }
         })();
         if let Err(runtime_error) = &mut result {
-            for frame in frames
-                .iter()
-                .rev()
-                .skip(usize::from(runtime_error.trace_includes_active_frame))
-            {
-                let instruction = frame.pc.saturating_sub(1);
-                runtime_error.trace.push(RuntimeFrame {
-                    function: frame.function.name().to_owned(),
-                    instruction,
-                    origin: frame.function.origin_at(instruction),
-                });
+            for (index, frame) in frames.iter().rev().enumerate() {
+                if index != 0 || !runtime_error.trace_includes_active_frame {
+                    let instruction = frame.pc.saturating_sub(1);
+                    runtime_error.trace.push(RuntimeFrame {
+                        function: frame.function.name().to_owned(),
+                        instruction,
+                        origin: frame.function.origin_at(instruction),
+                    });
+                }
+                frame
+                    .return_target
+                    .append_native_trace(&mut runtime_error.trace);
             }
             runtime_error.trace_includes_active_frame = false;
         }
@@ -1695,7 +1534,7 @@ fn make_execution_frame(
     prototype: Handle,
     arguments: &[RuntimeValue],
     captures: &[RuntimeValue],
-    return_destination: Option<Register>,
+    return_target: ReturnTarget,
     stack: &mut Vec<Option<RuntimeValue>>,
     stack_limit: usize,
 ) -> Result<ExecutionFrame, RuntimeError> {
@@ -1753,8 +1592,551 @@ fn make_execution_frame(
         prototype,
         base,
         pc: 0,
-        return_destination,
+        return_target,
     })
+}
+
+fn drive_vm_action(
+    mut action: VmAction,
+    frames: &mut Vec<ExecutionFrame>,
+    stack: &mut Vec<Option<RuntimeValue>>,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<DriveOutcome, RuntimeError> {
+    loop {
+        action = match action {
+            VmAction::Return {
+                value,
+                return_target,
+            } => match return_target {
+                ReturnTarget::Root => return Ok(DriveOutcome::Root(value)),
+                ReturnTarget::Register(destination) => {
+                    let caller = frames.last().ok_or_else(|| RuntimeError {
+                        kind: RuntimeErrorKind::InvalidBytecode,
+                        message: "return register has no caller".into(),
+                        function: "<vm>".into(),
+                        instruction: 0,
+                        trace: Vec::new(),
+                        rendered: None,
+                        trace_includes_active_frame: false,
+                    })?;
+                    let caller_function = caller.function.clone();
+                    let caller_end = caller.base + caller.function.register_count();
+                    write_register(
+                        &mut stack[caller.base..caller_end],
+                        destination,
+                        value,
+                        &caller_function,
+                        caller.pc.saturating_sub(1),
+                    )?;
+                    return Ok(DriveOutcome::Pending);
+                }
+                ReturnTarget::Native(continuation) => {
+                    let trace_frame = continuation.trace_frame.clone();
+                    resume_array_continuation(*continuation, value, current, background, account)
+                        .map_err(|mut runtime_error| {
+                            runtime_error.trace.push(trace_frame);
+                            runtime_error
+                        })?
+                }
+            },
+            VmAction::Call {
+                callee,
+                arguments,
+                return_target,
+                call_function,
+                call_pc,
+            } => {
+                consume_fuel(account, &call_function, call_pc).map_err(|mut runtime_error| {
+                    return_target.append_native_trace(&mut runtime_error.trace);
+                    runtime_error
+                })?;
+                let logical_depth = frames.len()
+                    + frames
+                        .iter()
+                        .map(|frame| frame.return_target.native_depth())
+                        .sum::<usize>()
+                    + return_target.native_depth();
+                if logical_depth >= MAX_CALL_DEPTH {
+                    return Err(error(
+                        RuntimeErrorKind::CallDepthExceeded,
+                        format!("call depth exceeds the limit of {MAX_CALL_DEPTH} frames"),
+                        &call_function,
+                        call_pc,
+                    ));
+                }
+                let RuntimeValue::Func(closure_handle) = callee else {
+                    let view = HeapView {
+                        current,
+                        background: Some(background),
+                    };
+                    return Err(runtime_type_error(
+                        "Func",
+                        &callee,
+                        &view,
+                        &call_function,
+                        call_pc,
+                    ));
+                };
+                let view = HeapView {
+                    current,
+                    background: Some(background),
+                };
+                let (runtime_prototype, upvalues) =
+                    view.closure(closure_handle).map_err(|heap_error| {
+                        error(
+                            RuntimeErrorKind::InvalidBytecode,
+                            heap_error.to_string(),
+                            &call_function,
+                            call_pc,
+                        )
+                    })?;
+                let upvalues = upvalues.to_vec();
+                let expected_arity = match runtime_prototype {
+                    crate::heap::RuntimePrototype::Bytecode(prototype) => view
+                        .bytecode(prototype)
+                        .map_err(|heap_error| {
+                            error(
+                                RuntimeErrorKind::InvalidBytecode,
+                                heap_error.to_string(),
+                                &call_function,
+                                call_pc,
+                            )
+                        })?
+                        .0
+                        .parameter_count(),
+                    crate::heap::RuntimePrototype::Native(native) => native.arity(),
+                };
+                if arguments.len() != expected_arity {
+                    return Err(error(
+                        RuntimeErrorKind::TypeMismatch,
+                        format!(
+                            "expected {expected_arity} arguments, got {}",
+                            arguments.len()
+                        ),
+                        &call_function,
+                        call_pc,
+                    ));
+                }
+                match runtime_prototype {
+                    crate::heap::RuntimePrototype::Bytecode(prototype) => {
+                        let (code, _, _, _) = view.bytecode(prototype).map_err(|heap_error| {
+                            error(
+                                RuntimeErrorKind::InvalidBytecode,
+                                heap_error.to_string(),
+                                &call_function,
+                                call_pc,
+                            )
+                        })?;
+                        let callee_function =
+                            Arc::new(BytecodeFunction::from_linked_code(Arc::clone(code)));
+                        let next = make_execution_frame(
+                            callee_function,
+                            prototype,
+                            &arguments,
+                            &upvalues,
+                            return_target,
+                            stack,
+                            account.stack_limit(),
+                        )
+                        .map_err(|runtime_error| {
+                            error(
+                                runtime_error.kind,
+                                runtime_error.message,
+                                &call_function,
+                                call_pc,
+                            )
+                        })?;
+                        frames.push(next);
+                        return Ok(DriveOutcome::Pending);
+                    }
+                    crate::heap::RuntimePrototype::Native(native) => match native.kind() {
+                        NativeKind::Synchronous => {
+                            let mut context = CallContext::new(
+                                current,
+                                Some(background),
+                                stack,
+                                account,
+                                arguments,
+                                &upvalues,
+                            )
+                            .map_err(|native_error| {
+                                native_runtime_error(native, native_error, &call_function, call_pc)
+                            })?;
+                            (native.callback())(&mut context).map_err(|native_error| {
+                                native_runtime_error(native, native_error, &call_function, call_pc)
+                            })?;
+                            let value = context.take_result().map_err(|native_error| {
+                                error(
+                                    RuntimeErrorKind::InvalidBytecode,
+                                    format!("{}: {}", native.name(), native_error.message),
+                                    &call_function,
+                                    call_pc,
+                                )
+                            })?;
+                            VmAction::Return {
+                                value,
+                                return_target,
+                            }
+                        }
+                        NativeKind::CoreArray(function) => start_array_continuation(
+                            function,
+                            arguments,
+                            return_target,
+                            call_function,
+                            call_pc,
+                            current,
+                            background,
+                        )?,
+                    },
+                }
+            }
+        };
+    }
+}
+
+impl ReturnTarget {
+    fn native_depth(&self) -> usize {
+        match self {
+            Self::Root | Self::Register(_) => 0,
+            Self::Native(continuation) => 1 + continuation.return_target.native_depth(),
+        }
+    }
+
+    fn append_native_trace(&self, trace: &mut Vec<RuntimeFrame>) {
+        if let Self::Native(continuation) = self {
+            trace.push(continuation.trace_frame.clone());
+            continuation.return_target.append_native_trace(trace);
+        }
+    }
+}
+
+fn native_runtime_error(
+    native: crate::NativeFunction,
+    native_error: NativeError,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> RuntimeError {
+    error(
+        match native_error.limit() {
+            Some(NativeLimit::Stack) => RuntimeErrorKind::StackLimitExceeded,
+            Some(NativeLimit::Allocation) => RuntimeErrorKind::AllocationQuotaExceeded,
+            None => RuntimeErrorKind::TypeMismatch,
+        },
+        format!("{}: {}", native.name(), native_error.message),
+        function,
+        pc,
+    )
+}
+
+fn start_array_continuation(
+    function: CoreArrayFunction,
+    arguments: Vec<RuntimeValue>,
+    return_target: ReturnTarget,
+    call_function: Arc<BytecodeFunction>,
+    call_pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+) -> Result<VmAction, RuntimeError> {
+    let source = arguments[0];
+    let RuntimeValue::Array(source_handle) = source else {
+        let view = HeapView {
+            current,
+            background: Some(background),
+        };
+        return Err(runtime_type_error(
+            "Array",
+            &source,
+            &view,
+            &call_function,
+            call_pc,
+        ));
+    };
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let length = view
+        .sequence(source_handle, false)
+        .map_err(|heap_error| {
+            error(
+                RuntimeErrorKind::InvalidBytecode,
+                heap_error.to_string(),
+                &call_function,
+                call_pc,
+            )
+        })?
+        .len();
+    if function == CoreArrayFunction::Length {
+        let length = i64::try_from(length).map_err(|_| {
+            error(
+                RuntimeErrorKind::IntegerOverflow,
+                "Array length does not fit Int",
+                &call_function,
+                call_pc,
+            )
+        })?;
+        return Ok(VmAction::Return {
+            value: RuntimeValue::Int(length),
+            return_target,
+        });
+    }
+
+    let callback_index = if function == CoreArrayFunction::Fold {
+        2
+    } else {
+        1
+    };
+    let callback = arguments[callback_index];
+    let RuntimeValue::Func(callback_handle) = callback else {
+        return Err(runtime_type_error(
+            "Func",
+            &callback,
+            &view,
+            &call_function,
+            call_pc,
+        ));
+    };
+    let expected_callback_arity = if function == CoreArrayFunction::Fold {
+        2
+    } else {
+        1
+    };
+    let actual_callback_arity = view.function_arity(callback_handle).map_err(|heap_error| {
+        error(
+            RuntimeErrorKind::InvalidBytecode,
+            heap_error.to_string(),
+            &call_function,
+            call_pc,
+        )
+    })?;
+    if actual_callback_arity != expected_callback_arity {
+        return Err(error(
+            RuntimeErrorKind::TypeMismatch,
+            format!(
+                "{} callback must accept {expected_callback_arity} arguments, got {actual_callback_arity}",
+                core_array_name(function)
+            ),
+            &call_function,
+            call_pc,
+        ));
+    }
+
+    let accumulator = (function == CoreArrayFunction::Fold).then_some(arguments[1]);
+    let continuation = ArrayContinuation {
+        function,
+        source,
+        callback,
+        next_index: 0,
+        accumulator,
+        output: Vec::new(),
+        return_target,
+        trace_frame: RuntimeFrame {
+            function: core_array_name(function).into(),
+            instruction: 0,
+            origin: call_function.origin_at(call_pc),
+        },
+        call_function,
+        call_pc,
+    };
+    next_array_action(continuation, current, background)
+}
+
+fn resume_array_continuation(
+    mut continuation: ArrayContinuation,
+    value: RuntimeValue,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    match continuation.function {
+        CoreArrayFunction::Length => unreachable!("length does not suspend"),
+        CoreArrayFunction::Map => {
+            charge_array_output(&continuation, account, 1)?;
+            continuation.output.push(value);
+        }
+        CoreArrayFunction::Filter => match value {
+            RuntimeValue::BuiltinAtom(BuiltinAtom::True) => {
+                let item = array_item(
+                    continuation.source,
+                    continuation.next_index - 1,
+                    current,
+                    background,
+                    &continuation.call_function,
+                    continuation.call_pc,
+                )?;
+                charge_array_output(&continuation, account, 1)?;
+                continuation.output.push(item);
+            }
+            RuntimeValue::BuiltinAtom(BuiltinAtom::False) => {}
+            _ => {
+                return Err(error(
+                    RuntimeErrorKind::TypeMismatch,
+                    "core:array.filter predicate must return 'True or 'False",
+                    &continuation.call_function,
+                    continuation.call_pc,
+                ));
+            }
+        },
+        CoreArrayFunction::FlatMap => {
+            let RuntimeValue::Array(handle) = value else {
+                return Err(error(
+                    RuntimeErrorKind::TypeMismatch,
+                    "core:array.flat_map callback must return an Array",
+                    &continuation.call_function,
+                    continuation.call_pc,
+                ));
+            };
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            let values = view
+                .sequence(handle, false)
+                .map_err(|heap_error| {
+                    error(
+                        RuntimeErrorKind::InvalidBytecode,
+                        heap_error.to_string(),
+                        &continuation.call_function,
+                        continuation.call_pc,
+                    )
+                })?
+                .to_vec();
+            charge_array_output(&continuation, account, values.len())?;
+            continuation.output.extend(values);
+        }
+        CoreArrayFunction::Fold => continuation.accumulator = Some(value),
+    }
+    next_array_action(continuation, current, background)
+}
+
+fn next_array_action(
+    mut continuation: ArrayContinuation,
+    current: &mut Heap,
+    background: &Heap,
+) -> Result<VmAction, RuntimeError> {
+    let RuntimeValue::Array(handle) = continuation.source else {
+        unreachable!("validated Array continuation source")
+    };
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let length = view
+        .sequence(handle, false)
+        .map_err(|heap_error| {
+            error(
+                RuntimeErrorKind::InvalidBytecode,
+                heap_error.to_string(),
+                &continuation.call_function,
+                continuation.call_pc,
+            )
+        })?
+        .len();
+    if continuation.next_index >= length {
+        let value = if continuation.function == CoreArrayFunction::Fold {
+            continuation
+                .accumulator
+                .expect("fold continuation has an accumulator")
+        } else {
+            RuntimeValue::Array(current.allocate(Object::Array(continuation.output.into())))
+        };
+        return Ok(VmAction::Return {
+            value,
+            return_target: continuation.return_target,
+        });
+    }
+
+    let item = array_item(
+        continuation.source,
+        continuation.next_index,
+        current,
+        background,
+        &continuation.call_function,
+        continuation.call_pc,
+    )?;
+    continuation.next_index += 1;
+    let arguments = if continuation.function == CoreArrayFunction::Fold {
+        vec![
+            continuation
+                .accumulator
+                .expect("fold continuation has an accumulator"),
+            item,
+        ]
+    } else {
+        vec![item]
+    };
+    let callee = continuation.callback;
+    let call_function = Arc::clone(&continuation.call_function);
+    let call_pc = continuation.call_pc;
+    Ok(VmAction::Call {
+        callee,
+        arguments,
+        return_target: ReturnTarget::Native(Box::new(continuation)),
+        call_function,
+        call_pc,
+    })
+}
+
+fn array_item(
+    source: RuntimeValue,
+    index: usize,
+    current: &Heap,
+    background: &Heap,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> Result<RuntimeValue, RuntimeError> {
+    let RuntimeValue::Array(handle) = source else {
+        unreachable!("validated Array source")
+    };
+    HeapView {
+        current,
+        background: Some(background),
+    }
+    .sequence(handle, false)
+    .map_err(|heap_error| {
+        error(
+            RuntimeErrorKind::InvalidBytecode,
+            heap_error.to_string(),
+            function,
+            pc,
+        )
+    })?
+    .get(index)
+    .copied()
+    .ok_or_else(|| {
+        error(
+            RuntimeErrorKind::InvalidBytecode,
+            "Array continuation index is out of bounds",
+            function,
+            pc,
+        )
+    })
+}
+
+fn charge_array_output(
+    continuation: &ArrayContinuation,
+    account: &mut QuotaAccount,
+    count: usize,
+) -> Result<(), RuntimeError> {
+    let bytes = logical_value_bytes(count).map_err(|native_error| {
+        allocation_error(
+            native_error.message,
+            &continuation.call_function,
+            continuation.call_pc,
+        )
+    })?;
+    charge_allocation(
+        account,
+        bytes,
+        &continuation.call_function,
+        continuation.call_pc,
+    )
+}
+
+const fn core_array_name(function: CoreArrayFunction) -> &'static str {
+    function.name()
 }
 
 fn decimal_length(value: i64) -> usize {

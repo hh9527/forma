@@ -1,6 +1,6 @@
 # RFC 0015: Core Array Functions and Native Continuations
 
-- Status: Accepted for implementation
+- Status: Implemented
 
 ## Summary
 
@@ -306,3 +306,25 @@ operations.
    retain useful source origins and bounded traces.
 9. Tool-stage closed computations can use `core:array` through the same VM.
 10. Existing language, heap, module, quota, and CLI behavior remains unchanged.
+
+## Implementation result
+
+`core:array` is resolved before filesystem modules and published once per
+module-loading world. Its five functions operate directly on runtime Array
+handles. Higher-order operations use VM-owned continuation records and the
+ordinary call dispatcher, so bytecode closures, synchronous native functions,
+nested Array operations, fuel, allocation accounting, call depth, and traces
+all retain one execution model without recursive VM entry.
+
+The implementation charges one call unit for the core operation and one for
+each callback. Output slots are charged as builders grow and are not charged
+again when the final immutable Array is installed in the local heap. Tests
+cover ordering, empty inputs, nested operations, native callbacks, 1,500-item
+iteration without frame growth, exact fuel and allocation boundaries,
+tool-stage evaluation, boundary errors, callback traces, and continuation
+depth exhaustion.
+
+As planned, the focused checker currently exposes the module's exact Dict
+shape and function arities while generic input/result relationships remain
+`Any`. Core modules are also not yet included in filesystem dependency
+reporting; manifests and versioned core dependency identities remain deferred.

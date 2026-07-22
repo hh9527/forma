@@ -1,5 +1,6 @@
 use crate::ast::{BindingKind, Expr, ExprKind, Program, StringPartKind};
 use crate::compiler::compile_program_analyzed_in;
+use crate::core::{ARRAY_MODULE, array_module_value};
 use crate::heap::{Heap, PersistentValue, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
 use crate::parser::parse_registered;
@@ -134,6 +135,7 @@ pub fn load_module_with_quota(
     }
     let mut loader = ModuleLoader {
         cache: HashMap::new(),
+        core_modules: HashMap::new(),
         world: Heap::persistent(),
         visiting: Vec::new(),
         dependencies: BTreeSet::new(),
@@ -145,6 +147,7 @@ pub fn load_module_with_quota(
 
 struct ModuleLoader {
     cache: HashMap<PathBuf, ModuleState>,
+    core_modules: HashMap<&'static str, (Value, PersistentValue)>,
     world: Heap,
     visiting: Vec<PathBuf>,
     dependencies: BTreeSet<PathBuf>,
@@ -308,6 +311,12 @@ impl ModuleLoader {
             let ExprKind::String(relative) = &binding.value.value.value else {
                 return Err(ModuleError::new("import path must be a string"));
             };
+            if relative.starts_with("core:") {
+                let (value, root) = self.load_core_module(relative)?;
+                external_roots.insert(binding.value.name.value.clone(), root);
+                external_bindings.insert(binding.value.name.value.clone(), value);
+                continue;
+            }
             let imported = path
                 .parent()
                 .expect("canonical module path has a parent")
@@ -351,6 +360,21 @@ impl ModuleLoader {
             compile_program_analyzed_in(self.sources.get(source_id), &program, &analysis)
                 .map_err(|error| ModuleError::new(error.to_string()))?;
         Ok((analysis, function, external_roots))
+    }
+
+    fn load_core_module(&mut self, name: &str) -> Result<(Value, PersistentValue), ModuleError> {
+        if name != ARRAY_MODULE {
+            return Err(ModuleError::new(format!("unknown core module {name:?}")));
+        }
+        if let Some((value, root)) = self.core_modules.get(ARRAY_MODULE) {
+            return Ok((value.clone(), *root));
+        }
+        let value = array_module_value();
+        let root = publish_value(&mut self.world, &value)
+            .map_err(|error| ModuleError::new(error.to_string()))?;
+        self.core_modules
+            .insert(ARRAY_MODULE, (value.clone(), root));
+        Ok((value, root))
     }
 
     fn enter(&mut self, path: &Path) -> Result<(), ModuleError> {
@@ -660,6 +684,7 @@ mod tests {
         fs::write(&data, r#"{"name":"Ada","items":[1,2,3]}"#).unwrap();
         let mut loader = ModuleLoader {
             cache: HashMap::new(),
+            core_modules: HashMap::new(),
             world: Heap::persistent(),
             visiting: Vec::new(),
             dependencies: BTreeSet::new(),
@@ -684,6 +709,210 @@ mod tests {
     }
 
     #[test]
+    fn core_array_module_runs_higher_order_operations_and_nested_callbacks() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import arrays from "core:array";
+               let values = [1, 2, 3];
+               {
+                   length: arrays.length(values),
+                   mapped: arrays.map(values, fn(value) { value + 10 }),
+                   filtered: arrays.filter(values, fn(value) { 1 < value }),
+                   flattened: arrays.flat_map(values, fn(value) { [value, value] }),
+                   folded: arrays.fold(values, 0, fn(total, value) { total + value }),
+                   empty_map: arrays.map([], fn(value) { value / 0 }),
+                   empty_filter: arrays.filter([], fn(value) { value }),
+                   empty_flat_map: arrays.flat_map([], fn(value) { value }),
+                   empty_fold: arrays.fold([], 42, fn(total, value) { total + value }),
+                   nested: arrays.map(values, fn(value) {
+                       arrays.fold([value, value], 0, fn(total, item) { total + item })
+                   }),
+                   native_callback: arrays.map([Int], Array),
+               }"#,
+        )
+        .unwrap();
+
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let value = module.execute(100_000).unwrap();
+        let Value::Dict(result) = value else {
+            panic!("expected Dict result")
+        };
+        assert_eq!(result.get("length").unwrap().to_string(), "3");
+        assert_eq!(result.get("mapped").unwrap().to_string(), "[11, 12, 13]");
+        assert_eq!(result.get("filtered").unwrap().to_string(), "[2, 3]");
+        assert_eq!(
+            result.get("flattened").unwrap().to_string(),
+            "[1, 1, 2, 2, 3, 3]"
+        );
+        assert_eq!(result.get("folded").unwrap().to_string(), "6");
+        assert_eq!(result.get("empty_map").unwrap().to_string(), "[]");
+        assert_eq!(result.get("empty_filter").unwrap().to_string(), "[]");
+        assert_eq!(result.get("empty_flat_map").unwrap().to_string(), "[]");
+        assert_eq!(result.get("empty_fold").unwrap().to_string(), "42");
+        assert_eq!(result.get("nested").unwrap().to_string(), "[2, 4, 6]");
+        let Value::Array(native) = result.get("native_callback").unwrap() else {
+            panic!("expected native callback Array")
+        };
+        assert_eq!(native.len(), 1);
+        assert!(matches!(native[0], Value::Dict(_)));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn core_array_callbacks_share_fuel_allocation_and_tool_stage_execution() {
+        let directory = fixture_dir();
+        let item_count = 1_500usize;
+        let data = format!("[{}]", vec!["1"; item_count].join(","));
+        fs::write(directory.join("values.json"), data).unwrap();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import arrays from "core:array";
+               import values from "./values.json";
+               arrays.map(values, fn(value) { value + 1 })"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+
+        let mut exact = QuotaAccount::new(Quota::new(1_501, 1_000, u64::MAX));
+        let arena = Vm::new()
+            .execute_in_background(
+                &module.runtime.world,
+                &module.runtime.externals,
+                &module.function,
+                &[],
+                &mut exact,
+            )
+            .unwrap();
+        assert_eq!(
+            exact.requested_allocation_bytes(),
+            item_count as u64 * std::mem::size_of::<Value>() as u64
+        );
+        let Value::Array(mapped) = arena.export(&module.runtime.world).unwrap() else {
+            panic!("expected mapped Array")
+        };
+        assert_eq!(mapped.len(), item_count);
+
+        let mut fuel_short = QuotaAccount::new(Quota::new(1_500, 1_000, u64::MAX));
+        assert_eq!(
+            Vm::new()
+                .execute_in_background(
+                    &module.runtime.world,
+                    &module.runtime.externals,
+                    &module.function,
+                    &[],
+                    &mut fuel_short,
+                )
+                .err()
+                .expect("fuel must be exhausted")
+                .kind,
+            crate::RuntimeErrorKind::FuelExhausted
+        );
+
+        let requested = item_count as u64 * std::mem::size_of::<Value>() as u64;
+        let mut allocation_short = QuotaAccount::new(Quota::new(1_501, 1_000, requested - 1));
+        assert_eq!(
+            Vm::new()
+                .execute_in_background(
+                    &module.runtime.world,
+                    &module.runtime.externals,
+                    &module.function,
+                    &[],
+                    &mut allocation_short,
+                )
+                .err()
+                .expect("allocation must be exhausted")
+                .kind,
+            crate::RuntimeErrorKind::AllocationQuotaExceeded
+        );
+
+        fs::write(
+            directory.join("types.xl"),
+            r#"import arrays from "core:array";
+               type Pair = Tuple(arrays.map([Int, String], fn(item) { item }));
+               let pair: Pair = (1, "one");
+               pair"#,
+        )
+        .unwrap();
+        let types = load_module(directory.join("types.xl"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(types.execute(100_000).unwrap().to_string(), "(1, \"one\")");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn core_array_reports_boundary_and_callback_result_errors() {
+        let directory = fixture_dir();
+        let run_error = |name: &str, expression: &str| {
+            let path = directory.join(name);
+            fs::write(
+                &path,
+                format!("import arrays from \"core:array\"; {expression}"),
+            )
+            .unwrap();
+            let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
+            module.execute(100_000).unwrap_err()
+        };
+
+        assert!(
+            run_error("length.xl", "arrays.length(1)")
+                .message
+                .contains("Array")
+        );
+        assert!(
+            run_error("arity.xl", "arrays.map([1], fn(a, b) { a + b })")
+                .message
+                .contains("callback must accept 1")
+        );
+        assert!(
+            run_error("filter.xl", "arrays.filter([1], fn(value) { value })")
+                .message
+                .contains("must return 'True or 'False")
+        );
+        assert!(
+            run_error("flat-map.xl", "arrays.flat_map([1], fn(value) { value })")
+                .message
+                .contains("must return an Array")
+        );
+        let callback = run_error("callback.xl", "arrays.map([1], fn(value) { value / 0 })");
+        assert!(callback.to_string().contains("callback.xl:1:"));
+        assert!(
+            callback
+                .trace
+                .iter()
+                .any(|frame| frame.function == "core:array.map")
+        );
+
+        let nested_depth = run_error(
+            "nested-depth.xl",
+            "decl nest: fn(Int) -> Int;
+             def nest = fn(n) {
+                 if n < 1 { 0 } else {
+                     arrays.fold([n], 0, fn(total, value) { nest(value - 1) })
+                 }
+             };
+             nest(1100)",
+        );
+        assert_eq!(
+            nested_depth.kind,
+            crate::RuntimeErrorKind::CallDepthExceeded
+        );
+
+        let unknown_path = directory.join("unknown-core.xl");
+        fs::write(
+            &unknown_path,
+            "import unknown from \"core:unknown\"; unknown",
+        )
+        .unwrap();
+        assert!(
+            load_module(unknown_path, BTreeMap::new(), 100_000)
+                .unwrap_err()
+                .to_string()
+                .contains("unknown core module")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn diamond_dependencies_reuse_the_same_persistent_root() {
         let directory = fixture_dir();
         let c = directory.join("c.xl");
@@ -694,6 +923,7 @@ mod tests {
         fs::write(&b, r#"import c from "./c.xl"; c"#).unwrap();
         let mut loader = ModuleLoader {
             cache: HashMap::new(),
+            core_modules: HashMap::new(),
             world: Heap::persistent(),
             visiting: Vec::new(),
             dependencies: BTreeSet::new(),

@@ -127,11 +127,47 @@ impl NativeError {
 
 pub type NativeCallback = fn(&mut CallContext<'_, '_>) -> Result<(), NativeError>;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreArrayFunction {
+    Length,
+    Map,
+    Filter,
+    FlatMap,
+    Fold,
+}
+
+impl CoreArrayFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Length => "core:array.length",
+            Self::Map => "core:array.map",
+            Self::Filter => "core:array.filter",
+            Self::FlatMap => "core:array.flat_map",
+            Self::Fold => "core:array.fold",
+        }
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        match self {
+            Self::Length => 1,
+            Self::Map | Self::Filter | Self::FlatMap => 2,
+            Self::Fold => 3,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeKind {
+    Synchronous,
+    CoreArray(CoreArrayFunction),
+}
+
 #[derive(Clone, Copy)]
 pub struct NativeFunction {
     name: &'static str,
     arity: usize,
     callback: NativeCallback,
+    kind: NativeKind,
 }
 
 impl NativeFunction {
@@ -140,6 +176,16 @@ impl NativeFunction {
             name,
             arity,
             callback,
+            kind: NativeKind::Synchronous,
+        }
+    }
+
+    pub(crate) const fn core_array(function: CoreArrayFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreArray(function),
         }
     }
 
@@ -154,6 +200,16 @@ impl NativeFunction {
     pub const fn callback(self) -> NativeCallback {
         self.callback
     }
+
+    pub(crate) const fn kind(self) -> NativeKind {
+        self.kind
+    }
+}
+
+fn unavailable_core_callback(_: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+    Err(NativeError::new(
+        "VM-managed core function cannot use the synchronous native ABI",
+    ))
 }
 
 impl fmt::Debug for NativeFunction {
@@ -162,6 +218,7 @@ impl fmt::Debug for NativeFunction {
             .debug_struct("NativeFunction")
             .field("name", &self.name)
             .field("arity", &self.arity)
+            .field("kind", &self.kind)
             .finish_non_exhaustive()
     }
 }

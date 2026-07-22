@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod bytecode;
 pub mod compiler;
+mod core;
 mod heap;
 pub mod json;
 pub mod lexer;

@@ -11,6 +11,7 @@ The current MVP demonstrates:
 - immutable Dict, Array, Tuple, Atom, and primitive values;
 - Erlang-style tagged tuples and pattern matching;
 - explicit single-assignment recursion with proper tail calls;
+- pure Array transformations through the explicit `core:array` module;
 - ordinary functions that compute Type metadata in a tool-stage VM;
 - structural annotations and runtime validation from the same metadata;
 - `.xl` and `.json` modules in a closed dependency graph;
@@ -54,6 +55,18 @@ validate(User, user)
 `value |> f(arg)` passes `value` as the first argument. The built-in validator
 uses the order `validate(type, value)`, so it is called directly; placeholders
 for non-first pipeline insertion are deferred.
+
+Array operations are ordinary imported functions:
+
+```text
+import arrays from "core:array";
+
+[1, 2, 3]
+    |> arrays.map(fn(value) { value + 1 })
+    |> arrays.filter(fn(value) { 2 < value })
+```
+
+The initial module exports `length`, `map`, `filter`, `flat_map`, and `fold`.
 
 ## Current limits
 
