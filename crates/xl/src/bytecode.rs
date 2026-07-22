@@ -23,6 +23,24 @@ pub enum Instruction {
         dst: Register,
         src: Register,
     },
+    MakeDefinitionCell {
+        dst: Register,
+    },
+    ReadDefinitionCell {
+        dst: Register,
+        cell: Register,
+    },
+    InitializeDefinitionCell {
+        cell: Register,
+        src: Register,
+    },
+    AssertDefinitionCellReady {
+        cell: Register,
+    },
+    AssertFunctionArity {
+        value: Register,
+        arity: usize,
+    },
     Add {
         dst: Register,
         left: Register,
@@ -123,6 +141,24 @@ pub enum Opcode {
         dst: Register,
         src: Register,
     },
+    MakeDefinitionCell {
+        dst: Register,
+    },
+    ReadDefinitionCell {
+        dst: Register,
+        cell: Register,
+    },
+    InitializeDefinitionCell {
+        cell: Register,
+        src: Register,
+    },
+    AssertDefinitionCellReady {
+        cell: Register,
+    },
+    AssertFunctionArity {
+        value: Register,
+        arity: usize,
+    },
     Add {
         dst: Register,
         left: Register,
@@ -221,6 +257,12 @@ pub struct FuncByteCode {
     register_count: usize,
     instructions: Vec<Opcode>,
     debug_origins: Vec<DebugOriginRange>,
+}
+
+impl FuncByteCode {
+    pub(crate) const fn parameter_count(&self) -> usize {
+        self.parameter_count
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -450,6 +492,17 @@ fn link_instruction(instruction: Instruction, links: &mut LinkingTable) -> Opcod
             value: ValueLinkId(constant),
         },
         Instruction::Move { dst, src } => Opcode::Move { dst, src },
+        Instruction::MakeDefinitionCell { dst } => Opcode::MakeDefinitionCell { dst },
+        Instruction::ReadDefinitionCell { dst, cell } => Opcode::ReadDefinitionCell { dst, cell },
+        Instruction::InitializeDefinitionCell { cell, src } => {
+            Opcode::InitializeDefinitionCell { cell, src }
+        }
+        Instruction::AssertDefinitionCellReady { cell } => {
+            Opcode::AssertDefinitionCellReady { cell }
+        }
+        Instruction::AssertFunctionArity { value, arity } => {
+            Opcode::AssertFunctionArity { value, arity }
+        }
         Instruction::Add { dst, left, right } => Opcode::Add { dst, left, right },
         Instruction::Subtract { dst, left, right } => Opcode::Subtract { dst, left, right },
         Instruction::Multiply { dst, left, right } => Opcode::Multiply { dst, left, right },

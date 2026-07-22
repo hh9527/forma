@@ -46,6 +46,7 @@ pub(crate) enum RuntimeValue {
     Tuple(Handle),
     Dict(Handle),
     Func(Handle),
+    DefinitionCell(Handle),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -79,6 +80,9 @@ pub(crate) enum Object {
         prototype: RuntimePrototype,
         upvalues: Box<[RuntimeValue]>,
     },
+    DefinitionCell {
+        value: Option<RuntimeValue>,
+    },
     ByteCodeProto {
         code: Arc<FuncByteCode>,
         values: Box<[RuntimeValue]>,
@@ -93,6 +97,13 @@ pub(crate) struct HeapError(&'static str);
 impl HeapError {
     pub(crate) const fn new(message: &'static str) -> Self {
         Self(message)
+    }
+
+    pub(crate) fn is_legacy_cycle(&self) -> bool {
+        matches!(
+            self.0,
+            "cyclic heap values cannot cross the legacy Value boundary"
+        )
     }
 }
 
@@ -186,6 +197,24 @@ impl Heap {
             return Err(HeapError("heap slot is already initialized"));
         }
         *slot = object;
+        Ok(())
+    }
+
+    pub(crate) fn initialize_definition_cell(
+        &mut self,
+        handle: Handle,
+        value: RuntimeValue,
+    ) -> Result<(), HeapError> {
+        if handle.storage != Storage::Local {
+            return Err(HeapError("persistent definition cells are read-only"));
+        }
+        let Object::DefinitionCell { value: slot } = self.object_mut(handle)? else {
+            return Err(HeapError("handle is not a definition cell"));
+        };
+        if slot.is_some() {
+            return Err(HeapError("definition cell is already initialized"));
+        }
+        *slot = Some(value);
         Ok(())
     }
 
@@ -492,6 +521,29 @@ impl<'a> HeapView<'a> {
         Ok((*prototype, upvalues))
     }
 
+    pub(crate) fn function_arity(&self, handle: Handle) -> Result<usize, HeapError> {
+        let (prototype, _) = self.closure(handle)?;
+        match prototype {
+            RuntimePrototype::Native(function) => Ok(function.arity()),
+            RuntimePrototype::Bytecode(handle) => {
+                let Object::ByteCodeProto { code, .. } = self.object(handle)? else {
+                    return Err(HeapError("prototype handle refers to another object kind"));
+                };
+                Ok(code.parameter_count())
+            }
+        }
+    }
+
+    pub(crate) fn definition_cell(
+        &self,
+        handle: Handle,
+    ) -> Result<Option<RuntimeValue>, HeapError> {
+        let Object::DefinitionCell { value } = self.object(handle)? else {
+            return Err(HeapError("handle is not a definition cell"));
+        };
+        Ok(*value)
+    }
+
     pub(crate) fn sequence(
         &self,
         handle: Handle,
@@ -596,6 +648,9 @@ impl<'a> HeapView<'a> {
                     return Err(HeapError("Func handle refers to another object kind"));
                 };
                 Ok(Arc::ptr_eq(left, right))
+            }
+            (RuntimeValue::DefinitionCell(_), _) | (_, RuntimeValue::DefinitionCell(_)) => {
+                Err(HeapError("definition cell escaped into equality"))
             }
             (RuntimeValue::Int(left), RuntimeValue::Int(right)) => Ok(left == right),
             (RuntimeValue::Float(left), RuntimeValue::Float(right)) => Ok(left == right),
@@ -826,6 +881,19 @@ impl<'a> HeapView<'a> {
                     upvalues,
                 )))
             }
+            RuntimeValue::DefinitionCell(handle) => {
+                if !visiting.insert(handle) {
+                    return Err(HeapError(
+                        "cyclic heap values cannot cross the legacy Value boundary",
+                    ));
+                }
+                let value = self
+                    .definition_cell(handle)?
+                    .ok_or(HeapError("definition cell is uninitialized"))?;
+                let value = self.export_value_with(value, visiting)?;
+                visiting.remove(&handle);
+                value
+            }
         })
     }
 
@@ -994,6 +1062,9 @@ impl PendingCopy {
             RuntimeValue::Func(handle) => {
                 RuntimeValue::Func(self.copy_object(target, source, handle)?)
             }
+            RuntimeValue::DefinitionCell(handle) => {
+                RuntimeValue::DefinitionCell(self.copy_object(target, source, handle)?)
+            }
         })
     }
 
@@ -1055,6 +1126,13 @@ impl PendingCopy {
                 identity: Arc::clone(identity),
                 prototype: self.copy_prototype(target, source, prototype)?,
                 upvalues: copy_values(self, upvalues)?,
+            },
+            Object::DefinitionCell { value } => Object::DefinitionCell {
+                value: Some(self.copy_value(
+                    target,
+                    source,
+                    value.ok_or(HeapError("cannot publish an uninitialized definition cell"))?,
+                )?),
             },
             Object::ByteCodeProto {
                 code,
@@ -1194,7 +1272,8 @@ fn value_contains_foreign(value: RuntimeValue, target: Storage) -> bool {
         | RuntimeValue::Array(handle)
         | RuntimeValue::Tuple(handle)
         | RuntimeValue::Dict(handle)
-        | RuntimeValue::Func(handle) => handle.storage != target,
+        | RuntimeValue::Func(handle)
+        | RuntimeValue::DefinitionCell(handle) => handle.storage != target,
         RuntimeValue::Int(_) | RuntimeValue::Float(_) | RuntimeValue::BuiltinAtom(_) => false,
     }
 }
@@ -1214,6 +1293,9 @@ fn object_contains_foreign(object: &Object, target: Storage) -> bool {
         Object::Closure { upvalues, .. } => upvalues
             .iter()
             .any(|value| value_contains_foreign(*value, target)),
+        Object::DefinitionCell { value } => {
+            value.is_none_or(|value| value_contains_foreign(value, target))
+        }
         Object::ByteCodeProto {
             values,
             text,
@@ -1460,6 +1542,53 @@ mod tests {
             }
             .values_equal(RuntimeValue::Array(left), RuntimeValue::Array(right))
             .unwrap()
+        );
+    }
+
+    #[test]
+    fn promotion_copies_ready_definition_cells_and_rejects_uninitialized_cells() {
+        let mut local = Heap::local();
+        let cell = local.allocate(Object::DefinitionCell { value: None });
+        let array = local.allocate(Object::Array(
+            vec![RuntimeValue::DefinitionCell(cell)].into(),
+        ));
+        local
+            .initialize_definition_cell(cell, RuntimeValue::Array(array))
+            .unwrap();
+        let mut world = Heap::persistent();
+        let RuntimeValue::DefinitionCell(persistent_cell) =
+            publish_root(&mut world, &local, RuntimeValue::DefinitionCell(cell))
+                .unwrap()
+                .runtime()
+        else {
+            panic!("expected persistent definition cell")
+        };
+        let reader = Heap::local();
+        let view = HeapView {
+            current: &reader,
+            background: Some(&world),
+        };
+        let RuntimeValue::Array(array) = view
+            .definition_cell(persistent_cell)
+            .unwrap()
+            .expect("published cell is ready")
+        else {
+            panic!("expected Array")
+        };
+        assert_eq!(
+            view.sequence(array, false).unwrap(),
+            &[RuntimeValue::DefinitionCell(persistent_cell)]
+        );
+
+        let mut uninitialized = Heap::local();
+        let cell = uninitialized.allocate(Object::DefinitionCell { value: None });
+        assert!(
+            publish_root(
+                &mut world,
+                &uninitialized,
+                RuntimeValue::DefinitionCell(cell)
+            )
+            .is_err()
         );
     }
 

@@ -23,6 +23,8 @@ impl LexerError {
 pub enum Token {
     EOF,
     Let,
+    Decl,
+    Def,
     Type,
     Fn,
     If,
@@ -47,6 +49,7 @@ pub enum Token {
     Less,
     EqualEqual,
     Equal,
+    Arrow,
     FatArrow,
     Pipe,
     Int,
@@ -70,6 +73,10 @@ pub enum Token {
 enum NormalToken {
     #[token("let")]
     Let,
+    #[token("decl")]
+    Decl,
+    #[token("def")]
+    Def,
     #[token("type")]
     Type,
     #[token("fn")]
@@ -116,6 +123,8 @@ enum NormalToken {
     Less,
     #[token("==")]
     EqualEqual,
+    #[token("->")]
+    Arrow,
     #[token("=")]
     Equal,
     #[token("=>")]
@@ -286,6 +295,8 @@ impl From<NormalToken> for Token {
     fn from(token: NormalToken) -> Self {
         match token {
             NormalToken::Let => Self::Let,
+            NormalToken::Decl => Self::Decl,
+            NormalToken::Def => Self::Def,
             NormalToken::Type => Self::Type,
             NormalToken::Fn => Self::Fn,
             NormalToken::If => Self::If,
@@ -309,6 +320,7 @@ impl From<NormalToken> for Token {
             NormalToken::Slash => Self::Slash,
             NormalToken::Less => Self::Less,
             NormalToken::EqualEqual => Self::EqualEqual,
+            NormalToken::Arrow => Self::Arrow,
             NormalToken::Equal => Self::Equal,
             NormalToken::FatArrow => Self::FatArrow,
             NormalToken::Pipe => Self::Pipe,

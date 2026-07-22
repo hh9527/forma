@@ -1,9 +1,9 @@
-token Let='let' Type='type' Fn='fn' If='if' Else='else' Match='match';
+token Let='let' Decl='decl' Def='def' Type='type' Fn='fn' If='if' Else='else' Match='match';
 token Import='import' From='from';
 token LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
 token Comma=',' Colon=':' Semicolon=';' Dot='.';
 token Plus='+' Minus='-' Star='*' Slash='/' Less='<' EqualEqual='==' Equal='=';
-token FatArrow='=>' Pipe='|>';
+token Arrow='->' FatArrow='=>' Pipe='|>';
 token Int='<integer>' Float='<float>' Bytes='<bytes>';
 token DoubleQuote='"' StringText='<string text>' EscapeSequence='<escape>';
 token UnknownEscapeSequence='<unknown escape>' UnterminatedEscapeSequence='<unterminated escape>';
@@ -16,11 +16,13 @@ start program;
 
 program: body;
 body: (?1 binding)* expression;
-binding^: let_binding | type_binding | import_binding | named_function;
+binding^: let_binding | decl_binding | def_binding | type_binding | import_binding | named_function;
 let_binding: 'let' Identifier [':' expression] '=' expression ';';
+decl_binding: 'decl' Identifier ':' contract ';';
+def_binding: 'def' Identifier '=' expression ';';
 type_binding: 'type' Identifier '=' expression ';';
 import_binding: 'import' Identifier 'from' string_literal ';';
-named_function: 'fn' Identifier parameters block;
+named_function: 'fn' Identifier annotated_parameters ['->' contract] block;
 
 expression:
   expression arguments @call_expr
@@ -43,7 +45,8 @@ primary:
 | '(' [expression (?1 ',' expression)* [',']] ')' @paren_expr
 | '[' [expression (?2 ',' expression)* [',']] ']' @array_expr
 | braced
-| closure
+| ?3 function_contract
+| ?t closure
 | if_expr
 | match_expr
 ;
@@ -55,7 +58,11 @@ braced:
 dict_field: (Identifier | string_literal) ':' expression;
 block: '{' body '}';
 closure: 'fn' parameters block;
+function_contract: 'fn' '(' [contract (?1 ',' contract)* [',']] ')' '->' contract;
+contract: Identifier [?1 '(' [contract (?2 ',' contract)* [',']] ')'] @contract_expr | function_contract;
 parameters: '(' [Identifier (?1 ',' Identifier)* [',']] ')';
+annotated_parameters: '(' [annotated_parameter (?1 ',' annotated_parameter)* [',']] ')';
+annotated_parameter: Identifier [':' contract];
 arguments: '(' [expression (?1 ',' expression)* [',']] ')';
 if_expr: 'if' expression block 'else' block;
 match_expr: 'match' expression '{' match_arm (?1 ',' match_arm)* [','] '}';

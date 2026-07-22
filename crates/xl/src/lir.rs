@@ -23,6 +23,24 @@ pub enum Operation {
         dst: RegisterId,
         src: RegisterId,
     },
+    MakeDefinitionCell {
+        dst: RegisterId,
+    },
+    ReadDefinitionCell {
+        dst: RegisterId,
+        cell: RegisterId,
+    },
+    InitializeDefinitionCell {
+        cell: RegisterId,
+        src: RegisterId,
+    },
+    AssertDefinitionCellReady {
+        cell: RegisterId,
+    },
+    AssertFunctionArity {
+        value: RegisterId,
+        arity: u32,
+    },
     Add {
         dst: RegisterId,
         left: RegisterId,
@@ -243,6 +261,26 @@ fn lower_operation(
         Operation::Move { dst, src } => Instruction::Move {
             dst: register(dst)?,
             src: register(src)?,
+        },
+        Operation::MakeDefinitionCell { dst } => Instruction::MakeDefinitionCell {
+            dst: register(dst)?,
+        },
+        Operation::ReadDefinitionCell { dst, cell } => Instruction::ReadDefinitionCell {
+            dst: register(dst)?,
+            cell: register(cell)?,
+        },
+        Operation::InitializeDefinitionCell { cell, src } => {
+            Instruction::InitializeDefinitionCell {
+                cell: register(cell)?,
+                src: register(src)?,
+            }
+        }
+        Operation::AssertDefinitionCellReady { cell } => Instruction::AssertDefinitionCellReady {
+            cell: register(cell)?,
+        },
+        Operation::AssertFunctionArity { value, arity } => Instruction::AssertFunctionArity {
+            value: register(value)?,
+            arity: usize::try_from(arity).map_err(|_| assembly_error("arity is too large"))?,
         },
         Operation::Add { dst, left, right } => Instruction::Add {
             dst: register(dst)?,

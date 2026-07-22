@@ -26,6 +26,10 @@ pub enum TypeDescriptor {
     Tuple(Vec<TypeDescriptor>),
     Struct(BTreeMap<String, TypeDescriptor>),
     Union(Vec<TypeDescriptor>),
+    Function {
+        parameters: Vec<TypeDescriptor>,
+        result: Box<TypeDescriptor>,
+    },
 }
 
 impl TypeDescriptor {
@@ -74,6 +78,20 @@ impl TypeDescriptor {
                     ),
                 ),
             ],
+            Self::Function { parameters, result } => vec![
+                kind_entry("Function"),
+                (
+                    "parameters".into(),
+                    Value::Array(
+                        parameters
+                            .iter()
+                            .map(|parameter| parameter.to_value(vm))
+                            .collect::<Vec<_>>()
+                            .into(),
+                    ),
+                ),
+                ("result".into(), result.to_value(vm)),
+            ],
         };
         vm.make_dict(entries)
             .expect("Type metadata fields are unique")
@@ -113,6 +131,15 @@ impl TypeDescriptor {
                 .map(Self::display_name)
                 .collect::<Vec<_>>()
                 .join(" | "),
+            Self::Function { parameters, result } => format!(
+                "fn({}) -> {}",
+                parameters
+                    .iter()
+                    .map(Self::display_name)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                result.display_name()
+            ),
         }
     }
 }
@@ -217,12 +244,97 @@ pub(crate) fn analyze_program_with_bindings(
         binding_types.insert(name.clone(), TypeDescriptor::Any);
     }
 
+    let mut definition_contracts = HashMap::new();
+    let mut declaration_locations = HashMap::new();
+    let mut definition_counts = HashMap::<String, usize>::new();
+    for binding in &program.value.body.value.bindings {
+        let name = &binding.value.name.value;
+        if matches!(
+            binding.value.kind,
+            BindingKind::Def | BindingKind::NamedFunction
+        ) {
+            *definition_counts.entry(name.clone()).or_default() += 1;
+        }
+        if binding.value.kind != BindingKind::Decl {
+            continue;
+        }
+        if definition_contracts.contains_key(name) {
+            return Err(FrontendError::from_diagnostic(
+                sources,
+                Diagnostic::error(format!("duplicate declaration {name:?}"), binding.location),
+            ));
+        }
+        let contract = binding
+            .value
+            .annotation
+            .as_ref()
+            .expect("declaration has a lowered contract");
+        let metadata =
+            evaluate_tool_expression(source_name, contract, &tool_values, account, sources)?;
+        let descriptor = TypeDescriptor::from_value(&metadata).map_err(|message| {
+            frontend_error(
+                source_name,
+                format!("declaration {name} has invalid contract metadata: {message}"),
+            )
+        })?;
+        static_environment.insert(name.clone(), descriptor.clone());
+        binding_types.insert(name.clone(), descriptor.clone());
+        definition_contracts.insert(name.clone(), descriptor);
+        declaration_locations.insert(name.clone(), binding.location);
+    }
+    for binding in &program.value.body.value.bindings {
+        if binding.value.kind != BindingKind::NamedFunction {
+            continue;
+        }
+        let name = &binding.value.name.value;
+        let Some(contract) = &binding.value.annotation else {
+            continue;
+        };
+        let metadata =
+            evaluate_tool_expression(source_name, contract, &tool_values, account, sources)?;
+        let descriptor = TypeDescriptor::from_value(&metadata).map_err(|message| {
+            frontend_error(
+                source_name,
+                format!("function {name} has invalid contract metadata: {message}"),
+            )
+        })?;
+        if let Some(declared) = definition_contracts.get(name) {
+            if !assignable(&descriptor, declared) {
+                return Err(FrontendError::from_diagnostic(
+                    sources,
+                    Diagnostic::error(
+                        format!(
+                            "function {name} contract {} is incompatible with declared {}",
+                            descriptor.display_name(),
+                            declared.display_name()
+                        ),
+                        contract.location,
+                    )
+                    .with_secondary("contract declared here", declaration_locations[name]),
+                ));
+            }
+        } else {
+            static_environment.insert(name.clone(), descriptor.clone());
+            binding_types.insert(name.clone(), descriptor.clone());
+            definition_contracts.insert(name.clone(), descriptor);
+        }
+    }
+    for (name, count) in &definition_counts {
+        if *count > 1 {
+            return Err(frontend_error(
+                source_name,
+                format!("definition {name:?} is initialized more than once"),
+            ));
+        }
+    }
+
     for binding in &program.value.body.value.bindings {
         check_interpolations(&binding.value.value, &static_environment, sources)?;
         if let Some(annotation) = &binding.value.annotation {
             check_interpolations(annotation, &static_environment, sources)?;
         }
         match binding.value.kind {
+            BindingKind::Decl => continue,
             BindingKind::Type => {
                 let value = evaluate_tool_expression(
                     source_name,
@@ -316,6 +428,44 @@ pub(crate) fn analyze_program_with_bindings(
                     tool_values.insert(binding.value.name.value.clone(), value);
                 }
             }
+            BindingKind::Def | BindingKind::NamedFunction => {
+                let name = &binding.value.name.value;
+                let inferred = infer_expr(&binding.value.value, &static_environment);
+                let checked = if let Some(expected) = definition_contracts.get(name) {
+                    if !assignable(&inferred, expected) {
+                        let declaration = declaration_locations
+                            .get(name)
+                            .copied()
+                            .unwrap_or(binding.location);
+                        return Err(FrontendError::from_diagnostic(
+                            sources,
+                            Diagnostic::error(
+                                format!(
+                                    "definition {name} has type {}, which is not assignable to {}",
+                                    inferred.display_name(),
+                                    expected.display_name()
+                                ),
+                                binding.value.value.location,
+                            )
+                            .with_secondary("contract declared here", declaration),
+                        ));
+                    }
+                    expected.clone()
+                } else {
+                    inferred
+                };
+                static_environment.insert(name.clone(), checked.clone());
+                binding_types.insert(name.clone(), checked);
+                if let Ok(value) = evaluate_tool_expression(
+                    source_name,
+                    &binding.value.value,
+                    &tool_values,
+                    account,
+                    sources,
+                ) {
+                    tool_values.insert(name.clone(), value);
+                }
+            }
             BindingKind::Import => {
                 let value = external_values
                     .get(&binding.value.name.value)
@@ -331,6 +481,18 @@ pub(crate) fn analyze_program_with_bindings(
                 binding_types.insert(binding.value.name.value.clone(), inferred);
                 tool_values.insert(binding.value.name.value.clone(), value);
             }
+        }
+    }
+
+    for (name, location) in &declaration_locations {
+        if definition_counts.get(name).copied().unwrap_or(0) == 0 {
+            return Err(FrontendError::from_diagnostic(
+                sources,
+                Diagnostic::error(
+                    format!("definition {name:?} was declared but never initialized"),
+                    *location,
+                ),
+            ));
         }
     }
 
@@ -373,7 +535,16 @@ pub(crate) fn infer_value(value: &Value) -> TypeDescriptor {
                 .map(|(name, value)| (name.clone(), infer_value(value)))
                 .collect(),
         ),
-        Value::Func(_) => TypeDescriptor::Any,
+        Value::Func(closure) => {
+            let arity = match closure.prototype() {
+                crate::Prototype::Bytecode(function) => function.parameter_count(),
+                crate::Prototype::Native(function) => function.arity(),
+            };
+            TypeDescriptor::Function {
+                parameters: vec![TypeDescriptor::Any; arity],
+                result: Box::new(TypeDescriptor::Any),
+            }
+        }
     }
 }
 
@@ -421,6 +592,7 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
         NativeFunction::new("Tuple", 1, native_tuple_type),
         NativeFunction::new("Struct", 1, native_struct_type),
         NativeFunction::new("Union", 1, native_union_type),
+        NativeFunction::new("Fn", 2, native_function_type),
         NativeFunction::new("validate", 2, native_validate),
     ] {
         prelude.insert(
@@ -490,6 +662,31 @@ fn native_union_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeErro
         .map(|index| decode_native_type(value.sequence_get(index).expect("valid Array index")))
         .collect::<Result<Vec<_>, _>>()?;
     write_native_type(context, context.result(), &TypeDescriptor::Union(variants))
+}
+
+fn native_function_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+    let parameters_value = context.value(context.argument(0)?)?;
+    if parameters_value.kind() != ValueKind::Array {
+        return Err(NativeError::new("Fn expects an Array of parameter Types"));
+    }
+    let parameters = (0..parameters_value.sequence_len().expect("Array has a length"))
+        .map(|index| {
+            decode_native_type(
+                parameters_value
+                    .sequence_get(index)
+                    .expect("valid Array index"),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let result = decode_native_type(context.value(context.argument(1)?)?)?;
+    write_native_type(
+        context,
+        context.result(),
+        &TypeDescriptor::Function {
+            parameters,
+            result: Box::new(result),
+        },
+    )
 }
 
 fn native_validate(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
@@ -613,6 +810,30 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
                     .collect::<Result<_, String>>()?,
             )
         }
+        "Function" => {
+            require(&["kind", "parameters", "result"])?;
+            let parameters = value
+                .dict_get("parameters")
+                .ok_or_else(|| format!("{path}.parameters is missing"))?;
+            if parameters.kind() != ValueKind::Array {
+                return Err(format!("{path}.parameters must be an Array"));
+            }
+            let parameters = (0..parameters.sequence_len().expect("Array has a length"))
+                .map(|index| {
+                    decode_type_ref(
+                        parameters.sequence_get(index).expect("valid Array index"),
+                        &format!("{path}.parameters[{index}]"),
+                    )
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let result = value
+                .dict_get("result")
+                .ok_or_else(|| format!("{path}.result is missing"))?;
+            TypeDescriptor::Function {
+                parameters,
+                result: Box::new(decode_type_ref(result, &format!("{path}.result"))?),
+            }
+        }
         _ => return Err(format!("{path}.kind has unknown value '{kind}")),
     })
 }
@@ -634,6 +855,7 @@ fn write_native_type(
         TypeDescriptor::Tuple(_) => "Tuple",
         TypeDescriptor::Struct(_) => "Struct",
         TypeDescriptor::Union(_) => "Union",
+        TypeDescriptor::Function { .. } => "Function",
     };
     context.set_atom(kind, name)?;
     let mut fields = vec![("kind".to_owned(), kind)];
@@ -677,6 +899,20 @@ fn write_native_type(
             let value = context.scratch()?;
             context.make_dict(value, &item_fields)?;
             fields.push(("fields".into(), value));
+        }
+        TypeDescriptor::Function { parameters, result } => {
+            let mut parameter_registers = Vec::with_capacity(parameters.len());
+            for parameter in parameters {
+                let register = context.scratch()?;
+                write_native_type(context, register, parameter)?;
+                parameter_registers.push(register);
+            }
+            let values = context.scratch()?;
+            context.make_array(values, &parameter_registers)?;
+            fields.push(("parameters".into(), values));
+            let value = context.scratch()?;
+            write_native_type(context, value, result)?;
+            fields.push(("result".into(), value));
         }
         TypeDescriptor::Any
         | TypeDescriptor::Int
@@ -754,6 +990,14 @@ fn validate_value_ref(
             } else {
                 Err(format!("{path} does not match any Union variant"))
             }
+        }
+        TypeDescriptor::Function { parameters, .. }
+            if value.function_arity() == Some(parameters.len()) =>
+        {
+            Ok(())
+        }
+        TypeDescriptor::Function { parameters, .. } if value.kind() == ValueKind::Func => {
+            Err(format!("{path} must accept {} arguments", parameters.len()))
         }
         descriptor => Err(format!(
             "{path} must be {}, got {:?}",
@@ -862,6 +1106,26 @@ fn decode_type(value: &Value, path: &str) -> Result<TypeDescriptor, String> {
                     .collect::<Result<_, _>>()?,
             )
         }
+        "Function" => {
+            require_fields(metadata, path, &["kind", "parameters", "result"])?;
+            let Value::Array(parameters) = metadata.get("parameters").expect("required field")
+            else {
+                return Err(format!("{path}.parameters must be an Array"));
+            };
+            TypeDescriptor::Function {
+                parameters: parameters
+                    .iter()
+                    .enumerate()
+                    .map(|(index, parameter)| {
+                        decode_type(parameter, &format!("{path}.parameters[{index}]"))
+                    })
+                    .collect::<Result<_, _>>()?,
+                result: Box::new(decode_type(
+                    metadata.get("result").expect("required field"),
+                    &format!("{path}.result"),
+                )?),
+            }
+        }
         other => return Err(format!("{path}.kind has unknown value '{other}")),
     };
     Ok(descriptor)
@@ -945,7 +1209,20 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
                 .unwrap_or(TypeDescriptor::Any),
             _ => TypeDescriptor::Any,
         },
-        ExprKind::Call { .. } | ExprKind::Closure { .. } => TypeDescriptor::Any,
+        ExprKind::Call { callee, .. } => match infer_expr(callee, environment) {
+            TypeDescriptor::Function { result, .. } => *result,
+            _ => TypeDescriptor::Any,
+        },
+        ExprKind::Closure { parameters, body } => {
+            let mut closure_environment = environment.clone();
+            for parameter in parameters {
+                closure_environment.insert(parameter.value.clone(), TypeDescriptor::Any);
+            }
+            TypeDescriptor::Function {
+                parameters: vec![TypeDescriptor::Any; parameters.len()],
+                result: Box::new(infer_block(body, &closure_environment)),
+            }
+        }
         ExprKind::If {
             then_branch,
             else_branch,
@@ -1058,11 +1335,22 @@ fn check_block_interpolations(
 ) -> Result<(), FrontendError> {
     let mut environment = environment.clone();
     for binding in &block.value.bindings {
+        if matches!(
+            binding.value.kind,
+            BindingKind::Decl | BindingKind::NamedFunction
+        ) {
+            environment.insert(binding.value.name.value.clone(), TypeDescriptor::Any);
+        }
+    }
+    for binding in &block.value.bindings {
         check_interpolations(&binding.value.value, &environment, sources)?;
         if let Some(annotation) = &binding.value.annotation {
             check_interpolations(annotation, &environment, sources)?;
         }
-        if matches!(binding.value.kind, BindingKind::Let | BindingKind::Import) {
+        if matches!(
+            binding.value.kind,
+            BindingKind::Let | BindingKind::Def | BindingKind::NamedFunction | BindingKind::Import
+        ) {
             let inferred = infer_expr(&binding.value.value, &environment);
             environment.insert(binding.value.name.value.clone(), inferred);
         }
@@ -1081,14 +1369,26 @@ fn interpolation_type_supported(descriptor: &TypeDescriptor) -> bool {
         | TypeDescriptor::Bytes
         | TypeDescriptor::Array(_)
         | TypeDescriptor::Tuple(_)
-        | TypeDescriptor::Struct(_) => false,
+        | TypeDescriptor::Struct(_)
+        | TypeDescriptor::Function { .. } => false,
     }
 }
 
 fn infer_block(block: &Block, environment: &HashMap<String, TypeDescriptor>) -> TypeDescriptor {
     let mut environment = environment.clone();
     for binding in &block.value.bindings {
-        if matches!(binding.value.kind, BindingKind::Let | BindingKind::Import) {
+        if matches!(
+            binding.value.kind,
+            BindingKind::Decl | BindingKind::NamedFunction
+        ) {
+            environment.insert(binding.value.name.value.clone(), TypeDescriptor::Any);
+        }
+    }
+    for binding in &block.value.bindings {
+        if matches!(
+            binding.value.kind,
+            BindingKind::Let | BindingKind::Def | BindingKind::NamedFunction | BindingKind::Import
+        ) {
             let inferred = infer_expr(&binding.value.value, &environment);
             environment.insert(binding.value.name.value.clone(), inferred);
         }
@@ -1156,6 +1456,23 @@ fn assignable(actual: &TypeDescriptor, expected: &TypeDescriptor) -> bool {
                         .get(name)
                         .is_some_and(|actual| assignable(actual, expected))
                 })
+        }
+        (
+            TypeDescriptor::Function {
+                parameters: actual_parameters,
+                result: actual_result,
+            },
+            TypeDescriptor::Function {
+                parameters: expected_parameters,
+                result: expected_result,
+            },
+        ) => {
+            actual_parameters.len() == expected_parameters.len()
+                && actual_parameters
+                    .iter()
+                    .zip(expected_parameters)
+                    .all(|(actual, expected)| assignable(actual, expected))
+                && assignable(actual_result, expected_result)
         }
         _ => actual == expected,
     }
@@ -1235,10 +1552,13 @@ mod tests {
 
     #[test]
     fn metadata_round_trips() {
-        let descriptor = TypeDescriptor::Struct(BTreeMap::from([
-            ("age".into(), TypeDescriptor::Int),
-            ("name".into(), TypeDescriptor::String),
-        ]));
+        let descriptor = TypeDescriptor::Function {
+            parameters: vec![TypeDescriptor::Struct(BTreeMap::from([
+                ("age".into(), TypeDescriptor::Int),
+                ("name".into(), TypeDescriptor::String),
+            ]))],
+            result: Box::new(TypeDescriptor::String),
+        };
         let value = descriptor.to_value(&mut Vm::new());
         assert_eq!(TypeDescriptor::from_value(&value).unwrap(), descriptor);
     }

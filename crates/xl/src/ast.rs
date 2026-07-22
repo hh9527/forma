@@ -32,6 +32,9 @@ pub struct BindingData {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BindingKind {
     Let,
+    Decl,
+    Def,
+    NamedFunction,
     Type,
     Import,
 }

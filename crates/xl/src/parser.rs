@@ -118,6 +118,8 @@ impl<'a> Lowerer<'a> {
             match self.rule(child) {
                 Some(
                     Rule::LetBinding
+                    | Rule::DeclBinding
+                    | Rule::DefBinding
                     | Rule::TypeBinding
                     | Rule::ImportBinding
                     | Rule::NamedFunction,
@@ -192,6 +194,46 @@ impl<'a> Lowerer<'a> {
                     self.location(node),
                 ))
             }
+            Rule::DeclBinding => {
+                let contract_node = self
+                    .rule_children(node)
+                    .find(|child| {
+                        matches!(
+                            self.rule(*child),
+                            Some(Rule::Contract | Rule::ContractExpr | Rule::FunctionContract)
+                        )
+                    })
+                    .ok_or_else(|| self.error(node, "declaration has no contract"))?;
+                let contract = self.contract_expression(contract_node)?;
+                Ok(located(
+                    BindingData {
+                        kind: BindingKind::Decl,
+                        name,
+                        annotation: Some(contract.clone()),
+                        value: contract,
+                    },
+                    self.location(node),
+                ))
+            }
+            Rule::DefBinding => {
+                let equal = self.first_token(node, Token::Equal)?;
+                let value_node = self
+                    .children(node)
+                    .find(|child| {
+                        self.is_expression(*child)
+                            && self.cst.span(*child).start > self.cst.span(equal).start
+                    })
+                    .ok_or_else(|| self.error(node, "definition has no value"))?;
+                Ok(located(
+                    BindingData {
+                        kind: BindingKind::Def,
+                        name,
+                        annotation: None,
+                        value: self.expression(value_node)?,
+                    },
+                    self.location(node),
+                ))
+            }
             Rule::TypeBinding => Ok(located(
                 BindingData {
                     kind: BindingKind::Type,
@@ -233,7 +275,7 @@ impl<'a> Lowerer<'a> {
             Rule::NamedFunction => {
                 let parameters = rules
                     .iter()
-                    .find(|child| self.rule(**child) == Some(Rule::Parameters))
+                    .find(|child| self.rule(**child) == Some(Rule::AnnotatedParameters))
                     .copied()
                     .ok_or_else(|| self.error(node, "function has no parameters"))?;
                 let block = rules
@@ -241,14 +283,36 @@ impl<'a> Lowerer<'a> {
                     .find(|child| self.rule(**child) == Some(Rule::Block))
                     .copied()
                     .ok_or_else(|| self.error(node, "function has no body"))?;
+                let (parameter_names, parameter_contracts, annotated) =
+                    self.annotated_parameters(parameters)?;
+                let result_contract = rules
+                    .iter()
+                    .copied()
+                    .find(|child| self.rule(*child) == Some(Rule::Contract))
+                    .map(|child| self.contract_expression(child))
+                    .transpose()?;
+                let annotation = if annotated || result_contract.is_some() {
+                    Some(self.function_contract_expression(
+                        parameter_contracts,
+                        result_contract.unwrap_or_else(|| {
+                            located(
+                                ExprKind::Variable(located("Any".to_owned(), self.location(node))),
+                                self.location(node),
+                            )
+                        }),
+                        self.location(node),
+                    ))
+                } else {
+                    None
+                };
                 Ok(located(
                     BindingData {
-                        kind: BindingKind::Let,
+                        kind: BindingKind::NamedFunction,
                         name,
-                        annotation: None,
+                        annotation,
                         value: located(
                             ExprKind::Closure {
-                                parameters: self.parameters(parameters),
+                                parameters: parameter_names,
                                 body: self.block_body(block)?,
                             },
                             self.location(node),
@@ -382,6 +446,7 @@ impl<'a> Lowerer<'a> {
                     body: self.block_body(block)?,
                 }
             }
+            Rule::FunctionContract => return self.contract_expression(node),
             Rule::UnaryExpr => ExprKind::Unary {
                 operator: located(
                     UnaryOperator::Negate,
@@ -622,6 +687,105 @@ impl<'a> Lowerer<'a> {
             .map(|child| self.identifier(child))
             .collect()
     }
+
+    fn annotated_parameters(
+        &self,
+        node: NodeRef,
+    ) -> Result<(Vec<Identifier>, Vec<Expr>, bool), Diagnostic> {
+        let mut names = Vec::new();
+        let mut contracts = Vec::new();
+        let mut annotated = false;
+        for parameter in self
+            .rule_children(node)
+            .filter(|child| self.rule(*child) == Some(Rule::AnnotatedParameter))
+        {
+            names.push(self.identifier(self.first_token(parameter, Token::Identifier)?));
+            let contract = self
+                .rule_children(parameter)
+                .find(|child| self.rule(*child) == Some(Rule::Contract))
+                .map(|child| self.contract_expression(child))
+                .transpose()?;
+            annotated |= contract.is_some();
+            contracts.push(contract.unwrap_or_else(|| {
+                located(
+                    ExprKind::Variable(located("Any".to_owned(), self.location(parameter))),
+                    self.location(parameter),
+                )
+            }));
+        }
+        Ok((names, contracts, annotated))
+    }
+
+    fn function_contract_expression(
+        &self,
+        parameters: Vec<Expr>,
+        result: Expr,
+        location: Location,
+    ) -> Expr {
+        let parameters = located(ExprKind::Array(parameters), location);
+        let callee_name = located("Fn".to_owned(), location);
+        located(
+            ExprKind::Call {
+                callee: Box::new(located(ExprKind::Variable(callee_name), location)),
+                arguments: vec![parameters, result],
+            },
+            location,
+        )
+    }
+
+    fn contract_expression(&self, node: NodeRef) -> Result<Expr, Diagnostic> {
+        let location = self.location(node);
+        match self.rule(node) {
+            Some(Rule::Contract) => {
+                let inner = self
+                    .first_rule(node)
+                    .ok_or_else(|| self.error(node, "empty contract"))?;
+                self.contract_expression(inner)
+            }
+            Some(Rule::ContractExpr) => {
+                let name = self.identifier(self.first_token(node, Token::Identifier)?);
+                let arguments = self
+                    .rule_children(node)
+                    .filter(|child| {
+                        matches!(
+                            self.rule(*child),
+                            Some(Rule::Contract | Rule::ContractExpr | Rule::FunctionContract)
+                        )
+                    })
+                    .map(|child| self.contract_expression(child))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if arguments.is_empty() {
+                    Ok(located(ExprKind::Variable(name), location))
+                } else {
+                    Ok(located(
+                        ExprKind::Call {
+                            callee: Box::new(located(ExprKind::Variable(name), location)),
+                            arguments,
+                        },
+                        location,
+                    ))
+                }
+            }
+            Some(Rule::FunctionContract) => {
+                let mut parts = self
+                    .rule_children(node)
+                    .filter(|child| {
+                        matches!(
+                            self.rule(*child),
+                            Some(Rule::Contract | Rule::ContractExpr | Rule::FunctionContract)
+                        )
+                    })
+                    .map(|child| self.contract_expression(child))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let result = parts
+                    .pop()
+                    .ok_or_else(|| self.error(node, "function contract has no result"))?;
+                Ok(self.function_contract_expression(parts, result, location))
+            }
+            _ => Err(self.error(node, "invalid contract")),
+        }
+    }
+
     fn expression_children(&self, node: NodeRef) -> Result<Vec<Expr>, Diagnostic> {
         self.children(node)
             .filter(|child| self.is_expression(*child))
@@ -651,6 +815,7 @@ impl<'a> Lowerer<'a> {
                     | Rule::DictExpr
                     | Rule::FieldExpr
                     | Rule::FloatExpr
+                    | Rule::FunctionContract
                     | Rule::IfExpr
                     | Rule::IntExpr
                     | Rule::MatchExpr
@@ -929,6 +1094,28 @@ mod tests {
                 if matches!(&expression.value, ExprKind::Variable(name) if name.value == "name")
         ));
         assert_eq!(parts[1].location.range.to_usize(), 25..29);
+    }
+
+    #[test]
+    fn lowers_definition_bindings_and_function_contracts() {
+        let program = parse("defs.xl", "decl f: fn(Int) -> Int; def f = fn(x) { x }; f").unwrap();
+        assert_eq!(program.value.body.value.bindings.len(), 2);
+        assert_eq!(
+            program.value.body.value.bindings[0].value.kind,
+            BindingKind::Decl
+        );
+        assert_eq!(
+            program.value.body.value.bindings[1].value.kind,
+            BindingKind::Def
+        );
+        assert!(matches!(
+            program.value.body.value.bindings[0]
+                .value
+                .annotation
+                .as_ref()
+                .map(|annotation| &annotation.value),
+            Some(ExprKind::Call { .. })
+        ));
     }
 
     #[test]

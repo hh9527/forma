@@ -157,6 +157,7 @@ enum ModuleState {
     Ready {
         root: PersistentValue,
         sourced: SourcedValue,
+        opaque: bool,
     },
 }
 
@@ -184,12 +185,12 @@ impl ModuleLoader {
 
     fn load_value(&mut self, path: &Path) -> Result<SourcedValue, ModuleError> {
         let path = canonicalize(path)?;
-        if let Some(ModuleState::Ready { root, sourced }) = self.cache.get(&path) {
+        if let Some(ModuleState::Ready { root, sourced, .. }) = self.cache.get(&path) {
             let _persistent_root = root;
             return Ok(sourced.clone());
         }
         self.enter(&path)?;
-        let result: Result<(SourcedValue, PersistentValue), ModuleError> =
+        let result: Result<(SourcedValue, PersistentValue, bool), ModuleError> =
             match path.extension().and_then(|extension| extension.to_str()) {
                 Some("json") => {
                     let source = read(&path)?;
@@ -210,7 +211,7 @@ impl ModuleLoader {
                         .and_then(|sourced| {
                             let root = publish_value(&mut self.world, &sourced.value)
                                 .map_err(|error| ModuleError::new(error.to_string()))?;
-                            Ok((sourced, root))
+                            Ok((sourced, root, false))
                         })
                 }
                 Some("xl") => {
@@ -228,9 +229,11 @@ impl ModuleLoader {
                                 .map_err(|error| {
                                     ModuleError::new(error.with_sources(&self.sources).to_string())
                                 })?;
-                            let value = arena
-                                .export(&self.world)
-                                .map_err(|error| ModuleError::new(error.to_string()))?;
+                            let (value, opaque) = match arena.export(&self.world) {
+                                Ok(value) => (value, false),
+                                Err(error) if error.is_legacy_cycle() => (Value::none(), true),
+                                Err(error) => return Err(ModuleError::new(error.to_string())),
+                            };
                             let root = arena
                                 .publish(&mut self.world)
                                 .map_err(|error| ModuleError::new(error.to_string()))?;
@@ -240,6 +243,7 @@ impl ModuleLoader {
                                     provenance: Provenance::default(),
                                 },
                                 root,
+                                opaque,
                             ))
                         })
                 }
@@ -253,12 +257,13 @@ impl ModuleLoader {
                 ))),
             };
         self.leave(&path);
-        let (sourced, root) = result?;
+        let (sourced, root, opaque) = result?;
         self.cache.insert(
             path,
             ModuleState::Ready {
                 root,
                 sourced: sourced.clone(),
+                opaque,
             },
         );
         Ok(sourced)
@@ -288,6 +293,7 @@ impl ModuleLoader {
         reject_nested_imports(&program, &source_name)?;
         let mut external_provenance = BTreeMap::new();
         let mut external_roots = HashMap::new();
+        let mut opaque_bindings = HashSet::new();
 
         for binding in &program.value.body.value.bindings {
             if binding.value.kind != BindingKind::Import {
@@ -308,22 +314,24 @@ impl ModuleLoader {
                 .join(relative);
             let sourced = self.load_value(&imported)?;
             let imported = canonicalize(&imported)?;
-            let ModuleState::Ready { root, .. } = self
+            let ModuleState::Ready { root, opaque, .. } = self
                 .cache
                 .get(&imported)
                 .expect("loaded module has a ready cache entry");
             external_roots.insert(binding.value.name.value.clone(), *root);
+            if *opaque {
+                opaque_bindings.insert(binding.value.name.value.clone());
+            }
             if !sourced.provenance.values.is_empty() {
                 external_provenance.insert(binding.value.name.value.clone(), sourced.provenance);
             }
             external_bindings.insert(binding.value.name.value.clone(), sourced.value);
         }
 
-        let dynamic_bindings = if is_root && external_bindings.contains_key("input") {
-            HashSet::from(["input".to_owned()])
-        } else {
-            HashSet::new()
-        };
+        let mut dynamic_bindings = opaque_bindings;
+        if is_root && external_bindings.contains_key("input") {
+            dynamic_bindings.insert("input".to_owned());
+        }
         let analysis = analyze_program_with_bindings(
             &source_name,
             &program,
@@ -370,7 +378,11 @@ impl ModuleLoader {
 
 fn reject_nested_imports(program: &Program, source_name: &str) -> Result<(), ModuleError> {
     for binding in &program.value.body.value.bindings {
-        if binding.value.kind == BindingKind::Let && expression_has_import(&binding.value.value) {
+        if matches!(
+            binding.value.kind,
+            BindingKind::Let | BindingKind::Def | BindingKind::NamedFunction
+        ) && expression_has_import(&binding.value.value)
+        {
             return Err(ModuleError::new(format!(
                 "{source_name}: imports are only allowed at module top level"
             )));
@@ -519,6 +531,25 @@ mod tests {
         fs::write(directory.join("b.xl"), "import a from \"./a.xl\"; a").unwrap();
         let error = load_module(directory.join("a.xl"), BTreeMap::new(), 100_000).unwrap_err();
         assert!(error.message().contains("cycle"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn imports_recursive_function_roots_from_the_persistent_world() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("countdown.xl"),
+            "fn countdown(n) { if n < 1 { 0 } else { countdown(n - 1) } } countdown",
+        )
+        .unwrap();
+        fs::write(
+            directory.join("main.xl"),
+            "import countdown from \"./countdown.xl\"; countdown(4)",
+        )
+        .unwrap();
+
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(module.execute(100_000).unwrap().to_string(), "0");
         fs::remove_dir_all(directory).unwrap();
     }
 

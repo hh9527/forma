@@ -1,7 +1,7 @@
 # RFC 0013: Single-Assignment Definitions
 
 - Status: Accepted for implementation
-- Implementation: Pending
+- Implementation: Complete
 
 ## Summary
 
@@ -232,3 +232,28 @@ correct implementation. Frozen private cells preserve XL immutability.
    identity; uninitialized cells cannot publish.
 10. Quotas, call depth, fuel, and module init-once behavior remain effective.
 11. Existing tests, strict Clippy, and diff checks pass.
+
+## Implementation result
+
+Implemented across the Logos/Lelwel frontend, located semantic AST, tool-stage
+metadata analysis, LIR assembler, bytecode VM, layered heap, and module loader.
+The compiler records direct and cell-backed bindings separately, so closure
+capture retains a cell while ordinary variable evaluation emits an explicit
+read. Named functions use the same cell path as explicit declarations.
+
+Function metadata now represents fixed parameter contracts and one result
+contract. Definition initialization includes an arity assertion even when a
+higher-order RHS has statically degraded to `Any`; deeper parameter and result
+checking remains in the tool stage and explicit `validate` boundary.
+
+Ready definition-cell graphs copy through promotion with cycles and closure
+identity intact. Uninitialized cells cannot publish. The legacy tree-shaped
+`Value` adapter cannot represent recursive closures; when an XL dependency has
+such a root, the module cache retains the authoritative persistent root and
+uses an `Any` analysis shadow for that import. Other export failures remain
+errors, and ordinary data modules retain exact values and provenance.
+
+The acceptance suite covers explicit self recursion, mutual recursion,
+higher-order construction, named-function sugar, annotated functions,
+initialization failures, no-shadow rules, dynamic arity checks, cyclic
+promotion, and recursive function imports.

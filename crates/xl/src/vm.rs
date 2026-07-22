@@ -108,6 +108,9 @@ impl<'a> ValueRef<'a> {
             RuntimeValue::BuiltinAtom(_) | RuntimeValue::Atom(_) => ValueKind::Atom,
             RuntimeValue::Tuple(_) => ValueKind::Tuple,
             RuntimeValue::Func(_) => ValueKind::Func,
+            RuntimeValue::DefinitionCell(_) => {
+                unreachable!("definition cells are private VM values")
+            }
         }
     }
 
@@ -176,6 +179,13 @@ impl<'a> ValueRef<'a> {
                 value,
                 view: self.view,
             })
+    }
+
+    pub fn function_arity(self) -> Option<usize> {
+        let RuntimeValue::Func(handle) = self.value else {
+            return None;
+        };
+        self.view.function_arity(handle).ok()
     }
 }
 
@@ -460,6 +470,8 @@ pub enum RuntimeErrorKind {
     NoPatternMatched,
     StackLimitExceeded,
     TypeMismatch,
+    UninitializedDefinition,
+    DuplicateDefinition,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -786,6 +798,153 @@ impl Vm {
                     Opcode::Move { dst, src } => {
                         let value = *read_register(&registers, *src, function, pc)?;
                         write_register(&mut registers, *dst, value, function, pc)?;
+                    }
+                    Opcode::MakeDefinitionCell { dst } => {
+                        charge_allocation(
+                            account,
+                            logical_value_bytes(1).map_err(|native_error| {
+                                allocation_error(native_error.message, function, pc)
+                            })?,
+                            function,
+                            pc,
+                        )?;
+                        let cell = RuntimeValue::DefinitionCell(
+                            current.allocate(crate::heap::Object::DefinitionCell { value: None }),
+                        );
+                        write_register(&mut registers, *dst, cell, function, pc)?;
+                    }
+                    Opcode::ReadDefinitionCell { dst, cell } => {
+                        let RuntimeValue::DefinitionCell(handle) =
+                            *read_register(&registers, *cell, function, pc)?
+                        else {
+                            return Err(error(
+                                RuntimeErrorKind::InvalidBytecode,
+                                "definition-cell read operand is not a cell",
+                                function,
+                                pc,
+                            ));
+                        };
+                        let value = view
+                            .definition_cell(handle)
+                            .map_err(|heap_error| {
+                                error(
+                                    RuntimeErrorKind::InvalidBytecode,
+                                    heap_error.to_string(),
+                                    function,
+                                    pc,
+                                )
+                            })?
+                            .ok_or_else(|| {
+                                error(
+                                    RuntimeErrorKind::UninitializedDefinition,
+                                    "definition was read before initialization",
+                                    function,
+                                    pc,
+                                )
+                            })?;
+                        write_register(&mut registers, *dst, value, function, pc)?;
+                    }
+                    Opcode::InitializeDefinitionCell { cell, src } => {
+                        let RuntimeValue::DefinitionCell(handle) =
+                            *read_register(&registers, *cell, function, pc)?
+                        else {
+                            return Err(error(
+                                RuntimeErrorKind::InvalidBytecode,
+                                "definition-cell initialization operand is not a cell",
+                                function,
+                                pc,
+                            ));
+                        };
+                        if view
+                            .definition_cell(handle)
+                            .map_err(|heap_error| {
+                                error(
+                                    RuntimeErrorKind::InvalidBytecode,
+                                    heap_error.to_string(),
+                                    function,
+                                    pc,
+                                )
+                            })?
+                            .is_some()
+                        {
+                            return Err(error(
+                                RuntimeErrorKind::DuplicateDefinition,
+                                "definition was initialized more than once",
+                                function,
+                                pc,
+                            ));
+                        }
+                        let value = *read_register(&registers, *src, function, pc)?;
+                        current.initialize_definition_cell(handle, value).map_err(
+                            |heap_error| {
+                                error(
+                                    RuntimeErrorKind::InvalidBytecode,
+                                    heap_error.to_string(),
+                                    function,
+                                    pc,
+                                )
+                            },
+                        )?;
+                    }
+                    Opcode::AssertDefinitionCellReady { cell } => {
+                        let RuntimeValue::DefinitionCell(handle) =
+                            *read_register(&registers, *cell, function, pc)?
+                        else {
+                            return Err(error(
+                                RuntimeErrorKind::InvalidBytecode,
+                                "definition-cell assertion operand is not a cell",
+                                function,
+                                pc,
+                            ));
+                        };
+                        if view
+                            .definition_cell(handle)
+                            .map_err(|heap_error| {
+                                error(
+                                    RuntimeErrorKind::InvalidBytecode,
+                                    heap_error.to_string(),
+                                    function,
+                                    pc,
+                                )
+                            })?
+                            .is_none()
+                        {
+                            return Err(error(
+                                RuntimeErrorKind::UninitializedDefinition,
+                                "declaration was not initialized before block completion",
+                                function,
+                                pc,
+                            ));
+                        }
+                    }
+                    Opcode::AssertFunctionArity { value, arity } => {
+                        let value = *read_register(&registers, *value, function, pc)?;
+                        let RuntimeValue::Func(handle) = value else {
+                            return Err(error(
+                                RuntimeErrorKind::TypeMismatch,
+                                format!(
+                                    "definition must be a function accepting {arity} arguments"
+                                ),
+                                function,
+                                pc,
+                            ));
+                        };
+                        let actual = view.function_arity(handle).map_err(|heap_error| {
+                            error(
+                                RuntimeErrorKind::InvalidBytecode,
+                                heap_error.to_string(),
+                                function,
+                                pc,
+                            )
+                        })?;
+                        if actual != *arity {
+                            return Err(error(
+                                RuntimeErrorKind::TypeMismatch,
+                                format!("definition must accept {arity} arguments, got {actual}"),
+                                function,
+                                pc,
+                            ));
+                        }
                     }
                     Opcode::Add { dst, left, right } => {
                         let value = numeric_binary(
@@ -1617,6 +1776,7 @@ fn runtime_shallow_type_error(
         RuntimeValue::Tuple(_) => "Tuple",
         RuntimeValue::Dict(_) => "Dict",
         RuntimeValue::Func(_) => "Func",
+        RuntimeValue::DefinitionCell(_) => "internal definition cell",
     };
     error(
         RuntimeErrorKind::TypeMismatch,

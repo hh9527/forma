@@ -31,14 +31,30 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
             .with_label(Label::primary((), span))
     }
     fn predicate_body_1(&self) -> bool {
-        matches!(self.current, Token::Let | Token::Type | Token::Import)
-            || self.current == Token::Fn && self.peek(1) == Token::Identifier
+        matches!(
+            self.current,
+            Token::Let | Token::Decl | Token::Def | Token::Type | Token::Import
+        ) || self.current == Token::Fn && self.peek(1) == Token::Identifier
     }
     fn predicate_primary_1(&self) -> bool {
         self.peek(1) != Token::RParen
     }
     fn predicate_primary_2(&self) -> bool {
         self.peek(1) != Token::RBracket
+    }
+    fn predicate_primary_3(&self) -> bool {
+        let mut depth = 0usize;
+        let mut lookahead = 1usize;
+        loop {
+            match self.peek(lookahead) {
+                Token::EOF => return false,
+                Token::LParen => depth += 1,
+                Token::RParen if depth == 1 => return self.peek(lookahead + 1) == Token::Arrow,
+                Token::RParen => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            lookahead += 1;
+        }
     }
     fn predicate_braced_1(&self) -> bool {
         if self.peek(1) == Token::RBrace
@@ -94,7 +110,19 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
     fn predicate_parameters_1(&self) -> bool {
         self.peek(1) != Token::RParen
     }
+    fn predicate_annotated_parameters_1(&self) -> bool {
+        self.peek(1) != Token::RParen
+    }
     fn predicate_arguments_1(&self) -> bool {
+        self.peek(1) != Token::RParen
+    }
+    fn predicate_contract_1(&self) -> bool {
+        self.current == Token::LParen
+    }
+    fn predicate_contract_2(&self) -> bool {
+        self.peek(1) != Token::RParen
+    }
+    fn predicate_function_contract_1(&self) -> bool {
         self.peek(1) != Token::RParen
     }
     fn predicate_match_expr_1(&self) -> bool {

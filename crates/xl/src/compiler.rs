@@ -97,6 +97,8 @@ pub(crate) fn compile_expression_with_bindings(
         source_name,
         function_name: function_name.to_owned(),
         environment: HashMap::new(),
+        cell_bindings: HashSet::new(),
+        definition_bindings: HashSet::new(),
         constants: Vec::new(),
         external_constant_links: Vec::new(),
         items: Vec::new(),
@@ -123,6 +125,8 @@ struct Compiler<'a> {
     source_name: &'a str,
     function_name: String,
     environment: HashMap<String, RegisterId>,
+    cell_bindings: HashSet<String>,
+    definition_bindings: HashSet<String>,
     constants: Vec<Value>,
     external_constant_links: Vec<(usize, String)>,
     items: Vec<Item>,
@@ -170,6 +174,8 @@ impl<'a> Compiler<'a> {
             source_name,
             function_name: source_name.to_owned(),
             environment: HashMap::new(),
+            cell_bindings: HashSet::new(),
+            definition_bindings: HashSet::new(),
             constants: Vec::new(),
             external_constant_links: Vec::new(),
             items: Vec::new(),
@@ -211,6 +217,8 @@ impl<'a> Compiler<'a> {
         function_name: String,
         parameters: &[Identifier],
         captures: &[String],
+        captured_cells: &HashSet<String>,
+        captured_definitions: &HashSet<String>,
     ) -> Result<Self, FrontendError> {
         let mut environment = HashMap::new();
         for (index, parameter) in parameters.iter().enumerate() {
@@ -250,6 +258,8 @@ impl<'a> Compiler<'a> {
             source_name,
             function_name,
             environment,
+            cell_bindings: captured_cells.clone(),
+            definition_bindings: captured_definitions.clone(),
             constants: Vec::new(),
             external_constant_links: Vec::new(),
             items: Vec::new(),
@@ -292,8 +302,102 @@ impl<'a> Compiler<'a> {
 
     fn compile_block(&mut self, block: &Block) -> Result<RegisterId, FrontendError> {
         let outer = self.environment.clone();
+        let outer_cells = self.cell_bindings.clone();
+        let outer_definitions = self.definition_bindings.clone();
+        let mut declared = HashMap::<String, (RegisterId, Location, Option<u32>)>::new();
+        let mut definition_counts = HashMap::<String, usize>::new();
+
+        for binding in &block.value.bindings {
+            let name = &binding.value.name.value;
+            if matches!(
+                binding.value.kind,
+                BindingKind::Def | BindingKind::NamedFunction
+            ) {
+                *definition_counts.entry(name.clone()).or_default() += 1;
+            }
+            if binding.value.kind == BindingKind::Decl {
+                if declared.contains_key(name) {
+                    return Err(
+                        self.error_at(binding.location, format!("duplicate declaration {name:?}"))
+                    );
+                }
+                if outer.contains_key(name) {
+                    return Err(self.error_at(
+                        binding.location,
+                        format!("definition {name:?} cannot shadow an outer definition"),
+                    ));
+                }
+                let cell = self.allocate();
+                self.emit(
+                    Operation::MakeDefinitionCell { dst: cell },
+                    binding.location,
+                );
+                self.environment.insert(name.clone(), cell);
+                self.cell_bindings.insert(name.clone());
+                self.definition_bindings.insert(name.clone());
+                let arity = binding
+                    .value
+                    .annotation
+                    .as_ref()
+                    .and_then(function_contract_arity);
+                declared.insert(name.clone(), (cell, binding.location, arity));
+            }
+        }
+        for binding in &block.value.bindings {
+            if binding.value.kind != BindingKind::NamedFunction {
+                continue;
+            }
+            let name = &binding.value.name.value;
+            if declared.contains_key(name) {
+                continue;
+            }
+            if outer.contains_key(name) {
+                return Err(self.error_at(
+                    binding.location,
+                    format!("definition {name:?} cannot shadow an outer definition"),
+                ));
+            }
+            let cell = self.allocate();
+            self.emit(
+                Operation::MakeDefinitionCell { dst: cell },
+                binding.location,
+            );
+            self.environment.insert(name.clone(), cell);
+            self.cell_bindings.insert(name.clone());
+            self.definition_bindings.insert(name.clone());
+            let arity = binding
+                .value
+                .annotation
+                .as_ref()
+                .and_then(function_contract_arity);
+            declared.insert(name.clone(), (cell, binding.location, arity));
+        }
+        for (name, count) in &definition_counts {
+            if *count > 1 {
+                return Err(self.error_at(
+                    block.location,
+                    format!("definition {name:?} is initialized more than once"),
+                ));
+            }
+        }
+        for binding in &block.value.bindings {
+            let name = &binding.value.name.value;
+            if declared.contains_key(name)
+                && !matches!(
+                    binding.value.kind,
+                    BindingKind::Decl | BindingKind::Def | BindingKind::NamedFunction
+                )
+            {
+                return Err(self.error_at(
+                    binding.location,
+                    format!("binding {name:?} conflicts with a declaration in this block"),
+                ));
+            }
+        }
+
         for binding in &block.value.bindings {
             match binding.value.kind {
+                BindingKind::Decl => continue,
                 BindingKind::Type => {
                     if self.retained_names.contains(&binding.value.name.value) {
                         let value = self
@@ -335,14 +439,63 @@ impl<'a> Compiler<'a> {
                         .insert(binding.value.name.value.clone(), register);
                     continue;
                 }
-                BindingKind::Let => {}
+                BindingKind::Let | BindingKind::Def | BindingKind::NamedFunction => {}
+            }
+            if binding.value.kind == BindingKind::Def
+                && !declared.contains_key(&binding.value.name.value)
+                && self.environment.contains_key(&binding.value.name.value)
+            {
+                return Err(self.error_at(
+                    binding.location,
+                    format!(
+                        "definition {:?} cannot shadow a visible binding",
+                        binding.value.name.value
+                    ),
+                ));
             }
             let value = self.compile_expr(&binding.value.value)?;
-            self.environment
-                .insert(binding.value.name.value.clone(), value);
+            let name = binding.value.name.value.clone();
+            if matches!(
+                binding.value.kind,
+                BindingKind::Def | BindingKind::NamedFunction
+            ) && let Some((cell, _, arity)) = declared.get(&name)
+            {
+                if let Some(arity) = arity {
+                    self.emit(
+                        Operation::AssertFunctionArity {
+                            value,
+                            arity: *arity,
+                        },
+                        binding.location,
+                    );
+                }
+                self.emit(
+                    Operation::InitializeDefinitionCell {
+                        cell: *cell,
+                        src: value,
+                    },
+                    binding.location,
+                );
+            } else {
+                self.environment.insert(name.clone(), value);
+                self.cell_bindings.remove(&name);
+                if binding.value.kind == BindingKind::Def {
+                    self.definition_bindings.insert(name);
+                } else if binding.value.kind == BindingKind::Let {
+                    self.definition_bindings.remove(&name);
+                }
+            }
+        }
+        for (cell, location, _) in declared.values() {
+            self.emit(
+                Operation::AssertDefinitionCellReady { cell: *cell },
+                *location,
+            );
         }
         let result = self.compile_expr(&block.value.result)?;
         self.environment = outer;
+        self.cell_bindings = outer_cells;
+        self.definition_bindings = outer_definitions;
         Ok(result)
     }
 
@@ -380,12 +533,25 @@ impl<'a> Compiler<'a> {
             }
             ExprKind::Atom(name) => Ok(self.load_constant(atom_value(name), expression.location)),
             ExprKind::Variable(name) => {
-                self.environment.get(&name.value).copied().ok_or_else(|| {
+                let register = self.environment.get(&name.value).copied().ok_or_else(|| {
                     self.error_at(
                         expression.location,
                         format!("unknown binding {:?}", name.value),
                     )
-                })
+                })?;
+                if self.cell_bindings.contains(&name.value) {
+                    let dst = self.allocate();
+                    self.emit(
+                        Operation::ReadDefinitionCell {
+                            dst,
+                            cell: register,
+                        },
+                        expression.location,
+                    );
+                    Ok(dst)
+                } else {
+                    Ok(register)
+                }
             }
             ExprKind::Array(items) => {
                 let items = self.compile_many(items)?;
@@ -557,6 +723,16 @@ impl<'a> Compiler<'a> {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let captured_cells = captures
+            .iter()
+            .filter(|name| self.cell_bindings.contains(*name))
+            .cloned()
+            .collect::<HashSet<_>>();
+        let captured_definitions = captures
+            .iter()
+            .filter(|name| self.definition_bindings.contains(*name))
+            .cloned()
+            .collect::<HashSet<_>>();
 
         let name = format!("{}::closure{}", self.function_name, self.closure_index);
         self.closure_index += 1;
@@ -566,6 +742,8 @@ impl<'a> Compiler<'a> {
             name,
             parameters,
             &captures,
+            &captured_cells,
+            &captured_definitions,
         )?;
         let result = nested.compile_block(body)?;
         nested.emit_synthetic(Operation::Return { src: result }, body.location);
@@ -851,9 +1029,35 @@ fn atom_value(name: &str) -> Value {
     })
 }
 
+fn function_contract_arity(contract: &Expr) -> Option<u32> {
+    let ExprKind::Call { callee, arguments } = &contract.value else {
+        return None;
+    };
+    let ExprKind::Variable(name) = &callee.value else {
+        return None;
+    };
+    if name.value != "Fn" || arguments.len() != 2 {
+        return None;
+    }
+    let ExprKind::Array(parameters) = &arguments[0].value else {
+        return None;
+    };
+    u32::try_from(parameters.len()).ok()
+}
+
 fn free_block(block: &Block, bound: &mut HashSet<String>, free: &mut BTreeSet<String>) {
     for binding in &block.value.bindings {
-        free_expr(&binding.value.value, bound, free);
+        if matches!(
+            binding.value.kind,
+            BindingKind::Decl | BindingKind::NamedFunction
+        ) {
+            bound.insert(binding.value.name.value.clone());
+        }
+    }
+    for binding in &block.value.bindings {
+        if binding.value.kind != BindingKind::Decl {
+            free_expr(&binding.value.value, bound, free);
+        }
         bound.insert(binding.value.name.value.clone());
     }
     free_expr(&block.value.result, bound, free);
@@ -959,7 +1163,10 @@ fn bind_pattern(pattern: &Pattern, bound: &mut HashSet<String>) {
 
 fn collect_runtime_names_block(block: &Block, names: &mut HashSet<String>) {
     for binding in &block.value.bindings {
-        if binding.value.kind == BindingKind::Let {
+        if matches!(
+            binding.value.kind,
+            BindingKind::Let | BindingKind::Def | BindingKind::NamedFunction
+        ) {
             collect_runtime_names(&binding.value.value, names);
         }
     }
@@ -1079,6 +1286,74 @@ mod tests {
                 Value::Atom(Atom::Builtin(BuiltinAtom::True)),
                 Value::Atom(Atom::Builtin(BuiltinAtom::False))
             ]
+        ));
+    }
+
+    #[test]
+    fn executes_single_assignment_recursive_definitions() {
+        let explicit = run(
+            "decl countdown: fn(Int) -> Int; def countdown = fn(n) { if n < 1 { 0 } else { countdown(n - 1) } }; countdown(4)",
+        )
+        .unwrap();
+        assert!(matches!(explicit, Value::Int(0)));
+
+        let mutual = run(
+            "decl even: fn(Int) -> Int; decl odd: fn(Int) -> Int; def even = fn(n) { if n < 1 { 0 } else { odd(n - 1) } }; def odd = fn(n) { if n < 1 { 1 } else { even(n - 1) } }; even(4)",
+        )
+        .unwrap();
+        assert!(matches!(mutual, Value::Int(0)));
+
+        let higher_order = run(
+            "decl loop: fn(Int) -> Int; let build = fn(body) { body }; def loop = build(fn(n) { if n < 1 { 0 } else { loop(n - 1) } }); loop(3)",
+        )
+        .unwrap();
+        assert!(matches!(higher_order, Value::Int(0)));
+
+        let named = run("fn loop(n) { if n < 1 { 0 } else { loop(n - 1) } } loop(3)").unwrap();
+        assert!(matches!(named, Value::Int(0)));
+
+        let annotated = run("fn increment(value: Int) -> Int { value + 1 } increment(41)").unwrap();
+        assert!(matches!(annotated, Value::Int(42)));
+    }
+
+    #[test]
+    fn definition_contract_failures_keep_source_origins() {
+        let missing = run("decl missing: fn(Int) -> Int; 0").unwrap_err();
+        assert!(
+            missing
+                .to_string()
+                .contains("declared but never initialized")
+        );
+
+        let early_read = run("decl value: Int; def value = value + 1; value").unwrap_err();
+        assert!(matches!(
+            early_read,
+            ExecutionError::Runtime(RuntimeError {
+                kind: RuntimeErrorKind::UninitializedDefinition,
+                ..
+            })
+        ));
+
+        let shadow = run("def value = 1; { def value = 2; value }").unwrap_err();
+        assert!(shadow.to_string().contains("cannot shadow"));
+
+        let let_shadow = run("let value = 1; def value = 2; value").unwrap_err();
+        assert!(let_shadow.to_string().contains("cannot shadow"));
+
+        let declaration_conflict =
+            run("decl value: Int; let value = 1; def value = 2; value").unwrap_err();
+        assert!(declaration_conflict.to_string().contains("conflicts"));
+
+        let wrong_arity = run(
+            "decl f: fn(Int) -> Int; let build = fn(value) { value }; def f = build(fn(a, b) { a + b }); f",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            wrong_arity,
+            ExecutionError::Runtime(RuntimeError {
+                kind: RuntimeErrorKind::TypeMismatch,
+                ..
+            })
         ));
     }
 

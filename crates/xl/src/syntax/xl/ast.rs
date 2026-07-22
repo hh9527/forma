@@ -125,6 +125,8 @@ impl<'tree> AstNode<'tree> for Body<'tree> {
 #[derive(Clone, Copy)]
 pub enum Binding<'tree> {
     Let(LetBinding<'tree>),
+    Decl(DeclBinding<'tree>),
+    Def(DefBinding<'tree>),
     Type(TypeBinding<'tree>),
     Import(ImportBinding<'tree>),
     Function(NamedFunction<'tree>),
@@ -137,6 +139,8 @@ impl<'tree> Binding<'tree> {
         }
         match syntax.rule()? {
             Rule::LetBinding => Some(Self::Let(LetBinding { syntax })),
+            Rule::DeclBinding => Some(Self::Decl(DeclBinding { syntax })),
+            Rule::DefBinding => Some(Self::Def(DefBinding { syntax })),
             Rule::TypeBinding => Some(Self::Type(TypeBinding { syntax })),
             Rule::ImportBinding => Some(Self::Import(ImportBinding { syntax })),
             Rule::NamedFunction => Some(Self::Function(NamedFunction { syntax })),
@@ -147,6 +151,8 @@ impl<'tree> Binding<'tree> {
     pub fn syntax(self) -> SyntaxNode<'tree> {
         match self {
             Self::Let(node) => node.syntax,
+            Self::Decl(node) => node.syntax,
+            Self::Def(node) => node.syntax,
             Self::Type(node) => node.syntax,
             Self::Import(node) => node.syntax,
             Self::Function(node) => node.syntax,
@@ -156,6 +162,8 @@ impl<'tree> Binding<'tree> {
     pub fn name(self) -> Option<SyntaxToken<'tree>> {
         match self {
             Self::Let(node) => node.name(),
+            Self::Decl(node) => node.name(),
+            Self::Def(node) => node.name(),
             Self::Type(node) => node.name(),
             Self::Import(node) => node.name(),
             Self::Function(node) => node.name(),
@@ -183,6 +191,8 @@ macro_rules! binding_node {
 }
 
 binding_node!(LetBinding);
+binding_node!(DeclBinding);
+binding_node!(DefBinding);
 binding_node!(TypeBinding);
 binding_node!(ImportBinding);
 binding_node!(NamedFunction);
@@ -206,6 +216,27 @@ impl<'tree> LetBinding<'tree> {
     }
 }
 
+impl<'tree> DeclBinding<'tree> {
+    pub fn contract(self) -> Option<SyntaxNode<'tree>> {
+        self.syntax.children().find(|child| {
+            matches!(
+                child.rule(),
+                Some(Rule::Contract | Rule::ContractExpr | Rule::FunctionContract)
+            )
+        })
+    }
+}
+
+impl<'tree> DefBinding<'tree> {
+    pub fn value(self) -> Option<Expr<'tree>> {
+        expression_slots(self.syntax).first().copied().flatten()
+    }
+
+    fn value_slot(self) -> Option<SyntaxNode<'tree>> {
+        expression_slot_nodes(self.syntax).first().copied()
+    }
+}
+
 impl<'tree> TypeBinding<'tree> {
     pub fn value(self) -> Option<Expr<'tree>> {
         expression_slots(self.syntax).first().copied().flatten()
@@ -224,7 +255,7 @@ impl<'tree> ImportBinding<'tree> {
 
 impl<'tree> NamedFunction<'tree> {
     pub fn parameters(self) -> Option<SyntaxNode<'tree>> {
-        child_node(self.syntax, Rule::Parameters)
+        child_node(self.syntax, Rule::AnnotatedParameters)
     }
 
     pub fn body(self) -> Option<SyntaxNode<'tree>> {
@@ -290,6 +321,7 @@ pub enum ExpectedSyntax {
     ProgramBody,
     BindingName,
     BindingValue,
+    BindingContract,
     ImportPath,
     FunctionParameters,
     FunctionBody,
@@ -327,6 +359,18 @@ pub fn validate(source: SourceId, tree: &CstData) -> Vec<SyntaxIssue> {
         }
         match binding {
             Binding::Let(node) if node.value().is_none() => issues.push(missing_slot(
+                source,
+                node.value_slot(),
+                node.syntax,
+                Some(Token::Semicolon),
+                ExpectedSyntax::BindingValue,
+            )),
+            Binding::Decl(node) if node.contract().is_none() => issues.push(missing_at(
+                source,
+                node.syntax,
+                ExpectedSyntax::BindingContract,
+            )),
+            Binding::Def(node) if node.value().is_none() => issues.push(missing_slot(
                 source,
                 node.value_slot(),
                 node.syntax,
@@ -413,6 +457,7 @@ fn is_expression_slot(syntax: SyntaxNode<'_>) -> bool {
                 | Rule::BytesExpr
                 | Rule::CallExpr
                 | Rule::Closure
+                | Rule::FunctionContract
                 | Rule::DictExpr
                 | Rule::FieldExpr
                 | Rule::FloatExpr
@@ -444,6 +489,8 @@ fn is_complete_expression(syntax: SyntaxNode<'_>) -> bool {
 fn missing_after_keyword(source: SourceId, binding: Binding<'_>) -> SyntaxIssue {
     let keyword = match binding {
         Binding::Let(_) => Token::Let,
+        Binding::Decl(_) => Token::Decl,
+        Binding::Def(_) => Token::Def,
         Binding::Type(_) => Token::Type,
         Binding::Import(_) => Token::Import,
         Binding::Function(_) => Token::Fn,
@@ -502,6 +549,7 @@ fn expected_name(expected: &ExpectedSyntax) -> &'static str {
         ExpectedSyntax::ProgramBody => "program body",
         ExpectedSyntax::BindingName => "binding name",
         ExpectedSyntax::BindingValue => "binding value",
+        ExpectedSyntax::BindingContract => "binding contract",
         ExpectedSyntax::ImportPath => "import path",
         ExpectedSyntax::FunctionParameters => "function parameters",
         ExpectedSyntax::FunctionBody => "function body",
