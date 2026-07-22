@@ -486,8 +486,8 @@ fn native_validate(context: &mut CallContext<'_, '_>) -> Result<(), NativeError>
     let type_register = context.argument(0)?;
     let value_register = context.argument(1)?;
     let descriptor = decode_native_type(context.value(type_register)?)?;
-    let tag = context.scratch();
-    let payload = context.scratch();
+    let tag = context.scratch()?;
+    let payload = context.scratch()?;
     match validate_value_ref(&descriptor, context.value(value_register)?, "value") {
         Ok(()) => {
             context.set_atom(tag, "Ok")?;
@@ -616,7 +616,7 @@ fn write_native_type(
     destination: RegisterId,
     descriptor: &TypeDescriptor,
 ) -> Result<(), NativeError> {
-    let kind = context.scratch();
+    let kind = context.scratch()?;
     let name = match descriptor {
         TypeDescriptor::Any => "Any",
         TypeDescriptor::Int => "Int",
@@ -633,23 +633,23 @@ fn write_native_type(
     let mut fields = vec![("kind".to_owned(), kind)];
     match descriptor {
         TypeDescriptor::Atom(atom) => {
-            let tag = context.scratch();
+            let tag = context.scratch()?;
             context.set_atom(tag, atom.name())?;
             fields.push(("tag".into(), tag));
         }
         TypeDescriptor::Array(item) => {
-            let value = context.scratch();
+            let value = context.scratch()?;
             write_native_type(context, value, item)?;
             fields.push(("item".into(), value));
         }
         TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
             let mut item_registers = Vec::with_capacity(items.len());
             for item in items {
-                let register = context.scratch();
+                let register = context.scratch()?;
                 write_native_type(context, register, item)?;
                 item_registers.push(register);
             }
-            let sequence = context.scratch();
+            let sequence = context.scratch()?;
             context.make_array(sequence, &item_registers)?;
             fields.push((
                 if matches!(descriptor, TypeDescriptor::Tuple(_)) {
@@ -664,11 +664,11 @@ fn write_native_type(
         TypeDescriptor::Struct(items) => {
             let mut item_fields = Vec::with_capacity(items.len());
             for (name, item) in items {
-                let register = context.scratch();
+                let register = context.scratch()?;
                 write_native_type(context, register, item)?;
                 item_fields.push((name.clone(), register));
             }
-            let value = context.scratch();
+            let value = context.scratch()?;
             context.make_dict(value, &item_fields)?;
             fields.push(("fields".into(), value));
         }

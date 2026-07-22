@@ -7,6 +7,9 @@ use std::fmt;
 use std::fmt::Write;
 use std::sync::{Arc, Weak};
 
+const MAX_CALL_DEPTH: usize = 1_024;
+const MAX_STACK_SLOTS: usize = 1_048_576;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ValueKind {
     Int,
@@ -108,16 +111,28 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
         stack: &'stack mut Vec<Option<Value>>,
         arguments: Vec<Value>,
         upvalues: &[Value],
-    ) -> Self {
+    ) -> Result<Self, NativeError> {
         let base = stack.len();
         let argument_count = arguments.len();
+        let window_size = argument_count
+            .checked_add(upvalues.len())
+            .and_then(|size| size.checked_add(1))
+            .ok_or_else(|| NativeError::resource_limit("native stack window is too large"))?;
+        let end = base
+            .checked_add(window_size)
+            .ok_or_else(|| NativeError::resource_limit("XL stack size overflowed"))?;
+        if end > MAX_STACK_SLOTS || window_size > u32::MAX as usize {
+            return Err(NativeError::resource_limit(
+                "native call exceeds the XL stack-slot limit",
+            ));
+        }
         stack.extend(arguments.into_iter().map(Some));
         let upvalue_base = argument_count;
         stack.extend(upvalues.iter().cloned().map(Some));
         let upvalue_count = upvalues.len();
         let result_index = argument_count + upvalue_count;
         stack.push(None);
-        Self {
+        Ok(Self {
             vm,
             stack,
             base,
@@ -125,9 +140,11 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
             upvalue_base,
             upvalue_count,
             result: RegisterId(
-                u32::try_from(result_index).expect("native register count exceeds u32"),
+                u32::try_from(result_index).map_err(|_| {
+                    NativeError::resource_limit("native register count exceeds u32")
+                })?,
             ),
-        }
+        })
     }
 
     pub fn argument(&self, index: usize) -> Result<RegisterId, NativeError> {
@@ -136,9 +153,9 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
                 "argument {index} is out of bounds"
             )));
         }
-        Ok(RegisterId(
-            u32::try_from(index).expect("argument count exceeds u32"),
-        ))
+        Ok(RegisterId(u32::try_from(index).map_err(|_| {
+            NativeError::resource_limit("argument register exceeds u32")
+        })?))
     }
 
     pub const fn result(&self) -> RegisterId {
@@ -152,7 +169,8 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
             )));
         }
         Ok(RegisterId(
-            u32::try_from(self.upvalue_base + index).expect("native register count exceeds u32"),
+            u32::try_from(self.upvalue_base + index)
+                .map_err(|_| NativeError::resource_limit("upvalue register exceeds u32"))?,
         ))
     }
 
@@ -166,12 +184,18 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
             .ok_or_else(|| NativeError::new(format!("register {} is not initialized", register.0)))
     }
 
-    pub fn scratch(&mut self) -> RegisterId {
+    pub fn scratch(&mut self) -> Result<RegisterId, NativeError> {
+        if self.stack.len() >= MAX_STACK_SLOTS {
+            return Err(NativeError::resource_limit(
+                "native scratch register exceeds the XL stack-slot limit",
+            ));
+        }
         let register = RegisterId(
-            u32::try_from(self.stack.len() - self.base).expect("native register count exceeds u32"),
+            u32::try_from(self.stack.len() - self.base)
+                .map_err(|_| NativeError::resource_limit("native scratch register exceeds u32"))?,
         );
         self.stack.push(None);
-        register
+        Ok(register)
     }
 
     pub fn set_atom(&mut self, destination: RegisterId, name: &str) -> Result<(), NativeError> {
@@ -262,8 +286,14 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
     }
 
     fn take_result(self) -> Result<Value, NativeError> {
-        let index = usize::try_from(self.result.0).expect("result register fits usize");
-        let result = self.stack[self.base + index]
+        let index = usize::try_from(self.result.0)
+            .map_err(|_| NativeError::resource_limit("result register does not fit usize"))?;
+        let slot = self
+            .base
+            .checked_add(index)
+            .and_then(|slot| self.stack.get_mut(slot))
+            .ok_or_else(|| NativeError::new("native result register is out of bounds"))?;
+        let result = slot
             .take()
             .ok_or_else(|| NativeError::new("native function did not write its result register"));
         self.stack.truncate(self.base);
@@ -286,11 +316,13 @@ fn atom_from_name(name: &str) -> Atom {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimeErrorKind {
     BudgetExceeded,
+    CallDepthExceeded,
     DivisionByZero,
     IntegerOverflow,
     InvalidBytecode,
     MissingField,
     NoPatternMatched,
+    StackLimitExceeded,
     TypeMismatch,
     UnsupportedEquality,
 }
@@ -303,6 +335,7 @@ pub struct RuntimeError {
     pub instruction: usize,
     pub trace: Vec<RuntimeFrame>,
     rendered: Option<String>,
+    trace_includes_active_frame: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -704,6 +737,16 @@ impl Vm {
                         let arguments = read_many(&registers, arguments, function, pc)?;
                         match callable.prototype() {
                             Prototype::Bytecode(callee_function) => {
+                                if frames.len() >= MAX_CALL_DEPTH {
+                                    return Err(error(
+                                        RuntimeErrorKind::CallDepthExceeded,
+                                        format!(
+                                            "call depth exceeds the limit of {MAX_CALL_DEPTH} frames"
+                                        ),
+                                        function,
+                                        pc,
+                                    ));
+                                }
                                 frames.last_mut().expect("caller frame").pc += 1;
                                 let next = make_execution_frame(
                                     callee_function.clone(),
@@ -711,7 +754,11 @@ impl Vm {
                                     callable.upvalues(),
                                     Some(*dst),
                                     &mut stack,
-                                )?;
+                                )
+                                .map_err(|mut runtime_error| {
+                                    runtime_error.trace_includes_active_frame = false;
+                                    runtime_error
+                                })?;
                                 frames.push(next);
                                 continue;
                             }
@@ -737,16 +784,30 @@ impl Vm {
                                     ));
                                 }
                                 *remaining -= 1;
+                                // Native scratch slots extend the same stack, so end the
+                                // current frame-window borrow before creating its context.
                                 let _ = registers;
                                 let mut context = CallContext::new(
                                     self,
                                     &mut stack,
                                     arguments,
                                     callable.upvalues(),
-                                );
+                                )
+                                .map_err(|native_error| {
+                                    error(
+                                        RuntimeErrorKind::StackLimitExceeded,
+                                        format!("{}: {}", native.name(), native_error.message),
+                                        function,
+                                        pc,
+                                    )
+                                })?;
                                 (native.callback())(&mut context).map_err(|native_error| {
                                     error(
-                                        RuntimeErrorKind::TypeMismatch,
+                                        if native_error.is_resource_limit() {
+                                            RuntimeErrorKind::StackLimitExceeded
+                                        } else {
+                                            RuntimeErrorKind::TypeMismatch
+                                        },
                                         format!("{}: {}", native.name(), native_error.message),
                                         function,
                                         pc,
@@ -818,12 +879,11 @@ impl Vm {
             }
         })();
         if let Err(runtime_error) = &mut result {
-            let skip_active = frames.last().is_some_and(|frame| {
-                runtime_error.trace.first().is_some_and(|trace| {
-                    trace.function == frame.function.name() && trace.instruction == frame.pc
-                })
-            });
-            for frame in frames.iter().rev().skip(usize::from(skip_active)) {
+            for frame in frames
+                .iter()
+                .rev()
+                .skip(usize::from(runtime_error.trace_includes_active_frame))
+            {
                 let instruction = frame.pc.saturating_sub(1);
                 runtime_error.trace.push(RuntimeFrame {
                     function: frame.function.name().to_owned(),
@@ -831,6 +891,7 @@ impl Vm {
                     origin: frame.function.origin_at(instruction),
                 });
             }
+            runtime_error.trace_includes_active_frame = false;
         }
         result
     }
@@ -864,7 +925,23 @@ fn make_execution_frame(
         ));
     }
     let base = stack.len();
-    stack.resize(base + function.register_count(), None);
+    let end = base.checked_add(function.register_count()).ok_or_else(|| {
+        error(
+            RuntimeErrorKind::StackLimitExceeded,
+            "XL stack size overflowed",
+            &function,
+            0,
+        )
+    })?;
+    if end > MAX_STACK_SLOTS {
+        return Err(error(
+            RuntimeErrorKind::StackLimitExceeded,
+            format!("XL stack exceeds the limit of {MAX_STACK_SLOTS} slots"),
+            &function,
+            0,
+        ));
+    }
+    stack.resize(end, None);
     for (index, value) in arguments.iter().chain(captures).enumerate() {
         let Some(register) = stack.get_mut(base + index) else {
             return Err(error(
@@ -1116,6 +1193,7 @@ fn error(
             origin: function.origin_at(instruction),
         }],
         rendered: None,
+        trace_includes_active_frame: true,
     }
 }
 
@@ -1429,5 +1507,101 @@ mod tests {
             Vm::new().execute(&function, 2_000).unwrap(),
             Value::Int(7)
         ));
+    }
+
+    #[test]
+    fn enforces_independent_call_depth_and_stack_slot_limits() {
+        let mut function = Arc::new(BytecodeFunction::new(
+            "leaf",
+            1,
+            vec![Value::Int(7)],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::Return { src: Register(0) },
+            ],
+        ));
+        for _ in 0..MAX_CALL_DEPTH {
+            let closure = Value::Func(Arc::new(Closure::new(function, Vec::new())));
+            function = Arc::new(BytecodeFunction::new(
+                "recursive-shape",
+                2,
+                vec![closure],
+                vec![
+                    Instruction::LoadConst {
+                        dst: Register(0),
+                        constant: 0,
+                    },
+                    Instruction::Call {
+                        dst: Register(1),
+                        callee: Register(0),
+                        arguments: vec![],
+                    },
+                    Instruction::Return { src: Register(1) },
+                ],
+            ));
+        }
+        let depth = Vm::new().execute(&function, usize::MAX).unwrap_err();
+        assert_eq!(depth.kind, RuntimeErrorKind::CallDepthExceeded);
+
+        let oversized = BytecodeFunction::new(
+            "oversized",
+            MAX_STACK_SLOTS + 1,
+            vec![],
+            vec![Instruction::Return { src: Register(0) }],
+        );
+        let stack = Vm::new().execute(&oversized, usize::MAX).unwrap_err();
+        assert_eq!(stack.kind, RuntimeErrorKind::StackLimitExceeded);
+    }
+
+    #[test]
+    fn trace_does_not_deduplicate_equal_function_names_and_pcs() {
+        let leaf = Arc::new(BytecodeFunction::new(
+            "same",
+            3,
+            vec![Value::Int(1), Value::Int(0)],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::LoadConst {
+                    dst: Register(1),
+                    constant: 1,
+                },
+                Instruction::Divide {
+                    dst: Register(2),
+                    left: Register(0),
+                    right: Register(1),
+                },
+                Instruction::Return { src: Register(2) },
+            ],
+        ));
+        let mut function = leaf;
+        for _ in 0..2 {
+            let closure = Value::Func(Arc::new(Closure::new(function, Vec::new())));
+            function = Arc::new(BytecodeFunction::new(
+                "same",
+                2,
+                vec![closure],
+                vec![
+                    Instruction::LoadConst {
+                        dst: Register(0),
+                        constant: 0,
+                    },
+                    Instruction::Call {
+                        dst: Register(1),
+                        callee: Register(0),
+                        arguments: vec![],
+                    },
+                    Instruction::Return { src: Register(1) },
+                ],
+            ));
+        }
+        let error = Vm::new().execute(&function, 100).unwrap_err();
+        assert_eq!(error.trace.len(), 3);
+        assert!(error.trace.iter().all(|frame| frame.function == "same"));
     }
 }

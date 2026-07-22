@@ -363,3 +363,11 @@ the prototype debug map, and compiler, tool-stage, loaded-module, and imported
 module paths render the resulting origin through their shared source database.
 Tests cover nested division-by-zero traces, missing fields, and dynamic string
 interpolation at their source expressions.
+
+An implementation follow-up added independent limits of 1,024 bytecode frames
+and 1,048,576 XL stack slots. Bytecode frames, native call windows, and native
+scratch registers all obey the stack-slot limit and report structured runtime
+errors instead of allocation overflow or integer-conversion panics. Trace
+assembly now uses an explicit active-frame state rather than comparing function
+names and PCs, so recursive frames with identical debug coordinates remain
+distinct.

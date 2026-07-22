@@ -88,13 +88,26 @@ pub struct Closure {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeError {
     pub message: String,
+    resource_limit: bool,
 }
 
 impl NativeError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            resource_limit: false,
         }
+    }
+
+    pub(crate) fn resource_limit(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            resource_limit: true,
+        }
+    }
+
+    pub(crate) const fn is_resource_limit(&self) -> bool {
+        self.resource_limit
     }
 }
 
