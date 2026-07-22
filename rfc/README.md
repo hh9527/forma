@@ -28,3 +28,5 @@ semantics from an earlier RFC.
 10. Evaluation fuel for calls and control-flow back edges.
 11. Unified execution quotas for module initialization and runtime sessions.
 12. Layered heaps, per-heap interning, and export-root promotion.
+13. Single-assignment definition slots, recursive definitions, and focused
+    function contracts.
