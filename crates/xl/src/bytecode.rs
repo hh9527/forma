@@ -258,6 +258,13 @@ pub struct DebugOriginRange {
 }
 
 impl BytecodeFunction {
+    pub(crate) fn from_linked_code(code: Arc<FuncByteCode>) -> Self {
+        Self {
+            code,
+            links: LinkingTable::default(),
+        }
+    }
+
     pub(crate) fn from_linked_parts(
         code: Arc<FuncByteCode>,
         values: Vec<Value>,

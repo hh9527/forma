@@ -4,6 +4,7 @@ use crate::{
     Atom, BuiltinAtom, BytecodeFunction, Closure, Dict, FuncByteCode, NativeFunction, Prototype,
     Shape, Value,
 };
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
@@ -46,7 +47,7 @@ pub(crate) enum RuntimeValue {
     Func(Handle),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum RuntimePrototype {
     Bytecode(Handle),
     Native(NativeFunction),
@@ -77,6 +78,12 @@ pub(crate) enum Object {
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct HeapError(&'static str);
+
+impl HeapError {
+    pub(crate) const fn new(message: &'static str) -> Self {
+        Self(message)
+    }
+}
 
 impl fmt::Display for HeapError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -117,6 +124,7 @@ pub(crate) struct Heap {
     text: TextTable,
     shapes: Vec<Box<[InternId]>>,
     shape_slots: HashMap<Vec<InternId>, u32>,
+    exported_shapes: RefCell<HashMap<u32, Arc<Shape>>>,
 }
 
 impl Heap {
@@ -127,6 +135,7 @@ impl Heap {
             text: TextTable::default(),
             shapes: Vec::new(),
             shape_slots: HashMap::new(),
+            exported_shapes: RefCell::new(HashMap::new()),
         }
     }
 
@@ -393,6 +402,13 @@ pub(crate) struct HeapView<'a> {
     pub(crate) background: Option<&'a Heap>,
 }
 
+type BytecodeLinks<'a> = (
+    &'a Arc<FuncByteCode>,
+    &'a [RuntimeValue],
+    &'a [InternId],
+    &'a [RuntimePrototype],
+);
+
 impl HeapView<'_> {
     fn heap(&self, id: HeapId) -> Result<&Heap, HeapError> {
         if self.current.id == id {
@@ -413,6 +429,62 @@ impl HeapView<'_> {
 
     fn shape(&self, id: ShapeId) -> Result<&[InternId], HeapError> {
         self.heap(id.heap)?.shape(id)
+    }
+
+    pub(crate) fn bytecode(&self, handle: Handle) -> Result<BytecodeLinks<'_>, HeapError> {
+        let Object::ByteCodeProto {
+            code,
+            values,
+            text,
+            prototypes,
+        } = self.object(handle)?
+        else {
+            return Err(HeapError("handle is not a bytecode prototype"));
+        };
+        Ok((code, values, text, prototypes))
+    }
+
+    pub(crate) fn closure(
+        &self,
+        handle: Handle,
+    ) -> Result<(RuntimePrototype, &[RuntimeValue]), HeapError> {
+        let Object::Closure {
+            prototype,
+            upvalues,
+        } = self.object(handle)?
+        else {
+            return Err(HeapError("handle is not a closure"));
+        };
+        Ok((*prototype, upvalues))
+    }
+
+    pub(crate) fn sequence(
+        &self,
+        handle: Handle,
+        tuple: bool,
+    ) -> Result<&[RuntimeValue], HeapError> {
+        match self.object(handle)? {
+            Object::Array(values) if !tuple => Ok(values),
+            Object::Tuple(values) if tuple => Ok(values),
+            _ => Err(HeapError("handle is not the requested sequence kind")),
+        }
+    }
+
+    pub(crate) fn dict_get(
+        &self,
+        handle: Handle,
+        field: InternId,
+    ) -> Result<Option<RuntimeValue>, HeapError> {
+        let Object::Dict { shape, values } = self.object(handle)? else {
+            return Err(HeapError("handle is not a Dict"));
+        };
+        let wanted = self.text(field)?;
+        for (index, candidate) in self.shape(*shape)?.iter().enumerate() {
+            if self.text(*candidate)? == wanted {
+                return Ok(values.get(index).copied());
+            }
+        }
+        Ok(None)
     }
 
     pub(crate) fn export_value(&self, value: RuntimeValue) -> Result<Value, HeapError> {
@@ -479,10 +551,18 @@ impl HeapView<'_> {
                     .map(|value| self.export_value_with(*value, visiting))
                     .collect::<Result<Vec<_>, _>>()?;
                 visiting.remove(&handle);
-                Value::Dict(Dict::new(
-                    Arc::new(Shape::from_sorted_fields(fields)),
-                    values,
-                ))
+                let owner = self.heap(shape.heap)?;
+                let shape = if let Some(shape) = owner.exported_shapes.borrow().get(&shape.slot) {
+                    Arc::clone(shape)
+                } else {
+                    let shape_value = Arc::new(Shape::from_sorted_fields(fields));
+                    owner
+                        .exported_shapes
+                        .borrow_mut()
+                        .insert(shape.slot, Arc::clone(&shape_value));
+                    shape_value
+                };
+                Value::Dict(Dict::new(shape, values))
             }
             RuntimeValue::Func(handle) => {
                 let Object::Closure {
