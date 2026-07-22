@@ -11,7 +11,7 @@ The current MVP demonstrates:
 - immutable Dict, Array, Tuple, Atom, and primitive values;
 - Erlang-style tagged tuples and pattern matching;
 - explicit single-assignment recursion with proper tail calls;
-- pure Array transformations through the explicit `core:array` module;
+- pure Array and Dict transformations through explicit core modules;
 - ordinary functions that compute Type metadata in a tool-stage VM;
 - structural annotations and runtime validation from the same metadata;
 - `.xl` and `.json` modules in a closed dependency graph;
@@ -67,6 +67,20 @@ import arrays from "core:array";
 ```
 
 The initial module exports `length`, `map`, `filter`, `flat_map`, and `fold`.
+
+Dict enumeration and construction use `core:dict`:
+
+```text
+import dicts from "core:dict";
+
+let entries = dicts.pairs({ z: 3, a: 1 });
+let rebuilt = dicts.from_pairs(entries);
+dicts.merge(rebuilt, { a: 10 })
+```
+
+`keys`, `values`, and `pairs` use deterministic field order. `from_pairs`
+rejects duplicate keys, while the shallow `merge(left, right)` gives precedence
+to the right Dict.
 
 ## Current limits
 

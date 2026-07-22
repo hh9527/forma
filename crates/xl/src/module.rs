@@ -1,6 +1,6 @@
 use crate::ast::{BindingKind, Expr, ExprKind, Program, StringPartKind};
 use crate::compiler::compile_program_analyzed_in;
-use crate::core::{ARRAY_MODULE, array_module_value};
+use crate::core::{ARRAY_MODULE, DICT_MODULE, array_module_value, dict_module_value};
 use crate::heap::{Heap, PersistentValue, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
 use crate::parser::parse_registered;
@@ -363,17 +363,17 @@ impl ModuleLoader {
     }
 
     fn load_core_module(&mut self, name: &str) -> Result<(Value, PersistentValue), ModuleError> {
-        if name != ARRAY_MODULE {
-            return Err(ModuleError::new(format!("unknown core module {name:?}")));
-        }
-        if let Some((value, root)) = self.core_modules.get(ARRAY_MODULE) {
+        if let Some((value, root)) = self.core_modules.get(name) {
             return Ok((value.clone(), *root));
         }
-        let value = array_module_value();
+        let (identity, value) = match name {
+            ARRAY_MODULE => (ARRAY_MODULE, array_module_value()),
+            DICT_MODULE => (DICT_MODULE, dict_module_value()),
+            _ => return Err(ModuleError::new(format!("unknown core module {name:?}"))),
+        };
         let root = publish_value(&mut self.world, &value)
             .map_err(|error| ModuleError::new(error.to_string()))?;
-        self.core_modules
-            .insert(ARRAY_MODULE, (value.clone(), root));
+        self.core_modules.insert(identity, (value.clone(), root));
         Ok((value, root))
     }
 
@@ -909,6 +909,159 @@ mod tests {
                 .to_string()
                 .contains("unknown core module")
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn core_dict_enumerates_constructs_and_merges_in_canonical_order() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import dicts from "core:dict";
+               let source = { z: 3, a: 1, middle: 2 };
+               {
+                   keys: dicts.keys(source),
+                   values: dicts.values(source),
+                   pairs: dicts.pairs(source),
+                   round_trip: dicts.from_pairs(dicts.pairs(source)),
+                   merged: dicts.merge(
+                       { a: 1, nested: { left: 1 } },
+                       { b: 2, nested: { right: 2 } },
+                   ),
+                   empty_keys: dicts.keys({}),
+                   empty_pairs: dicts.pairs({}),
+                   empty_from_pairs: dicts.from_pairs([]),
+               }"#,
+        )
+        .unwrap();
+
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(result) = module.execute(100_000).unwrap() else {
+            panic!("expected Dict result")
+        };
+        assert_eq!(
+            result.get("keys").unwrap().to_string(),
+            "[\"a\", \"middle\", \"z\"]"
+        );
+        assert_eq!(result.get("values").unwrap().to_string(), "[1, 2, 3]");
+        assert_eq!(
+            result.get("pairs").unwrap().to_string(),
+            "[(\"a\", 1), (\"middle\", 2), (\"z\", 3)]"
+        );
+        assert_eq!(
+            result.get("round_trip").unwrap().to_string(),
+            "{a: 1, middle: 2, z: 3}"
+        );
+        assert_eq!(
+            result.get("merged").unwrap().to_string(),
+            "{a: 1, b: 2, nested: {right: 2}}"
+        );
+        assert_eq!(result.get("empty_keys").unwrap().to_string(), "[]");
+        assert_eq!(result.get("empty_pairs").unwrap().to_string(), "[]");
+        assert_eq!(result.get("empty_from_pairs").unwrap().to_string(), "{}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn core_dict_supports_tool_stage_and_exact_output_quota() {
+        let directory = fixture_dir();
+        fs::write(directory.join("data.json"), r#"{"a":1,"long":2}"#).unwrap();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import dicts from "core:dict";
+               import data from "./data.json";
+               dicts.keys(data)"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let requested = 2 * std::mem::size_of::<Value>() as u64 + 5;
+        let mut exact = QuotaAccount::new(Quota::new(1, 1_000, requested));
+        let arena = Vm::new()
+            .execute_in_background(
+                &module.runtime.world,
+                &module.runtime.externals,
+                &module.function,
+                &[],
+                &mut exact,
+            )
+            .unwrap();
+        assert_eq!(exact.requested_allocation_bytes(), requested);
+        assert_eq!(
+            arena.export(&module.runtime.world).unwrap().to_string(),
+            "[\"a\", \"long\"]"
+        );
+
+        let mut short = QuotaAccount::new(Quota::new(1, 1_000, requested - 1));
+        assert_eq!(
+            Vm::new()
+                .execute_in_background(
+                    &module.runtime.world,
+                    &module.runtime.externals,
+                    &module.function,
+                    &[],
+                    &mut short,
+                )
+                .err()
+                .expect("allocation must be exhausted")
+                .kind,
+            crate::RuntimeErrorKind::AllocationQuotaExceeded
+        );
+
+        fs::write(
+            directory.join("types.xl"),
+            r#"import dicts from "core:dict";
+               type Pair = Tuple(dicts.values({ first: Int, second: String }));
+               let pair: Pair = (1, "one");
+               pair"#,
+        )
+        .unwrap();
+        let types = load_module(directory.join("types.xl"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(types.execute(100_000).unwrap().to_string(), "(1, \"one\")");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn core_dict_rejects_invalid_arguments_pairs_and_duplicates() {
+        let directory = fixture_dir();
+        let run_error = |name: &str, expression: &str| {
+            let path = directory.join(name);
+            fs::write(
+                &path,
+                format!("import dicts from \"core:dict\"; {expression}"),
+            )
+            .unwrap();
+            let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
+            module.execute(100_000).unwrap_err()
+        };
+
+        assert!(
+            run_error("keys.xl", "dicts.keys([])")
+                .message
+                .contains("Dict")
+        );
+        assert!(
+            run_error("merge.xl", "dicts.merge({}, [])")
+                .message
+                .contains("right Dict")
+        );
+        assert!(
+            run_error("pairs-array.xl", "dicts.from_pairs({})")
+                .message
+                .contains("Array")
+        );
+        assert!(
+            run_error("pair-shape.xl", "dicts.from_pairs([(\"a\", 1, 2)])")
+                .message
+                .contains("two-element Tuple")
+        );
+        assert!(
+            run_error("pair-key.xl", "dicts.from_pairs([('a, 1)])")
+                .message
+                .contains("key must be a String")
+        );
+        let duplicate = run_error("duplicate.xl", "dicts.from_pairs([(\"a\", 1), (\"a\", 2)])");
+        assert!(duplicate.message.contains("duplicate field"));
+        assert!(duplicate.to_string().contains("duplicate.xl:1:"));
         fs::remove_dir_all(directory).unwrap();
     }
 

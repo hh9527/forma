@@ -585,6 +585,16 @@ impl<'a> HeapView<'a> {
             .collect()
     }
 
+    pub(crate) fn dict_parts(
+        &self,
+        handle: Handle,
+    ) -> Result<(&'a [InternId], &'a [RuntimeValue]), HeapError> {
+        let Object::Dict { shape, values } = self.object(handle)? else {
+            return Err(HeapError("handle is not a Dict"));
+        };
+        Ok((self.shape(*shape)?, values))
+    }
+
     pub(crate) fn dict_get_text(
         &self,
         handle: Handle,

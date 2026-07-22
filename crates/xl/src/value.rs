@@ -136,6 +136,34 @@ pub(crate) enum CoreArrayFunction {
     Fold,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreDictFunction {
+    Keys,
+    Values,
+    Pairs,
+    FromPairs,
+    Merge,
+}
+
+impl CoreDictFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Keys => "core:dict.keys",
+            Self::Values => "core:dict.values",
+            Self::Pairs => "core:dict.pairs",
+            Self::FromPairs => "core:dict.from_pairs",
+            Self::Merge => "core:dict.merge",
+        }
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        match self {
+            Self::Keys | Self::Values | Self::Pairs | Self::FromPairs => 1,
+            Self::Merge => 2,
+        }
+    }
+}
+
 impl CoreArrayFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
@@ -160,6 +188,7 @@ impl CoreArrayFunction {
 pub(crate) enum NativeKind {
     Synchronous,
     CoreArray(CoreArrayFunction),
+    CoreDict(CoreDictFunction),
 }
 
 #[derive(Clone, Copy)]
@@ -186,6 +215,15 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreArray(function),
+        }
+    }
+
+    pub(crate) const fn core_dict(function: CoreDictFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreDict(function),
         }
     }
 

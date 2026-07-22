@@ -1,6 +1,6 @@
 # RFC 0016: Core Dict Functions
 
-- Status: Accepted for implementation
+- Status: Implemented
 
 ## Summary
 
@@ -228,3 +228,22 @@ XL has no nominal method-dispatch model. An explicit module is consistent with
 7. Closed tool-stage expressions can use `core:dict`.
 8. Boundary failures retain the XL call origin and core function identity.
 9. Existing VM, heap, module, Array core, quota, and CLI tests remain unchanged.
+
+## Implementation result
+
+`core:dict` is registered through the same reserved-module path and persistent
+world cache as `core:array`. The five functions execute as trusted synchronous
+core operations inside the ordinary VM call dispatcher. They inspect Dict
+shape and value slices through `HeapView` and never cross the legacy `Value`
+export boundary.
+
+Enumeration follows canonical shape order. `pairs` creates two-element Tuples,
+`from_pairs` validates every item and rejects duplicate String keys before
+allocation, and `merge` performs a linear two-way shallow merge with right-side
+precedence. Existing nested values remain shared runtime references.
+
+Allocation is computed and charged before result objects are installed. Tests
+cover canonical and empty results, round trips, shallow right-biased merge,
+tool-stage metadata evaluation, exact output quota, malformed items, invalid
+argument kinds, duplicate fields, and source-positioned failures. As planned,
+generic static signatures and core-module dependency reporting remain deferred.

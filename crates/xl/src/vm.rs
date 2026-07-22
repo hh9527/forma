@@ -2,7 +2,8 @@ use crate::bytecode::{BytecodeFunction, Opcode, Register};
 use crate::heap::{Handle, Heap, HeapView, Object, PersistentValue, RuntimeValue, publish_root};
 use crate::lir::RegisterId;
 use crate::value::{
-    BuiltinAtom, CoreArrayFunction, Dict, NativeError, NativeKind, NativeLimit, Shape, Value,
+    BuiltinAtom, CoreArrayFunction, CoreDictFunction, Dict, NativeError, NativeKind, NativeLimit,
+    Shape, Value,
 };
 use crate::{Diagnostic, Origin, SourceDatabase};
 use std::collections::HashMap;
@@ -1789,6 +1790,16 @@ fn drive_vm_action(
                             current,
                             background,
                         )?,
+                        NativeKind::CoreDict(function) => run_core_dict(
+                            function,
+                            &arguments,
+                            return_target,
+                            &call_function,
+                            call_pc,
+                            current,
+                            background,
+                            account,
+                        )?,
                     },
                 }
             }
@@ -2137,6 +2148,267 @@ fn charge_array_output(
 
 const fn core_array_name(function: CoreArrayFunction) -> &'static str {
     function.name()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_core_dict(
+    operation: CoreDictFunction,
+    arguments: &[RuntimeValue],
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let value = match operation {
+        CoreDictFunction::Keys => {
+            let entries =
+                core_dict_entries(arguments[0], "Dict", function, pc, current, background)?;
+            charge_core_dict_output(
+                entries.len(),
+                entries.iter().map(|(field, _)| field.len()),
+                function,
+                pc,
+                account,
+            )?;
+            let values = entries
+                .into_iter()
+                .map(|(field, _)| current.string(Some(background), &field))
+                .collect::<Box<[_]>>();
+            RuntimeValue::Array(current.allocate(Object::Array(values)))
+        }
+        CoreDictFunction::Values => {
+            let entries =
+                core_dict_entries(arguments[0], "Dict", function, pc, current, background)?;
+            charge_core_dict_output(entries.len(), std::iter::empty(), function, pc, account)?;
+            let values = entries
+                .into_iter()
+                .map(|(_, value)| value)
+                .collect::<Box<[_]>>();
+            RuntimeValue::Array(current.allocate(Object::Array(values)))
+        }
+        CoreDictFunction::Pairs => {
+            let entries =
+                core_dict_entries(arguments[0], "Dict", function, pc, current, background)?;
+            let slot_count = entries.len().checked_mul(3).ok_or_else(|| {
+                allocation_error("core:dict.pairs allocation size overflowed", function, pc)
+            })?;
+            charge_core_dict_output(
+                slot_count,
+                entries.iter().map(|(field, _)| field.len()),
+                function,
+                pc,
+                account,
+            )?;
+            let pairs = entries
+                .into_iter()
+                .map(|(field, value)| {
+                    let field = current.string(Some(background), &field);
+                    RuntimeValue::Tuple(current.allocate(Object::Tuple(vec![field, value].into())))
+                })
+                .collect::<Box<[_]>>();
+            RuntimeValue::Array(current.allocate(Object::Array(pairs)))
+        }
+        CoreDictFunction::FromPairs => {
+            let RuntimeValue::Array(handle) = arguments[0] else {
+                let view = HeapView {
+                    current,
+                    background: Some(background),
+                };
+                return Err(runtime_type_error(
+                    "Array",
+                    &arguments[0],
+                    &view,
+                    function,
+                    pc,
+                ));
+            };
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            let items = view
+                .sequence(handle, false)
+                .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?;
+            let mut entries = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().copied().enumerate() {
+                let RuntimeValue::Tuple(pair) = item else {
+                    return Err(error(
+                        RuntimeErrorKind::TypeMismatch,
+                        format!("core:dict.from_pairs item {index} must be a two-element Tuple"),
+                        function,
+                        pc,
+                    ));
+                };
+                let pair = view
+                    .sequence(pair, true)
+                    .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?;
+                if pair.len() != 2 {
+                    return Err(error(
+                        RuntimeErrorKind::TypeMismatch,
+                        format!("core:dict.from_pairs item {index} must be a two-element Tuple"),
+                        function,
+                        pc,
+                    ));
+                }
+                let Some(field) = view
+                    .string_text(pair[0])
+                    .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                else {
+                    return Err(error(
+                        RuntimeErrorKind::TypeMismatch,
+                        format!("core:dict.from_pairs item {index} key must be a String"),
+                        function,
+                        pc,
+                    ));
+                };
+                entries.push((field.to_owned(), pair[1]));
+            }
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+            if let Some(duplicate) = entries
+                .windows(2)
+                .find(|pair| pair[0].0 == pair[1].0)
+                .map(|pair| pair[0].0.as_str())
+            {
+                return Err(error(
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("core:dict.from_pairs contains duplicate field {duplicate:?}"),
+                    function,
+                    pc,
+                ));
+            }
+            allocate_core_dict(entries, function, pc, current, account)?
+        }
+        CoreDictFunction::Merge => {
+            let left =
+                core_dict_entries(arguments[0], "left Dict", function, pc, current, background)?;
+            let right = core_dict_entries(
+                arguments[1],
+                "right Dict",
+                function,
+                pc,
+                current,
+                background,
+            )?;
+            let mut merged = Vec::with_capacity(left.len().saturating_add(right.len()));
+            let (mut left_index, mut right_index) = (0, 0);
+            while left_index < left.len() && right_index < right.len() {
+                match left[left_index].0.cmp(&right[right_index].0) {
+                    std::cmp::Ordering::Less => {
+                        merged.push(left[left_index].clone());
+                        left_index += 1;
+                    }
+                    std::cmp::Ordering::Equal => {
+                        merged.push(right[right_index].clone());
+                        left_index += 1;
+                        right_index += 1;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        merged.push(right[right_index].clone());
+                        right_index += 1;
+                    }
+                }
+            }
+            merged.extend_from_slice(&left[left_index..]);
+            merged.extend_from_slice(&right[right_index..]);
+            allocate_core_dict(merged, function, pc, current, account)?
+        }
+    };
+    Ok(VmAction::Return {
+        value,
+        return_target,
+    })
+}
+
+fn core_dict_entries(
+    value: RuntimeValue,
+    expected: &str,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &Heap,
+    background: &Heap,
+) -> Result<Vec<(String, RuntimeValue)>, RuntimeError> {
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let RuntimeValue::Dict(handle) = value else {
+        return Err(runtime_type_error(expected, &value, &view, function, pc));
+    };
+    let (fields, values) = view
+        .dict_parts(handle)
+        .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?;
+    fields
+        .iter()
+        .zip(values)
+        .map(|(field, value)| {
+            Ok((
+                view.text(*field)
+                    .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                    .to_owned(),
+                *value,
+            ))
+        })
+        .collect()
+}
+
+fn allocate_core_dict(
+    entries: Vec<(String, RuntimeValue)>,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    account: &mut QuotaAccount,
+) -> Result<RuntimeValue, RuntimeError> {
+    charge_core_dict_output(
+        entries.len(),
+        entries.iter().map(|(field, _)| field.len()),
+        function,
+        pc,
+        account,
+    )?;
+    let (fields, values): (Vec<_>, Vec<_>) = entries
+        .into_iter()
+        .map(|(field, value)| (current.intern(&field), value))
+        .unzip();
+    let shape = current.intern_shape(fields);
+    Ok(RuntimeValue::Dict(current.allocate(Object::Dict {
+        shape,
+        values: values.into(),
+    })))
+}
+
+fn charge_core_dict_output(
+    value_slots: usize,
+    mut text_lengths: impl Iterator<Item = usize>,
+    function: &BytecodeFunction,
+    pc: usize,
+    account: &mut QuotaAccount,
+) -> Result<(), RuntimeError> {
+    let text_bytes = text_lengths.try_fold(0u64, |total, length| {
+        total
+            .checked_add(length as u64)
+            .ok_or_else(|| allocation_error("core:dict allocation size overflowed", function, pc))
+    })?;
+    let value_bytes = logical_value_bytes(value_slots)
+        .map_err(|native_error| allocation_error(native_error.message, function, pc))?;
+    let bytes = text_bytes
+        .checked_add(value_bytes)
+        .ok_or_else(|| allocation_error("core:dict allocation size overflowed", function, pc))?;
+    charge_allocation(account, bytes, function, pc)
+}
+
+fn core_dict_heap_error(
+    heap_error: crate::heap::HeapError,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> RuntimeError {
+    error(
+        RuntimeErrorKind::InvalidBytecode,
+        heap_error.to_string(),
+        function,
+        pc,
+    )
 }
 
 fn decimal_length(value: i64) -> usize {
