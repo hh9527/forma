@@ -30,3 +30,4 @@ semantics from an earlier RFC.
 12. Layered heaps, per-heap interning, and export-root promotion.
 13. Single-assignment definition slots, recursive definitions, and focused
     function contracts.
+14. Contiguous call windows and proper tail calls.
