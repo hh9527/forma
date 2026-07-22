@@ -469,7 +469,7 @@ fn native_struct_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeErr
         .iter()
         .map(|name| {
             Ok((
-                name.clone(),
+                (*name).to_owned(),
                 decode_native_type(value.dict_get(name).expect("Dict field exists"))?,
             ))
         })
@@ -524,11 +524,7 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
         .and_then(ValueRef::as_atom)
         .ok_or_else(|| format!("{path}.kind must be an Atom"))?;
     let require = |expected: &[&str]| -> Result<(), String> {
-        if fields
-            .iter()
-            .map(String::as_str)
-            .eq(expected.iter().copied())
-        {
+        if fields.iter().copied().eq(expected.iter().copied()) {
             Ok(())
         } else {
             Err(format!("{path} has invalid fields for {kind}"))
@@ -610,7 +606,7 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
                     .map(|name| {
                         let field = fields_value.dict_get(name).expect("Dict field exists");
                         Ok((
-                            name.clone(),
+                            (*name).to_owned(),
                             decode_type_ref(field, &format!("{path}.fields.{name}"))?,
                         ))
                     })

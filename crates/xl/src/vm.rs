@@ -1,7 +1,7 @@
 use crate::bytecode::{BytecodeFunction, Opcode, Register};
-use crate::heap::{Handle, Heap, HeapView, RuntimeValue};
+use crate::heap::{Handle, Heap, HeapView, Object, RuntimeValue};
 use crate::lir::RegisterId;
-use crate::value::{Atom, BuiltinAtom, Dict, NativeError, NativeLimit, Shape, Value};
+use crate::value::{BuiltinAtom, Dict, NativeError, NativeLimit, Shape, Value};
 use crate::{Diagnostic, Origin, SourceDatabase};
 use std::collections::HashMap;
 use std::fmt;
@@ -92,79 +92,97 @@ pub enum ValueKind {
 
 #[derive(Clone, Copy)]
 pub struct ValueRef<'a> {
-    value: &'a Value,
+    value: RuntimeValue,
+    view: HeapView<'a>,
 }
 
 impl<'a> ValueRef<'a> {
     pub fn kind(self) -> ValueKind {
         match self.value {
-            Value::Int(_) => ValueKind::Int,
-            Value::Float(_) => ValueKind::Float,
-            Value::String(_) => ValueKind::String,
-            Value::Bytes(_) => ValueKind::Bytes,
-            Value::Dict(_) => ValueKind::Dict,
-            Value::Array(_) => ValueKind::Array,
-            Value::Atom(_) => ValueKind::Atom,
-            Value::Tuple(_) => ValueKind::Tuple,
-            Value::Func(_) => ValueKind::Func,
+            RuntimeValue::Int(_) => ValueKind::Int,
+            RuntimeValue::Float(_) => ValueKind::Float,
+            RuntimeValue::ShortString(_) | RuntimeValue::String(_) => ValueKind::String,
+            RuntimeValue::Bytes(_) => ValueKind::Bytes,
+            RuntimeValue::Dict(_) => ValueKind::Dict,
+            RuntimeValue::Array(_) => ValueKind::Array,
+            RuntimeValue::BuiltinAtom(_) | RuntimeValue::Atom(_) => ValueKind::Atom,
+            RuntimeValue::Tuple(_) => ValueKind::Tuple,
+            RuntimeValue::Func(_) => ValueKind::Func,
         }
     }
 
     pub fn as_atom(self) -> Option<&'a str> {
         match self.value {
-            Value::Atom(atom) => Some(atom.name()),
+            RuntimeValue::BuiltinAtom(atom) => Some(atom.name()),
+            RuntimeValue::Atom(id) => self.view.text(id).ok(),
             _ => None,
         }
     }
 
     pub fn as_int(self) -> Option<i64> {
         match self.value {
-            Value::Int(value) => Some(*value),
+            RuntimeValue::Int(value) => Some(value),
             _ => None,
         }
     }
 
     pub fn as_str(self) -> Option<&'a str> {
         match self.value {
-            Value::String(value) => Some(value),
+            RuntimeValue::ShortString(id) => self.view.text(id).ok(),
+            RuntimeValue::String(handle) => match self.view.object(handle).ok()? {
+                Object::String(value) => Some(value),
+                _ => None,
+            },
             _ => None,
         }
     }
 
     pub fn sequence_len(self) -> Option<usize> {
         match self.value {
-            Value::Array(values) | Value::Tuple(values) => Some(values.len()),
+            RuntimeValue::Array(handle) => self.view.sequence(handle, false).ok().map(<[_]>::len),
+            RuntimeValue::Tuple(handle) => self.view.sequence(handle, true).ok().map(<[_]>::len),
             _ => None,
         }
     }
 
     pub fn sequence_get(self, index: usize) -> Option<ValueRef<'a>> {
-        match self.value {
-            Value::Array(values) | Value::Tuple(values) => {
-                values.get(index).map(|value| ValueRef { value })
-            }
-            _ => None,
-        }
+        let values = match self.value {
+            RuntimeValue::Array(handle) => self.view.sequence(handle, false).ok()?,
+            RuntimeValue::Tuple(handle) => self.view.sequence(handle, true).ok()?,
+            _ => return None,
+        };
+        values.get(index).copied().map(|value| ValueRef {
+            value,
+            view: self.view,
+        })
     }
 
-    pub fn dict_fields(self) -> Option<&'a [String]> {
+    pub fn dict_fields(self) -> Option<Vec<&'a str>> {
         match self.value {
-            Value::Dict(dict) => Some(dict.shape().fields()),
+            RuntimeValue::Dict(handle) => self.view.dict_fields(handle).ok(),
             _ => None,
         }
     }
 
     pub fn dict_get(self, field: &str) -> Option<ValueRef<'a>> {
-        match self.value {
-            Value::Dict(dict) => dict.get(field).map(|value| ValueRef { value }),
-            _ => None,
-        }
+        let RuntimeValue::Dict(handle) = self.value else {
+            return None;
+        };
+        self.view
+            .dict_get_text(handle, field)
+            .ok()
+            .flatten()
+            .map(|value| ValueRef {
+                value,
+                view: self.view,
+            })
     }
 }
 
 pub struct CallContext<'vm, 'stack> {
-    vm: &'vm mut Vm,
-    stack: &'stack mut Vec<Option<Value>>,
+    current: &'vm mut Heap,
+    background: Option<&'vm Heap>,
+    stack: &'stack mut Vec<Option<RuntimeValue>>,
     account: &'stack mut QuotaAccount,
     base: usize,
     argument_count: usize,
@@ -175,11 +193,12 @@ pub struct CallContext<'vm, 'stack> {
 
 impl<'vm, 'stack> CallContext<'vm, 'stack> {
     fn new(
-        vm: &'vm mut Vm,
-        stack: &'stack mut Vec<Option<Value>>,
+        current: &'vm mut Heap,
+        background: Option<&'vm Heap>,
+        stack: &'stack mut Vec<Option<RuntimeValue>>,
         account: &'stack mut QuotaAccount,
-        arguments: Vec<Value>,
-        upvalues: &[Value],
+        arguments: Vec<RuntimeValue>,
+        upvalues: &[RuntimeValue],
     ) -> Result<Self, NativeError> {
         let base = stack.len();
         let argument_count = arguments.len();
@@ -202,7 +221,8 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
         let result_index = argument_count + upvalue_count;
         stack.push(None);
         Ok(Self {
-            vm,
+            current,
+            background,
             stack,
             account,
             base,
@@ -249,7 +269,14 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
         self.stack
             .get(self.base + index)
             .and_then(Option::as_ref)
-            .map(|value| ValueRef { value })
+            .copied()
+            .map(|value| ValueRef {
+                value,
+                view: HeapView {
+                    current: self.current,
+                    background: self.background,
+                },
+            })
             .ok_or_else(|| NativeError::new(format!("register {} is not initialized", register.0)))
     }
 
@@ -268,19 +295,20 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
     }
 
     pub fn set_atom(&mut self, destination: RegisterId, name: &str) -> Result<(), NativeError> {
-        self.set(destination, Value::Atom(atom_from_name(name)))
+        let value = self.current.atom(self.background, name);
+        self.set(destination, value)
     }
 
     pub fn set_int(&mut self, destination: RegisterId, value: i64) -> Result<(), NativeError> {
-        self.set(destination, Value::Int(value))
+        self.set(destination, RuntimeValue::Int(value))
     }
 
     pub fn set_float(&mut self, destination: RegisterId, value: f64) -> Result<(), NativeError> {
-        self.set(destination, Value::Float(value))
+        self.set(destination, RuntimeValue::Float(value))
     }
 
     pub fn set_none(&mut self, destination: RegisterId) -> Result<(), NativeError> {
-        self.set(destination, Value::none())
+        self.set(destination, RuntimeValue::BuiltinAtom(BuiltinAtom::None))
     }
 
     pub fn set_string(
@@ -290,7 +318,8 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
     ) -> Result<(), NativeError> {
         let value = value.into();
         self.charge_allocation(value.len())?;
-        self.set(destination, Value::string(value))
+        let value = self.current.string(self.background, &value);
+        self.set(destination, value)
     }
 
     pub fn copy(&mut self, destination: RegisterId, source: RegisterId) -> Result<(), NativeError> {
@@ -308,7 +337,8 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
             .map(|item| self.owned(*item))
             .collect::<Result<Vec<_>, _>>()?;
         self.charge_sequence(values.len())?;
-        self.set(destination, Value::Array(values.into()))
+        let value = RuntimeValue::Array(self.current.allocate(Object::Array(values.into())));
+        self.set(destination, value)
     }
 
     pub fn make_tuple(
@@ -321,7 +351,8 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
             .map(|item| self.owned(*item))
             .collect::<Result<Vec<_>, _>>()?;
         self.charge_sequence(values.len())?;
-        self.set(destination, Value::Tuple(values.into()))
+        let value = RuntimeValue::Tuple(self.current.allocate(Object::Tuple(values.into())));
+        self.set(destination, value)
     }
 
     pub fn make_dict(
@@ -329,12 +360,24 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
         destination: RegisterId,
         fields: &[(String, RegisterId)],
     ) -> Result<(), NativeError> {
-        let entries = fields
+        let mut entries = fields
             .iter()
-            .map(|(name, register)| Ok((name.clone(), self.owned(*register)?)))
+            .map(|(name, register)| Ok((name.as_str(), self.owned(*register)?)))
             .collect::<Result<Vec<_>, NativeError>>()?;
         self.charge_dict(&entries)?;
-        let value = self.vm.make_dict(entries).map_err(NativeError::new)?;
+        entries.sort_by(|left, right| left.0.cmp(right.0));
+        if entries.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(NativeError::new("Dict contains a duplicate field"));
+        }
+        let (fields, values): (Vec<_>, Vec<_>) = entries
+            .into_iter()
+            .map(|(field, value)| (self.current.intern(field), value))
+            .unzip();
+        let shape = self.current.intern_shape(fields);
+        let value = RuntimeValue::Dict(self.current.allocate(Object::Dict {
+            shape,
+            values: values.into(),
+        }));
         self.set(destination, value)
     }
 
@@ -345,7 +388,7 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
             .map_err(|()| NativeError::allocation_limit("native allocation quota exceeded"))
     }
 
-    fn charge_dict(&mut self, entries: &[(String, Value)]) -> Result<(), NativeError> {
+    fn charge_dict(&mut self, entries: &[(&str, RuntimeValue)]) -> Result<(), NativeError> {
         let field_bytes = entries.iter().try_fold(0u64, |total, (field, _)| {
             total.checked_add(field.len() as u64).ok_or_else(|| {
                 NativeError::allocation_limit("native Dict allocation size overflowed")
@@ -368,17 +411,17 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
             .map_err(|()| NativeError::allocation_limit("native allocation quota exceeded"))
     }
 
-    fn owned(&self, register: RegisterId) -> Result<Value, NativeError> {
+    fn owned(&self, register: RegisterId) -> Result<RuntimeValue, NativeError> {
         let index = usize::try_from(register.0)
             .map_err(|_| NativeError::new("register does not fit this platform"))?;
         self.stack
             .get(self.base + index)
             .and_then(Option::as_ref)
-            .cloned()
+            .copied()
             .ok_or_else(|| NativeError::new(format!("register {} is not initialized", register.0)))
     }
 
-    fn set(&mut self, register: RegisterId, value: Value) -> Result<(), NativeError> {
+    fn set(&mut self, register: RegisterId, value: RuntimeValue) -> Result<(), NativeError> {
         let index = usize::try_from(register.0)
             .map_err(|_| NativeError::new("register does not fit this platform"))?;
         let slot = self
@@ -389,7 +432,7 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
         Ok(())
     }
 
-    fn take_result(self) -> Result<Value, NativeError> {
+    fn take_result(self) -> Result<RuntimeValue, NativeError> {
         let index = usize::try_from(self.result.0)
             .map_err(|_| NativeError::stack_limit("result register does not fit usize"))?;
         let slot = self
@@ -402,18 +445,6 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
             .ok_or_else(|| NativeError::new("native function did not write its result register"));
         self.stack.truncate(self.base);
         result
-    }
-}
-
-fn atom_from_name(name: &str) -> Atom {
-    match name {
-        "None" => Atom::builtin(BuiltinAtom::None),
-        "Some" => Atom::builtin(BuiltinAtom::Some),
-        "Ok" => Atom::builtin(BuiltinAtom::Ok),
-        "Err" => Atom::builtin(BuiltinAtom::Err),
-        "True" => Atom::builtin(BuiltinAtom::True),
-        "False" => Atom::builtin(BuiltinAtom::False),
-        _ => Atom::named(name),
     }
 }
 
@@ -1130,21 +1161,13 @@ impl Vm {
                                 // Native scratch slots extend the same stack, so end the
                                 // current frame-window borrow before creating its context.
                                 let _ = registers;
-                                let native_arguments = arguments
-                                    .into_iter()
-                                    .map(|value| export_runtime(&view, value, function, pc))
-                                    .collect::<Result<Vec<_>, _>>()?;
-                                let native_upvalues = upvalues
-                                    .into_iter()
-                                    .map(|value| export_runtime(&view, value, function, pc))
-                                    .collect::<Result<Vec<_>, _>>()?;
-                                let mut native_stack = Vec::new();
                                 let mut context = CallContext::new(
-                                    self,
-                                    &mut native_stack,
+                                    &mut current,
+                                    Some(&background),
+                                    &mut stack,
                                     account,
-                                    native_arguments,
-                                    &native_upvalues,
+                                    arguments,
+                                    &upvalues,
                                 )
                                 .map_err(|native_error| {
                                     error(
@@ -1178,16 +1201,6 @@ impl Vm {
                                         pc,
                                     )
                                 })?;
-                                let value = current
-                                    .import_value(Some(&background), &value)
-                                    .map_err(|heap_error| {
-                                        error(
-                                            RuntimeErrorKind::InvalidBytecode,
-                                            heap_error.to_string(),
-                                            function,
-                                            pc,
-                                        )
-                                    })?;
                                 write_register(&mut stack[base..end], *dst, value, function, pc)?;
                                 frames.last_mut().expect("execution frame").pc += 1;
                                 continue;
@@ -1703,7 +1716,7 @@ fn error(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{BytecodeFunction, Closure, Instruction, NativeFunction, Register};
+    use crate::{Atom, BytecodeFunction, Closure, Instruction, NativeFunction, Register};
 
     fn run(
         vm: &mut Vm,

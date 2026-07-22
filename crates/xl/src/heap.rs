@@ -397,6 +397,7 @@ impl Heap {
     }
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct HeapView<'a> {
     pub(crate) current: &'a Heap,
     pub(crate) background: Option<&'a Heap>,
@@ -409,8 +410,8 @@ type BytecodeLinks<'a> = (
     &'a [RuntimePrototype],
 );
 
-impl HeapView<'_> {
-    fn heap(&self, id: HeapId) -> Result<&Heap, HeapError> {
+impl<'a> HeapView<'a> {
+    fn heap(&self, id: HeapId) -> Result<&'a Heap, HeapError> {
         if self.current.id == id {
             return Ok(self.current);
         }
@@ -419,19 +420,19 @@ impl HeapView<'_> {
             .ok_or(HeapError("value refers to a heap outside its view"))
     }
 
-    pub(crate) fn object(&self, handle: Handle) -> Result<&Object, HeapError> {
+    pub(crate) fn object(&self, handle: Handle) -> Result<&'a Object, HeapError> {
         self.heap(handle.heap)?.object(handle)
     }
 
-    pub(crate) fn text(&self, id: InternId) -> Result<&str, HeapError> {
+    pub(crate) fn text(&self, id: InternId) -> Result<&'a str, HeapError> {
         self.heap(id.heap)?.resolve_text(id)
     }
 
-    fn shape(&self, id: ShapeId) -> Result<&[InternId], HeapError> {
+    fn shape(&self, id: ShapeId) -> Result<&'a [InternId], HeapError> {
         self.heap(id.heap)?.shape(id)
     }
 
-    pub(crate) fn bytecode(&self, handle: Handle) -> Result<BytecodeLinks<'_>, HeapError> {
+    pub(crate) fn bytecode(&self, handle: Handle) -> Result<BytecodeLinks<'a>, HeapError> {
         let Object::ByteCodeProto {
             code,
             values,
@@ -447,7 +448,7 @@ impl HeapView<'_> {
     pub(crate) fn closure(
         &self,
         handle: Handle,
-    ) -> Result<(RuntimePrototype, &[RuntimeValue]), HeapError> {
+    ) -> Result<(RuntimePrototype, &'a [RuntimeValue]), HeapError> {
         let Object::Closure {
             prototype,
             upvalues,
@@ -462,7 +463,7 @@ impl HeapView<'_> {
         &self,
         handle: Handle,
         tuple: bool,
-    ) -> Result<&[RuntimeValue], HeapError> {
+    ) -> Result<&'a [RuntimeValue], HeapError> {
         match self.object(handle)? {
             Object::Array(values) if !tuple => Ok(values),
             Object::Tuple(values) if tuple => Ok(values),
@@ -481,6 +482,32 @@ impl HeapView<'_> {
         let wanted = self.text(field)?;
         for (index, candidate) in self.shape(*shape)?.iter().enumerate() {
             if self.text(*candidate)? == wanted {
+                return Ok(values.get(index).copied());
+            }
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn dict_fields(&self, handle: Handle) -> Result<Vec<&'a str>, HeapError> {
+        let Object::Dict { shape, .. } = self.object(handle)? else {
+            return Err(HeapError("handle is not a Dict"));
+        };
+        self.shape(*shape)?
+            .iter()
+            .map(|field| self.text(*field))
+            .collect()
+    }
+
+    pub(crate) fn dict_get_text(
+        &self,
+        handle: Handle,
+        field: &str,
+    ) -> Result<Option<RuntimeValue>, HeapError> {
+        let Object::Dict { shape, values } = self.object(handle)? else {
+            return Err(HeapError("handle is not a Dict"));
+        };
+        for (index, candidate) in self.shape(*shape)?.iter().enumerate() {
+            if self.text(*candidate)? == field {
                 return Ok(values.get(index).copied());
             }
         }
@@ -583,11 +610,11 @@ impl HeapView<'_> {
         })
     }
 
-    fn enter_object<'a>(
-        &'a self,
+    fn enter_object<'view>(
+        &'view self,
         handle: Handle,
         visiting: &mut HashSet<Handle>,
-    ) -> Result<&'a Object, HeapError> {
+    ) -> Result<&'view Object, HeapError> {
         if !visiting.insert(handle) {
             return Err(HeapError(
                 "cyclic heap values cannot cross the legacy Value boundary",
