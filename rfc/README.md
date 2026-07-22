@@ -27,3 +27,4 @@ semantics from an earlier RFC.
 9. Register LIR, VM call context, unified closures, and debug origins.
 10. Evaluation fuel for calls and control-flow back edges.
 11. Unified execution quotas for module initialization and runtime sessions.
+12. Layered heaps, per-heap interning, and export-root promotion.
