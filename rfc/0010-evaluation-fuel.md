@@ -1,7 +1,7 @@
 # RFC 0010: Evaluation Fuel for Dynamic Control Flow
 
 - Status: Accepted
-- Implementation: Pending
+- Implementation: Complete
 
 ## Summary
 
@@ -207,3 +207,21 @@ fuel.
 11. Existing XL language results are unchanged when sufficient fuel is
     provided.
 12. Workspace tests, strict Clippy, formatting, and diff checks pass.
+
+## Implementation result
+
+The VM now decrements evaluation fuel only in one centralized helper called by
+bytecode/native calls and taken jumps whose resolved target is less than or
+equal to the current PC. Ordinary dispatch, forward jumps, untaken conditions,
+returns, and entry execute with zero fuel. The old per-instruction decrement
+and the native double charge were removed.
+
+Runtime APIs and tool/module/CLI internals use evaluation-fuel terminology, and
+exhaustion reports `FuelExhausted` with the charging instruction's existing
+debug origin and frame trace. Call-depth and stack-slot limits remain separate
+errors and are checked independently of fuel.
+
+Focused bytecode tests prove zero-fuel straight-line and forward execution,
+free untaken back edges, exactly one unit for a taken back edge, one unit for
+bytecode and native calls, and shared fuel across nested calls. Tool-stage and
+module tests cover the same semantics, including a source-located call failure.

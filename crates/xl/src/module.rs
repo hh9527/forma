@@ -45,9 +45,9 @@ pub struct LoadedModule {
 }
 
 impl LoadedModule {
-    pub fn execute(&self, instruction_budget: usize) -> Result<Value, crate::RuntimeError> {
+    pub fn execute(&self, evaluation_fuel: usize) -> Result<Value, crate::RuntimeError> {
         Vm::new()
-            .execute(&self.function, instruction_budget)
+            .execute(&self.function, evaluation_fuel)
             .map_err(|error| error.with_sources(&self.sources))
     }
 }
@@ -55,7 +55,7 @@ impl LoadedModule {
 pub fn load_module(
     path: impl AsRef<Path>,
     external_bindings: BTreeMap<String, Value>,
-    instruction_budget: usize,
+    evaluation_fuel: usize,
 ) -> Result<LoadedModule, ModuleError> {
     let root = canonicalize(path.as_ref())?;
     if root.extension().and_then(|extension| extension.to_str()) != Some("xl") {
@@ -65,7 +65,7 @@ pub fn load_module(
         cache: HashMap::new(),
         visiting: Vec::new(),
         dependencies: BTreeSet::new(),
-        instruction_budget,
+        evaluation_fuel,
         sources: SourceDatabase::default(),
     };
     loader.load_root(root, external_bindings)
@@ -75,7 +75,7 @@ struct ModuleLoader {
     cache: HashMap<PathBuf, SourcedValue>,
     visiting: Vec<PathBuf>,
     dependencies: BTreeSet<PathBuf>,
-    instruction_budget: usize,
+    evaluation_fuel: usize,
     sources: SourceDatabase,
 }
 
@@ -124,7 +124,7 @@ impl ModuleLoader {
                 self.compile_xl(&path, BTreeMap::new(), false)
                     .and_then(|(_, function)| {
                         Vm::new()
-                            .execute(&function, self.instruction_budget)
+                            .execute(&function, self.evaluation_fuel)
                             .map(|value| SourcedValue {
                                 value,
                                 provenance: Provenance::default(),
@@ -204,7 +204,7 @@ impl ModuleLoader {
         let analysis = analyze_program_with_bindings(
             &source_name,
             &program,
-            self.instruction_budget,
+            self.evaluation_fuel,
             &external_bindings,
             &dynamic_bindings,
             &self.sources,
@@ -439,6 +439,26 @@ mod tests {
         assert!(
             message.contains("main.xl:2:1: type requirement declared here"),
             "{message}"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn module_execution_uses_evaluation_fuel_semantics() {
+        let directory = fixture_dir();
+        fs::write(directory.join("straight.xl"), "40 + 2").unwrap();
+        let straight = load_module(directory.join("straight.xl"), BTreeMap::new(), 0).unwrap();
+        assert_eq!(straight.execute(0).unwrap().to_string(), "42");
+
+        fs::write(
+            directory.join("call.xl"),
+            "let identity = fn(value) { value }; identity(42)",
+        )
+        .unwrap();
+        let call = load_module(directory.join("call.xl"), BTreeMap::new(), 0).unwrap();
+        assert_eq!(
+            call.execute(0).unwrap_err().kind,
+            crate::RuntimeErrorKind::FuelExhausted
         );
         fs::remove_dir_all(directory).unwrap();
     }

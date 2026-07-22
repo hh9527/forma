@@ -76,13 +76,13 @@ pub(crate) fn compile_program_analyzed_in(
 pub fn run_source(
     source_name: &str,
     source: &str,
-    instruction_budget: usize,
+    evaluation_fuel: usize,
 ) -> Result<Value, ExecutionError> {
     let function = compile_source(source_name, source)?;
     let mut sources = SourceDatabase::default();
     sources.add(source_name, source);
     Vm::new()
-        .execute(&function, instruction_budget)
+        .execute(&function, evaluation_fuel)
         .map_err(|error| ExecutionError::Runtime(error.with_sources(&sources)))
 }
 
@@ -1130,5 +1130,15 @@ mod tests {
         let interpolation =
             run("fn render(value) {\n  \"value=\\{value}\"\n}\nrender([1])").unwrap_err();
         assert!(interpolation.to_string().contains("test:2:3"));
+    }
+
+    #[test]
+    fn fuel_exhaustion_points_to_the_call_expression() {
+        let error = run_source("test", "let f = fn() { 1 };\nf()", 0).unwrap_err();
+        let ExecutionError::Runtime(error) = error else {
+            panic!("expected runtime error");
+        };
+        assert_eq!(error.kind, RuntimeErrorKind::FuelExhausted);
+        assert!(error.to_string().contains("test:2:1"));
     }
 }

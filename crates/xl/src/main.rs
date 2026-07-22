@@ -5,7 +5,7 @@ use std::io::{self, Read};
 use std::path::Path;
 use xl::{Value, load_module, parse_json};
 
-const BUDGET: usize = 1_000_000;
+const EVALUATION_FUEL: usize = 1_000_000;
 
 fn main() {
     if let Err(error) = run_cli(env::args().skip(1).collect()) {
@@ -42,8 +42,11 @@ fn run_command(arguments: &[String]) -> Result<(), String> {
         }
         _ => return Err(format!("invalid run arguments\n{}", usage())),
     }
-    let module = load_module(module_path, bindings, BUDGET).map_err(|error| error.to_string())?;
-    let result = module.execute(BUDGET).map_err(|error| error.to_string())?;
+    let module =
+        load_module(module_path, bindings, EVALUATION_FUEL).map_err(|error| error.to_string())?;
+    let result = module
+        .execute(EVALUATION_FUEL)
+        .map_err(|error| error.to_string())?;
     println!("{result}");
     Ok(())
 }
@@ -52,8 +55,8 @@ fn check_command(arguments: &[String]) -> Result<(), String> {
     let [module_path] = arguments else {
         return Err(format!("check requires one module path\n{}", usage()));
     };
-    let module =
-        load_module(module_path, BTreeMap::new(), BUDGET).map_err(|error| error.to_string())?;
+    let module = load_module(module_path, BTreeMap::new(), EVALUATION_FUEL)
+        .map_err(|error| error.to_string())?;
     println!("ok ({} dependencies)", module.dependencies.len());
     Ok(())
 }
@@ -62,8 +65,8 @@ fn types_command(arguments: &[String]) -> Result<(), String> {
     let [module_path] = arguments else {
         return Err(format!("types requires one module path\n{}", usage()));
     };
-    let module =
-        load_module(module_path, BTreeMap::new(), BUDGET).map_err(|error| error.to_string())?;
+    let module = load_module(module_path, BTreeMap::new(), EVALUATION_FUEL)
+        .map_err(|error| error.to_string())?;
     for (name, descriptor) in &module.analysis.declared_types {
         println!("type {name} = {}", descriptor.display_name());
     }

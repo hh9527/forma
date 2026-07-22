@@ -315,7 +315,7 @@ fn atom_from_name(name: &str) -> Atom {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimeErrorKind {
-    BudgetExceeded,
+    FuelExhausted,
     CallDepthExceeded,
     DivisionByZero,
     IntegerOverflow,
@@ -428,19 +428,19 @@ impl Vm {
     pub fn execute(
         &mut self,
         function: &BytecodeFunction,
-        instruction_budget: usize,
+        evaluation_fuel: usize,
     ) -> Result<Value, RuntimeError> {
-        self.execute_with_args(function, &[], instruction_budget)
+        self.execute_with_args(function, &[], evaluation_fuel)
     }
 
     pub fn execute_with_args(
         &mut self,
         function: &BytecodeFunction,
         arguments: &[Value],
-        instruction_budget: usize,
+        evaluation_fuel: usize,
     ) -> Result<Value, RuntimeError> {
-        let mut remaining = instruction_budget;
-        self.execute_frame(function, arguments, &[], &mut remaining)
+        let mut remaining_fuel = evaluation_fuel;
+        self.execute_frame(function, arguments, &[], &mut remaining_fuel)
     }
 
     #[allow(clippy::needless_borrow)]
@@ -449,7 +449,7 @@ impl Vm {
         function: &BytecodeFunction,
         arguments: &[Value],
         captures: &[Value],
-        remaining: &mut usize,
+        remaining_fuel: &mut usize,
     ) -> Result<Value, RuntimeError> {
         let mut stack = Vec::new();
         let mut frames = vec![make_execution_frame(
@@ -469,16 +469,6 @@ impl Vm {
                     .clone();
                 let function = function_arc.as_ref();
                 let pc = frames.last().expect("execution frame").pc;
-                if *remaining == 0 {
-                    return Err(error(
-                        RuntimeErrorKind::BudgetExceeded,
-                        "instruction budget exhausted",
-                        function,
-                        pc,
-                    ));
-                }
-                *remaining -= 1;
-
                 let instruction = function.instructions().get(pc).ok_or_else(|| {
                     error(
                         RuntimeErrorKind::InvalidBytecode,
@@ -734,6 +724,7 @@ impl Vm {
                         let Value::Func(callable) = callee else {
                             return Err(type_error("Func", &callee, function, pc));
                         };
+                        consume_fuel(remaining_fuel, function, pc)?;
                         let arguments = read_many(&registers, arguments, function, pc)?;
                         match callable.prototype() {
                             Prototype::Bytecode(callee_function) => {
@@ -775,15 +766,6 @@ impl Vm {
                                         pc,
                                     ));
                                 }
-                                if *remaining == 0 {
-                                    return Err(error(
-                                        RuntimeErrorKind::BudgetExceeded,
-                                        "instruction budget exhausted",
-                                        function,
-                                        pc,
-                                    ));
-                                }
-                                *remaining -= 1;
                                 // Native scratch slots extend the same stack, so end the
                                 // current frame-window borrow before creating its context.
                                 let _ = registers;
@@ -829,6 +811,9 @@ impl Vm {
                     }
                     Instruction::Jump { target } => {
                         validate_jump(*target, function, pc)?;
+                        if *target <= pc {
+                            consume_fuel(remaining_fuel, function, pc)?;
+                        }
                         frames.last_mut().expect("execution frame").pc = *target;
                         continue;
                     }
@@ -837,6 +822,9 @@ impl Vm {
                             Value::Atom(Atom::Builtin(BuiltinAtom::True)) => {}
                             Value::Atom(Atom::Builtin(BuiltinAtom::False)) => {
                                 validate_jump(*target, function, pc)?;
+                                if *target <= pc {
+                                    consume_fuel(remaining_fuel, function, pc)?;
+                                }
                                 frames.last_mut().expect("execution frame").pc = *target;
                                 continue;
                             }
@@ -1146,6 +1134,23 @@ fn sequences_equal(
     Ok(true)
 }
 
+fn consume_fuel(
+    remaining_fuel: &mut usize,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> Result<(), RuntimeError> {
+    if *remaining_fuel == 0 {
+        return Err(error(
+            RuntimeErrorKind::FuelExhausted,
+            "evaluation fuel exhausted",
+            function,
+            pc,
+        ));
+    }
+    *remaining_fuel -= 1;
+    Ok(())
+}
+
 fn validate_jump(
     target: usize,
     function: &BytecodeFunction,
@@ -1410,11 +1415,11 @@ mod tests {
     }
 
     #[test]
-    fn enforces_budget_and_rejects_malformed_bytecode() {
+    fn enforces_fuel_and_rejects_malformed_bytecode() {
         let loop_function =
             BytecodeFunction::new("loop", 0, vec![], vec![Instruction::Jump { target: 0 }]);
         let error = Vm::new().execute(&loop_function, 5).unwrap_err();
-        assert_eq!(error.kind, RuntimeErrorKind::BudgetExceeded);
+        assert_eq!(error.kind, RuntimeErrorKind::FuelExhausted);
 
         let invalid = BytecodeFunction::new(
             "invalid",
@@ -1424,6 +1429,191 @@ mod tests {
         );
         let error = Vm::new().execute(&invalid, 5).unwrap_err();
         assert_eq!(error.kind, RuntimeErrorKind::InvalidBytecode);
+    }
+
+    #[test]
+    fn straight_line_and_forward_control_flow_need_no_fuel() {
+        let straight = BytecodeFunction::new(
+            "straight",
+            1,
+            vec![Value::Int(42)],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::Return { src: Register(0) },
+            ],
+        );
+        assert!(matches!(
+            Vm::new().execute(&straight, 0).unwrap(),
+            Value::Int(42)
+        ));
+
+        let forward = BytecodeFunction::new(
+            "forward",
+            1,
+            vec![Value::Int(42)],
+            vec![
+                Instruction::Jump { target: 2 },
+                Instruction::Fail {
+                    message: "skipped".into(),
+                },
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::Return { src: Register(0) },
+            ],
+        );
+        assert!(matches!(
+            Vm::new().execute(&forward, 0).unwrap(),
+            Value::Int(42)
+        ));
+    }
+
+    #[test]
+    fn only_taken_back_edges_consume_fuel() {
+        let untaken = BytecodeFunction::new(
+            "untaken",
+            1,
+            vec![Value::bool(true)],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::JumpIfFalse {
+                    condition: Register(0),
+                    target: 0,
+                },
+                Instruction::Return { src: Register(0) },
+            ],
+        );
+        assert!(Vm::new().execute(&untaken, 0).is_ok());
+
+        let one_back_edge = BytecodeFunction::new(
+            "one-back-edge",
+            1,
+            vec![Value::bool(false), Value::bool(true)],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::Jump { target: 3 },
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 1,
+                },
+                Instruction::JumpIfFalse {
+                    condition: Register(0),
+                    target: 2,
+                },
+                Instruction::Return { src: Register(0) },
+            ],
+        );
+        let exhausted = Vm::new().execute(&one_back_edge, 0).unwrap_err();
+        assert_eq!(exhausted.kind, RuntimeErrorKind::FuelExhausted);
+        assert!(Vm::new().execute(&one_back_edge, 1).is_ok());
+    }
+
+    #[test]
+    fn bytecode_and_native_calls_each_consume_one_fuel() {
+        let callee = Arc::new(BytecodeFunction::new(
+            "callee",
+            1,
+            vec![Value::Int(42)],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::Return { src: Register(0) },
+            ],
+        ));
+        let bytecode = BytecodeFunction::new(
+            "bytecode-call",
+            2,
+            vec![Value::Func(Arc::new(Closure::new(callee, Vec::new())))],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::Call {
+                    dst: Register(1),
+                    callee: Register(0),
+                    arguments: vec![],
+                },
+                Instruction::Return { src: Register(1) },
+            ],
+        );
+        assert_eq!(
+            Vm::new().execute(&bytecode, 0).unwrap_err().kind,
+            RuntimeErrorKind::FuelExhausted
+        );
+        assert!(Vm::new().execute(&bytecode, 1).is_ok());
+
+        let nested = BytecodeFunction::new(
+            "nested-call",
+            2,
+            vec![Value::Func(Arc::new(Closure::new(
+                Arc::new(bytecode),
+                Vec::new(),
+            )))],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::Call {
+                    dst: Register(1),
+                    callee: Register(0),
+                    arguments: vec![],
+                },
+                Instruction::Return { src: Register(1) },
+            ],
+        );
+        assert_eq!(
+            Vm::new().execute(&nested, 1).unwrap_err().kind,
+            RuntimeErrorKind::FuelExhausted
+        );
+        assert!(Vm::new().execute(&nested, 2).is_ok());
+
+        let native = NativeFunction::new("add_upvalue", 1, native_add_upvalue);
+        let native = BytecodeFunction::new(
+            "native-call",
+            3,
+            vec![
+                Value::Func(Arc::new(Closure::native_with_upvalues(
+                    native,
+                    vec![Value::Int(40)],
+                ))),
+                Value::Int(2),
+            ],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::LoadConst {
+                    dst: Register(1),
+                    constant: 1,
+                },
+                Instruction::Call {
+                    dst: Register(2),
+                    callee: Register(0),
+                    arguments: vec![Register(1)],
+                },
+                Instruction::Return { src: Register(2) },
+            ],
+        );
+        assert_eq!(
+            Vm::new().execute(&native, 0).unwrap_err().kind,
+            RuntimeErrorKind::FuelExhausted
+        );
+        assert!(Vm::new().execute(&native, 1).is_ok());
     }
 
     fn native_add_upvalue(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {

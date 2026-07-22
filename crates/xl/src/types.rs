@@ -12,7 +12,7 @@ use crate::value::{Atom, Closure, NativeError, NativeFunction, Value};
 use crate::{BuiltinAtom, CallContext, ValueKind, ValueRef, Vm};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-const DEFAULT_TOOL_BUDGET: usize = 100_000;
+const DEFAULT_TOOL_FUEL: usize = 100_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TypeDescriptor {
@@ -129,13 +129,13 @@ pub struct Analysis {
 }
 
 pub fn analyze_source(source_name: &str, source: &str) -> Result<Analysis, FrontendError> {
-    analyze_source_with_budget(source_name, source, DEFAULT_TOOL_BUDGET)
+    analyze_source_with_fuel(source_name, source, DEFAULT_TOOL_FUEL)
 }
 
-pub fn analyze_source_with_budget(
+pub fn analyze_source_with_fuel(
     source_name: &str,
     source: &str,
-    instruction_budget: usize,
+    evaluation_fuel: usize,
 ) -> Result<Analysis, FrontendError> {
     let mut sources = SourceDatabase::default();
     let source_id = sources.add(source_name, source);
@@ -153,7 +153,7 @@ pub fn analyze_source_with_budget(
     analyze_program_with_bindings(
         source_name,
         &program,
-        instruction_budget,
+        evaluation_fuel,
         &BTreeMap::new(),
         &HashSet::new(),
         &sources,
@@ -165,12 +165,12 @@ pub(crate) fn analyze_program_registered(
     source_name: &str,
     sources: &SourceDatabase,
     program: &Program,
-    instruction_budget: usize,
+    evaluation_fuel: usize,
 ) -> Result<Analysis, FrontendError> {
     analyze_program_with_bindings(
         source_name,
         program,
-        instruction_budget,
+        evaluation_fuel,
         &BTreeMap::new(),
         &HashSet::new(),
         sources,
@@ -181,7 +181,7 @@ pub(crate) fn analyze_program_registered(
 pub(crate) fn analyze_program_with_bindings(
     source_name: &str,
     program: &Program,
-    instruction_budget: usize,
+    evaluation_fuel: usize,
     external_values: &BTreeMap<String, Value>,
     dynamic_bindings: &HashSet<String>,
     sources: &SourceDatabase,
@@ -218,7 +218,7 @@ pub(crate) fn analyze_program_with_bindings(
                     source_name,
                     &binding.value.value,
                     &tool_values,
-                    instruction_budget,
+                    evaluation_fuel,
                     sources,
                 )?;
                 let descriptor = TypeDescriptor::from_value(&value).map_err(|message| {
@@ -242,7 +242,7 @@ pub(crate) fn analyze_program_with_bindings(
                         source_name,
                         annotation,
                         &tool_values,
-                        instruction_budget,
+                        evaluation_fuel,
                         sources,
                     )?;
                     let expected = TypeDescriptor::from_value(&metadata).map_err(|message| {
@@ -300,7 +300,7 @@ pub(crate) fn analyze_program_with_bindings(
                     source_name,
                     &binding.value.value,
                     &tool_values,
-                    instruction_budget,
+                    evaluation_fuel,
                     sources,
                 ) {
                     tool_values.insert(binding.value.name.value.clone(), value);
@@ -371,7 +371,7 @@ fn evaluate_tool_expression(
     source_name: &str,
     expression: &Expr,
     bindings: &BTreeMap<String, Value>,
-    instruction_budget: usize,
+    evaluation_fuel: usize,
     sources: &SourceDatabase,
 ) -> Result<Value, FrontendError> {
     let function = compile_expression_with_bindings(
@@ -382,7 +382,7 @@ fn evaluate_tool_expression(
         sources.get(expression.location.source),
     )?;
     Vm::new()
-        .execute(&function, instruction_budget)
+        .execute(&function, evaluation_fuel)
         .map_err(|error| {
             frontend_error(
                 source_name,
@@ -1271,9 +1271,9 @@ mod tests {
     }
 
     #[test]
-    fn tool_stage_respects_its_budget() {
-        let error = analyze_source_with_budget("test", "type Number = Int; 0", 1).unwrap_err();
-        assert!(error.message.contains("budget"));
+    fn tool_stage_respects_evaluation_fuel() {
+        let error = analyze_source_with_fuel("test", "type Number = Array(Int); 0", 0).unwrap_err();
+        assert!(error.message.contains("fuel"));
     }
 
     #[test]
