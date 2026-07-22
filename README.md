@@ -10,6 +10,7 @@ The current MVP demonstrates:
 - Rust-like expression syntax with `fn(args) { ... }` closures and `|>`;
 - immutable Dict, Array, Tuple, Atom, and primitive values;
 - Erlang-style tagged tuples and pattern matching;
+- explicit single-assignment recursion with proper tail calls;
 - ordinary functions that compute Type metadata in a tool-stage VM;
 - structural annotations and runtime validation from the same metadata;
 - `.xl` and `.json` modules in a closed dependency graph;
@@ -56,8 +57,8 @@ for non-first pipeline insertion are deferred.
 
 ## Current limits
 
-The MVP has no effects, recursion, package manager, LSP server, traits, HKT,
-YAML/TOML modules, normalization protocol, or production garbage collector.
+The MVP has no effects, package manager, LSP server, traits, HKT, YAML/TOML
+modules, normalization protocol, or production garbage collector.
 Function signatures are dynamically checked and static inference deliberately
 falls back to `Any` where the focused checker has no precise model.
 

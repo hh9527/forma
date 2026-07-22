@@ -116,8 +116,7 @@ pub(crate) fn compile_expression_with_bindings(
         let register = compiler.load_constant(value.clone(), expression.location);
         compiler.environment.insert(name.clone(), register);
     }
-    let result = compiler.compile_expr(expression)?;
-    compiler.emit_synthetic(Operation::Return { src: result }, expression.location);
+    compiler.compile_tail_expr(expression)?;
     compiler.finish()
 }
 
@@ -206,8 +205,7 @@ impl<'a> Compiler<'a> {
                 compiler.environment.insert(name.clone(), register);
             }
         }
-        let result = compiler.compile_block(&program.value.body)?;
-        compiler.emit_synthetic(Operation::Return { src: result }, program.location);
+        compiler.compile_tail_block(&program.value.body)?;
         compiler.finish()
     }
 
@@ -301,6 +299,20 @@ impl<'a> Compiler<'a> {
     }
 
     fn compile_block(&mut self, block: &Block) -> Result<RegisterId, FrontendError> {
+        self.compile_block_inner(block, false)?
+            .ok_or_else(|| frontend_error(self.source_name, "value block did not produce a value"))
+    }
+
+    fn compile_tail_block(&mut self, block: &Block) -> Result<(), FrontendError> {
+        self.compile_block_inner(block, true)?;
+        Ok(())
+    }
+
+    fn compile_block_inner(
+        &mut self,
+        block: &Block,
+        tail: bool,
+    ) -> Result<Option<RegisterId>, FrontendError> {
         let outer = self.environment.clone();
         let outer_up_links = self.up_link_bindings.clone();
         let outer_definitions = self.definition_bindings.clone();
@@ -483,7 +495,12 @@ impl<'a> Compiler<'a> {
         for (link, location, _) in declared.values() {
             self.emit(Operation::AssertUpLinkReady { link: *link }, *location);
         }
-        let result = self.compile_expr(&block.value.result)?;
+        let result = if tail {
+            self.compile_tail_expr(&block.value.result)?;
+            None
+        } else {
+            Some(self.compile_expr(&block.value.result)?)
+        };
         self.environment = outer;
         self.up_link_bindings = outer_up_links;
         self.definition_bindings = outer_definitions;
@@ -601,44 +618,16 @@ impl<'a> Compiler<'a> {
                 Ok(dst)
             }
             ExprKind::Call { callee, arguments } => {
-                let callee = self.compile_expr(callee)?;
-                let arguments = self.compile_many(arguments)?;
-                let argument_base = if arguments.is_empty() {
-                    RegisterId(0)
-                } else {
-                    let base = self.allocate();
-                    self.emit(
-                        Operation::Move {
-                            dst: base,
-                            src: arguments[0],
-                        },
-                        expression.location,
-                    );
-                    for argument in arguments.iter().skip(1) {
-                        let destination = self.allocate();
-                        self.emit(
-                            Operation::Move {
-                                dst: destination,
-                                src: *argument,
-                            },
-                            expression.location,
-                        );
-                    }
-                    base
-                };
-                let dst = self.allocate();
+                let (base, argument_count) =
+                    self.compile_call_window(callee, arguments, expression.location)?;
                 self.emit(
                     Operation::Call {
-                        dst,
-                        callee,
-                        argument_base,
-                        argument_count: u32::try_from(arguments.len()).map_err(|_| {
-                            frontend_error(self.source_name, "too many call arguments")
-                        })?,
+                        base,
+                        argument_count,
                     },
                     expression.location,
                 );
-                Ok(dst)
+                Ok(base)
             }
             ExprKind::Closure { parameters, body } => {
                 self.compile_closure(parameters, body, expression.location)
@@ -650,6 +639,67 @@ impl<'a> Compiler<'a> {
             } => self.compile_if(condition, then_branch, else_branch, expression.location),
             ExprKind::Match { value, arms } => self.compile_match(value, arms, expression.location),
         }
+    }
+
+    fn compile_tail_expr(&mut self, expression: &Expr) -> Result<(), FrontendError> {
+        match &expression.value {
+            ExprKind::Call { callee, arguments } => {
+                let (base, argument_count) =
+                    self.compile_call_window(callee, arguments, expression.location)?;
+                self.emit(
+                    Operation::TailCall {
+                        base,
+                        argument_count,
+                    },
+                    expression.location,
+                );
+            }
+            ExprKind::Block(block) => self.compile_tail_block(block)?,
+            ExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => self.compile_tail_if(condition, then_branch, else_branch)?,
+            ExprKind::Match { value, arms } => {
+                self.compile_tail_match(value, arms, expression.location)?
+            }
+            _ => {
+                let result = self.compile_expr(expression)?;
+                self.emit_synthetic(Operation::Return { src: result }, expression.location);
+            }
+        }
+        Ok(())
+    }
+
+    fn compile_call_window(
+        &mut self,
+        callee: &Expr,
+        arguments: &[Expr],
+        location: Location,
+    ) -> Result<(RegisterId, u32), FrontendError> {
+        let callee = self.compile_expr(callee)?;
+        let arguments = self.compile_many(arguments)?;
+        let base = self.allocate();
+        self.emit(
+            Operation::Move {
+                dst: base,
+                src: callee,
+            },
+            location,
+        );
+        for argument in &arguments {
+            let destination = self.allocate();
+            self.emit(
+                Operation::Move {
+                    dst: destination,
+                    src: *argument,
+                },
+                location,
+            );
+        }
+        let argument_count = u32::try_from(arguments.len())
+            .map_err(|_| frontend_error(self.source_name, "too many call arguments"))?;
+        Ok((base, argument_count))
     }
 
     fn compile_many(&mut self, expressions: &[Expr]) -> Result<Vec<RegisterId>, FrontendError> {
@@ -736,8 +786,7 @@ impl<'a> Compiler<'a> {
             &captured_up_links,
             &captured_definitions,
         )?;
-        let result = nested.compile_block(body)?;
-        nested.emit_synthetic(Operation::Return { src: result }, body.location);
+        nested.compile_tail_block(body)?;
         let function = Box::new(nested.finish_lir());
 
         let dst = self.allocate();
@@ -793,6 +842,27 @@ impl<'a> Compiler<'a> {
         Ok(result)
     }
 
+    fn compile_tail_if(
+        &mut self,
+        condition: &Expr,
+        then_branch: &Block,
+        else_branch: &Block,
+    ) -> Result<(), FrontendError> {
+        let condition_location = condition.location;
+        let condition = self.compile_expr(condition)?;
+        let else_label = self.new_label();
+        self.emit(
+            Operation::JumpIfFalse {
+                condition,
+                target: else_label,
+            },
+            condition_location,
+        );
+        self.compile_tail_block(then_branch)?;
+        self.mark_label(else_label);
+        self.compile_tail_block(else_branch)
+    }
+
     fn compile_match(
         &mut self,
         value: &Expr,
@@ -840,6 +910,40 @@ impl<'a> Compiler<'a> {
             self.mark_label(jump);
         }
         Ok(result)
+    }
+
+    fn compile_tail_match(
+        &mut self,
+        value: &Expr,
+        arms: &[MatchArm],
+        location: Location,
+    ) -> Result<(), FrontendError> {
+        let value = self.compile_expr(value)?;
+
+        for arm in arms {
+            let outer = self.environment.clone();
+            let mut failures = Vec::new();
+            let mut pattern_bindings = HashSet::new();
+            self.compile_pattern(
+                &arm.value.pattern,
+                value,
+                &mut failures,
+                &mut pattern_bindings,
+            )?;
+            self.compile_tail_expr(&arm.value.value)?;
+            for failure in failures {
+                self.mark_label(failure);
+            }
+            self.environment = outer;
+        }
+
+        self.emit(
+            Operation::Fail {
+                message: "no match arm accepted the value".into(),
+            },
+            location,
+        );
+        Ok(())
     }
 
     fn compile_pattern(
@@ -1314,6 +1418,83 @@ mod tests {
     }
 
     #[test]
+    fn proper_tail_calls_cross_recursive_branches_and_match_arms() {
+        let direct =
+            run("fn countdown(n) { if n < 1 { 0 } else { countdown(n - 1) } } countdown(1500)")
+                .unwrap();
+        assert!(matches!(direct, Value::Int(0)));
+
+        let mutual = run(
+            "decl even: fn(Int) -> Int; decl odd: fn(Int) -> Int; def even = fn(n) { if n < 1 { 0 } else { odd(n - 1) } }; def odd = fn(n) { if n < 1 { 1 } else { even(n - 1) } }; even(1500)",
+        )
+        .unwrap();
+        assert!(matches!(mutual, Value::Int(0)));
+
+        let matched = run(
+            "fn countdown(n) { match n { 0 => 0, value => countdown(value - 1) } } countdown(1500)",
+        )
+        .unwrap();
+        assert!(matches!(matched, Value::Int(0)));
+
+        let higher_order = run(
+            "let iterate = fn(step, n) { if n < 1 { 0 } else { step(step, n - 1) } }; iterate(iterate, 1500)",
+        )
+        .unwrap();
+        assert!(matches!(higher_order, Value::Int(0)));
+
+        let non_tail =
+            run("fn descend(n) { if n < 1 { 0 } else { 1 + descend(n - 1) } } descend(1500)")
+                .unwrap_err();
+        assert!(matches!(
+            non_tail,
+            ExecutionError::Runtime(RuntimeError {
+                kind: RuntimeErrorKind::CallDepthExceeded,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn emits_contiguous_call_windows_and_structural_tail_calls() {
+        let tail = compile_source("test", "let id = fn(x) { x }; id(1)").unwrap();
+        assert!(matches!(
+            tail.instructions().last(),
+            Some(crate::Opcode::TailCall {
+                argument_count: 1,
+                ..
+            })
+        ));
+
+        let non_tail =
+            compile_source("test", "let id = fn(x) { x }; let value = id(1); value").unwrap();
+        assert!(non_tail.instructions().iter().any(|instruction| matches!(
+            instruction,
+            crate::Opcode::Call {
+                argument_count: 1,
+                ..
+            }
+        )));
+        assert!(matches!(
+            non_tail.instructions().last(),
+            Some(crate::Opcode::Return { .. })
+        ));
+
+        let branches = compile_source(
+            "test",
+            "let id = fn(x) { x }; if 'True { id(1) } else { id(2) }",
+        )
+        .unwrap();
+        assert_eq!(
+            branches
+                .instructions()
+                .iter()
+                .filter(|instruction| matches!(instruction, crate::Opcode::TailCall { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
     fn definition_contract_failures_keep_source_origins() {
         let missing = run("decl missing: fn(Int) -> Int; 0").unwrap_err();
         assert!(
@@ -1464,7 +1645,8 @@ mod tests {
 
     #[test]
     fn runtime_errors_retain_expression_origins_and_call_trace() {
-        let error = run("let divide = fn(x) {\n  x / 0\n};\ndivide(4)").unwrap_err();
+        let error =
+            run("let divide = fn(x) {\n  x / 0\n};\nlet result = divide(4); result").unwrap_err();
         let ExecutionError::Runtime(error) = error else {
             panic!("expected runtime error");
         };
@@ -1475,6 +1657,12 @@ mod tests {
         };
         assert_eq!(location.range.start, 23);
         assert!(error.to_string().contains("test:2:3"));
+
+        let tail = run("let divide = fn(x) { x / 0 }; divide(4)").unwrap_err();
+        let ExecutionError::Runtime(tail) = tail else {
+            panic!("expected runtime error");
+        };
+        assert_eq!(tail.trace.len(), 1);
     }
 
     #[test]

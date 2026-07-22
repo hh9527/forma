@@ -1,6 +1,6 @@
 # RFC 0014: Contiguous Call Windows and Tail Calls
 
-- Status: Accepted for implementation
+- Status: Implemented
 
 ## Summary
 
@@ -197,3 +197,26 @@ facility.
    retaining an unbounded eliminated-frame history.
 10. Existing language, module, heap, quota, source-origin, and CLI behavior
     remains unchanged.
+
+## Implementation result
+
+Implemented across the compiler, register LIR, linked bytecode, and VM. The
+logical `Call` and `TailCall` Opcodes now contain only a base register and an
+argument count. The compiler materializes `[callee, arguments...]` windows,
+and ordinary results overwrite the callee slot.
+
+Function bodies compile structurally in tail context. Blocks, both `if`
+branches, and every `match` arm propagate that context; intermediate calls
+remain ordinary calls. Bytecode tail calls replace the active frame at the
+same stack base, while native tail calls release the bytecode window before
+opening `CallContext` and forward their result to the original caller.
+
+Runtime validation rejects malformed call windows without panicking. Tests
+cover calls through direct, mutual, higher-order, and up-link-backed recursion
+beyond the physical frame limit; non-tail recursion still reaches the limit.
+Native tail calls, fuel, larger replacement frames, stack quota, and the
+physical-trace policy are covered independently.
+
+The compiler still allocates monotonic temporary registers and emits moves to
+form each call window. Reusable scratch windows and move elimination remain the
+deferred optimization described above.

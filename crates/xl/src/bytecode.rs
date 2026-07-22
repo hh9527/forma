@@ -112,9 +112,12 @@ pub enum Instruction {
         captures: Vec<Register>,
     },
     Call {
-        dst: Register,
-        callee: Register,
-        arguments: Vec<Register>,
+        base: Register,
+        argument_count: usize,
+    },
+    TailCall {
+        base: Register,
+        argument_count: usize,
     },
     Jump {
         target: usize,
@@ -230,9 +233,12 @@ pub enum Opcode {
         captures: Vec<Register>,
     },
     Call {
-        dst: Register,
-        callee: Register,
-        arguments: Vec<Register>,
+        base: Register,
+        argument_count: usize,
+    },
+    TailCall {
+        base: Register,
+        argument_count: usize,
     },
     Jump {
         target: usize,
@@ -539,13 +545,18 @@ fn link_instruction(instruction: Instruction, links: &mut LinkingTable) -> Opcod
             }
         }
         Instruction::Call {
-            dst,
-            callee,
-            arguments,
+            base,
+            argument_count,
         } => Opcode::Call {
-            dst,
-            callee,
-            arguments,
+            base,
+            argument_count,
+        },
+        Instruction::TailCall {
+            base,
+            argument_count,
+        } => Opcode::TailCall {
+            base,
+            argument_count,
         },
         Instruction::Jump { target } => Opcode::Jump { target },
         Instruction::JumpIfFalse { condition, target } => Opcode::JumpIfFalse { condition, target },

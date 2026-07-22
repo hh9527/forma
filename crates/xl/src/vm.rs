@@ -1338,11 +1338,10 @@ impl Vm {
                         write_register(&mut registers, *dst, closure, function, pc)?;
                     }
                     Opcode::Call {
-                        dst,
-                        callee,
-                        arguments,
+                        base: call_base,
+                        argument_count,
                     } => {
-                        let callee = *read_register(&registers, *callee, function, pc)?;
+                        let callee = *read_register(&registers, *call_base, function, pc)?;
                         let RuntimeValue::Func(closure_handle) = callee else {
                             return Err(runtime_type_error("Func", &callee, &view, function, pc));
                         };
@@ -1357,7 +1356,13 @@ impl Vm {
                             })?;
                         let upvalues = upvalues.to_vec();
                         consume_fuel(account, function, pc)?;
-                        let arguments = read_many(&registers, arguments, function, pc)?;
+                        let arguments = read_call_arguments(
+                            &registers,
+                            *call_base,
+                            *argument_count,
+                            function,
+                            pc,
+                        )?;
                         match runtime_prototype {
                             crate::heap::RuntimePrototype::Bytecode(prototype) => {
                                 if frames.len() >= MAX_CALL_DEPTH {
@@ -1387,7 +1392,7 @@ impl Vm {
                                     prototype,
                                     &arguments,
                                     &upvalues,
-                                    Some(*dst),
+                                    Some(*call_base),
                                     &mut stack,
                                     account.stack_limit(),
                                 )
@@ -1454,8 +1459,148 @@ impl Vm {
                                         pc,
                                     )
                                 })?;
-                                write_register(&mut stack[base..end], *dst, value, function, pc)?;
+                                write_register(
+                                    &mut stack[base..end],
+                                    *call_base,
+                                    value,
+                                    function,
+                                    pc,
+                                )?;
                                 frames.last_mut().expect("execution frame").pc += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    Opcode::TailCall {
+                        base: call_base,
+                        argument_count,
+                    } => {
+                        let callee = *read_register(&registers, *call_base, function, pc)?;
+                        let RuntimeValue::Func(closure_handle) = callee else {
+                            return Err(runtime_type_error("Func", &callee, &view, function, pc));
+                        };
+                        let (runtime_prototype, upvalues) =
+                            view.closure(closure_handle).map_err(|heap_error| {
+                                error(
+                                    RuntimeErrorKind::InvalidBytecode,
+                                    heap_error.to_string(),
+                                    function,
+                                    pc,
+                                )
+                            })?;
+                        let upvalues = upvalues.to_vec();
+                        consume_fuel(account, function, pc)?;
+                        let arguments = read_call_arguments(
+                            &registers,
+                            *call_base,
+                            *argument_count,
+                            function,
+                            pc,
+                        )?;
+                        match runtime_prototype {
+                            crate::heap::RuntimePrototype::Bytecode(prototype) => {
+                                let (code, _, _, _) =
+                                    view.bytecode(prototype).map_err(|heap_error| {
+                                        error(
+                                            RuntimeErrorKind::InvalidBytecode,
+                                            heap_error.to_string(),
+                                            function,
+                                            pc,
+                                        )
+                                    })?;
+                                let callee_function =
+                                    Arc::new(BytecodeFunction::from_linked_code(Arc::clone(code)));
+                                let current_frame = frames.last().expect("tail caller frame");
+                                let frame_base = current_frame.base;
+                                let return_destination = current_frame.return_destination;
+                                let _ = registers;
+                                stack.truncate(frame_base);
+                                let next = make_execution_frame(
+                                    callee_function,
+                                    prototype,
+                                    &arguments,
+                                    &upvalues,
+                                    return_destination,
+                                    &mut stack,
+                                    account.stack_limit(),
+                                )
+                                .map_err(|runtime_error| {
+                                    error(runtime_error.kind, runtime_error.message, function, pc)
+                                })?;
+                                *frames.last_mut().expect("tail caller frame") = next;
+                                continue;
+                            }
+                            crate::heap::RuntimePrototype::Native(native) => {
+                                if arguments.len() != native.arity() {
+                                    return Err(error(
+                                        RuntimeErrorKind::TypeMismatch,
+                                        format!(
+                                            "expected {} arguments, got {}",
+                                            native.arity(),
+                                            arguments.len()
+                                        ),
+                                        function,
+                                        pc,
+                                    ));
+                                }
+                                let completed = frames.last().expect("tail caller frame");
+                                let frame_base = completed.base;
+                                let _ = registers;
+                                stack.truncate(frame_base);
+                                let mut context = CallContext::new(
+                                    &mut current,
+                                    Some(background),
+                                    &mut stack,
+                                    account,
+                                    arguments,
+                                    &upvalues,
+                                )
+                                .map_err(|native_error| {
+                                    error(
+                                        RuntimeErrorKind::StackLimitExceeded,
+                                        format!("{}: {}", native.name(), native_error.message),
+                                        function,
+                                        pc,
+                                    )
+                                })?;
+                                (native.callback())(&mut context).map_err(|native_error| {
+                                    error(
+                                        match native_error.limit() {
+                                            Some(NativeLimit::Stack) => {
+                                                RuntimeErrorKind::StackLimitExceeded
+                                            }
+                                            Some(NativeLimit::Allocation) => {
+                                                RuntimeErrorKind::AllocationQuotaExceeded
+                                            }
+                                            None => RuntimeErrorKind::TypeMismatch,
+                                        },
+                                        format!("{}: {}", native.name(), native_error.message),
+                                        function,
+                                        pc,
+                                    )
+                                })?;
+                                let value = context.take_result().map_err(|native_error| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        format!("{}: {}", native.name(), native_error.message),
+                                        function,
+                                        pc,
+                                    )
+                                })?;
+                                let completed = frames.pop().expect("tail caller frame");
+                                let Some(destination) = completed.return_destination else {
+                                    return Ok(value);
+                                };
+                                let caller = frames.last().expect("tail call has a caller");
+                                let caller_function = caller.function.clone();
+                                let caller_end = caller.base + caller.function.register_count();
+                                write_register(
+                                    &mut stack[caller.base..caller_end],
+                                    destination,
+                                    value,
+                                    &caller_function,
+                                    caller.pc.saturating_sub(1),
+                                )?;
                                 continue;
                             }
                         }
@@ -1677,6 +1822,53 @@ fn read_many(
     items
         .iter()
         .map(|register| read_register(registers, *register, function, pc).copied())
+        .collect()
+}
+
+fn read_call_arguments(
+    registers: &[Option<RuntimeValue>],
+    base: Register,
+    argument_count: usize,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> Result<Vec<RuntimeValue>, RuntimeError> {
+    let start = base.0.checked_add(1).ok_or_else(|| {
+        error(
+            RuntimeErrorKind::InvalidBytecode,
+            "call window overflows",
+            function,
+            pc,
+        )
+    })?;
+    let end = start.checked_add(argument_count).ok_or_else(|| {
+        error(
+            RuntimeErrorKind::InvalidBytecode,
+            "call window overflows",
+            function,
+            pc,
+        )
+    })?;
+    let arguments = registers.get(start..end).ok_or_else(|| {
+        error(
+            RuntimeErrorKind::InvalidBytecode,
+            "call window is out of bounds",
+            function,
+            pc,
+        )
+    })?;
+    arguments
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value.as_ref().copied().ok_or_else(|| {
+                error(
+                    RuntimeErrorKind::InvalidBytecode,
+                    format!("call argument register {} is uninitialized", start + index),
+                    function,
+                    pc,
+                )
+            })
+        })
         .collect()
 }
 
@@ -2158,6 +2350,28 @@ mod tests {
         );
         let error = Vm::new().execute(&invalid, 5).unwrap_err();
         assert_eq!(error.kind, RuntimeErrorKind::InvalidBytecode);
+
+        let invalid_call_window = BytecodeFunction::new(
+            "invalid-call-window",
+            1,
+            vec![Value::Func(Arc::new(Closure::native(NativeFunction::new(
+                "identity",
+                1,
+                native_identity,
+            ))))],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::TailCall {
+                    base: Register(0),
+                    argument_count: 1,
+                },
+            ],
+        );
+        let error = Vm::new().execute(&invalid_call_window, 5).unwrap_err();
+        assert_eq!(error.kind, RuntimeErrorKind::InvalidBytecode);
     }
 
     #[test]
@@ -2271,11 +2485,10 @@ mod tests {
                     constant: 0,
                 },
                 Instruction::Call {
-                    dst: Register(1),
-                    callee: Register(0),
-                    arguments: vec![],
+                    base: Register(0),
+                    argument_count: 0,
                 },
-                Instruction::Return { src: Register(1) },
+                Instruction::Return { src: Register(0) },
             ],
         );
         assert_eq!(
@@ -2297,11 +2510,10 @@ mod tests {
                     constant: 0,
                 },
                 Instruction::Call {
-                    dst: Register(1),
-                    callee: Register(0),
-                    arguments: vec![],
+                    base: Register(0),
+                    argument_count: 0,
                 },
-                Instruction::Return { src: Register(1) },
+                Instruction::Return { src: Register(0) },
             ],
         );
         assert_eq!(
@@ -2331,11 +2543,10 @@ mod tests {
                     constant: 1,
                 },
                 Instruction::Call {
-                    dst: Register(2),
-                    callee: Register(0),
-                    arguments: vec![Register(1)],
+                    base: Register(0),
+                    argument_count: 1,
                 },
-                Instruction::Return { src: Register(2) },
+                Instruction::Return { src: Register(0) },
             ],
         );
         assert_eq!(
@@ -2357,6 +2568,90 @@ mod tests {
         context.set_int(context.result(), argument + upvalue)
     }
 
+    fn native_identity(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+        let value = context
+            .value(context.argument(0)?)?
+            .as_int()
+            .ok_or_else(|| NativeError::new("expected Int argument"))?;
+        context.set_int(context.result(), value)
+    }
+
+    #[test]
+    fn tail_calls_native_functions_and_replace_bytecode_frames() {
+        let native = NativeFunction::new("identity", 1, native_identity);
+        let native_tail = BytecodeFunction::new(
+            "native-tail",
+            2,
+            vec![
+                Value::Func(Arc::new(Closure::native(native))),
+                Value::Int(42),
+            ],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::LoadConst {
+                    dst: Register(1),
+                    constant: 1,
+                },
+                Instruction::TailCall {
+                    base: Register(0),
+                    argument_count: 1,
+                },
+            ],
+        );
+        assert_eq!(
+            Vm::new().execute(&native_tail, 0).unwrap_err().kind,
+            RuntimeErrorKind::FuelExhausted
+        );
+        assert!(matches!(
+            Vm::new().execute(&native_tail, 1).unwrap(),
+            Value::Int(42)
+        ));
+
+        let large = Arc::new(BytecodeFunction::new(
+            "large-frame",
+            100,
+            vec![Value::Int(7)],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::Return { src: Register(0) },
+            ],
+        ));
+        let replace = BytecodeFunction::new(
+            "small-frame",
+            1,
+            vec![Value::Func(Arc::new(Closure::new(large, Vec::new())))],
+            vec![
+                Instruction::LoadConst {
+                    dst: Register(0),
+                    constant: 0,
+                },
+                Instruction::TailCall {
+                    base: Register(0),
+                    argument_count: 0,
+                },
+            ],
+        );
+        assert!(matches!(
+            Vm::new()
+                .execute_with_quota(&replace, Quota::new(1, 100, u64::MAX))
+                .unwrap(),
+            Value::Int(7)
+        ));
+        assert_eq!(
+            Vm::new()
+                .execute_with_quota(&replace, Quota::new(1, 99, u64::MAX))
+                .unwrap_err()
+                .kind,
+            RuntimeErrorKind::StackLimitExceeded
+        );
+    }
+
     #[test]
     fn native_closures_use_register_context_and_upvalues() {
         let native = NativeFunction::new("add_upvalue", 1, native_add_upvalue);
@@ -2375,11 +2670,10 @@ mod tests {
                     constant: 1,
                 },
                 Instruction::Call {
-                    dst: Register(2),
-                    callee: Register(0),
-                    arguments: vec![Register(1)],
+                    base: Register(0),
+                    argument_count: 1,
                 },
-                Instruction::Return { src: Register(2) },
+                Instruction::Return { src: Register(0) },
             ],
         );
         assert!(matches!(
@@ -2414,11 +2708,10 @@ mod tests {
                         constant: 0,
                     },
                     Instruction::Call {
-                        dst: Register(1),
-                        callee: Register(0),
-                        arguments: vec![],
+                        base: Register(0),
+                        argument_count: 0,
                     },
-                    Instruction::Return { src: Register(1) },
+                    Instruction::Return { src: Register(0) },
                 ],
             ));
         }
@@ -2454,11 +2747,10 @@ mod tests {
                         constant: 0,
                     },
                     Instruction::Call {
-                        dst: Register(1),
-                        callee: Register(0),
-                        arguments: vec![],
+                        base: Register(0),
+                        argument_count: 0,
                     },
-                    Instruction::Return { src: Register(1) },
+                    Instruction::Return { src: Register(0) },
                 ],
             ));
         }
@@ -2511,11 +2803,10 @@ mod tests {
                         constant: 0,
                     },
                     Instruction::Call {
-                        dst: Register(1),
-                        callee: Register(0),
-                        arguments: vec![],
+                        base: Register(0),
+                        argument_count: 0,
                     },
-                    Instruction::Return { src: Register(1) },
+                    Instruction::Return { src: Register(0) },
                 ],
             ));
         }

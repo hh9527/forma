@@ -112,9 +112,11 @@ pub enum Operation {
         captures: Vec<RegisterId>,
     },
     Call {
-        dst: RegisterId,
-        callee: RegisterId,
-        argument_base: RegisterId,
+        base: RegisterId,
+        argument_count: u32,
+    },
+    TailCall {
+        base: RegisterId,
         argument_count: u32,
     },
     Jump {
@@ -358,25 +360,41 @@ fn lower_operation(
             captures: registers(captures)?,
         },
         Operation::Call {
-            dst,
-            callee,
-            argument_base,
+            base,
             argument_count,
         } => {
-            let base = usize::try_from(argument_base.0)
-                .map_err(|_| assembly_error("argument base is too large"))?;
+            let base = register(base)?;
             let count = usize::try_from(argument_count)
                 .map_err(|_| assembly_error("argument count is too large"))?;
             let end = base
+                .0
                 .checked_add(count)
-                .ok_or_else(|| assembly_error("argument range overflows"))?;
-            if end > register_count {
-                return Err(assembly_error("argument range is out of bounds"));
+                .ok_or_else(|| assembly_error("call window overflows"))?;
+            if end >= register_count {
+                return Err(assembly_error("call window is out of bounds"));
             }
             Instruction::Call {
-                dst: register(dst)?,
-                callee: register(callee)?,
-                arguments: (base..end).map(Register).collect(),
+                base,
+                argument_count: count,
+            }
+        }
+        Operation::TailCall {
+            base,
+            argument_count,
+        } => {
+            let base = register(base)?;
+            let count = usize::try_from(argument_count)
+                .map_err(|_| assembly_error("argument count is too large"))?;
+            let end = base
+                .0
+                .checked_add(count)
+                .ok_or_else(|| assembly_error("call window overflows"))?;
+            if end >= register_count {
+                return Err(assembly_error("call window is out of bounds"));
+            }
+            Instruction::TailCall {
+                base,
+                argument_count: count,
             }
         }
         Operation::Jump { target } => Instruction::Jump {
@@ -507,9 +525,7 @@ mod tests {
             constants: vec![],
             items: vec![Item::Operation(WithOrigin {
                 value: Operation::Call {
-                    dst: RegisterId(0),
-                    callee: RegisterId(0),
-                    argument_base: RegisterId(0),
+                    base: RegisterId(0),
                     argument_count: 2,
                 },
                 origin: origin(),
@@ -519,7 +535,7 @@ mod tests {
             assemble(bad_arguments)
                 .unwrap_err()
                 .message
-                .contains("argument range")
+                .contains("call window")
         );
 
         let duplicate_label = Function {
