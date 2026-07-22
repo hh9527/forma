@@ -482,6 +482,18 @@ pub struct RuntimeFrame {
 }
 
 impl RuntimeError {
+    pub(crate) fn from_heap_error(
+        function: &BytecodeFunction,
+        heap_error: crate::heap::HeapError,
+    ) -> Self {
+        error(
+            RuntimeErrorKind::InvalidBytecode,
+            heap_error.to_string(),
+            function,
+            0,
+        )
+    }
+
     pub fn origin(&self) -> Option<Origin> {
         self.trace.first().and_then(|frame| frame.origin)
     }
@@ -609,7 +621,14 @@ impl Vm {
         account: &mut QuotaAccount,
     ) -> Result<Value, RuntimeError> {
         let background = Heap::new(0);
-        let arena = self.execute_frame(&background, function, arguments, &[], account)?;
+        let arena = self.execute_frame(
+            &background,
+            &HashMap::new(),
+            function,
+            arguments,
+            &[],
+            account,
+        )?;
         HeapView {
             current: &arena.heap,
             background: Some(&background),
@@ -628,17 +647,19 @@ impl Vm {
     pub(crate) fn execute_in_background(
         &mut self,
         background: &Heap,
+        externals: &HashMap<String, RuntimeValue>,
         function: &BytecodeFunction,
         arguments: &[Value],
         account: &mut QuotaAccount,
     ) -> Result<ExecutionArena, RuntimeError> {
-        self.execute_frame(background, function, arguments, &[], account)
+        self.execute_frame(background, externals, function, arguments, &[], account)
     }
 
     #[allow(clippy::needless_borrow)]
     fn execute_frame(
         &mut self,
         background: &Heap,
+        externals: &HashMap<String, RuntimeValue>,
         function: &BytecodeFunction,
         arguments: &[Value],
         captures: &[Value],
@@ -653,7 +674,8 @@ impl Vm {
                 .stack_size(16 * 1024 * 1024)
                 .spawn_scoped(scope, || {
                     let mut current = Heap::new(1);
-                    let prototype = current.link_bytecode(Some(background), function)?;
+                    let prototype =
+                        current.link_bytecode_resolved(Some(background), function, externals)?;
                     Ok::<_, crate::heap::HeapError>((current, prototype))
                 })
                 .map_err(|_| crate::heap::HeapError::new("failed to start bytecode linker"))?

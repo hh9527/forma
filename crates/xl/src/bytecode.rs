@@ -226,6 +226,7 @@ pub struct FuncByteCode {
 #[derive(Clone, Debug, Default)]
 pub struct LinkingTable {
     values: Vec<Value>,
+    external_values: Vec<Option<Arc<str>>>,
     text: Vec<Arc<str>>,
     prototypes: Vec<Arc<BytecodeFunction>>,
 }
@@ -233,6 +234,10 @@ pub struct LinkingTable {
 impl LinkingTable {
     pub(crate) fn values(&self) -> &[Value] {
         &self.values
+    }
+
+    pub(crate) fn external_value(&self, index: usize) -> Option<&str> {
+        self.external_values.get(index)?.as_deref()
     }
 
     pub(crate) fn text(&self) -> &[Arc<str>] {
@@ -275,6 +280,7 @@ impl BytecodeFunction {
             code,
             links: LinkingTable {
                 values,
+                external_values: Vec::new(),
                 text,
                 prototypes,
             },
@@ -319,6 +325,7 @@ impl BytecodeFunction {
         debug_origins: Vec<DebugOriginRange>,
     ) -> Self {
         let mut links = LinkingTable {
+            external_values: vec![None; constants.len()],
             values: constants,
             ..LinkingTable::default()
         };
@@ -377,6 +384,7 @@ impl BytecodeFunction {
             code: Arc::clone(&self.code),
             links: LinkingTable {
                 values: self.links.values.iter().map(&mut value).collect(),
+                external_values: self.links.external_values.clone(),
                 text: self.links.text.iter().map(|item| text(item)).collect(),
                 prototypes: self.links.prototypes.iter().map(&mut prototype).collect(),
             },
@@ -401,6 +409,13 @@ impl BytecodeFunction {
 
     pub fn constants(&self) -> &[Value] {
         &self.links.values
+    }
+
+    pub(crate) fn bind_external_value(&mut self, index: usize, key: impl Into<Arc<str>>) {
+        self.links
+            .external_values
+            .resize(self.links.values.len(), None);
+        self.links.external_values[index] = Some(key.into());
     }
 
     pub fn instructions(&self) -> &[Opcode] {

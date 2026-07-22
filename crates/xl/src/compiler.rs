@@ -98,6 +98,7 @@ pub(crate) fn compile_expression_with_bindings(
         function_name: function_name.to_owned(),
         environment: HashMap::new(),
         constants: Vec::new(),
+        external_constant_links: Vec::new(),
         items: Vec::new(),
         next_register: 0,
         next_label: 0,
@@ -123,6 +124,7 @@ struct Compiler<'a> {
     function_name: String,
     environment: HashMap<String, RegisterId>,
     constants: Vec<Value>,
+    external_constant_links: Vec<(usize, String)>,
     items: Vec<Item>,
     next_register: u32,
     next_label: u32,
@@ -169,6 +171,7 @@ impl<'a> Compiler<'a> {
             function_name: source_name.to_owned(),
             environment: HashMap::new(),
             constants: Vec::new(),
+            external_constant_links: Vec::new(),
             items: Vec::new(),
             next_register: 0,
             next_label: 0,
@@ -248,6 +251,7 @@ impl<'a> Compiler<'a> {
             function_name,
             environment,
             constants: Vec::new(),
+            external_constant_links: Vec::new(),
             items: Vec::new(),
             next_register: u32::try_from(register_count)
                 .map_err(|_| frontend_error(source_name, "too many closure registers"))?,
@@ -277,8 +281,13 @@ impl<'a> Compiler<'a> {
 
     fn finish(self) -> Result<BytecodeFunction, FrontendError> {
         let source_name = self.source_name;
-        lir::assemble(self.finish_lir())
-            .map_err(|error| frontend_error(source_name, error.to_string()))
+        let external_links = self.external_constant_links.clone();
+        let mut function = lir::assemble(self.finish_lir())
+            .map_err(|error| frontend_error(source_name, error.to_string()))?;
+        for (index, key) in external_links {
+            function.bind_external_value(index, key);
+        }
+        Ok(function)
     }
 
     fn compile_block(&mut self, block: &Block) -> Result<RegisterId, FrontendError> {
@@ -317,7 +326,11 @@ impl<'a> Compiler<'a> {
                                 ),
                             )
                         })?;
-                    let register = self.load_constant(value, binding.location);
+                    let register = self.load_external_constant(
+                        value,
+                        binding.value.name.value.clone(),
+                        binding.location,
+                    );
                     self.environment
                         .insert(binding.value.name.value.clone(), register);
                     continue;
@@ -769,6 +782,18 @@ impl<'a> Compiler<'a> {
             location,
         );
         dst
+    }
+
+    fn load_external_constant(
+        &mut self,
+        value: Value,
+        key: String,
+        location: Location,
+    ) -> RegisterId {
+        let index = self.constants.len();
+        let register = self.load_constant(value, location);
+        self.external_constant_links.push((index, key));
+        register
     }
 
     fn allocate(&mut self) -> RegisterId {

@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct ModuleError {
@@ -43,19 +44,44 @@ pub struct LoadedModule {
     pub analysis: Analysis,
     pub function: BytecodeFunction,
     pub sources: SourceDatabase,
+    runtime: Arc<ModuleRuntime>,
+}
+
+struct ModuleRuntime {
+    world: Heap,
+    externals: HashMap<String, RuntimeValue>,
+}
+
+impl fmt::Debug for ModuleRuntime {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ModuleRuntime")
+            .finish_non_exhaustive()
+    }
 }
 
 impl LoadedModule {
     pub fn execute(&self, evaluation_fuel: usize) -> Result<Value, crate::RuntimeError> {
-        Vm::new()
-            .execute(&self.function, evaluation_fuel)
-            .map_err(|error| error.with_sources(&self.sources))
+        self.execute_with_quota(Quota::with_fuel(evaluation_fuel))
     }
 
     pub fn execute_with_quota(&self, quota: Quota) -> Result<Value, crate::RuntimeError> {
-        Vm::new()
-            .execute_with_quota(&self.function, quota)
-            .map_err(|error| error.with_sources(&self.sources))
+        let mut account = QuotaAccount::new(quota);
+        let arena = Vm::new()
+            .execute_in_background(
+                &self.runtime.world,
+                &self.runtime.externals,
+                &self.function,
+                &[],
+                &mut account,
+            )
+            .map_err(|error| error.with_sources(&self.sources))?;
+        crate::heap::HeapView {
+            current: &arena.heap,
+            background: Some(&self.runtime.world),
+        }
+        .export_value(arena.root)
+        .map_err(|error| crate::RuntimeError::from_heap_error(&self.function, error))
     }
 }
 
@@ -147,13 +173,15 @@ impl ModuleLoader {
         let mut account = QuotaAccount::new(self.module_quota);
         let result = self.compile_xl(&path, external_bindings, true, &mut account);
         self.leave(&path);
-        let (analysis, function) = result?;
+        let (analysis, function, externals) = result?;
+        let world = std::mem::replace(&mut self.world, Heap::new(0));
         Ok(LoadedModule {
             path,
             dependencies: self.dependencies.iter().cloned().collect(),
             analysis,
             function,
             sources: self.sources.clone(),
+            runtime: Arc::new(ModuleRuntime { world, externals }),
         })
     }
 
@@ -195,9 +223,15 @@ impl ModuleLoader {
                 Some("xl") => {
                     let mut account = QuotaAccount::new(self.module_quota);
                     self.compile_xl(&path, BTreeMap::new(), false, &mut account)
-                        .and_then(|(_, function)| {
+                        .and_then(|(_, function, externals)| {
                             let arena = Vm::new()
-                                .execute_in_background(&self.world, &function, &[], &mut account)
+                                .execute_in_background(
+                                    &self.world,
+                                    &externals,
+                                    &function,
+                                    &[],
+                                    &mut account,
+                                )
                                 .map_err(|error| {
                                     ModuleError::new(error.with_sources(&self.sources).to_string())
                                 })?;
@@ -245,7 +279,7 @@ impl ModuleLoader {
         mut external_bindings: BTreeMap<String, Value>,
         is_root: bool,
         account: &mut QuotaAccount,
-    ) -> Result<(Analysis, BytecodeFunction), ModuleError> {
+    ) -> Result<(Analysis, BytecodeFunction, HashMap<String, RuntimeValue>), ModuleError> {
         let source = read(path)?;
         let source_name = path.display().to_string();
         let source_id = self.sources.add(source_name.clone(), source);
@@ -262,6 +296,7 @@ impl ModuleLoader {
         })?;
         reject_nested_imports(&program, &source_name)?;
         let mut external_provenance = BTreeMap::new();
+        let mut external_roots = HashMap::new();
 
         for binding in &program.value.body.value.bindings {
             if binding.value.kind != BindingKind::Import {
@@ -281,6 +316,12 @@ impl ModuleLoader {
                 .expect("canonical module path has a parent")
                 .join(relative);
             let sourced = self.load_value(&imported)?;
+            let imported = canonicalize(&imported)?;
+            let ModuleState::Ready { root, .. } = self
+                .cache
+                .get(&imported)
+                .expect("loaded module has a ready cache entry");
+            external_roots.insert(binding.value.name.value.clone(), *root);
             if !sourced.provenance.values.is_empty() {
                 external_provenance.insert(binding.value.name.value.clone(), sourced.provenance);
             }
@@ -310,7 +351,7 @@ impl ModuleLoader {
         let function =
             compile_program_analyzed_in(self.sources.get(source_id), &program, &analysis)
                 .map_err(|error| ModuleError::new(error.to_string()))?;
-        Ok((analysis, function))
+        Ok((analysis, function, external_roots))
     }
 
     fn enter(&mut self, path: &Path) -> Result<(), ModuleError> {
@@ -617,6 +658,37 @@ mod tests {
         assert_eq!(first.value.to_string(), second.value.to_string());
         assert_eq!(first_root, second_root);
         assert_eq!(counts, loader.world.counts());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn diamond_dependencies_reuse_the_same_persistent_root() {
+        let directory = fixture_dir();
+        let c = directory.join("c.xl");
+        let a = directory.join("a.xl");
+        let b = directory.join("b.xl");
+        fs::write(&c, r#"{value: [1, 2, 3]}"#).unwrap();
+        fs::write(&a, r#"import c from "./c.xl"; c"#).unwrap();
+        fs::write(&b, r#"import c from "./c.xl"; c"#).unwrap();
+        let mut loader = ModuleLoader {
+            cache: HashMap::new(),
+            world: Heap::new(0),
+            visiting: Vec::new(),
+            dependencies: BTreeSet::new(),
+            module_quota: Quota::with_fuel(100_000),
+            sources: SourceDatabase::default(),
+        };
+
+        loader.load_value(&a).unwrap();
+        let counts_after_a = loader.world.counts();
+        loader.load_value(&b).unwrap();
+        let root = |path: &Path| match loader.cache.get(&canonicalize(path).unwrap()).unwrap() {
+            ModuleState::Ready { root, .. } => *root,
+        };
+
+        assert_eq!(root(&a), root(&c));
+        assert_eq!(root(&b), root(&c));
+        assert_eq!(counts_after_a, loader.world.counts());
         fs::remove_dir_all(directory).unwrap();
     }
 }

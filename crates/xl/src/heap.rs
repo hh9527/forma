@@ -267,13 +267,14 @@ impl Heap {
         value: &Value,
     ) -> Result<RuntimeValue, HeapError> {
         let mut prototypes = HashMap::new();
-        self.import_value_with(background, value, &mut prototypes)
+        self.import_value_with(background, value, &HashMap::new(), &mut prototypes)
     }
 
     fn import_value_with(
         &mut self,
         background: Option<&Heap>,
         value: &Value,
+        externals: &HashMap<String, RuntimeValue>,
         prototypes: &mut HashMap<*const BytecodeFunction, Handle>,
     ) -> Result<RuntimeValue, HeapError> {
         Ok(match value {
@@ -288,14 +289,14 @@ impl Heap {
             Value::Array(values) => {
                 let values = values
                     .iter()
-                    .map(|value| self.import_value_with(background, value, prototypes))
+                    .map(|value| self.import_value_with(background, value, externals, prototypes))
                     .collect::<Result<Box<[_]>, _>>()?;
                 RuntimeValue::Array(self.allocate(Object::Array(values)))
             }
             Value::Tuple(values) => {
                 let values = values
                     .iter()
-                    .map(|value| self.import_value_with(background, value, prototypes))
+                    .map(|value| self.import_value_with(background, value, externals, prototypes))
                     .collect::<Result<Box<[_]>, _>>()?;
                 RuntimeValue::Tuple(self.allocate(Object::Tuple(values)))
             }
@@ -314,21 +315,21 @@ impl Heap {
                 let values = dict
                     .values()
                     .iter()
-                    .map(|value| self.import_value_with(background, value, prototypes))
+                    .map(|value| self.import_value_with(background, value, externals, prototypes))
                     .collect::<Result<Box<[_]>, _>>()?;
                 RuntimeValue::Dict(self.allocate(Object::Dict { shape, values }))
             }
             Value::Func(closure) => {
                 let prototype = match closure.prototype() {
                     Prototype::Bytecode(function) => RuntimePrototype::Bytecode(
-                        self.link_bytecode_with(background, function, prototypes)?,
+                        self.link_bytecode_with(background, function, externals, prototypes)?,
                     ),
                     Prototype::Native(function) => RuntimePrototype::Native(*function),
                 };
                 let upvalues = closure
                     .upvalues()
                     .iter()
-                    .map(|value| self.import_value_with(background, value, prototypes))
+                    .map(|value| self.import_value_with(background, value, externals, prototypes))
                     .collect::<Result<Box<[_]>, _>>()?;
                 RuntimeValue::Func(self.allocate(Object::Closure {
                     prototype,
@@ -343,13 +344,23 @@ impl Heap {
         background: Option<&Heap>,
         function: &BytecodeFunction,
     ) -> Result<Handle, HeapError> {
-        self.link_bytecode_with(background, function, &mut HashMap::new())
+        self.link_bytecode_resolved(background, function, &HashMap::new())
+    }
+
+    pub(crate) fn link_bytecode_resolved(
+        &mut self,
+        background: Option<&Heap>,
+        function: &BytecodeFunction,
+        externals: &HashMap<String, RuntimeValue>,
+    ) -> Result<Handle, HeapError> {
+        self.link_bytecode_with(background, function, externals, &mut HashMap::new())
     }
 
     fn link_bytecode_with(
         &mut self,
         background: Option<&Heap>,
         function: &BytecodeFunction,
+        externals: &HashMap<String, RuntimeValue>,
         forwarded: &mut HashMap<*const BytecodeFunction, Handle>,
     ) -> Result<Handle, HeapError> {
         let identity = std::ptr::from_ref(function);
@@ -362,7 +373,16 @@ impl Heap {
             .links()
             .values()
             .iter()
-            .map(|value| self.import_value_with(background, value, forwarded))
+            .enumerate()
+            .map(|(index, value)| {
+                if let Some(key) = function.links().external_value(index) {
+                    return externals
+                        .get(key)
+                        .copied()
+                        .ok_or(HeapError("external value link is unresolved"));
+                }
+                self.import_value_with(background, value, externals, forwarded)
+            })
             .collect::<Result<Box<[_]>, _>>()?;
         let text = function
             .links()
@@ -379,7 +399,7 @@ impl Heap {
             .prototypes()
             .iter()
             .map(|prototype| {
-                self.link_bytecode_with(background, prototype, forwarded)
+                self.link_bytecode_with(background, prototype, externals, forwarded)
                     .map(RuntimePrototype::Bytecode)
             })
             .collect::<Result<Box<[_]>, _>>()?;
