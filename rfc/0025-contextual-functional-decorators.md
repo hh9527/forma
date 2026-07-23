@@ -1,6 +1,6 @@
 # RFC 0025: Contextual functional decorators
 
-- Status: Accepted for implementation
+- Status: Implemented
 - Depends on: RFC 0006, RFC 0017, RFC 0022, RFC 0024
 
 ## Summary
@@ -172,3 +172,28 @@ because decorators remain explicit AST data.
 6. Invalid targets and decorator failures retain useful source locations.
 7. Existing undecorated syntax, metadata, quotas, and runtime behavior remain
    compatible.
+
+## Implementation result
+
+The Logos/Lelwel frontend now accepts located bare, configured, qualified, and
+stacked decorators on type bindings and Dict fields. Lossless CST rules and
+typed TypeBinding queries retain the original syntax. Semantic `BindingData`
+and `DictFieldKind` retain `Decorator` records containing the callee,
+arguments, configuration form, and location.
+
+Lowering additionally builds the specified ordinary call expression around
+the RHS. Context is an ordinary Dict with exactly `kind` and `name`; its Atom,
+String, fields, and locations use the same AST/runtime representations as
+hand-written XL. This lets the existing analyzer, compiler, VM, function ABI,
+quota account, and debug origins execute decorators without a dedicated
+runtime mechanism.
+
+Type decorators run during existing metadata evaluation and their final result
+is checked as TypeMetadata. Field decorators run as normal expression code.
+Invalid type results point at the outer decorator application. Unsupported
+binding targets remain syntax errors. No WithAttributes constructor, key, or
+domain behavior was added.
+
+Tests cover lossless reconstruction, retained decorator AST, bare/configured
+and qualified application, Python nesting order, Type/Field contexts, shared
+tool fuel, invalid metadata origins, and unsupported targets.

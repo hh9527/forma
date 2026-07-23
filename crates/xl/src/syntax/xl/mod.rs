@@ -81,6 +81,32 @@ mod tests {
     }
 
     #[test]
+    fn cst_preserves_type_and_field_decorators_losslessly() {
+        let source = "@outer @factory(1) type T = Int; { @field value: 2 }";
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("decorators.xl", source);
+        let parsed = parse(id, source);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+        let program = Program::cast(&parsed.syntax, NodeRef::ROOT).unwrap();
+        let Binding::Type(binding) = program.body().unwrap().bindings().next().unwrap() else {
+            panic!("expected type binding")
+        };
+        assert_eq!(binding.decorators().count(), 2);
+    }
+
+    #[test]
+    fn decorators_reject_unsupported_binding_targets() {
+        let source = "@f let value = 1; value";
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("unsupported.xl", source);
+        let parsed = parse(id, source);
+        assert!(parsed.has_errors());
+    }
+
+    #[test]
     fn cst_preserves_string_quotes_text_escapes_and_interpolation() {
         let source = r#""hi\n \{name}""#;
         let mut sources = crate::source::SourceDatabase::default();

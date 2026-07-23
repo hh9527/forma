@@ -202,6 +202,25 @@ binding_node!(TypeBinding);
 binding_node!(ImportBinding);
 binding_node!(NamedFunction);
 
+#[derive(Clone, Copy)]
+pub struct Decorator<'tree> {
+    syntax: SyntaxNode<'tree>,
+}
+
+impl<'tree> Decorator<'tree> {
+    pub fn syntax(self) -> SyntaxNode<'tree> {
+        self.syntax
+    }
+
+    pub fn path(self) -> Option<SyntaxNode<'tree>> {
+        child_node(self.syntax, Rule::DecoratorPath)
+    }
+
+    pub fn arguments(self) -> Option<SyntaxNode<'tree>> {
+        child_node(self.syntax, Rule::Arguments)
+    }
+}
+
 impl<'tree> LetBinding<'tree> {
     pub fn annotation(self) -> Option<Expr<'tree>> {
         token_child(self.syntax, Token::Colon)?;
@@ -254,6 +273,12 @@ impl<'tree> DefBinding<'tree> {
 }
 
 impl<'tree> TypeBinding<'tree> {
+    pub fn decorators(self) -> impl Iterator<Item = Decorator<'tree>> {
+        self.syntax.children().filter_map(|syntax| {
+            (syntax.rule() == Some(Rule::Decorator)).then_some(Decorator { syntax })
+        })
+    }
+
     pub fn value(self) -> Option<Expr<'tree>> {
         expression_slots(self.syntax).first().copied().flatten()
     }

@@ -8,6 +8,7 @@ pub type Expr = Located<ExprKind>;
 pub type Pattern = Located<PatternKind>;
 pub type MatchArm = Located<MatchArmKind>;
 pub type DictField = Located<DictFieldKind>;
+pub type Decorator = Located<DecoratorKind>;
 pub type StringPart = Located<StringPartKind>;
 
 #[derive(Clone, Debug)]
@@ -23,10 +24,18 @@ pub struct BlockKind {
 
 #[derive(Clone, Debug)]
 pub struct BindingData {
+    pub decorators: Vec<Decorator>,
     pub kind: BindingKind,
     pub name: Identifier,
     pub annotation: Option<Expr>,
     pub value: Expr,
+}
+
+#[derive(Clone, Debug)]
+pub struct DecoratorKind {
+    pub callee: Expr,
+    pub arguments: Vec<Expr>,
+    pub configured: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -108,6 +117,7 @@ pub enum BinaryOperator {
 
 #[derive(Clone, Debug)]
 pub struct DictFieldKind {
+    pub decorators: Vec<Decorator>,
     pub name: Identifier,
     pub value: Expr,
 }

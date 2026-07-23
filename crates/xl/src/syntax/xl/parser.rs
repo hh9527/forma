@@ -33,7 +33,13 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
     fn predicate_body_1(&self) -> bool {
         matches!(
             self.current,
-            Token::Let | Token::Decl | Token::Def | Token::Native | Token::Type | Token::Import
+            Token::Let
+                | Token::Decl
+                | Token::Def
+                | Token::Native
+                | Token::Type
+                | Token::Import
+                | Token::At
         ) || self.current == Token::Fn && self.peek(1) == Token::Identifier
     }
     fn predicate_primary_1(&self) -> bool {
@@ -58,6 +64,7 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
     }
     fn predicate_braced_1(&self) -> bool {
         if self.peek(1) == Token::RBrace
+            || self.peek(1) == Token::At
             || self.peek(1) == Token::Identifier && self.peek(2) == Token::Colon
         {
             return true;

@@ -16,6 +16,7 @@ The current MVP demonstrates:
 - structural annotations and runtime validation from the same metadata;
 - `.xl` and `.json` modules in a closed dependency graph;
 - declarative `native name: contract;` host bindings for analyzable core interfaces;
+- contextual Python-style decorators as ordinary RHS function transformations;
 - explicit external JSON input through the CLI.
 - Logos + Lelwel lossless CSTs shared by compilation and future editor tooling;
 - byte-range diagnostics and source locations carried by runtime values.
@@ -154,6 +155,28 @@ are available to parsing and analysis; the host registry supplies only the
 `NativeFunction`. Linking produces an ordinary `Func`, so native and bytecode
 calls share the same VM ABI. User-provided native registries are not exposed
 yet.
+
+## Decorators
+
+Decorators are domain-neutral syntax for transforming the RHS of a type or
+Dict field. The compiler supplies only a syntax-derived ordinary-data context:
+
+```xl
+@optional
+type UserId = Int;
+// optional({ kind: 'Type, name: "UserId" }, Int)
+
+{
+    @json.rename("type")
+    ty: Int,
+}
+// json.rename("type")({ kind: 'Field, name: "ty" }, Int)
+```
+
+Stacked decorators use Python nesting order. They may transform values,
+validate them, or adopt a library convention such as flat `WithAttributes`;
+the language assigns no attribute keys or model-specific meaning. Original
+decorator syntax and locations remain available in the semantic AST.
 
 ## Current limits
 

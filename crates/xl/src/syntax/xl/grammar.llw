@@ -1,7 +1,7 @@
 token Let='let' Decl='decl' Def='def' Native='native' Type='type' Fn='fn' If='if' Else='else' Match='match';
 token Import='import' From='from';
 token SectionLParen='\\(' LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
-token Comma=',' Colon=':' Semicolon=';' Dot='.';
+token Comma=',' Colon=':' Semicolon=';' Dot='.' At='@';
 token Plus='+' Minus='-' Star='*' Slash='/' Less='<' EqualEqual='==' Equal='=';
 token Arrow='->' FatArrow='=>' Pipe='|>';
 token Int='<integer>' Float='<float>' Bytes='<bytes>';
@@ -21,7 +21,7 @@ let_binding: 'let' Identifier [':' expression] '=' expression ';';
 decl_binding: 'decl' Identifier ':' contract ';';
 def_binding: 'def' Identifier '=' expression ';';
 native_binding: 'native' Identifier ':' contract ';';
-type_binding: 'type' Identifier '=' expression ';';
+type_binding: decorator* 'type' Identifier '=' expression ';';
 import_binding: 'import' Identifier 'from' string_literal ';';
 named_function: 'fn' Identifier annotated_parameters ['->' contract] block;
 
@@ -57,7 +57,9 @@ braced:
   ?1 '{' [dict_field (?2 ',' dict_field)* [',']] '}' @dict_expr
 | ?t block
 ;
-dict_field: (Identifier | string_literal) ':' expression;
+dict_field: decorator* (Identifier | string_literal) ':' expression;
+decorator: '@' decorator_path [arguments];
+decorator_path: Identifier ('.' Identifier)*;
 block: '{' body '}';
 closure: 'fn' parameters block;
 function_contract: 'fn' '(' [contract (?1 ',' contract)* [',']] ')' '->' contract;

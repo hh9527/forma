@@ -1,7 +1,7 @@
 use crate::ast::{
-    BinaryOperator, Binding, BindingData, BindingKind, Block, BlockKind, DictFieldKind, Expr,
-    ExprKind, Identifier, MatchArm, MatchArmKind, Pattern, PatternKind, Program, ProgramKind,
-    StringPartKind, UnaryOperator, located,
+    BinaryOperator, Binding, BindingData, BindingKind, Block, BlockKind, Decorator, DecoratorKind,
+    DictFieldKind, Expr, ExprKind, Identifier, MatchArm, MatchArmKind, Pattern, PatternKind,
+    Program, ProgramKind, StringPartKind, UnaryOperator, located,
 };
 use crate::lexer::{FrontendError, SourceLocation};
 use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
@@ -200,6 +200,7 @@ impl<'a> Lowerer<'a> {
                 let value = self.expression(value_node)?;
                 Ok(located(
                     BindingData {
+                        decorators: Vec::new(),
                         kind: BindingKind::Let,
                         name,
                         annotation,
@@ -221,6 +222,7 @@ impl<'a> Lowerer<'a> {
                 let contract = self.contract_expression(contract_node)?;
                 Ok(located(
                     BindingData {
+                        decorators: Vec::new(),
                         kind: BindingKind::Decl,
                         name,
                         annotation: Some(contract.clone()),
@@ -242,6 +244,7 @@ impl<'a> Lowerer<'a> {
                 let contract = self.contract_expression(contract_node)?;
                 Ok(located(
                     BindingData {
+                        decorators: Vec::new(),
                         kind: BindingKind::Native,
                         name,
                         annotation: Some(contract.clone()),
@@ -261,6 +264,7 @@ impl<'a> Lowerer<'a> {
                     .ok_or_else(|| self.error(node, "definition has no value"))?;
                 Ok(located(
                     BindingData {
+                        decorators: Vec::new(),
                         kind: BindingKind::Def,
                         name,
                         annotation: None,
@@ -269,26 +273,30 @@ impl<'a> Lowerer<'a> {
                     self.location(node),
                 ))
             }
-            Rule::TypeBinding => Ok(located(
-                BindingData {
-                    kind: BindingKind::Type,
-                    name,
-                    annotation: None,
-                    value: {
-                        let equal = self.first_token(node, Token::Equal)?;
-                        let start = self.cst.span(equal).start;
-                        self.expression(
-                            self.children(node)
-                                .find(|child| {
-                                    self.is_expression(*child)
-                                        && self.cst.span(*child).start > start
-                                })
-                                .ok_or_else(|| self.error(node, "type has no value"))?,
-                        )?
+            Rule::TypeBinding => {
+                let decorators = self.decorators(node)?;
+                let equal = self.first_token(node, Token::Equal)?;
+                let start = self.cst.span(equal).start;
+                let value = self.expression(
+                    self.children(node)
+                        .find(|child| {
+                            self.is_expression(*child) && self.cst.span(*child).start > start
+                        })
+                        .ok_or_else(|| self.error(node, "type has no value"))?,
+                )?;
+                let value =
+                    self.apply_decorators(&decorators, "Type", &name, value, self.location(node));
+                Ok(located(
+                    BindingData {
+                        decorators,
+                        kind: BindingKind::Type,
+                        name,
+                        annotation: None,
+                        value,
                     },
-                },
-                self.location(node),
-            )),
+                    self.location(node),
+                ))
+            }
             Rule::ImportBinding => {
                 let path = self
                     .rule_children(node)
@@ -296,6 +304,7 @@ impl<'a> Lowerer<'a> {
                     .ok_or_else(|| self.error(node, "import has no path"))?;
                 Ok(located(
                     BindingData {
+                        decorators: Vec::new(),
                         kind: BindingKind::Import,
                         name,
                         annotation: None,
@@ -342,6 +351,7 @@ impl<'a> Lowerer<'a> {
                 };
                 Ok(located(
                     BindingData {
+                        decorators: Vec::new(),
                         kind: BindingKind::NamedFunction,
                         name,
                         annotation,
@@ -454,10 +464,20 @@ impl<'a> Lowerer<'a> {
                                 && self.cst.span(*child).start > self.cst.span(colon).start
                         })
                         .ok_or_else(|| self.error(field, "Dict field has no value"))?;
+                    let decorators = self.decorators(field)?;
+                    let value = self.expression(value)?;
+                    let value = self.apply_decorators(
+                        &decorators,
+                        "Field",
+                        &name,
+                        value,
+                        self.location(field),
+                    );
                     fields.push(located(
                         DictFieldKind {
+                            decorators,
                             name,
-                            value: self.expression(value)?,
+                            value,
                         },
                         self.location(field),
                     ));
@@ -834,6 +854,108 @@ impl<'a> Lowerer<'a> {
             }
             _ => Err(self.error(node, "invalid contract")),
         }
+    }
+
+    fn decorators(&self, node: NodeRef) -> Result<Vec<Decorator>, Diagnostic> {
+        self.rule_children(node)
+            .filter(|child| self.rule(*child) == Some(Rule::Decorator))
+            .map(|decorator| {
+                let path = self
+                    .rule_children(decorator)
+                    .find(|child| self.rule(*child) == Some(Rule::DecoratorPath))
+                    .ok_or_else(|| self.error(decorator, "decorator has no path"))?;
+                let mut identifiers = self
+                    .token_children(path, Token::Identifier)
+                    .map(|token| self.identifier(token));
+                let first = identifiers
+                    .next()
+                    .ok_or_else(|| self.error(path, "decorator path is empty"))?;
+                let mut callee = located(ExprKind::Variable(first.clone()), first.location);
+                for field in identifiers {
+                    let location = Location::new(
+                        callee.location.source,
+                        crate::source::TextRange::from_usize(
+                            callee.location.start as usize..field.location.end as usize,
+                        )
+                        .expect("decorator path is within a parsed source"),
+                    );
+                    callee = located(
+                        ExprKind::Field {
+                            receiver: Box::new(callee),
+                            field,
+                        },
+                        location,
+                    );
+                }
+                let arguments_node = self
+                    .rule_children(decorator)
+                    .find(|child| self.rule(*child) == Some(Rule::Arguments));
+                let arguments = arguments_node
+                    .map(|arguments| self.expression_children(arguments))
+                    .transpose()?
+                    .unwrap_or_default();
+                Ok(located(
+                    DecoratorKind {
+                        callee,
+                        arguments,
+                        configured: arguments_node.is_some(),
+                    },
+                    self.location(decorator),
+                ))
+            })
+            .collect()
+    }
+
+    fn apply_decorators(
+        &self,
+        decorators: &[Decorator],
+        kind: &str,
+        name: &Identifier,
+        mut value: Expr,
+        target_location: Location,
+    ) -> Expr {
+        let context = located(
+            ExprKind::Dict(vec![
+                located(
+                    DictFieldKind {
+                        decorators: Vec::new(),
+                        name: located("kind".to_owned(), target_location),
+                        value: located(ExprKind::Atom(kind.to_owned()), target_location),
+                    },
+                    target_location,
+                ),
+                located(
+                    DictFieldKind {
+                        decorators: Vec::new(),
+                        name: located("name".to_owned(), name.location),
+                        value: located(ExprKind::String(name.value.clone()), name.location),
+                    },
+                    name.location,
+                ),
+            ]),
+            target_location,
+        );
+        for decorator in decorators.iter().rev() {
+            let callee = if decorator.value.configured {
+                located(
+                    ExprKind::Call {
+                        callee: Box::new(decorator.value.callee.clone()),
+                        arguments: decorator.value.arguments.clone(),
+                    },
+                    decorator.location,
+                )
+            } else {
+                decorator.value.callee.clone()
+            };
+            value = located(
+                ExprKind::Call {
+                    callee: Box::new(callee),
+                    arguments: vec![context.clone(), value],
+                },
+                decorator.location,
+            );
+        }
+        value
     }
 
     fn expression_children(&self, node: NodeRef) -> Result<Vec<Expr>, Diagnostic> {
@@ -1415,6 +1537,25 @@ mod tests {
         assert_eq!(binding.value.name.value, "map");
         assert!(binding.value.annotation.is_some());
         assert_eq!(binding.location.range(), 0..57);
+    }
+
+    #[test]
+    fn retains_decorators_and_lowers_their_rhs_calls() {
+        let program = parse(
+            "decorators.xl",
+            "@outer @factory(1) type T = Int; { @field value: 2 }",
+        )
+        .unwrap();
+        let binding = &program.value.body.value.bindings[0];
+        assert_eq!(binding.value.decorators.len(), 2);
+        assert!(!binding.value.decorators[0].value.configured);
+        assert!(binding.value.decorators[1].value.configured);
+        assert!(matches!(binding.value.value.value, ExprKind::Call { .. }));
+        let ExprKind::Dict(fields) = &program.value.body.value.result.value else {
+            panic!("expected Dict")
+        };
+        assert_eq!(fields[0].value.decorators.len(), 1);
+        assert!(matches!(fields[0].value.value.value, ExprKind::Call { .. }));
     }
 
     #[test]

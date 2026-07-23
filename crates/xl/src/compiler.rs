@@ -1399,6 +1399,34 @@ mod tests {
     }
 
     #[test]
+    fn decorators_transform_type_and_field_rhs_with_syntax_context() {
+        let value = run(r#"
+let choose = fn(ctx, rhs) {
+    if ctx.kind == 'Type {
+        if ctx.name == "Alias" { rhs } else { 'Bad }
+    } else {
+        'Bad
+    }
+};
+@choose
+type Alias = Int;
+let typed: Alias = 7;
+
+let outer = fn(ctx, rhs) { if ctx.name == "value" { rhs * 10 } else { 0 } };
+let decorators = {
+    add: fn(amount) { fn(ctx, rhs) { if ctx.kind == 'Field { rhs + amount } else { 0 } } },
+};
+{
+    @outer
+    @decorators.add(2)
+    value: typed,
+}
+"#)
+        .unwrap();
+        assert_eq!(value.to_string(), "{value: 90}");
+    }
+
+    #[test]
     fn compares_tagged_tuples_structurally() {
         assert!(matches!(
             run("('Ok, 42) == ('Ok, 42)").unwrap(),

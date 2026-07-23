@@ -403,11 +403,14 @@ pub(crate) fn analyze_program_with_bindings_observed(
                     debug_sink,
                 )?;
                 let descriptor = TypeDescriptor::from_value(&value).map_err(|message| {
-                    frontend_error(
-                        source_name,
-                        format!(
-                            "type {} produced invalid metadata: {message}",
-                            binding.value.name.value
+                    FrontendError::from_diagnostic(
+                        sources,
+                        Diagnostic::error(
+                            format!(
+                                "type {} produced invalid metadata: {message}",
+                                binding.value.name.value
+                            ),
+                            binding.value.value.location,
                         ),
                     )
                 })?;
@@ -1596,6 +1599,22 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.message.contains("fuel"));
+    }
+
+    #[test]
+    fn type_decorators_share_tool_fuel_and_report_the_decorator_origin() {
+        let source = "let same = fn(ctx, rhs) { rhs }; @same type T = Int; 0";
+        let exhausted = analyze_source_with_fuel("decorator.xl", source, 0).unwrap_err();
+        assert!(exhausted.message.contains("fuel"));
+
+        let invalid = analyze_source(
+            "decorator.xl",
+            "let invalid = fn(ctx, rhs) { 1 }; @invalid type T = Int; 0",
+        )
+        .unwrap_err();
+        assert!(invalid.message.contains("invalid metadata"));
+        let diagnostic = invalid.diagnostic.expect("located decorator diagnostic");
+        assert_eq!(diagnostic.labels[0].location.range(), 34..42);
     }
 
     #[test]
