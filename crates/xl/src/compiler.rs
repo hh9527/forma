@@ -1,6 +1,7 @@
 use crate::ast::{
-    BinaryOperator, BindingKind, Block, DictField, Expr, ExprKind, Identifier, MatchArm, Pattern,
-    PatternKind, Program, StringPartKind, UnaryOperator,
+    BinaryOperator, BindingKind, Block, BlockKind, DictField, DictFieldKind, Expr, ExprKind,
+    Identifier, MatchArm, Pattern, PatternKind, Program, ProgramKind, StringPartKind,
+    UnaryOperator, located,
 };
 use crate::bytecode::BytecodeFunction;
 use crate::lexer::{FrontendError, SourceLocation};
@@ -65,12 +66,107 @@ pub(crate) fn compile_program_analyzed_in(
     program: &Program,
     analysis: &Analysis,
 ) -> Result<BytecodeFunction, FrontendError> {
+    compile_program_with_promoted_types(source_file, program, analysis, &HashSet::new())
+}
+
+pub(crate) fn compile_program_with_promoted_types(
+    source_file: &SourceFile,
+    program: &Program,
+    analysis: &Analysis,
+    promoted_types: &HashSet<String>,
+) -> Result<BytecodeFunction, FrontendError> {
     Compiler::program_in(
         source_file.name.as_ref(),
         Some(source_file),
         program,
         analysis,
+        promoted_types.clone(),
     )
+}
+
+pub(crate) fn type_link_key(name: &str) -> String {
+    format!("type:{name}")
+}
+
+pub(crate) fn compile_metadata_initializer(
+    source_file: &SourceFile,
+    program: &Program,
+    analysis: &Analysis,
+) -> Result<Option<(BytecodeFunction, Vec<String>)>, FrontendError> {
+    let mut type_names = program
+        .value
+        .body
+        .value
+        .bindings
+        .iter()
+        .filter(|binding| binding.value.kind == BindingKind::Type)
+        .map(|binding| binding.value.name.value.clone())
+        .collect::<Vec<_>>();
+    if type_names.is_empty() {
+        return Ok(None);
+    }
+    type_names.sort();
+    type_names.dedup();
+
+    let mut needed = type_names.iter().cloned().collect::<HashSet<_>>();
+    loop {
+        let before = needed.len();
+        for binding in &program.value.body.value.bindings {
+            if needed.contains(&binding.value.name.value) {
+                collect_runtime_names(&binding.value.value, &mut needed);
+                if let Some(annotation) = &binding.value.annotation {
+                    collect_runtime_names(annotation, &mut needed);
+                }
+            }
+        }
+        if needed.len() == before {
+            break;
+        }
+    }
+    let bindings = program
+        .value
+        .body
+        .value
+        .bindings
+        .iter()
+        .filter(|binding| needed.contains(&binding.value.name.value))
+        .cloned()
+        .collect();
+    let result = located(
+        ExprKind::Dict(
+            type_names
+                .iter()
+                .map(|name| {
+                    located(
+                        DictFieldKind {
+                            decorators: Vec::new(),
+                            name: located(name.clone(), program.location),
+                            value: located(
+                                ExprKind::Variable(located(name.clone(), program.location)),
+                                program.location,
+                            ),
+                        },
+                        program.location,
+                    )
+                })
+                .collect(),
+        ),
+        program.location,
+    );
+    let metadata_program = located(
+        ProgramKind {
+            body: located(
+                BlockKind {
+                    bindings,
+                    result: Box::new(result),
+                },
+                program.value.body.location,
+            ),
+        },
+        program.location,
+    );
+    let function = compile_program_analyzed_in(source_file, &metadata_program, analysis)?;
+    Ok(Some((function, type_names)))
 }
 
 pub fn run_source(
@@ -110,6 +206,7 @@ pub(crate) fn compile_expression_with_bindings(
         closure_index: 0,
         located_constants: HashMap::new(),
         retained_names: HashSet::new(),
+        promoted_types: HashSet::new(),
         external_values: BTreeMap::new(),
         source_file: Some(source_file),
     };
@@ -138,6 +235,7 @@ struct Compiler<'a> {
     closure_index: usize,
     located_constants: HashMap<String, Value>,
     retained_names: HashSet<String>,
+    promoted_types: HashSet<String>,
     external_values: BTreeMap<String, Value>,
     source_file: Option<&'a SourceFile>,
 }
@@ -168,6 +266,7 @@ impl<'a> Compiler<'a> {
         source_file: Option<&'a SourceFile>,
         program: &Program,
         analysis: &Analysis,
+        promoted_types: HashSet<String>,
     ) -> Result<BytecodeFunction, FrontendError> {
         let mut retained_names = HashSet::new();
         collect_runtime_names_block(&program.value.body, &mut retained_names);
@@ -201,6 +300,7 @@ impl<'a> Compiler<'a> {
             closure_index: 0,
             located_constants: HashMap::new(),
             retained_names,
+            promoted_types,
             external_values: analysis.external_values.clone(),
             source_file,
         };
@@ -294,6 +394,7 @@ impl<'a> Compiler<'a> {
             closure_index: 0,
             located_constants: HashMap::new(),
             retained_names: HashSet::new(),
+            promoted_types: HashSet::new(),
             external_values: BTreeMap::new(),
             source_file,
         })
@@ -437,6 +538,7 @@ impl<'a> Compiler<'a> {
         for binding in &block.value.bindings {
             if binding.value.kind != BindingKind::Type
                 || !self.retained_names.contains(&binding.value.name.value)
+                || self.promoted_types.contains(&binding.value.name.value)
             {
                 continue;
             }
@@ -481,17 +583,27 @@ impl<'a> Compiler<'a> {
                 BindingKind::Decl => continue,
                 BindingKind::Type => {
                     if self.retained_names.contains(&binding.value.name.value) {
-                        self.preserved_up_link_reads = type_links.keys().cloned().collect();
-                        let register = self.compile_expr(&binding.value.value)?;
-                        self.preserved_up_link_reads.clear();
-                        let (link, _) = type_links[&binding.value.name.value];
-                        self.emit(
-                            Operation::InitializeUpLink {
-                                link,
-                                src: register,
-                            },
-                            binding.location,
-                        );
+                        let name = binding.value.name.value.clone();
+                        if self.promoted_types.contains(&name) {
+                            let register = self.load_external_constant(
+                                Value::none(),
+                                type_link_key(&name),
+                                binding.location,
+                            );
+                            self.environment.insert(name, register);
+                        } else {
+                            self.preserved_up_link_reads = type_links.keys().cloned().collect();
+                            let register = self.compile_expr(&binding.value.value)?;
+                            self.preserved_up_link_reads.clear();
+                            let (link, _) = type_links[&binding.value.name.value];
+                            self.emit(
+                                Operation::InitializeUpLink {
+                                    link,
+                                    src: register,
+                                },
+                                binding.location,
+                            );
+                        }
                     }
                     continue;
                 }

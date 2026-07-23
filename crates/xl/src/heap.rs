@@ -87,6 +87,26 @@ impl From<RuntimeValue> for RichValue {
 pub(crate) struct PersistentValue(RichValue);
 
 impl PersistentValue {
+    pub(crate) fn dict_get(self, heap: &Heap, name: &str) -> Result<Option<Self>, HeapError> {
+        if heap.storage != Storage::Main {
+            return Err(HeapError("persistent values require a Main world"));
+        }
+        let RuntimeValue::Dict(handle) = self.0.value else {
+            return Err(HeapError("persistent value is not a Dict"));
+        };
+        let Object::Dict { shape, values } = heap.object(handle)? else {
+            return Err(HeapError("persistent Dict handle has another object kind"));
+        };
+        for (field, value) in heap.shape(*shape)?.iter().zip(values) {
+            if heap.resolve_text(*field)? == name {
+                return Ok(Some(Self(*value)));
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl PersistentValue {
     pub(crate) const fn runtime(self) -> RichValue {
         self.0
     }

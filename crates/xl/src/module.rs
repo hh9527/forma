@@ -1,5 +1,8 @@
 use crate::ast::{BindingKind, Expr, ExprKind, Program, StringPartKind};
-use crate::compiler::{compile_program_analyzed_in, function_contract_arity};
+use crate::compiler::{
+    compile_metadata_initializer, compile_program_analyzed_in, compile_program_with_promoted_types,
+    function_contract_arity, type_link_key,
+};
 use crate::core::module_specs;
 use crate::heap::{Heap, PersistentValue, publish_root, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
@@ -541,6 +544,18 @@ impl ModuleLoader {
         if is_root && external_bindings.contains_key("input") {
             dynamic_bindings.insert("input".to_owned());
         }
+        let has_type_bindings = program
+            .value
+            .body
+            .value
+            .bindings
+            .iter()
+            .any(|binding| binding.value.kind == BindingKind::Type);
+        let bootstrap_sink: Arc<dyn DebugSink> = if has_type_bindings {
+            Arc::new(DiscardDebugSink)
+        } else {
+            Arc::clone(&self.debug_sink)
+        };
         let analysis = analyze_program_with_bindings_observed(
             &source_name,
             &program,
@@ -549,7 +564,7 @@ impl ModuleLoader {
             &dynamic_bindings,
             &self.sources,
             &external_provenance,
-            &self.debug_sink,
+            &bootstrap_sink,
         )
         .map_err(|error| {
             error.diagnostic.as_ref().map_or_else(
@@ -557,9 +572,42 @@ impl ModuleLoader {
                 |diagnostic| ModuleError::new(self.sources.render(diagnostic)),
             )
         })?;
-        let function =
-            compile_program_analyzed_in(self.sources.get(source_id), &program, &analysis)
+        let source_file = self.sources.get(source_id);
+        let mut promoted_types = HashSet::new();
+        if let Some((metadata_function, type_names)) =
+            compile_metadata_initializer(source_file, &program, &analysis)
+                .map_err(|error| ModuleError::new(error.to_string()))?
+        {
+            let arena = Vm::new()
+                .with_debug_sink(Arc::clone(&self.debug_sink))
+                .execute_in_work(
+                    &self.main.heap,
+                    &external_roots,
+                    &metadata_function,
+                    &[],
+                    account,
+                )
+                .map_err(|error| ModuleError::new(error.with_sources(&self.sources).to_string()))?;
+            let metadata_root = arena
+                .publish(&mut self.main.heap)
                 .map_err(|error| ModuleError::new(error.to_string()))?;
+            for name in type_names {
+                let root = metadata_root
+                    .dict_get(&self.main.heap, &name)
+                    .map_err(|error| ModuleError::new(error.to_string()))?
+                    .ok_or_else(|| {
+                        ModuleError::new(format!("metadata initializer omitted type root {name:?}"))
+                    })?;
+                external_roots.insert(type_link_key(&name), root);
+                promoted_types.insert(name);
+            }
+        }
+        let function = if promoted_types.is_empty() {
+            compile_program_analyzed_in(source_file, &program, &analysis)
+        } else {
+            compile_program_with_promoted_types(source_file, &program, &analysis, &promoted_types)
+        }
+        .map_err(|error| ModuleError::new(error.to_string()))?;
         Ok((analysis, function, external_roots))
     }
 
@@ -834,6 +882,23 @@ mod tests {
             "{value: 42}"
         );
         assert_eq!(sink.events.lock().unwrap().len(), 3);
+
+        let mut second = QuotaAccount::new(Quota::new(1, 1_000, 0));
+        Vm::new()
+            .with_debug_sink(sink.clone())
+            .execute_in_work(
+                &module.runtime.main.heap,
+                &module.runtime.externals,
+                &module.function,
+                &[],
+                &mut second,
+            )
+            .unwrap();
+        assert_eq!(
+            sink.events.lock().unwrap().len(),
+            4,
+            "the type RHS must not execute again in a later session"
+        );
 
         let mut no_fuel = QuotaAccount::new(Quota::new(0, 1_000, 0));
         assert_eq!(
@@ -2258,7 +2323,7 @@ mod tests {
     }
 
     #[test]
-    fn recursive_type_consumers_reject_pending_links_before_module_seal() {
+    fn final_program_observes_only_presealed_recursive_type_roots() {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
@@ -2270,15 +2335,9 @@ mod tests {
         )
         .unwrap();
         let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
-        let failure = module.execute(100_000).unwrap_err();
         assert_eq!(
-            failure.kind,
-            crate::RuntimeErrorKind::UninitializedDefinition
-        );
-        assert!(
-            failure
-                .message
-                .contains("before recursive type metadata was sealed")
+            module.execute(100_000).unwrap().to_string(),
+            "('Ok, {next: 1})"
         );
         fs::remove_dir_all(directory).unwrap();
     }

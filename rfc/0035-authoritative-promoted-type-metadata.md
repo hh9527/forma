@@ -1,6 +1,6 @@
 # RFC 0035: Authoritative promoted TypeMetadata
 
-- Status: Proposed
+- Status: Partially implemented
 - Depends on: RFC 0012, RFC 0024, RFC 0034
 
 ## Summary
@@ -191,4 +191,36 @@ violated an invariant.
 
 ## Implementation result
 
-Pending.
+The authoritative runtime half is implemented. The compiler extracts a
+transitive binding closure rooted at all module type bindings and emits a
+MetadataInit function whose result is a deterministic name-to-TypeMetadata
+Dict. The loader executes this function once under the existing module quota,
+publishes the Dict root in one operation, and extracts named persistent roots
+from the resulting Main World object. Because publication starts from one Dict,
+one forwarding context preserves sharing and all recursive identities.
+
+The final compiler receives the promoted type-name set. It replaces each type
+RHS with a LinkTable-backed external constant under a stable `type:<name>` key;
+no type up-link allocation, decorator call, or metadata constructor remains in
+session execution. A forward-reference test now succeeds even when its source
+places a codec call before the referenced type, because MetadataInit has sealed
+the complete graph before final bytecode can run. The debug integration test
+executes two sessions and confirms that the type RHS is observed once at module
+load while ordinary session debug work repeats.
+
+Bootstrap analysis remains necessary to compile MetadataInit. For modules with
+type bindings its debug sink is intentionally discarded so this conservative
+pass is not observably mistaken for authoritative construction. It currently
+still consumes the shared module quota and still projects recursive edges to
+`Any`; replacing it with the promoted-heap `TypeGraph` described above remains
+unfinished.
+
+The following RFC 0035 items therefore remain open:
+
+- deriving `TypeGraph` and refined Analysis from the promoted roots;
+- graph-aware assignability and recursive display/LSP traversal;
+- rejecting effectful metadata dependency closures structurally rather than
+  merely suppressing bootstrap debug observation;
+- eliminating duplicated bootstrap computation and its quota cost;
+- pruning metadata-only helper bindings from final bytecode when they have no
+  ordinary runtime use.
