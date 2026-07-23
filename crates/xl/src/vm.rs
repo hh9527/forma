@@ -3345,6 +3345,19 @@ fn run_core_codec(
 ) -> Result<VmAction, RuntimeError> {
     let schema = decode_runtime_type(arguments[0], current, background)
         .map_err(|message| error(RuntimeErrorKind::TypeMismatch, message, function, pc))?;
+    assert_codec_graph_ready(&schema, current, background).map_err(
+        |graph_error| match graph_error {
+            CodecGraphError::Pending => error(
+                RuntimeErrorKind::UninitializedDefinition,
+                "codec was invoked before recursive type metadata was sealed",
+                function,
+                pc,
+            ),
+            CodecGraphError::Invalid(message) => {
+                error(RuntimeErrorKind::TypeMismatch, message, function, pc)
+            }
+        },
+    )?;
     let direction = match operation {
         CoreCodecFunction::Decode => CodecDirection::Decode,
         CoreCodecFunction::Encode => CodecDirection::Encode,
@@ -3400,6 +3413,66 @@ fn decode_runtime_type(
     background: &Heap,
 ) -> Result<CodecType, String> {
     decode_runtime_type_at(value, "Type", current, background)
+}
+
+#[derive(Debug)]
+enum CodecGraphError {
+    Pending,
+    Invalid(String),
+}
+
+fn assert_codec_graph_ready(
+    schema: &CodecType,
+    current: &Heap,
+    background: &Heap,
+) -> Result<(), CodecGraphError> {
+    fn visit(
+        schema: &CodecType,
+        current: &Heap,
+        background: &Heap,
+        visited: &mut HashSet<Handle>,
+    ) -> Result<(), CodecGraphError> {
+        match &schema.kind {
+            CodecKind::UpLink(handle) => {
+                if !visited.insert(*handle) {
+                    return Ok(());
+                }
+                let view = HeapView {
+                    current,
+                    background: Some(background),
+                };
+                let resolved = view
+                    .up_link(*handle)
+                    .map_err(|error| CodecGraphError::Invalid(error.to_string()))?
+                    .ok_or(CodecGraphError::Pending)?;
+                let resolved = decode_runtime_type(resolved, current, background)
+                    .map_err(CodecGraphError::Invalid)?;
+                visit(&resolved, current, background, visited)
+            }
+            CodecKind::Array(item) => visit(item, current, background, visited),
+            CodecKind::Tuple(items) | CodecKind::Union(items) => items
+                .iter()
+                .try_for_each(|item| visit(item, current, background, visited)),
+            CodecKind::Struct(fields) => fields
+                .values()
+                .try_for_each(|field| visit(field, current, background, visited)),
+            CodecKind::Enum(variants) => variants.values().try_for_each(|variant| {
+                if let Some(payload) = &variant.payload {
+                    visit(payload, current, background, visited)?;
+                }
+                Ok(())
+            }),
+            CodecKind::Any
+            | CodecKind::Int
+            | CodecKind::Float
+            | CodecKind::String
+            | CodecKind::Bytes
+            | CodecKind::Atom(_)
+            | CodecKind::Function => Ok(()),
+        }
+    }
+
+    visit(schema, current, background, &mut HashSet::new())
 }
 
 fn decode_runtime_type_at(
@@ -5474,6 +5547,19 @@ fn run_core_json(
     if operation == CoreJsonFunction::Schema {
         let schema = decode_runtime_type(arguments[0], current, background)
             .map_err(|message| error(RuntimeErrorKind::TypeMismatch, message, function, pc))?;
+        assert_codec_graph_ready(&schema, current, background).map_err(|graph_error| {
+            match graph_error {
+                CodecGraphError::Pending => error(
+                    RuntimeErrorKind::UninitializedDefinition,
+                    "schema generation was invoked before recursive type metadata was sealed",
+                    function,
+                    pc,
+                ),
+                CodecGraphError::Invalid(message) => {
+                    error(RuntimeErrorKind::TypeMismatch, message, function, pc)
+                }
+            }
+        })?;
         let mut node = generate_json_schema(&schema, arguments[0], current, background).map_err(
             |failure| {
                 let mut runtime = error(

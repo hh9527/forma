@@ -2174,11 +2174,12 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("Types.xl"),
-            r#"@struct type Node = {
+            r#"import json from "core:json";
+               @struct type Node = {
                    value: Int,
                    children: Array(Node),
                };
-               @struct type Left = {right: Option(Right)};
+               @struct type Left = {@json.rename("rightValue") right: Option(Right)};
                @struct type Right = {left: Option(Left)};
                {Node: Node, Left: Left, Right: Right}"#,
         )
@@ -2194,7 +2195,7 @@ mod tests {
                    children: [{value: 2, children: []}],
                }) |> result.unwrap;
                let pair = codec.decode(Types.Left, {
-                   right: {left: 'None},
+                   rightValue: {left: 'None},
                }) |> result.unwrap;
                {
                    node: node,
@@ -2252,6 +2253,32 @@ mod tests {
                 .unwrap_err()
                 .message
                 .contains("internal up-link")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recursive_type_consumers_reject_pending_links_before_module_seal() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import codec from "core:codec";
+               @struct type Forward = {next: Later};
+               let premature = codec.decode(Forward, {next: 1});
+               type Later = Int;
+               premature"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let failure = module.execute(100_000).unwrap_err();
+        assert_eq!(
+            failure.kind,
+            crate::RuntimeErrorKind::UninitializedDefinition
+        );
+        assert!(
+            failure
+                .message
+                .contains("before recursive type metadata was sealed")
         );
         fs::remove_dir_all(directory).unwrap();
     }

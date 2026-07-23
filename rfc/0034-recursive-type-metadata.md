@@ -170,10 +170,22 @@ metadata and remain deferred. When the root was obtained through an ordinary
 resolved binding, it is emitted inline and its recursive backlink receives the
 definition, which is valid but may duplicate the root shape once.
 
+Metadata construction and consumption now have an explicit readiness boundary.
+Decorators and model constructors treat a pending link as an opaque valid type
+edge: they preserve wrappers and attributes but defer target-dependent checks
+such as whether `flatten` eventually names a Struct. Before codec or schema
+planning, the VM traverses the complete metadata graph by link identity and
+requires every reachable link to be Ready. An early consumer invocation reports
+`UninitializedDefinition` rather than returning a data-level codec `Err`;
+encode, decode, and schema traversal may consequently treat readiness as an
+execution invariant.
+
 The end-to-end module fixture exports self-recursive `Node` and mutually
 recursive `Left`/`Right` metadata through the persistent world, decodes and
 encodes finite recursive values, and generates terminating schemas containing
 multiple references. A located invalid JSON leaf retains both its deep data
 path and rule location. Direct JSON stringification of the same recursive
 metadata rejects the hidden link, confirming that it has not become an XL data
-type. Existing eager `decl/def` failure tests remain unchanged.
+type. A decorated forward reference verifies that decoration preserves the
+pending edge, and a deliberately interleaved codec call verifies the readiness
+boundary. Existing eager `decl/def` failure tests remain unchanged.
