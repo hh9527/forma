@@ -1,6 +1,6 @@
 # RFC 0027: Normalized Struct and Enum models
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0022, RFC 0025, RFC 0026
 
 ## Summary
@@ -261,4 +261,36 @@ raw metadata retains `'Enum` and its variant map.
 
 ## Implementation result
 
-Pending.
+The prelude now publishes lowercase `struct` and `enum` as VM-managed native
+functions. They are ordinary two-argument `Func` values, so contextual
+decorator calls and explicit `'None` calls use the same compiler, call ABI,
+fuel, stack, allocation quota, and debug origins. Context validation accepts
+only the specified two shapes.
+
+Both constructors work directly against `HeapView`. They flatten existing
+member wrappers, preserve inner and attribute rich values, allocate a canonical
+wrapper for every member, build a fresh deterministic members Dict, and wrap
+the resulting Struct or Enum metadata once at the root. No value crosses the
+legacy deep-export boundary during construction. Every new wrapper, attributes
+Dict, members Dict, and metadata Dict is allocation-charged.
+
+`TypeDescriptor::Enum` retains a deterministic map from tag names to optional
+payload descriptors. Rich and legacy TypeMetadata decoders accept `'Enum`,
+transparently strip member wrappers, require at least one variant, and
+distinguish the `'None` unit marker from payload TypeMetadata. Validation
+accepts matching unit Atoms or two-element tagged Tuples and reports unknown
+tags, missing payloads, unexpected payloads, and invalid payload values.
+Assignability handles both exact Enum-to-Enum comparison and ordinary inferred
+Atom/Tuple values by projecting variants into their runtime structural types.
+
+The runtime codec planner can decode and retain Enum metadata, including nested
+payload schemas, but returns a structured codec failure explaining that an
+external representation policy is required. It does not silently choose a JSON
+encoding.
+
+Tests cover decorator and explicit construction, nested field and variant
+normalization, empty and preserved attributes, root attributes applied by
+outer decorators, TypeMetadata round trips, unit and payload annotations,
+successful and failing validation, unsupported codec behavior, malformed
+contexts and members, empty variants, allocation exhaustion, and compatibility
+with existing uppercase constructors.

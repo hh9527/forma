@@ -176,6 +176,25 @@ impl CoreAttributesFunction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreModelFunction {
+    Struct,
+    Enum,
+}
+
+impl CoreModelFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Struct => "struct",
+            Self::Enum => "enum",
+        }
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        2
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CoreDebugFunction {
     Dbg,
     DbgWith,
@@ -296,6 +315,7 @@ pub(crate) enum NativeKind {
     Synchronous,
     CoreArray(CoreArrayFunction),
     CoreAttributes(CoreAttributesFunction),
+    CoreModel(CoreModelFunction),
     CoreDict(CoreDictFunction),
     CoreDebug(CoreDebugFunction),
     CoreCodec(CoreCodecFunction),
@@ -336,6 +356,15 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreAttributes(function),
+        }
+    }
+
+    pub(crate) const fn core_model(function: CoreModelFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreModel(function),
         }
     }
 

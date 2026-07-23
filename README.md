@@ -17,7 +17,8 @@ The current MVP demonstrates:
 - `.xl` and `.json` modules in a closed dependency graph;
 - declarative `native name: contract;` host bindings for analyzable core interfaces;
 - contextual Python-style decorators as ordinary RHS function transformations;
-- explicit external JSON input through the CLI.
+- normalized attributed Struct and Enum model metadata;
+- explicit external JSON input through the CLI;
 - Logos + Lelwel lossless CSTs shared by compilation and future editor tooling;
 - byte-range diagnostics and source locations carried by runtime values.
 
@@ -197,10 +198,33 @@ Nested wrappers are flattened and later additions win. Wrapped TypeMetadata is
 transparent to checking, validation, and derived codecs, while constructors
 such as `Struct` preserve the raw wrappers for generators and future LSP views.
 
+Normalized model declarations use decorator-compatible lowercase prelude
+functions:
+
+```xl
+@struct
+type User = {
+    name: String,
+};
+
+@enum
+type Lookup = {
+    Missing: 'None,
+    Found: User,
+};
+```
+
+The resulting Struct or Enum root and every field or variant have exactly one
+flat `WithAttributes` wrapper. Enum runtime values are `'Missing` for a unit
+variant and `('Found, user)` for a payload variant. Explicit construction uses
+`struct('None, fields)` or `enum('None, variants)`; uppercase metadata
+constructors remain available as lower-level compatibility functions.
+
 ## Current limits
 
 The MVP has no effects, package manager, LSP server, traits, HKT, YAML/TOML
-modules, domain model library, or production garbage collector.
+modules, attribute-aware Enum codecs, domain model library, or production
+garbage collector.
 Function signatures are dynamically checked and static inference deliberately
 falls back to `Any` where the focused checker has no precise model.
 

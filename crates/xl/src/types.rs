@@ -8,7 +8,7 @@ use crate::lexer::{FrontendError, SourceLocation};
 use crate::lir::RegisterId;
 use crate::parser::parse_registered;
 use crate::source::{Diagnostic, SourceDatabase};
-use crate::value::{Atom, Closure, NativeError, NativeFunction, Value};
+use crate::value::{Atom, Closure, CoreModelFunction, NativeError, NativeFunction, Value};
 use crate::{
     BuiltinAtom, CallContext, DebugSink, DiscardDebugSink, Quota, QuotaAccount, ValueKind,
     ValueRef, Vm,
@@ -29,6 +29,7 @@ pub enum TypeDescriptor {
     Array(Box<TypeDescriptor>),
     Tuple(Vec<TypeDescriptor>),
     Struct(BTreeMap<String, TypeDescriptor>),
+    Enum(BTreeMap<String, Option<Box<TypeDescriptor>>>),
     Union(Vec<TypeDescriptor>),
     Function {
         parameters: Vec<TypeDescriptor>,
@@ -68,6 +69,23 @@ impl TypeDescriptor {
                     .make_dict(field_values)
                     .expect("Type Struct fields are unique");
                 vec![kind_entry("Struct"), ("fields".into(), fields)]
+            }
+            Self::Enum(variants) => {
+                let variants = variants
+                    .iter()
+                    .map(|(name, payload)| {
+                        (
+                            name.clone(),
+                            payload
+                                .as_ref()
+                                .map_or_else(Value::none, |payload| payload.to_value(vm)),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let variants = vm
+                    .make_dict(variants)
+                    .expect("Type Enum variants are unique");
+                vec![kind_entry("Enum"), ("variants".into(), variants)]
             }
             Self::Union(variants) => vec![
                 kind_entry("Union"),
@@ -127,6 +145,17 @@ impl TypeDescriptor {
                 fields
                     .iter()
                     .map(|(name, item)| format!("{name}: {}", item.display_name()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Enum(variants) => format!(
+                "enum {{{}}}",
+                variants
+                    .iter()
+                    .map(|(name, payload)| payload.as_ref().map_or_else(
+                        || name.clone(),
+                        |payload| format!("{name}({})", payload.display_name())
+                    ))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
@@ -652,6 +681,8 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
         prelude.insert(name.into(), descriptor.to_value(vm));
     }
     for function in [
+        NativeFunction::core_model(CoreModelFunction::Struct),
+        NativeFunction::core_model(CoreModelFunction::Enum),
         NativeFunction::new("Atom", 1, native_atom_type),
         NativeFunction::new("Array", 1, native_array_type),
         NativeFunction::new("Tuple", 1, native_tuple_type),
@@ -900,6 +931,34 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
                     .collect::<Result<_, String>>()?,
             )
         }
+        "Enum" => {
+            require(&["kind", "variants"])?;
+            let variants = value
+                .dict_get("variants")
+                .ok_or_else(|| format!("{path}.variants is missing"))?;
+            let names = variants
+                .dict_fields()
+                .ok_or_else(|| format!("{path}.variants must be a Dict"))?;
+            if names.is_empty() {
+                return Err(format!("{path}.variants must not be empty"));
+            }
+            TypeDescriptor::Enum(
+                names
+                    .iter()
+                    .map(|name| {
+                        let variant = variants.dict_get(name).expect("Dict field exists");
+                        let variant_path = format!("{path}.variants.{name}");
+                        let inner = strip_attributes_ref(variant, &variant_path)?;
+                        let payload = if inner.as_atom() == Some("None") {
+                            None
+                        } else {
+                            Some(Box::new(decode_type_ref(inner, &variant_path)?))
+                        };
+                        Ok(((*name).to_owned(), payload))
+                    })
+                    .collect::<Result<_, String>>()?,
+            )
+        }
         "Function" => {
             require(&["kind", "parameters", "result"])?;
             let parameters = value
@@ -926,6 +985,29 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
         }
         _ => return Err(format!("{path}.kind has unknown value '{kind}")),
     })
+}
+
+fn strip_attributes_ref<'a>(mut value: ValueRef<'a>, path: &str) -> Result<ValueRef<'a>, String> {
+    loop {
+        let Some(fields) = value.dict_fields() else {
+            return Ok(value);
+        };
+        if value.dict_get("kind").and_then(ValueRef::as_atom) != Some("WithAttributes") {
+            return Ok(value);
+        }
+        if fields != ["attributes", "inner", "kind"] {
+            return Err(format!(
+                "{path} WithAttributes wrapper must have exactly attributes, inner, and kind fields"
+            ));
+        }
+        let attributes = value
+            .dict_get("attributes")
+            .expect("validated wrapper field");
+        if attributes.kind() != ValueKind::Dict {
+            return Err(format!("{path}.attributes must be a Dict"));
+        }
+        value = value.dict_get("inner").expect("validated wrapper field");
+    }
 }
 
 fn validate_value_ref(
@@ -985,6 +1067,33 @@ fn validate_value_ref(
                 )?;
             }
             Ok(())
+        }
+        TypeDescriptor::Enum(variants) => {
+            if let Some(tag) = value.as_atom() {
+                return match variants.get(tag) {
+                    Some(None) => Ok(()),
+                    Some(Some(_)) => Err(format!("{path} variant '{tag} requires a payload")),
+                    None => Err(format!("{path} has unknown Enum variant '{tag}")),
+                };
+            }
+            if value.kind() != ValueKind::Tuple || value.sequence_len() != Some(2) {
+                return Err(format!(
+                    "{path} must be a unit Atom or a two-element tagged Tuple"
+                ));
+            }
+            let tag = value
+                .sequence_get(0)
+                .and_then(ValueRef::as_atom)
+                .ok_or_else(|| format!("{path}.0 must be an Atom tag"))?;
+            match variants.get(tag) {
+                Some(Some(payload)) => validate_value_ref(
+                    payload,
+                    value.sequence_get(1).expect("two-element Tuple"),
+                    &format!("{path}.{tag}"),
+                ),
+                Some(None) => Err(format!("{path} variant '{tag} does not accept a payload")),
+                None => Err(format!("{path} has unknown Enum variant '{tag}")),
+            }
         }
         TypeDescriptor::Union(variants) => {
             if variants
@@ -1100,6 +1209,34 @@ fn decode_type(value: &Value, path: &str) -> Result<TypeDescriptor, String> {
                 .collect::<Result<_, String>>()?;
             TypeDescriptor::Struct(fields)
         }
+        "Enum" => {
+            require_fields(metadata, path, &["kind", "variants"])?;
+            let Value::Dict(variants) = metadata.get("variants").expect("required field") else {
+                return Err(format!("{path}.variants must be a Dict"));
+            };
+            if variants.values().is_empty() {
+                return Err(format!("{path}.variants must not be empty"));
+            }
+            TypeDescriptor::Enum(
+                variants
+                    .shape()
+                    .fields()
+                    .iter()
+                    .zip(variants.values())
+                    .map(|(name, variant)| {
+                        let variant_path = format!("{path}.variants.{name}");
+                        let inner = strip_attributes_value(variant, &variant_path)?;
+                        let payload = if matches!(inner, Value::Atom(atom) if atom.name() == "None")
+                        {
+                            None
+                        } else {
+                            Some(Box::new(decode_type(inner, &variant_path)?))
+                        };
+                        Ok((name.clone(), payload))
+                    })
+                    .collect::<Result<_, String>>()?,
+            )
+        }
         "Union" => {
             require_fields(metadata, path, &["kind", "variants"])?;
             let Value::Array(variants) = metadata.get("variants").expect("required field") else {
@@ -1141,6 +1278,23 @@ fn decode_type(value: &Value, path: &str) -> Result<TypeDescriptor, String> {
         other => return Err(format!("{path}.kind has unknown value '{other}")),
     };
     Ok(descriptor)
+}
+
+fn strip_attributes_value<'a>(mut value: &'a Value, path: &str) -> Result<&'a Value, String> {
+    loop {
+        let Value::Dict(metadata) = value else {
+            return Ok(value);
+        };
+        if !matches!(metadata.get("kind"), Some(Value::Atom(kind)) if kind.name() == "WithAttributes")
+        {
+            return Ok(value);
+        }
+        require_fields(metadata, path, &["attributes", "inner", "kind"])?;
+        if !matches!(metadata.get("attributes"), Some(Value::Dict(_))) {
+            return Err(format!("{path}.attributes must be a Dict"));
+        }
+        value = metadata.get("inner").expect("required field");
+    }
 }
 
 fn require_fields(metadata: &crate::Dict, path: &str, fields: &[&str]) -> Result<(), String> {
@@ -1377,6 +1531,9 @@ fn interpolation_type_supported(descriptor: &TypeDescriptor) -> bool {
         | TypeDescriptor::String
         | TypeDescriptor::Atom(_) => true,
         TypeDescriptor::Union(variants) => variants.iter().all(interpolation_type_supported),
+        TypeDescriptor::Enum(variants) => variants.iter().all(|(name, payload)| {
+            interpolation_type_supported(&enum_variant_type(name, payload.as_deref()))
+        }),
         TypeDescriptor::Float
         | TypeDescriptor::Bytes
         | TypeDescriptor::Array(_)
@@ -1445,6 +1602,24 @@ fn union_or_single(mut types: Vec<TypeDescriptor>) -> TypeDescriptor {
 fn assignable(actual: &TypeDescriptor, expected: &TypeDescriptor) -> bool {
     match (actual, expected) {
         (TypeDescriptor::Any, _) | (_, TypeDescriptor::Any) => true,
+        (TypeDescriptor::Enum(actual), TypeDescriptor::Enum(expected)) => {
+            actual.len() == expected.len()
+                && expected.iter().all(|(name, expected)| {
+                    actual
+                        .get(name)
+                        .is_some_and(|actual| match (actual, expected) {
+                            (None, None) => true,
+                            (Some(actual), Some(expected)) => assignable(actual, expected),
+                            _ => false,
+                        })
+                })
+        }
+        (actual, TypeDescriptor::Enum(variants)) => variants.iter().any(|(name, payload)| {
+            assignable(actual, &enum_variant_type(name, payload.as_deref()))
+        }),
+        (TypeDescriptor::Enum(variants), expected) => variants.iter().all(|(name, payload)| {
+            assignable(&enum_variant_type(name, payload.as_deref()), expected)
+        }),
         (actual, TypeDescriptor::Union(variants)) => {
             variants.iter().any(|variant| assignable(actual, variant))
         }
@@ -1490,6 +1665,13 @@ fn assignable(actual: &TypeDescriptor, expected: &TypeDescriptor) -> bool {
     }
 }
 
+fn enum_variant_type(name: &str, payload: Option<&TypeDescriptor>) -> TypeDescriptor {
+    let tag = TypeDescriptor::Atom(atom_from_name(name));
+    payload.map_or(tag.clone(), |payload| {
+        TypeDescriptor::Tuple(vec![tag, payload.clone()])
+    })
+}
+
 fn incompatibility_path(actual: &TypeDescriptor, expected: &TypeDescriptor) -> Option<ValuePath> {
     fn visit(actual: &TypeDescriptor, expected: &TypeDescriptor, path: &mut ValuePath) -> bool {
         match (actual, expected) {
@@ -1500,6 +1682,25 @@ fn incompatibility_path(actual: &TypeDescriptor, expected: &TypeDescriptor) -> O
                     let mismatch = actual
                         .get(name)
                         .is_none_or(|actual| visit(actual, expected, path));
+                    if mismatch {
+                        return true;
+                    }
+                    path.pop();
+                }
+                if let Some(name) = actual.keys().find(|name| !expected.contains_key(*name)) {
+                    path.push(ValuePathSegment::Key(name.clone()));
+                    return true;
+                }
+                false
+            }
+            (TypeDescriptor::Enum(actual), TypeDescriptor::Enum(expected)) => {
+                for (name, expected) in expected {
+                    path.push(ValuePathSegment::Key(name.clone()));
+                    let mismatch = match (actual.get(name), expected) {
+                        (Some(None), None) => false,
+                        (Some(Some(actual)), Some(expected)) => visit(actual, expected, path),
+                        _ => true,
+                    };
                     if mismatch {
                         return true;
                     }
@@ -1569,7 +1770,10 @@ mod tests {
                 ("age".into(), TypeDescriptor::Int),
                 ("name".into(), TypeDescriptor::String),
             ]))],
-            result: Box::new(TypeDescriptor::String),
+            result: Box::new(TypeDescriptor::Enum(BTreeMap::from([
+                ("None".into(), None),
+                ("Some".into(), Some(Box::new(TypeDescriptor::String))),
+            ]))),
         };
         let value = descriptor.to_value(&mut Vm::new());
         assert_eq!(TypeDescriptor::from_value(&value).unwrap(), descriptor);

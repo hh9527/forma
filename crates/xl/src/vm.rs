@@ -5,8 +5,8 @@ use crate::heap::{
 use crate::lir::RegisterId;
 use crate::value::{
     BuiltinAtom, CoreArrayFunction, CoreAttributesFunction, CoreCodecFunction, CoreDebugFunction,
-    CoreDictFunction, CoreJsonFunction, CoreResultFunction, Dict, NativeError, NativeKind,
-    NativeLimit, Shape, Value,
+    CoreDictFunction, CoreJsonFunction, CoreModelFunction, CoreResultFunction, Dict, NativeError,
+    NativeKind, NativeLimit, Shape, Value,
 };
 use crate::{Diagnostic, Origin, SourceDatabase};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1961,6 +1961,16 @@ fn drive_vm_action(
                             background,
                             account,
                         )?,
+                        NativeKind::CoreModel(function) => run_core_model(
+                            function,
+                            &arguments,
+                            return_target,
+                            &call_function,
+                            call_pc,
+                            current,
+                            background,
+                            account,
+                        )?,
                         NativeKind::CoreDict(function) => run_core_dict(
                             function,
                             &arguments,
@@ -2861,6 +2871,165 @@ fn allocate_attributes_wrapper(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_core_model(
+    operation: CoreModelFunction,
+    arguments: &[RichValue],
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    validate_model_context(arguments[0], function, pc, current, background)?;
+    let member_name = match operation {
+        CoreModelFunction::Struct => "fields",
+        CoreModelFunction::Enum => "variants",
+    };
+    let entries = core_dict_entries(
+        arguments[1],
+        &format!("{member_name} Dict"),
+        function,
+        pc,
+        current,
+        background,
+    )?;
+    if operation == CoreModelFunction::Enum && entries.is_empty() {
+        return Err(error(
+            RuntimeErrorKind::TypeMismatch,
+            "enum requires at least one variant",
+            function,
+            pc,
+        ));
+    }
+
+    let mut normalized = Vec::with_capacity(entries.len());
+    for (name, member) in entries {
+        let path = format!("{member_name}.{name}");
+        let (inner, attributes) =
+            flatten_attributes(member, &path, function, pc, current, background)?;
+        match operation {
+            CoreModelFunction::Struct => {
+                decode_runtime_type_at(inner, &path, current, background).map_err(|message| {
+                    error(RuntimeErrorKind::TypeMismatch, message, function, pc)
+                })?;
+            }
+            CoreModelFunction::Enum => {
+                let view = HeapView {
+                    current,
+                    background: Some(background),
+                };
+                let unit = view
+                    .atom_text(inner)
+                    .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                    == Some("None");
+                if !unit {
+                    decode_runtime_type_at(inner, &path, current, background).map_err(
+                        |message| error(RuntimeErrorKind::TypeMismatch, message, function, pc),
+                    )?;
+                }
+            }
+        }
+        let member = allocate_attributes_wrapper(
+            inner,
+            attributes,
+            member.loc.or(instruction_location(function, pc)),
+            function,
+            pc,
+            current,
+            account,
+        )?;
+        normalized.push((name, member));
+    }
+
+    let members = allocate_core_dict(normalized, function, pc, current, account)?;
+    let kind_name = match operation {
+        CoreModelFunction::Struct => "Struct",
+        CoreModelFunction::Enum => "Enum",
+    };
+    let metadata = allocate_core_dict(
+        BTreeMap::from([
+            (
+                "kind".to_owned(),
+                RichValue::new(
+                    RuntimeValue::Atom(current.intern(kind_name)),
+                    instruction_location(function, pc),
+                ),
+            ),
+            (member_name.to_owned(), members),
+        ])
+        .into_iter()
+        .collect(),
+        function,
+        pc,
+        current,
+        account,
+    )?;
+    let value = allocate_attributes_wrapper(
+        metadata,
+        BTreeMap::new(),
+        instruction_location(function, pc),
+        function,
+        pc,
+        current,
+        account,
+    )?;
+    Ok(VmAction::Return {
+        value,
+        return_target,
+    })
+}
+
+fn validate_model_context(
+    context: RichValue,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &Heap,
+    background: &Heap,
+) -> Result<(), RuntimeError> {
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    if view
+        .atom_text(context)
+        .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+        == Some("None")
+    {
+        return Ok(());
+    }
+    let RuntimeValue::Dict(handle) = context.value else {
+        return Err(error(
+            RuntimeErrorKind::TypeMismatch,
+            "model context must be 'None or a Type context",
+            function,
+            pc,
+        ));
+    };
+    let fields = view
+        .dict_fields(handle)
+        .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?;
+    let kind = view
+        .dict_get_text(handle, "kind")
+        .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+        .and_then(|value| view.atom_text(value).ok().flatten());
+    let name = view
+        .dict_get_text(handle, "name")
+        .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+        .and_then(|value| view.string_text(value).ok().flatten());
+    if fields == ["kind", "name"] && kind == Some("Type") && name.is_some() {
+        Ok(())
+    } else {
+        Err(error(
+            RuntimeErrorKind::TypeMismatch,
+            "model context must be 'None or {kind: 'Type, name: String}",
+            function,
+            pc,
+        ))
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CodecType {
     kind: CodecKind,
@@ -2878,6 +3047,7 @@ enum CodecKind {
     Array(Box<CodecType>),
     Tuple(Vec<CodecType>),
     Struct(BTreeMap<String, CodecType>),
+    Enum(BTreeMap<String, Option<Box<CodecType>>>),
     Union(Vec<CodecType>),
     Function,
 }
@@ -3114,10 +3284,80 @@ fn decode_runtime_type_at(
                     .collect::<Result<_, String>>()?,
             )
         }
+        "Enum" => {
+            let variants = view
+                .dict_get_text(handle, "variants")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("{path}.variants is missing"))?;
+            let RuntimeValue::Dict(variants) = variants.value else {
+                return Err(format!("{path}.variants must be a Dict"));
+            };
+            let (names, values) = view
+                .dict_parts(variants)
+                .map_err(|error| error.to_string())?;
+            if names.is_empty() {
+                return Err(format!("{path}.variants must not be empty"));
+            }
+            let mut decoded = BTreeMap::new();
+            for (name, variant) in names.iter().zip(values) {
+                let name = view.text(*name).map_err(|error| error.to_string())?;
+                let variant_path = format!("{path}.variants.{name}");
+                let inner = strip_runtime_attributes(*variant, &variant_path, &view)?;
+                let payload =
+                    if view.atom_text(inner).map_err(|error| error.to_string())? == Some("None") {
+                        None
+                    } else {
+                        Some(Box::new(decode_runtime_type_at(
+                            inner,
+                            &variant_path,
+                            current,
+                            background,
+                        )?))
+                    };
+                decoded.insert(name.to_owned(), payload);
+            }
+            CodecKind::Enum(decoded)
+        }
         "Function" => CodecKind::Function,
         other => return Err(format!("{path}.kind has unsupported value '{other}")),
     };
     Ok(CodecType { kind, rule: value })
+}
+
+fn strip_runtime_attributes(
+    mut value: RichValue,
+    path: &str,
+    view: &HeapView<'_>,
+) -> Result<RichValue, String> {
+    while let RuntimeValue::Dict(handle) = value.value {
+        let kind = view
+            .dict_get_text(handle, "kind")
+            .map_err(|error| error.to_string())?
+            .and_then(|kind| view.atom_text(kind).ok().flatten());
+        if kind != Some("WithAttributes") {
+            break;
+        }
+        let fields = view
+            .dict_fields(handle)
+            .map_err(|error| error.to_string())?;
+        if fields != ["attributes", "inner", "kind"] {
+            return Err(format!(
+                "{path} WithAttributes wrapper must have exactly attributes, inner, and kind fields"
+            ));
+        }
+        let attributes = view
+            .dict_get_text(handle, "attributes")
+            .map_err(|error| error.to_string())?
+            .expect("validated wrapper field");
+        if !matches!(attributes.value, RuntimeValue::Dict(_)) {
+            return Err(format!("{path}.attributes must be a Dict"));
+        }
+        value = view
+            .dict_get_text(handle, "inner")
+            .map_err(|error| error.to_string())?
+            .expect("validated wrapper field");
+    }
+    Ok(value)
 }
 
 fn option_item(schema: &CodecType) -> Option<&CodecType> {
@@ -3284,6 +3524,11 @@ fn transform_codec(
                 schema.rule,
             ))
         }
+        CodecKind::Enum(_) => Err(CodecFailure::new(
+            format!("{path}: Enum codecs require an explicit representation policy"),
+            value,
+            schema.rule,
+        )),
         CodecKind::Bytes => Err(CodecFailure::new(
             format!("{path}: Bytes has no JSON codec"),
             value,
@@ -3419,6 +3664,10 @@ fn codec_type_name(schema: &CodecType) -> &'static str {
         CodecKind::Array(_) => "Array",
         CodecKind::Tuple(_) => "Tuple",
         CodecKind::Struct(_) => "Struct",
+        CodecKind::Enum(variants) => {
+            let _ = variants;
+            "Enum"
+        }
         CodecKind::Union(_) => "Union",
         CodecKind::Function => "Function",
     }

@@ -1740,6 +1740,189 @@ mod tests {
     }
 
     #[test]
+    fn normalized_struct_and_enum_models_preserve_uniform_member_attributes() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import attributes from "core:attributes";
+               let annotate = fn(key, payload) {
+                   fn(ctx, value) { attributes.add(value, { marker: (key, payload) }) }
+               };
+
+               @annotate("model", 1)
+               @struct
+               type User = {
+                   name: String,
+                   @annotate("field", 2)
+                   role: String,
+               };
+
+               @annotate("enum", 3)
+               @enum
+               type Choice = {
+                   None: 'None,
+                   User: User,
+               };
+
+               let explicit = struct('None, { value: Int });
+               let unit: Choice = 'None;
+               let payload: Choice = ('User, { name: "Ada", role: "admin" });
+               {
+                   user: User,
+                   choice: Choice,
+                   explicit: explicit,
+                   unit: validate(Choice, unit),
+                   payload: validate(Choice, payload),
+               }"#,
+        )
+        .unwrap();
+
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(result) = module.execute(100_000).unwrap() else {
+            panic!("expected model result")
+        };
+        assert!(result.get("unit").unwrap().to_string().starts_with("('Ok,"));
+        assert!(
+            result
+                .get("payload")
+                .unwrap()
+                .to_string()
+                .starts_with("('Ok,")
+        );
+
+        fn assert_wrapper(value: &Value) -> &crate::Dict {
+            let Value::Dict(wrapper) = value else {
+                panic!("expected WithAttributes wrapper")
+            };
+            assert_eq!(wrapper.get("kind").unwrap().to_string(), "'WithAttributes");
+            assert!(matches!(wrapper.get("attributes"), Some(Value::Dict(_))));
+            wrapper
+        }
+        let user = assert_wrapper(result.get("user").unwrap());
+        let Value::Dict(user_metadata) = user.get("inner").unwrap() else {
+            panic!("expected Struct metadata")
+        };
+        assert_eq!(user_metadata.get("kind").unwrap().to_string(), "'Struct");
+        let Value::Dict(fields) = user_metadata.get("fields").unwrap() else {
+            panic!("expected normalized fields")
+        };
+        let name = assert_wrapper(fields.get("name").unwrap());
+        assert_eq!(name.get("attributes").unwrap().to_string(), "{}");
+        let role = assert_wrapper(fields.get("role").unwrap());
+        assert_eq!(
+            role.get("attributes").unwrap().to_string(),
+            "{marker: (\"field\", 2)}"
+        );
+        assert_eq!(
+            user.get("attributes").unwrap().to_string(),
+            "{marker: (\"model\", 1)}"
+        );
+
+        let choice = assert_wrapper(result.get("choice").unwrap());
+        let Value::Dict(enum_metadata) = choice.get("inner").unwrap() else {
+            panic!("expected Enum metadata")
+        };
+        assert_eq!(enum_metadata.get("kind").unwrap().to_string(), "'Enum");
+        let Value::Dict(variants) = enum_metadata.get("variants").unwrap() else {
+            panic!("expected normalized variants")
+        };
+        for variant in variants.values() {
+            assert_wrapper(variant);
+        }
+        let none = assert_wrapper(variants.get("None").unwrap());
+        assert_eq!(none.get("inner").unwrap().to_string(), "'None");
+        assert_eq!(
+            choice.get("attributes").unwrap().to_string(),
+            "{marker: (\"enum\", 3)}"
+        );
+
+        let explicit = assert_wrapper(result.get("explicit").unwrap());
+        let Value::Dict(explicit_metadata) = explicit.get("inner").unwrap() else {
+            panic!("expected explicit Struct metadata")
+        };
+        let Value::Dict(explicit_fields) = explicit_metadata.get("fields").unwrap() else {
+            panic!("expected explicit fields")
+        };
+        assert_wrapper(explicit_fields.get("value").unwrap());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn enum_validation_rejects_unknown_tags_and_payload_shape_mismatches() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import codec from "core:codec";
+               @enum
+               type Choice = { None: 'None, Number: Int };
+               {
+                   unknown: validate(Choice, 'Other),
+                   missing: validate(Choice, 'Number),
+                   unexpected: validate(Choice, ('None, 1)),
+                   wrong: validate(Choice, ('Number, "one")),
+                   codec: codec.decode(Choice, "None"),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(result) = module.execute(100_000).unwrap() else {
+            panic!("expected validation results")
+        };
+        for field in ["unknown", "missing", "unexpected", "wrong", "codec"] {
+            assert!(result.get(field).unwrap().to_string().starts_with("('Err,"));
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn normalized_model_constructors_reject_invalid_inputs_and_charge_quota() {
+        let directory = fixture_dir();
+        let run_error = |name: &str, expression: &str| {
+            let path = directory.join(name);
+            fs::write(&path, expression).unwrap();
+            let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
+            module.execute(100_000).unwrap_err()
+        };
+        assert!(
+            run_error("context.xl", "struct('Bad, {x: Int})")
+                .message
+                .contains("model context")
+        );
+        assert!(
+            run_error("empty.xl", "enum('None, {})")
+                .message
+                .contains("at least one variant")
+        );
+        assert!(
+            run_error("field.xl", "struct('None, {x: 1})")
+                .message
+                .contains("Type metadata")
+        );
+        assert!(
+            run_error("variant.xl", "enum('None, {Bad: 1})")
+                .message
+                .contains("Type metadata")
+        );
+
+        let path = directory.join("quota.xl");
+        fs::write(&path, "struct('None, {x: Int})").unwrap();
+        let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
+        let mut account = QuotaAccount::new(Quota::new(10, 1_000, 0));
+        let error = Vm::new()
+            .execute_in_work(
+                &module.runtime.main.heap,
+                &module.runtime.externals,
+                &module.function,
+                &[],
+                &mut account,
+            )
+            .err()
+            .expect("model normalization must exhaust allocation quota");
+        assert_eq!(error.kind, crate::RuntimeErrorKind::AllocationQuotaExceeded);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn core_attributes_rejects_malformed_wrappers_and_obeys_allocation_quota() {
         let directory = fixture_dir();
         let path = directory.join("main.xl");
