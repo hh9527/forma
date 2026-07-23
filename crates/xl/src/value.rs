@@ -268,6 +268,7 @@ pub(crate) enum CoreJsonFunction {
     RenameAll,
     RenameAllDecorator,
     Flatten,
+    Untagged,
     Default,
     DefaultDecorator,
     SkipSerializingIf,
@@ -285,6 +286,7 @@ impl CoreJsonFunction {
             Self::RenameAll => "core:json.rename_all",
             Self::RenameAllDecorator => "core:json.rename_all.configured",
             Self::Flatten => "core:json.flatten",
+            Self::Untagged => "core:json.untagged",
             Self::Default => "core:json.default",
             Self::DefaultDecorator => "core:json.default.configured",
             Self::SkipSerializingIf => "core:json.skip_serializing_if",
@@ -295,6 +297,7 @@ impl CoreJsonFunction {
     pub(crate) const fn arity(self) -> usize {
         match self {
             Self::Flatten
+            | Self::Untagged
             | Self::RenameDecorator
             | Self::RenameAllDecorator
             | Self::DefaultDecorator

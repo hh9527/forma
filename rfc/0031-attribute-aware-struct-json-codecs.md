@@ -175,6 +175,6 @@ One placement check is intentionally narrower than the proposal. Because the
 flat attributed-value protocol erases wrapper nesting, a Struct node cannot
 tell whether a field-only attribute came from its parent's field wrapper or
 was written directly on the Struct expression. The codec therefore rejects
-misplacement only where context remains observable, such as `rename_all` on a
-field or `flatten` on a non-Struct field. Syntax-aware linting can diagnose the
-erased cases before normalization.
+misplacement only where context remains observable, such as `flatten` on a
+non-Struct field or incompatible attributes on one field. Syntax-aware linting
+can diagnose the erased cases before normalization.

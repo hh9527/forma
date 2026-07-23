@@ -3259,15 +3259,23 @@ enum CodecKind {
     Array(Box<CodecType>),
     Tuple(Vec<CodecType>),
     Struct(BTreeMap<String, CodecType>),
-    Enum(BTreeMap<String, Option<Box<CodecType>>>),
+    Enum(BTreeMap<String, CodecEnumVariant>),
     Union(Vec<CodecType>),
     Function,
+}
+
+#[derive(Clone, Debug)]
+struct CodecEnumVariant {
+    payload: Option<Box<CodecType>>,
+    attributes: BTreeMap<String, RichValue>,
+    rule: RichValue,
 }
 
 #[derive(Clone, Debug)]
 enum CodecNode {
     Existing(RichValue),
     Atom(BuiltinAtom, Option<crate::Loc>),
+    NamedAtom(String, Option<crate::Loc>),
     Array(Vec<Self>, Option<crate::Loc>),
     Tuple(Vec<Self>, Option<crate::Loc>),
     Dict(Vec<(String, Self)>, Option<crate::Loc>),
@@ -3525,7 +3533,7 @@ fn decode_runtime_type_at(
             for (name, variant) in names.iter().zip(values) {
                 let name = view.text(*name).map_err(|error| error.to_string())?;
                 let variant_path = format!("{path}.variants.{name}");
-                let inner = strip_runtime_attributes(*variant, &variant_path, &view)?;
+                let (inner, attributes) = strip_runtime_attributes(*variant, &variant_path, &view)?;
                 let payload =
                     if view.atom_text(inner).map_err(|error| error.to_string())? == Some("None") {
                         None
@@ -3537,7 +3545,14 @@ fn decode_runtime_type_at(
                             background,
                         )?))
                     };
-                decoded.insert(name.to_owned(), payload);
+                decoded.insert(
+                    name.to_owned(),
+                    CodecEnumVariant {
+                        payload,
+                        attributes,
+                        rule: *variant,
+                    },
+                );
             }
             CodecKind::Enum(decoded)
         }
@@ -3555,7 +3570,8 @@ fn strip_runtime_attributes(
     mut value: RichValue,
     path: &str,
     view: &HeapView<'_>,
-) -> Result<RichValue, String> {
+) -> Result<(RichValue, BTreeMap<String, RichValue>), String> {
+    let mut collected = BTreeMap::new();
     while let RuntimeValue::Dict(handle) = value.value {
         let kind = view
             .dict_get_text(handle, "kind")
@@ -3576,23 +3592,39 @@ fn strip_runtime_attributes(
             .dict_get_text(handle, "attributes")
             .map_err(|error| error.to_string())?
             .expect("validated wrapper field");
-        if !matches!(attributes.value, RuntimeValue::Dict(_)) {
+        let RuntimeValue::Dict(attributes) = attributes.value else {
             return Err(format!("{path}.attributes must be a Dict"));
+        };
+        let (names, values) = view
+            .dict_parts(attributes)
+            .map_err(|error| error.to_string())?;
+        for (name, attribute) in names.iter().zip(values) {
+            collected
+                .entry(
+                    view.text(*name)
+                        .map_err(|error| error.to_string())?
+                        .to_owned(),
+                )
+                .or_insert(*attribute);
         }
         value = view
             .dict_get_text(handle, "inner")
             .map_err(|error| error.to_string())?
             .expect("validated wrapper field");
     }
-    Ok(value)
+    Ok((value, collected))
 }
 
 fn option_item(schema: &CodecType) -> Option<&CodecType> {
     if let CodecKind::Enum(variants) = &schema.kind {
-        if variants.len() == 2 && matches!(variants.get("None"), Some(None)) {
+        if variants.len() == 2
+            && variants
+                .get("None")
+                .is_some_and(|variant| variant.payload.is_none())
+        {
             return variants
                 .get("Some")
-                .and_then(Option::as_ref)
+                .and_then(|variant| variant.payload.as_ref())
                 .map(Box::as_ref);
         }
         return None;
@@ -3760,11 +3792,9 @@ fn transform_codec(
                 schema.rule,
             ))
         }
-        CodecKind::Enum(_) => Err(CodecFailure::new(
-            format!("{path}: Enum codecs require an explicit representation policy"),
-            value,
-            schema.rule,
-        )),
+        CodecKind::Enum(variants) => transform_codec_enum(
+            schema, variants, value, direction, path, current, background,
+        ),
         CodecKind::Bytes => Err(CodecFailure::new(
             format!("{path}: Bytes has no JSON codec"),
             value,
@@ -3900,13 +3930,6 @@ fn plan_struct(
     let mut planned = Vec::with_capacity(fields.len());
     let mut external_names: BTreeMap<String, RichValue> = BTreeMap::new();
     for (internal_name, field) in fields {
-        if let Some(rule) = field.attributes.get("core:json.rename_all").copied() {
-            return Err(CodecFailure::new(
-                format!("{path}.{internal_name}: rename_all is only valid on a Struct"),
-                data,
-                rule,
-            ));
-        }
         let rename = field.attributes.get("core:json.rename").copied();
         let rename = rename
             .map(|rule| {
@@ -4053,17 +4076,421 @@ fn struct_plan_external_names(plan: &StructPlan) -> Vec<(String, RichValue)> {
 fn lower_camel_case(name: &str) -> String {
     let mut output = String::with_capacity(name.len());
     let mut uppercase = false;
-    for character in name.chars() {
+    for (index, character) in name.chars().enumerate() {
         if character == '_' {
             uppercase = true;
         } else if uppercase {
             output.extend(character.to_uppercase());
             uppercase = false;
+        } else if index == 0 {
+            output.extend(character.to_lowercase());
         } else {
             output.push(character);
         }
     }
     output
+}
+
+#[derive(Clone, Debug)]
+struct EnumVariantPlan {
+    internal_name: String,
+    external_name: String,
+    payload: Option<CodecType>,
+    rule: RichValue,
+}
+
+#[derive(Clone, Debug)]
+struct EnumPlan {
+    variants: Vec<EnumVariantPlan>,
+    untagged: bool,
+}
+
+fn plan_enum(
+    schema: &CodecType,
+    variants: &BTreeMap<String, CodecEnumVariant>,
+    data: RichValue,
+    path: &str,
+    view: &HeapView<'_>,
+) -> Result<EnumPlan, CodecFailure> {
+    let untagged = match schema.attributes.get("core:json.untagged").copied() {
+        Some(rule) => {
+            if view
+                .atom_text(rule)
+                .map_err(|error| CodecFailure::new(error.to_string(), data, rule))?
+                != Some("True")
+            {
+                return Err(CodecFailure::new(
+                    format!("{path}: untagged must be 'True"),
+                    data,
+                    rule,
+                ));
+            }
+            true
+        }
+        None => false,
+    };
+    let rename_all = match schema.attributes.get("core:json.rename_all").copied() {
+        Some(rule) => {
+            if untagged {
+                return Err(CodecFailure::new(
+                    format!("{path}: rename_all is not meaningful on an untagged Enum"),
+                    data,
+                    rule,
+                ));
+            }
+            if view
+                .atom_text(rule)
+                .map_err(|error| CodecFailure::new(error.to_string(), data, rule))?
+                != Some("CamelCase")
+            {
+                return Err(CodecFailure::new(
+                    format!("{path}: rename_all must be 'CamelCase"),
+                    data,
+                    rule,
+                ));
+            }
+            true
+        }
+        None => false,
+    };
+    let mut names = BTreeMap::new();
+    let mut planned = Vec::with_capacity(variants.len());
+    for (internal_name, variant) in variants {
+        let rename_rule = variant.attributes.get("core:json.rename").copied();
+        if let (true, Some(rule)) = (untagged, rename_rule) {
+            return Err(CodecFailure::new(
+                format!("{path}.{internal_name}: rename is not meaningful in an untagged Enum"),
+                data,
+                rule,
+            ));
+        }
+        if untagged && variant.payload.is_none() {
+            return Err(CodecFailure::new(
+                format!("{path}.{internal_name}: untagged variants require payloads"),
+                data,
+                variant.rule,
+            ));
+        }
+        let external_name = if let Some(rule) = rename_rule {
+            view.string_text(rule)
+                .map_err(|error| CodecFailure::new(error.to_string(), data, rule))?
+                .map(str::to_owned)
+                .ok_or_else(|| {
+                    CodecFailure::new(
+                        format!("{path}.{internal_name}: rename must be a String"),
+                        data,
+                        rule,
+                    )
+                })?
+        } else if rename_all {
+            lower_camel_case(internal_name)
+        } else {
+            internal_name.clone()
+        };
+        if !untagged && names.insert(external_name.clone(), variant.rule).is_some() {
+            return Err(CodecFailure::new(
+                format!("{path}.{external_name}: duplicate external variant name"),
+                data,
+                rename_rule.unwrap_or(variant.rule),
+            ));
+        }
+        planned.push(EnumVariantPlan {
+            internal_name: internal_name.clone(),
+            external_name,
+            payload: variant.payload.as_deref().cloned(),
+            rule: variant.rule,
+        });
+    }
+    Ok(EnumPlan {
+        variants: planned,
+        untagged,
+    })
+}
+
+fn transform_codec_enum(
+    schema: &CodecType,
+    variants: &BTreeMap<String, CodecEnumVariant>,
+    value: RichValue,
+    direction: CodecDirection,
+    path: &str,
+    current: &Heap,
+    background: &Heap,
+) -> Result<CodecNode, CodecFailure> {
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let plan = plan_enum(schema, variants, value, path, &view)?;
+    if plan.untagged {
+        return transform_untagged_enum(&plan, value, direction, path, current, background);
+    }
+    match direction {
+        CodecDirection::Decode => {
+            if let Some(tag) = view
+                .string_text(value)
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?
+            {
+                let Some(variant) = plan
+                    .variants
+                    .iter()
+                    .find(|variant| variant.external_name == tag)
+                else {
+                    return Err(CodecFailure::new(
+                        format!("{path}: unknown Enum variant {tag:?}"),
+                        value,
+                        schema.rule,
+                    ));
+                };
+                if variant.payload.is_some() {
+                    return Err(CodecFailure::new(
+                        format!("{path}: variant {tag:?} requires a payload"),
+                        value,
+                        variant.rule,
+                    ));
+                }
+                return Ok(CodecNode::NamedAtom(
+                    variant.internal_name.clone(),
+                    value.loc,
+                ));
+            }
+            let RuntimeValue::Dict(handle) = value.value else {
+                return Err(CodecFailure::new(
+                    format!("{path}: expected an Enum tag String or single-entry Dict"),
+                    value,
+                    schema.rule,
+                ));
+            };
+            let (names, values) = view
+                .dict_parts(handle)
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?;
+            if names.len() != 1 {
+                return Err(CodecFailure::new(
+                    format!("{path}: externally tagged Enum object must have one field"),
+                    value,
+                    schema.rule,
+                ));
+            }
+            let tag = view
+                .text(names[0])
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?;
+            let Some(variant) = plan
+                .variants
+                .iter()
+                .find(|variant| variant.external_name == tag)
+            else {
+                return Err(CodecFailure::new(
+                    format!("{path}: unknown Enum variant {tag:?}"),
+                    value,
+                    schema.rule,
+                ));
+            };
+            let Some(payload) = &variant.payload else {
+                return Err(CodecFailure::new(
+                    format!("{path}: unit variant {tag:?} must be a String"),
+                    value,
+                    variant.rule,
+                ));
+            };
+            Ok(CodecNode::Tuple(
+                vec![
+                    CodecNode::NamedAtom(variant.internal_name.clone(), value.loc),
+                    transform_codec(
+                        payload,
+                        values[0],
+                        direction,
+                        &format!("{path}.{tag}"),
+                        current,
+                        background,
+                    )?,
+                ],
+                value.loc,
+            ))
+        }
+        CodecDirection::Encode => {
+            if let Some(tag) = view
+                .atom_text(value)
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?
+            {
+                let Some(variant) = plan
+                    .variants
+                    .iter()
+                    .find(|variant| variant.internal_name == tag)
+                else {
+                    return Err(CodecFailure::new(
+                        format!("{path}: unknown Enum tag '{tag}"),
+                        value,
+                        schema.rule,
+                    ));
+                };
+                if variant.payload.is_some() {
+                    return Err(CodecFailure::new(
+                        format!("{path}: variant '{tag} requires a payload"),
+                        value,
+                        variant.rule,
+                    ));
+                }
+                return Ok(CodecNode::String(variant.external_name.clone(), value.loc));
+            }
+            let RuntimeValue::Tuple(handle) = value.value else {
+                return Err(CodecFailure::new(
+                    format!("{path}: expected canonical Enum value"),
+                    value,
+                    schema.rule,
+                ));
+            };
+            let tuple = view
+                .sequence(handle, true)
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?;
+            if tuple.len() != 2 {
+                return Err(CodecFailure::new(
+                    format!("{path}: expected ('Variant, payload)"),
+                    value,
+                    schema.rule,
+                ));
+            }
+            let tag = view
+                .atom_text(tuple[0])
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?
+                .ok_or_else(|| {
+                    CodecFailure::new(
+                        format!("{path}: Enum tuple tag must be an Atom"),
+                        value,
+                        schema.rule,
+                    )
+                })?;
+            let Some(variant) = plan
+                .variants
+                .iter()
+                .find(|variant| variant.internal_name == tag)
+            else {
+                return Err(CodecFailure::new(
+                    format!("{path}: unknown Enum tag '{tag}"),
+                    value,
+                    schema.rule,
+                ));
+            };
+            let Some(payload) = &variant.payload else {
+                return Err(CodecFailure::new(
+                    format!("{path}: unit variant '{tag} must not have a payload"),
+                    value,
+                    variant.rule,
+                ));
+            };
+            Ok(CodecNode::Dict(
+                vec![(
+                    variant.external_name.clone(),
+                    transform_codec(
+                        payload,
+                        tuple[1],
+                        direction,
+                        &format!("{path}.{tag}"),
+                        current,
+                        background,
+                    )?,
+                )],
+                value.loc,
+            ))
+        }
+    }
+}
+
+fn transform_untagged_enum(
+    plan: &EnumPlan,
+    value: RichValue,
+    direction: CodecDirection,
+    path: &str,
+    current: &Heap,
+    background: &Heap,
+) -> Result<CodecNode, CodecFailure> {
+    match direction {
+        CodecDirection::Decode => {
+            let mut matches = Vec::new();
+            let mut errors = Vec::new();
+            for variant in &plan.variants {
+                let payload = variant.payload.as_ref().expect("planned untagged payload");
+                match transform_codec(payload, value, direction, path, current, background) {
+                    Ok(node) => matches.push((variant, node)),
+                    Err(failure) => errors.push(failure.message),
+                }
+            }
+            match matches.as_slice() {
+                [(variant, node)] => Ok(CodecNode::Tuple(
+                    vec![
+                        CodecNode::NamedAtom(variant.internal_name.clone(), value.loc),
+                        node.clone(),
+                    ],
+                    value.loc,
+                )),
+                [] => Err(CodecFailure::new(
+                    format!(
+                        "{path}: value matches no untagged Enum variant ({})",
+                        errors.join("; ")
+                    ),
+                    value,
+                    plan.variants
+                        .first()
+                        .map(|variant| variant.rule)
+                        .unwrap_or(value),
+                )),
+                _ => Err(CodecFailure::new(
+                    format!("{path}: value ambiguously matches multiple untagged Enum variants"),
+                    value,
+                    matches[1].0.rule,
+                )),
+            }
+        }
+        CodecDirection::Encode => {
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            let RuntimeValue::Tuple(handle) = value.value else {
+                return Err(CodecFailure::new(
+                    format!("{path}: expected ('Variant, payload)"),
+                    value,
+                    plan.variants
+                        .first()
+                        .map(|variant| variant.rule)
+                        .unwrap_or(value),
+                ));
+            };
+            let tuple = view
+                .sequence(handle, true)
+                .map_err(|error| CodecFailure::new(error.to_string(), value, value))?;
+            if tuple.len() != 2 {
+                return Err(CodecFailure::new(
+                    format!("{path}: expected ('Variant, payload)"),
+                    value,
+                    value,
+                ));
+            }
+            let tag = view
+                .atom_text(tuple[0])
+                .map_err(|error| CodecFailure::new(error.to_string(), value, value))?
+                .ok_or_else(|| {
+                    CodecFailure::new(
+                        format!("{path}: Enum tuple tag must be an Atom"),
+                        value,
+                        value,
+                    )
+                })?;
+            let variant = plan
+                .variants
+                .iter()
+                .find(|variant| variant.internal_name == tag)
+                .ok_or_else(|| {
+                    CodecFailure::new(format!("{path}: unknown Enum tag '{tag}"), value, value)
+                })?;
+            transform_codec(
+                variant.payload.as_ref().expect("planned untagged payload"),
+                tuple[1],
+                direction,
+                path,
+                current,
+                background,
+            )
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4338,7 +4765,7 @@ fn codec_type_name(schema: &CodecType) -> &'static str {
 fn codec_node_bytes(node: &CodecNode) -> Result<u64, NativeError> {
     match node {
         CodecNode::Existing(_) | CodecNode::Atom(_, _) => Ok(0),
-        CodecNode::String(value, _) => Ok(value.len() as u64),
+        CodecNode::NamedAtom(value, _) | CodecNode::String(value, _) => Ok(value.len() as u64),
         CodecNode::Array(items, _) | CodecNode::Tuple(items, _) => {
             let own = logical_value_bytes(items.len())?;
             items.iter().try_fold(own, |total, item| {
@@ -4364,6 +4791,9 @@ fn materialize_codec_node(node: CodecNode, current: &mut Heap, background: &Heap
     match node {
         CodecNode::Existing(value) => value,
         CodecNode::Atom(atom, loc) => RichValue::new(RuntimeValue::BuiltinAtom(atom), loc),
+        CodecNode::NamedAtom(value, loc) => {
+            RichValue::new(current.atom(Some(background), &value), loc)
+        }
         CodecNode::String(value, loc) => {
             RichValue::new(current.string(Some(background), &value), loc)
         }
@@ -4583,6 +5013,7 @@ fn run_core_json(
     if matches!(
         operation,
         CoreJsonFunction::Flatten
+            | CoreJsonFunction::Untagged
             | CoreJsonFunction::RenameDecorator
             | CoreJsonFunction::RenameAllDecorator
             | CoreJsonFunction::DefaultDecorator
@@ -4591,6 +5022,13 @@ fn run_core_json(
         let (key, payload) = match operation {
             CoreJsonFunction::Flatten => (
                 "core:json.flatten",
+                RichValue::new(
+                    RuntimeValue::BuiltinAtom(BuiltinAtom::True),
+                    instruction_location(function, pc),
+                ),
+            ),
+            CoreJsonFunction::Untagged => (
+                "core:json.untagged",
                 RichValue::new(
                     RuntimeValue::BuiltinAtom(BuiltinAtom::True),
                     instruction_location(function, pc),
@@ -4704,6 +5142,7 @@ fn run_core_json(
         | CoreJsonFunction::RenameAll
         | CoreJsonFunction::RenameAllDecorator
         | CoreJsonFunction::Flatten
+        | CoreJsonFunction::Untagged
         | CoreJsonFunction::Default
         | CoreJsonFunction::DefaultDecorator
         | CoreJsonFunction::SkipSerializingIf

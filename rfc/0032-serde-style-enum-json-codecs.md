@@ -1,6 +1,6 @@
 # RFC 0032: Serde-style Enum JSON codecs
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0029, RFC 0030, RFC 0031
 
 ## Summary
@@ -119,4 +119,17 @@ envelope.
 
 ## Implementation result
 
-Pending.
+Implemented with `json.untagged` as an ordinary attribute decorator and with
+variant wrappers decoded into their own flat attribute maps. Enum codec plans
+resolve external names once, reject collisions and inert untagged naming, and
+preserve canonical XL tags in both transformation directions.
+
+Externally tagged unit and payload variants, CamelCase, explicit rename,
+Struct composition, and untagged String/Int variants are covered by a single
+language-level round-trip fixture. Additional fixtures verify zero-match and
+ambiguous untagged failures. The prior validation test now also confirms that
+an undecorated unit Enum variant has a working default JSON codec.
+
+The implementation deliberately rejects unit variants in untagged Enums and
+ambiguous successful matches. It performs no speculative materialization while
+trying variants; only the selected codec tree is allocated and charged.

@@ -1904,9 +1904,99 @@ mod tests {
         let Value::Dict(result) = module.execute(100_000).unwrap() else {
             panic!("expected validation results")
         };
-        for field in ["unknown", "missing", "unexpected", "wrong", "codec"] {
+        for field in ["unknown", "missing", "unexpected", "wrong"] {
             assert!(result.get(field).unwrap().to_string().starts_with("('Err,"));
         }
+        assert_eq!(result.get("codec").unwrap().to_string(), "('Ok, 'None)");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn enum_json_codecs_round_trip_external_and_untagged_representations() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import codec from "core:codec";
+               import json from "core:json";
+               import result from "core:result";
+               @struct type User = {name: String};
+               @json.rename_all('CamelCase)
+               @enum type Event = {
+                   Idle: 'None,
+                   UserJoined: User,
+                   @json.rename("fatal") FatalError: String,
+               };
+               @json.untagged
+               @enum type Scalar = {Text: String, Count: Int};
+               @struct type Envelope = {event: Event};
+               {
+                   idle: codec.decode(Event, "idle") |> result.unwrap,
+                   joined: codec.decode(Event, {userJoined: {name: "Ada"}}) |> result.unwrap,
+                   fatal: codec.encode(Event, ('FatalError, "boom")) |> result.unwrap,
+                   nested: codec.encode(Envelope, {event: ('UserJoined, {name: "Lin"})}) |> result.unwrap,
+                   text: codec.decode(Scalar, "hello") |> result.unwrap,
+                   count: codec.encode(Scalar, ('Count, 3)) |> result.unwrap,
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(output) = module.execute(100_000).unwrap() else {
+            panic!("expected Enum codec results")
+        };
+        assert_eq!(output.get("idle").unwrap().to_string(), "'Idle");
+        assert_eq!(
+            output.get("joined").unwrap().to_string(),
+            "('UserJoined, {name: \"Ada\"})"
+        );
+        assert_eq!(
+            output.get("fatal").unwrap().to_string(),
+            "{fatal: \"boom\"}"
+        );
+        assert_eq!(
+            output.get("nested").unwrap().to_string(),
+            "{event: {userJoined: {name: \"Lin\"}}}"
+        );
+        assert_eq!(
+            output.get("text").unwrap().to_string(),
+            "('Text, \"hello\")"
+        );
+        assert_eq!(output.get("count").unwrap().to_string(), "3");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn untagged_enum_json_codec_rejects_no_match_and_ambiguity() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import codec from "core:codec";
+               import json from "core:json";
+               @json.untagged @enum type Scalar = {Text: String, Count: Int};
+               @json.untagged @enum type Ambiguous = {Anything: Any, Text: String};
+               {
+                   no_match: codec.decode(Scalar, []),
+                   ambiguous: codec.decode(Ambiguous, "text"),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(output) = module.execute(100_000).unwrap() else {
+            panic!("expected failures")
+        };
+        assert!(
+            output
+                .get("no_match")
+                .unwrap()
+                .to_string()
+                .contains("matches no untagged")
+        );
+        assert!(
+            output
+                .get("ambiguous")
+                .unwrap()
+                .to_string()
+                .contains("ambiguously matches")
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
