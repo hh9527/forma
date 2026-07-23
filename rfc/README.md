@@ -38,3 +38,4 @@ semantics from an earlier RFC.
 19. Structured debug observation through an explicit core module and host sink.
 20. Derived structural codecs, an explicit Result boundary, and strict JSON
     output.
+21. Rich runtime values with compact inline source locations.
