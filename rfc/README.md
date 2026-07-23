@@ -44,3 +44,4 @@ semantics from an earlier RFC.
 24. Declarative native bindings in XL source.
 25. Contextual functional decorators.
 26. Flat attributed values and transparent TypeMetadata wrappers.
+27. Normalized Struct and Enum model metadata.
