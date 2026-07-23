@@ -13,8 +13,8 @@ const SHORT_TEXT_BYTES: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Storage {
-    Local,
-    Persistent,
+    Work,
+    Main,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -195,12 +195,12 @@ impl Heap {
         }
     }
 
-    pub(crate) fn local() -> Self {
-        Self::new(Storage::Local)
+    pub(crate) fn work() -> Self {
+        Self::new(Storage::Work)
     }
 
-    pub(crate) fn persistent() -> Self {
-        Self::new(Storage::Persistent)
+    pub(crate) fn main() -> Self {
+        Self::new(Storage::Main)
     }
 
     #[cfg(test)]
@@ -239,8 +239,8 @@ impl Heap {
         handle: Handle,
         value: RichValue,
     ) -> Result<(), HeapError> {
-        if handle.storage != Storage::Local {
-            return Err(HeapError("persistent up-links are read-only"));
+        if handle.storage != Storage::Work {
+            return Err(HeapError("Main up-links are read-only"));
         }
         let Object::UpLink { value: slot } = self.object_mut(handle)? else {
             return Err(HeapError("handle is not an up-link"));
@@ -580,11 +580,11 @@ type BytecodeLinks<'a> = (
 impl<'a> HeapView<'a> {
     fn heap(&self, storage: Storage) -> Result<&'a Heap, HeapError> {
         match storage {
-            Storage::Local if self.current.storage == Storage::Local => Ok(self.current),
-            Storage::Persistent => self
+            Storage::Work if self.current.storage == Storage::Work => Ok(self.current),
+            Storage::Main => self
                 .background
-                .filter(|heap| heap.storage == Storage::Persistent)
-                .ok_or(HeapError("persistent value has no background world")),
+                .filter(|heap| heap.storage == Storage::Main)
+                .ok_or(HeapError("Main value has no Main world")),
             _ => Err(HeapError("value refers to a heap outside its view")),
         }
     }
@@ -1093,9 +1093,9 @@ pub(crate) fn publish_root(
     current: &Heap,
     root: RichValue,
 ) -> Result<PersistentValue, HeapError> {
-    if target.storage != Storage::Persistent || current.storage != Storage::Local {
+    if target.storage != Storage::Main || current.storage != Storage::Work {
         return Err(HeapError(
-            "publication requires a local arena and persistent world",
+            "publication requires a Work world and Main world",
         ));
     }
     let roots = copy_roots(
@@ -1113,7 +1113,7 @@ pub(crate) fn publish_value(
     target: &mut Heap,
     value: &Value,
 ) -> Result<PersistentValue, HeapError> {
-    let mut local = Heap::local();
+    let mut local = Heap::work();
     let root = local.import_value(Some(target), value)?;
     publish_root(target, &local, root)
 }
@@ -1484,8 +1484,8 @@ mod tests {
     fn copy_preserves_root_and_collection_edge_locations() {
         let root_loc = location("root", 0..5);
         let item_loc = location("item", 6..7);
-        let mut world = Heap::persistent();
-        let mut current = Heap::local();
+        let mut world = Heap::main();
+        let mut current = Heap::work();
         let array = current.allocate(Object::Array(
             vec![RichValue::new(RuntimeValue::Int(42), Some(item_loc))].into(),
         ));
@@ -1513,9 +1513,9 @@ mod tests {
 
     #[test]
     fn copy_is_reachable_reinterning_and_target_self_contained() {
-        let mut world = Heap::persistent();
+        let mut world = Heap::main();
         let shared = world.allocate(Object::Bytes(vec![9].into()));
-        let mut current = Heap::local();
+        let mut current = Heap::work();
         let atom = current.atom(Some(&world), "Custom");
         let string = current.string(Some(&world), "Custom");
         let root = current.allocate(Object::Tuple(
@@ -1544,14 +1544,14 @@ mod tests {
         assert!(
             !values
                 .iter()
-                .any(|value| rich_value_contains_foreign(*value, Storage::Persistent))
+                .any(|value| rich_value_contains_foreign(*value, Storage::Main))
         );
     }
 
     #[test]
     fn copy_preserves_cycles_and_failure_is_atomic() {
-        let mut world = Heap::persistent();
-        let mut current = Heap::local();
+        let mut world = Heap::main();
+        let mut current = Heap::work();
         let cycle = current.reserve();
         current
             .initialize(
@@ -1572,7 +1572,7 @@ mod tests {
 
         let before = world.counts();
         let invalid = RuntimeValue::Array(Handle {
-            storage: Storage::Local,
+            storage: Storage::Work,
             slot: 99,
         });
         assert!(
@@ -1591,8 +1591,8 @@ mod tests {
 
     #[test]
     fn multiple_roots_share_one_forwarding_context() {
-        let mut target = Heap::persistent();
-        let mut source = Heap::local();
+        let mut target = Heap::main();
+        let mut source = Heap::work();
         let shared = source.allocate(Object::Bytes(vec![1].into()));
         let roots = copy_roots(
             &mut target,
@@ -1611,11 +1611,37 @@ mod tests {
     }
 
     #[test]
+    fn publication_preserves_main_edges_and_relocates_work_edges() {
+        let mut main = Heap::main();
+        let stable = publish_value(&mut main, &Value::Bytes(vec![1, 2, 3].into()))
+            .unwrap()
+            .runtime();
+        let mut work = Heap::work();
+        let work_root = work.allocate(Object::Array(vec![stable].into()));
+
+        let published = publish_root(&mut main, &work, rv(RuntimeValue::Array(work_root)))
+            .unwrap()
+            .runtime();
+        let RuntimeValue::Array(main_root) = published.value else {
+            panic!("expected published Array")
+        };
+        assert_eq!(main_root.storage, Storage::Main);
+        let Object::Array(items) = main.object(main_root).unwrap() else {
+            panic!("expected Main Array")
+        };
+        let RuntimeValue::Bytes(stable_bytes) = items[0].value else {
+            panic!("expected Main Bytes")
+        };
+        assert_eq!(stable_bytes.storage, Storage::Main);
+        assert_eq!(main.counts(), (2, 0, 0));
+    }
+
+    #[test]
     fn scalar_equality_compares_contents_across_storage() {
         let value = Value::string("same string that is too long for the short string form");
-        let mut world = Heap::persistent();
+        let mut world = Heap::main();
         let persistent = publish_value(&mut world, &value).unwrap().runtime();
-        let mut local = Heap::local();
+        let mut local = Heap::work();
         let local_value = local.import_value(Some(&world), &value).unwrap();
         assert!(
             HeapView {
@@ -1656,9 +1682,9 @@ mod tests {
     fn composite_equality_uses_function_identity_at_func_leaves() {
         let tagged =
             Value::Tuple(vec![Value::atom("Ok"), Value::Array(vec![Value::Int(42)].into())].into());
-        let mut world = Heap::persistent();
+        let mut world = Heap::main();
         let persistent = publish_value(&mut world, &tagged).unwrap().runtime();
-        let mut local = Heap::local();
+        let mut local = Heap::work();
         let local_tagged = local.import_value(Some(&world), &tagged).unwrap();
         let function = Arc::new(crate::compile_source("test", "fn() { 1 }").unwrap());
         let closure = Arc::new(Closure::new(function, Vec::new()));
@@ -1705,7 +1731,7 @@ mod tests {
 
     #[test]
     fn structural_equality_terminates_on_internal_cycles() {
-        let mut local = Heap::local();
+        let mut local = Heap::work();
         let left = local.reserve();
         local
             .initialize(
@@ -1720,7 +1746,7 @@ mod tests {
                 Object::Array(vec![rv(RuntimeValue::Array(right))].into()),
             )
             .unwrap();
-        let world = Heap::persistent();
+        let world = Heap::main();
         assert!(
             HeapView {
                 current: &local,
@@ -1736,13 +1762,13 @@ mod tests {
 
     #[test]
     fn promotion_copies_ready_up_links_and_rejects_uninitialized_links() {
-        let mut local = Heap::local();
+        let mut local = Heap::work();
         let link = local.allocate(Object::UpLink { value: None });
         let array = local.allocate(Object::Array(vec![rv(RuntimeValue::UpLink(link))].into()));
         local
             .initialize_up_link(link, rv(RuntimeValue::Array(array)))
             .unwrap();
-        let mut world = Heap::persistent();
+        let mut world = Heap::main();
         let RuntimeValue::UpLink(persistent_link) =
             publish_root(&mut world, &local, rv(RuntimeValue::UpLink(link)))
                 .unwrap()
@@ -1751,7 +1777,7 @@ mod tests {
         else {
             panic!("expected persistent up-link")
         };
-        let reader = Heap::local();
+        let reader = Heap::work();
         let view = HeapView {
             current: &reader,
             background: Some(&world),
@@ -1769,7 +1795,7 @@ mod tests {
             &[rv(RuntimeValue::UpLink(persistent_link))]
         );
 
-        let mut uninitialized = Heap::local();
+        let mut uninitialized = Heap::work();
         let link = uninitialized.allocate(Object::UpLink { value: None });
         assert!(publish_root(&mut world, &uninitialized, rv(RuntimeValue::UpLink(link))).is_err());
     }
@@ -1784,12 +1810,12 @@ mod tests {
             ])),
             vec![Value::Int(1), Value::Int(2), Value::Int(3)],
         ));
-        let mut world = Heap::persistent();
+        let mut world = Heap::main();
         let RuntimeValue::Dict(dict) = publish_value(&mut world, &value).unwrap().runtime().value
         else {
             panic!("expected persistent Dict")
         };
-        let mut local = Heap::local();
+        let mut local = Heap::work();
         let field = local.intern("b");
         let view = HeapView {
             current: &local,
@@ -1812,9 +1838,9 @@ mod tests {
             Arc::clone(&function),
             vec![Value::string("capture")],
         )));
-        let mut current = Heap::local();
+        let mut current = Heap::work();
         let root = current.import_value(None, &closure).unwrap();
-        let mut world = Heap::persistent();
+        let mut world = Heap::main();
         let copied = copy_roots(
             &mut world,
             HeapView {
@@ -1824,7 +1850,7 @@ mod tests {
             &[root],
         )
         .unwrap()[0];
-        let local = Heap::local();
+        let local = Heap::work();
         let exported = HeapView {
             current: &local,
             background: Some(&world),
@@ -1854,7 +1880,7 @@ mod tests {
             ]
             .into(),
         );
-        let mut heap = Heap::local();
+        let mut heap = Heap::work();
         let runtime = heap.import_value(None, &value).unwrap();
         let exported = HeapView {
             current: &heap,

@@ -686,12 +686,27 @@ enum DriveOutcome {
     Root(RichValue),
 }
 
-pub(crate) struct ExecutionArena {
+pub(crate) struct WorkWorld {
     heap: Heap,
     root: RichValue,
 }
 
-impl ExecutionArena {
+#[derive(Clone, Copy)]
+struct WorkView<'a> {
+    main: &'a Heap,
+    work: &'a Heap,
+}
+
+impl<'a> WorkView<'a> {
+    fn heap_view(self) -> HeapView<'a> {
+        HeapView {
+            current: self.work,
+            background: Some(self.main),
+        }
+    }
+}
+
+impl WorkWorld {
     pub(crate) fn export(&self, world: &Heap) -> Result<Value, crate::heap::HeapError> {
         HeapView {
             current: &self.heap,
@@ -773,7 +788,7 @@ impl Vm {
         arguments: &[Value],
         account: &mut QuotaAccount,
     ) -> Result<Value, RuntimeError> {
-        let background = Heap::persistent();
+        let background = Heap::main();
         let arena = self.execute_frame(
             &background,
             &HashMap::new(),
@@ -792,14 +807,14 @@ impl Vm {
         })
     }
 
-    pub(crate) fn execute_in_background(
+    pub(crate) fn execute_in_work(
         &mut self,
         background: &Heap,
         externals: &HashMap<String, PersistentValue>,
         function: &BytecodeFunction,
         arguments: &[Value],
         account: &mut QuotaAccount,
-    ) -> Result<ExecutionArena, RuntimeError> {
+    ) -> Result<WorkWorld, RuntimeError> {
         self.execute_frame(background, externals, function, arguments, &[], account)
     }
 
@@ -812,7 +827,7 @@ impl Vm {
         arguments: &[Value],
         captures: &[Value],
         account: &mut QuotaAccount,
-    ) -> Result<ExecutionArena, RuntimeError> {
+    ) -> Result<WorkWorld, RuntimeError> {
         // Linking recursively walks the immutable prototype graph. Keep that host
         // recursion off callers' often-small test or embedding threads; VM calls
         // themselves use the explicit frame stack below.
@@ -821,7 +836,7 @@ impl Vm {
                 .name("xl-bytecode-linker".into())
                 .stack_size(16 * 1024 * 1024)
                 .spawn_scoped(scope, || {
-                    let mut current = Heap::local();
+                    let mut current = Heap::work();
                     let prototype =
                         current.link_bytecode_resolved(Some(background), function, externals)?;
                     Ok::<_, crate::heap::HeapError>((current, prototype))
@@ -895,10 +910,11 @@ impl Vm {
                 let base = frame.base;
                 let end = base + frame.function.register_count();
                 let mut registers = &mut stack[base..end];
-                let view = HeapView {
-                    current: &current,
-                    background: Some(background),
-                };
+                let view = WorkView {
+                    main: background,
+                    work: &current,
+                }
+                .heap_view();
 
                 match instruction {
                     Opcode::LoadConst { dst, value } => {
@@ -1663,7 +1679,7 @@ impl Vm {
             }
             runtime_error.trace_includes_active_frame = false;
         }
-        result.map(|root| ExecutionArena {
+        result.map(|root| WorkWorld {
             heap: current,
             root,
         })
@@ -4962,8 +4978,8 @@ mod tests {
 
     #[test]
     fn debug_formatter_is_cycle_safe_and_bounded() {
-        let background = Heap::persistent();
-        let mut current = Heap::local();
+        let background = Heap::main();
+        let mut current = Heap::work();
         let cycle = current.reserve();
         current
             .initialize(
@@ -5004,8 +5020,8 @@ mod tests {
 
     #[test]
     fn json_writer_rejects_internal_cycles() {
-        let background = Heap::persistent();
-        let mut current = Heap::local();
+        let background = Heap::main();
+        let mut current = Heap::work();
         let cycle = current.reserve();
         current
             .initialize(

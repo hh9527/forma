@@ -53,8 +53,45 @@ pub struct LoadedModule {
 }
 
 struct ModuleRuntime {
-    world: Heap,
+    main: FrozenMainWorld,
     externals: HashMap<String, PersistentValue>,
+}
+
+struct MainWorld {
+    heap: Heap,
+}
+
+impl MainWorld {
+    fn building() -> Self {
+        Self { heap: Heap::main() }
+    }
+
+    fn seal(self) -> FrozenMainWorld {
+        FrozenMainWorld { heap: self.heap }
+    }
+}
+
+struct FrozenMainWorld {
+    heap: Heap,
+}
+
+fn install_core_modules(
+    main: &mut MainWorld,
+) -> Result<HashMap<&'static str, (Value, PersistentValue)>, ModuleError> {
+    let mut modules = HashMap::new();
+    for (name, value) in [
+        (ARRAY_MODULE, array_module_value()),
+        (DICT_MODULE, dict_module_value()),
+        (DEBUG_MODULE, debug_module_value()),
+        (CODEC_MODULE, codec_module_value()),
+        (RESULT_MODULE, result_module_value()),
+        (JSON_MODULE, json_module_value()),
+    ] {
+        let root = publish_value(&mut main.heap, &value)
+            .map_err(|error| ModuleError::new(error.to_string()))?;
+        modules.insert(name, (value, root));
+    }
+    Ok(modules)
 }
 
 impl fmt::Debug for ModuleRuntime {
@@ -82,8 +119,8 @@ impl LoadedModule {
         let mut account = QuotaAccount::new(quota);
         let arena = Vm::new()
             .with_debug_sink(debug_sink)
-            .execute_in_background(
-                &self.runtime.world,
+            .execute_in_work(
+                &self.runtime.main.heap,
                 &self.runtime.externals,
                 &self.function,
                 &[],
@@ -91,7 +128,7 @@ impl LoadedModule {
             )
             .map_err(|error| error.with_sources(&self.sources))?;
         arena
-            .export(&self.runtime.world)
+            .export(&self.runtime.main.heap)
             .map_err(|error| crate::RuntimeError::from_heap_error(&self.function, error))
     }
 }
@@ -185,10 +222,12 @@ pub fn load_module_with_quota_and_debug_sink(
     if root.extension().and_then(|extension| extension.to_str()) != Some("xl") {
         return Err(ModuleError::new("root module must have an .xl extension"));
     }
+    let mut main = MainWorld::building();
+    let core_modules = install_core_modules(&mut main)?;
     let mut loader = ModuleLoader {
         cache: HashMap::new(),
-        core_modules: HashMap::new(),
-        world: Heap::persistent(),
+        core_modules,
+        main,
         visiting: Vec::new(),
         dependencies: BTreeSet::new(),
         module_quota,
@@ -201,7 +240,7 @@ pub fn load_module_with_quota_and_debug_sink(
 struct ModuleLoader {
     cache: HashMap<PathBuf, ModuleState>,
     core_modules: HashMap<&'static str, (Value, PersistentValue)>,
-    world: Heap,
+    main: MainWorld,
     visiting: Vec<PathBuf>,
     dependencies: BTreeSet<PathBuf>,
     module_quota: Quota,
@@ -229,14 +268,14 @@ impl ModuleLoader {
         let result = self.compile_xl(&path, external_bindings, true, &mut account);
         self.leave(&path);
         let (analysis, function, externals) = result?;
-        let world = std::mem::replace(&mut self.world, Heap::persistent());
+        let main = std::mem::replace(&mut self.main, MainWorld::building()).seal();
         Ok(LoadedModule {
             path,
             dependencies: self.dependencies.iter().cloned().collect(),
             analysis,
             function,
             sources: self.sources.clone(),
-            runtime: Arc::new(ModuleRuntime { world, externals }),
+            runtime: Arc::new(ModuleRuntime { main, externals }),
         })
     }
 
@@ -266,11 +305,11 @@ impl ModuleLoader {
                             )
                         })
                         .and_then(|sourced| {
-                            let mut local = Heap::local();
+                            let mut local = Heap::work();
                             let local_root = local
-                                .import_sourced_value(Some(&self.world), &sourced)
+                                .import_sourced_value(Some(&self.main.heap), &sourced)
                                 .map_err(|error| ModuleError::new(error.to_string()))?;
-                            let root = publish_root(&mut self.world, &local, local_root)
+                            let root = publish_root(&mut self.main.heap, &local, local_root)
                                 .map_err(|error| ModuleError::new(error.to_string()))?;
                             Ok((sourced, root, false))
                         })
@@ -281,8 +320,8 @@ impl ModuleLoader {
                         .and_then(|(_, function, externals)| {
                             let arena = Vm::new()
                                 .with_debug_sink(Arc::clone(&self.debug_sink))
-                                .execute_in_background(
-                                    &self.world,
+                                .execute_in_work(
+                                    &self.main.heap,
                                     &externals,
                                     &function,
                                     &[],
@@ -291,13 +330,13 @@ impl ModuleLoader {
                                 .map_err(|error| {
                                     ModuleError::new(error.with_sources(&self.sources).to_string())
                                 })?;
-                            let (value, opaque) = match arena.export(&self.world) {
+                            let (value, opaque) = match arena.export(&self.main.heap) {
                                 Ok(value) => (value, false),
                                 Err(error) if error.is_legacy_cycle() => (Value::none(), true),
                                 Err(error) => return Err(ModuleError::new(error.to_string())),
                             };
                             let root = arena
-                                .publish(&mut self.world)
+                                .publish(&mut self.main.heap)
                                 .map_err(|error| ModuleError::new(error.to_string()))?;
                             Ok((
                                 SourcedValue {
@@ -423,22 +462,10 @@ impl ModuleLoader {
     }
 
     fn load_core_module(&mut self, name: &str) -> Result<(Value, PersistentValue), ModuleError> {
-        if let Some((value, root)) = self.core_modules.get(name) {
-            return Ok((value.clone(), *root));
-        }
-        let (identity, value) = match name {
-            ARRAY_MODULE => (ARRAY_MODULE, array_module_value()),
-            DICT_MODULE => (DICT_MODULE, dict_module_value()),
-            DEBUG_MODULE => (DEBUG_MODULE, debug_module_value()),
-            CODEC_MODULE => (CODEC_MODULE, codec_module_value()),
-            RESULT_MODULE => (RESULT_MODULE, result_module_value()),
-            JSON_MODULE => (JSON_MODULE, json_module_value()),
-            _ => return Err(ModuleError::new(format!("unknown core module {name:?}"))),
-        };
-        let root = publish_value(&mut self.world, &value)
-            .map_err(|error| ModuleError::new(error.to_string()))?;
-        self.core_modules.insert(identity, (value.clone(), root));
-        Ok((value, root))
+        self.core_modules
+            .get(name)
+            .map(|(value, root)| (value.clone(), *root))
+            .ok_or_else(|| ModuleError::new(format!("unknown core module {name:?}")))
     }
 
     fn enter(&mut self, path: &Path) -> Result<(), ModuleError> {
@@ -691,8 +718,8 @@ mod tests {
         let mut exact = QuotaAccount::new(Quota::new(1, 1_000, 0));
         let arena = Vm::new()
             .with_debug_sink(sink.clone())
-            .execute_in_background(
-                &module.runtime.world,
+            .execute_in_work(
+                &module.runtime.main.heap,
                 &module.runtime.externals,
                 &module.function,
                 &[],
@@ -701,7 +728,7 @@ mod tests {
             .unwrap();
         assert_eq!(exact.requested_allocation_bytes(), 0);
         assert_eq!(
-            arena.export(&module.runtime.world).unwrap().to_string(),
+            arena.export(&module.runtime.main.heap).unwrap().to_string(),
             "{value: 42}"
         );
         assert_eq!(sink.events.lock().unwrap().len(), 3);
@@ -710,8 +737,8 @@ mod tests {
         assert_eq!(
             Vm::new()
                 .with_debug_sink(sink)
-                .execute_in_background(
-                    &module.runtime.world,
+                .execute_in_work(
+                    &module.runtime.main.heap,
                     &module.runtime.externals,
                     &module.function,
                     &[],
@@ -1072,7 +1099,7 @@ mod tests {
         let mut loader = ModuleLoader {
             cache: HashMap::new(),
             core_modules: HashMap::new(),
-            world: Heap::persistent(),
+            main: MainWorld::building(),
             visiting: Vec::new(),
             dependencies: BTreeSet::new(),
             module_quota: Quota::with_fuel(100_000),
@@ -1081,7 +1108,7 @@ mod tests {
         };
 
         let first = loader.load_value(&data).unwrap();
-        let counts = loader.world.counts();
+        let counts = loader.main.heap.counts();
         let first_root = match loader.cache.get(&canonicalize(&data).unwrap()).unwrap() {
             ModuleState::Ready { root, .. } => *root,
         };
@@ -1092,7 +1119,25 @@ mod tests {
 
         assert_eq!(first.value.to_string(), second.value.to_string());
         assert_eq!(first_root, second_root);
-        assert_eq!(counts, loader.world.counts());
+        assert_eq!(counts, loader.main.heap.counts());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn sessions_use_fresh_work_worlds_and_leave_frozen_main_unchanged() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import arrays from "core:array"; arrays.map([1, 2], fn(x) { x + 1 })"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let main_counts = module.runtime.main.heap.counts();
+        assert!(main_counts.0 > 0, "core modules must be installed in Main");
+
+        assert_eq!(module.execute(100_000).unwrap().to_string(), "[2, 3]");
+        assert_eq!(module.execute(100_000).unwrap().to_string(), "[2, 3]");
+        assert_eq!(module.runtime.main.heap.counts(), main_counts);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1166,8 +1211,8 @@ mod tests {
 
         let mut exact = QuotaAccount::new(Quota::new(1_501, 1_000, u64::MAX));
         let arena = Vm::new()
-            .execute_in_background(
-                &module.runtime.world,
+            .execute_in_work(
+                &module.runtime.main.heap,
                 &module.runtime.externals,
                 &module.function,
                 &[],
@@ -1178,7 +1223,7 @@ mod tests {
             exact.requested_allocation_bytes(),
             item_count as u64 * std::mem::size_of::<Value>() as u64
         );
-        let Value::Array(mapped) = arena.export(&module.runtime.world).unwrap() else {
+        let Value::Array(mapped) = arena.export(&module.runtime.main.heap).unwrap() else {
             panic!("expected mapped Array")
         };
         assert_eq!(mapped.len(), item_count);
@@ -1186,8 +1231,8 @@ mod tests {
         let mut fuel_short = QuotaAccount::new(Quota::new(1_500, 1_000, u64::MAX));
         assert_eq!(
             Vm::new()
-                .execute_in_background(
-                    &module.runtime.world,
+                .execute_in_work(
+                    &module.runtime.main.heap,
                     &module.runtime.externals,
                     &module.function,
                     &[],
@@ -1203,8 +1248,8 @@ mod tests {
         let mut allocation_short = QuotaAccount::new(Quota::new(1_501, 1_000, requested - 1));
         assert_eq!(
             Vm::new()
-                .execute_in_background(
-                    &module.runtime.world,
+                .execute_in_work(
+                    &module.runtime.main.heap,
                     &module.runtime.externals,
                     &module.function,
                     &[],
@@ -1367,8 +1412,8 @@ mod tests {
         let requested = 2 * std::mem::size_of::<Value>() as u64 + 5;
         let mut exact = QuotaAccount::new(Quota::new(1, 1_000, requested));
         let arena = Vm::new()
-            .execute_in_background(
-                &module.runtime.world,
+            .execute_in_work(
+                &module.runtime.main.heap,
                 &module.runtime.externals,
                 &module.function,
                 &[],
@@ -1377,15 +1422,15 @@ mod tests {
             .unwrap();
         assert_eq!(exact.requested_allocation_bytes(), requested);
         assert_eq!(
-            arena.export(&module.runtime.world).unwrap().to_string(),
+            arena.export(&module.runtime.main.heap).unwrap().to_string(),
             "[\"a\", \"long\"]"
         );
 
         let mut short = QuotaAccount::new(Quota::new(1, 1_000, requested - 1));
         assert_eq!(
             Vm::new()
-                .execute_in_background(
-                    &module.runtime.world,
+                .execute_in_work(
+                    &module.runtime.main.heap,
                     &module.runtime.externals,
                     &module.function,
                     &[],
@@ -1467,7 +1512,7 @@ mod tests {
         let mut loader = ModuleLoader {
             cache: HashMap::new(),
             core_modules: HashMap::new(),
-            world: Heap::persistent(),
+            main: MainWorld::building(),
             visiting: Vec::new(),
             dependencies: BTreeSet::new(),
             module_quota: Quota::with_fuel(100_000),
@@ -1476,7 +1521,7 @@ mod tests {
         };
 
         loader.load_value(&a).unwrap();
-        let counts_after_a = loader.world.counts();
+        let counts_after_a = loader.main.heap.counts();
         loader.load_value(&b).unwrap();
         let root = |path: &Path| match loader.cache.get(&canonicalize(path).unwrap()).unwrap() {
             ModuleState::Ready { root, .. } => *root,
@@ -1484,7 +1529,7 @@ mod tests {
 
         assert_eq!(root(&a), root(&c));
         assert_eq!(root(&b), root(&c));
-        assert_eq!(counts_after_a, loader.world.counts());
+        assert_eq!(counts_after_a, loader.main.heap.counts());
         fs::remove_dir_all(directory).unwrap();
     }
 }

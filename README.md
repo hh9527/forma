@@ -133,6 +133,16 @@ their rich XL arguments; they do not create a privileged schema object. Codec
 failures are ordinary `('Err, {message, data, rule})` values until
 `result.unwrap` renders data and contract-rule source labels.
 
+## Execution worlds
+
+Runtime ownership has two fixed tiers. Engine core modules and initialized
+module exports live in `MainWorld`; each module initialization or serving call
+allocates in a fresh `WorkWorld`. VM execution reads Main but writes only Work.
+Module publication copies reachable Work values into Main while preserving
+existing Main references. After loading, Main is frozen; serving results are
+exported directly and Work is discarded, so repeated sessions cannot mutate
+the loaded application.
+
 ## Current limits
 
 The MVP has no effects, package manager, LSP server, traits, HKT, YAML/TOML

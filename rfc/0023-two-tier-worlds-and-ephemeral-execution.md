@@ -1,6 +1,6 @@
 # RFC 0023: Two-tier worlds and ephemeral execution
 
-- Status: Accepted for implementation
+- Status: Implemented
 - Depends on: RFC 0011, RFC 0012, RFC 0021, RFC 0022
 
 ## Summary
@@ -216,3 +216,23 @@ reclamation. Serving results cross the boundary through serialization.
 7. Repeated sessions use independent Work worlds and leave Main unchanged.
 8. Existing locations, quotas, recursion, codecs, debug output, and CLI behavior
    remain compatible.
+
+## Implementation result
+
+Runtime storage tags are now exactly `Main` and `Work`. Module loading owns a
+mutable `MainWorld`; completion consumes it into `FrozenMainWorld`, which is
+the only stable world exposed to loaded-module sessions. VM execution returns
+a `WorkWorld` and constructs a temporary `WorkView` for Main/Work resolution.
+The lower-level `HeapView` remains an internal read-only handle resolver.
+
+All core modules are installed into Main before module quota accounting starts.
+JSON and XL module initialization allocate in Work and publish atomically into
+Main. Publication preserves existing Main references, relocates reachable Work
+objects, and rejects invalid Work handles without partially changing Main.
+Session execution can export its result but has no mutable Main or publication
+capability.
+
+Tests cover Main-edge preservation, Work relocation, failure atomicity,
+one-time dependency publication, core availability, and repeated sessions
+leaving frozen Main allocation counts unchanged. `PersistentValue` remains as
+a compatibility name for a stable Main root.
