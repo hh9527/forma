@@ -50,3 +50,4 @@ semantics from an earlier RFC.
 30. Standard JSON model attribute decorators and payload vocabulary.
 31. Attribute-aware bidirectional Struct JSON codecs.
 32. Serde-style externally tagged and untagged Enum JSON codecs.
+33. JSON Schema generation from the shared codec metadata plan.
