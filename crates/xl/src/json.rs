@@ -101,7 +101,7 @@ fn compatibility_error(
     let offset = diagnostic
         .labels
         .first()
-        .map_or(0, |label| label.location.range.start);
+        .map_or(0, |label| label.location.start);
     let position = sources.get(source_id).position(offset);
     JsonError {
         source_name: sources.get(source_id).name.to_string(),
@@ -388,21 +388,12 @@ mod tests {
         let mut sources = SourceDatabase::default();
         let duplicate = sources.add("duplicate.json", r#"{"a":1,"a":2}"#);
         let parsed = parse_json_registered(&sources, duplicate);
-        assert_eq!(
-            parsed.diagnostics[0].labels[0].location.range.to_usize(),
-            7..10
-        );
-        assert_eq!(
-            parsed.diagnostics[0].labels[1].location.range.to_usize(),
-            1..4
-        );
+        assert_eq!(parsed.diagnostics[0].labels[0].location.range(), 7..10);
+        assert_eq!(parsed.diagnostics[0].labels[1].location.range(), 1..4);
 
         let large = sources.add("large.json", "9223372036854775808");
         let parsed = parse_json_registered(&sources, large);
-        assert_eq!(
-            parsed.diagnostics[0].labels[0].location.range.to_usize(),
-            0..19
-        );
+        assert_eq!(parsed.diagnostics[0].labels[0].location.range(), 0..19);
     }
 
     #[test]
@@ -417,6 +408,6 @@ mod tests {
             first.provenance.values[&path].source,
             second.provenance.values[&path].source
         );
-        assert_eq!(first.provenance.values[&path].range.to_usize(), 8..13);
+        assert_eq!(first.provenance.values[&path].range(), 8..13);
     }
 }

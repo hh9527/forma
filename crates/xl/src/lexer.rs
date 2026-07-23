@@ -35,11 +35,11 @@ impl FrontendError {
     ) -> Self {
         let label = diagnostic.labels.first().expect("diagnostic has a label");
         let file = sources.get(label.location.source);
-        let position = file.position(label.location.range.start);
+        let position = file.position(label.location.start);
         Self {
             source_name: file.name.to_string(),
             location: SourceLocation {
-                offset: label.location.range.start as usize,
+                offset: label.location.start as usize,
                 line: position.line,
                 column: position.column,
             },

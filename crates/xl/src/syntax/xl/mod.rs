@@ -11,12 +11,12 @@ pub fn parse(source_id: crate::source::SourceId, source: &str) -> super::Parse<C
     let mut diagnostics = super::convert_diagnostics(source_id, diagnostics);
     for issue in ast::validate(source_id, &syntax) {
         let diagnostic = issue.into_diagnostic();
-        let start = diagnostic.labels[0].location.range.start;
+        let start = diagnostic.labels[0].location.start;
         if !diagnostics.iter().any(|existing| {
             existing
                 .labels
                 .first()
-                .is_some_and(|label| label.location.range.start == start)
+                .is_some_and(|label| label.location.start == start)
         }) {
             diagnostics.push(diagnostic);
         }
@@ -25,7 +25,7 @@ pub fn parse(source_id: crate::source::SourceId, source: &str) -> super::Parse<C
         diagnostic
             .labels
             .first()
-            .map_or(u32::MAX, |label| label.location.range.start)
+            .map_or(u32::MAX, |label| label.location.start)
     });
     super::Parse {
         syntax,
@@ -144,7 +144,7 @@ mod tests {
         let issues = ast::validate(id, &parsed.syntax);
         assert_eq!(issues.len(), 1);
         assert_eq!(issues[0].expected, ExpectedSyntax::BindingValue);
-        assert!(issues[0].location.range.start == issues[0].location.range.end);
+        assert!(issues[0].location.start == issues[0].location.end);
         assert_eq!(
             std::mem::size_of_val(&program),
             std::mem::size_of_val(&program.syntax())
@@ -203,10 +203,7 @@ mod tests {
         let id = sources.add("escape.xl", source);
         let parsed = parse(id, source);
         assert_eq!(parsed.diagnostics.len(), 1);
-        assert_eq!(
-            parsed.diagnostics[0].labels[0].location.range.to_usize(),
-            2..4
-        );
+        assert_eq!(parsed.diagnostics[0].labels[0].location.range(), 2..4);
         let string_node = find_rule(&parsed.syntax, NodeRef::ROOT, parser::Rule::StringLiteral)
             .expect("string literal remains in CST");
         let string = StringLiteral::cast(&parsed.syntax, string_node).unwrap();

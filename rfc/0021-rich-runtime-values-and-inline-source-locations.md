@@ -1,6 +1,6 @@
 # RFC 0021: Rich Runtime Values and Inline Source Locations
 
-- Status: Accepted for implementation
+- Status: Implemented
 
 ## Summary
 
@@ -258,3 +258,26 @@ on collection edges as well as roots.
 9. Legacy Value APIs remain compatible and explicitly use unknown locations.
 10. Existing language, quota, module, snapshot-boundary, and CLI tests remain
     behaviorally compatible.
+
+## Implementation result
+
+Implemented with `SourceId` as a one-based `NonZeroU32`, flat three-word
+`Loc`, and a `Copy` `RichValue` wrapper. On the supported 64-bit target,
+`Option<Loc>` remains 12 bytes and `RichValue` is 32 bytes. VM registers,
+native windows, collection edges, closures, up-links, linked bytecode values,
+and persistent roots all carry the wrapper. Promotion relocates payloads while
+preserving locations; legacy `Value` import and export remain explicit
+location-adding and location-dropping boundaries.
+
+JSON module loading now imports the existing path provenance onto every rich
+runtime edge before publishing the root. The compatibility side table remains
+available to callers. Codec normalization preserves locations through rebuilt
+collections and reports a nested mismatch at the exact offending JSON value.
+`result.unwrap` promotes the located `Err` payload into a runtime diagnostic;
+rendering uses the data location as primary and the opcode origin as secondary.
+
+Opcode/debug origins remain separate from data provenance. The current codec
+secondary label identifies the codec or unwrap operation expression rather
+than the precise field inside the schema metadata. Carrying rule-edge
+locations through decoded Type metadata is deferred with structured diagnostic
+Result payloads.

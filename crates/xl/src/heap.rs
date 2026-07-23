@@ -1,3 +1,5 @@
+use crate::json::{SourcedValue, ValuePath, ValuePathSegment};
+use crate::source::Loc;
 use crate::{
     Atom, BuiltinAtom, BytecodeFunction, Closure, Dict, FuncByteCode, NativeFunction, Prototype,
     Shape, Value,
@@ -49,11 +51,43 @@ pub(crate) enum RuntimeValue {
     UpLink(Handle),
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RichValue {
+    pub(crate) value: RuntimeValue,
+    pub(crate) loc: Option<Loc>,
+}
+
+impl RichValue {
+    pub(crate) const fn new(value: RuntimeValue, loc: Option<Loc>) -> Self {
+        Self { value, loc }
+    }
+
+    pub(crate) const fn unknown(value: RuntimeValue) -> Self {
+        Self::new(value, None)
+    }
+
+    pub(crate) const fn with_loc(self, loc: Option<Loc>) -> Self {
+        Self { loc, ..self }
+    }
+}
+
+impl PartialEq for RichValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.value == other.value
+    }
+}
+
+impl From<RuntimeValue> for RichValue {
+    fn from(value: RuntimeValue) -> Self {
+        Self::unknown(value)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct PersistentValue(RuntimeValue);
+pub(crate) struct PersistentValue(RichValue);
 
 impl PersistentValue {
-    pub(crate) const fn runtime(self) -> RuntimeValue {
+    pub(crate) const fn runtime(self) -> RichValue {
         self.0
     }
 }
@@ -69,23 +103,23 @@ pub(crate) enum Object {
     Reserved,
     String(Box<str>),
     Bytes(Box<[u8]>),
-    Array(Box<[RuntimeValue]>),
-    Tuple(Box<[RuntimeValue]>),
+    Array(Box<[RichValue]>),
+    Tuple(Box<[RichValue]>),
     Dict {
         shape: ShapeId,
-        values: Box<[RuntimeValue]>,
+        values: Box<[RichValue]>,
     },
     Closure {
         identity: Arc<()>,
         prototype: RuntimePrototype,
-        upvalues: Box<[RuntimeValue]>,
+        upvalues: Box<[RichValue]>,
     },
     UpLink {
-        value: Option<RuntimeValue>,
+        value: Option<RichValue>,
     },
     ByteCodeProto {
         code: Arc<FuncByteCode>,
-        values: Box<[RuntimeValue]>,
+        values: Box<[RichValue]>,
         text: Box<[InternId]>,
         prototypes: Box<[RuntimePrototype]>,
     },
@@ -203,7 +237,7 @@ impl Heap {
     pub(crate) fn initialize_up_link(
         &mut self,
         handle: Handle,
-        value: RuntimeValue,
+        value: RichValue,
     ) -> Result<(), HeapError> {
         if handle.storage != Storage::Local {
             return Err(HeapError("persistent up-links are read-only"));
@@ -311,9 +345,83 @@ impl Heap {
         &mut self,
         background: Option<&Heap>,
         value: &Value,
-    ) -> Result<RuntimeValue, HeapError> {
+    ) -> Result<RichValue, HeapError> {
         let mut prototypes = HashMap::new();
         self.import_value_with(background, value, &HashMap::new(), &mut prototypes)
+    }
+
+    pub(crate) fn import_sourced_value(
+        &mut self,
+        background: Option<&Heap>,
+        sourced: &SourcedValue,
+    ) -> Result<RichValue, HeapError> {
+        self.import_sourced_at(
+            background,
+            &sourced.value,
+            &sourced.provenance,
+            &mut Vec::new(),
+        )
+    }
+
+    fn import_sourced_at(
+        &mut self,
+        background: Option<&Heap>,
+        value: &Value,
+        provenance: &crate::json::Provenance,
+        path: &mut ValuePath,
+    ) -> Result<RichValue, HeapError> {
+        let loc = provenance.values.get(path).copied();
+        let value = match value {
+            Value::Int(value) => RuntimeValue::Int(*value),
+            Value::Float(value) => RuntimeValue::Float(*value),
+            Value::String(value) => self.string(background, value),
+            Value::Bytes(value) => {
+                RuntimeValue::Bytes(self.allocate(Object::Bytes(value.as_ref().into())))
+            }
+            Value::Atom(Atom::Builtin(atom)) => RuntimeValue::BuiltinAtom(*atom),
+            Value::Atom(Atom::Named(name)) => self.atom(background, name),
+            Value::Array(values) => {
+                let mut imported = Vec::with_capacity(values.len());
+                for (index, value) in values.iter().enumerate() {
+                    path.push(ValuePathSegment::Index(index));
+                    imported.push(self.import_sourced_at(background, value, provenance, path)?);
+                    path.pop();
+                }
+                RuntimeValue::Array(self.allocate(Object::Array(imported.into())))
+            }
+            Value::Tuple(values) => {
+                let mut imported = Vec::with_capacity(values.len());
+                for (index, value) in values.iter().enumerate() {
+                    path.push(ValuePathSegment::Index(index));
+                    imported.push(self.import_sourced_at(background, value, provenance, path)?);
+                    path.pop();
+                }
+                RuntimeValue::Tuple(self.allocate(Object::Tuple(imported.into())))
+            }
+            Value::Dict(dict) => {
+                let mut fields = Vec::with_capacity(dict.values().len());
+                let mut values = Vec::with_capacity(dict.values().len());
+                for (field, value) in dict.shape().fields().iter().zip(dict.values()) {
+                    fields.push(
+                        background
+                            .and_then(|heap| heap.find_text(field))
+                            .unwrap_or_else(|| self.intern(field)),
+                    );
+                    path.push(ValuePathSegment::Key(field.clone()));
+                    values.push(self.import_sourced_at(background, value, provenance, path)?);
+                    path.pop();
+                }
+                let shape = self.intern_shape(fields);
+                RuntimeValue::Dict(self.allocate(Object::Dict {
+                    shape,
+                    values: values.into(),
+                }))
+            }
+            Value::Func(_) => {
+                return Err(HeapError("sourced data cannot contain Func"));
+            }
+        };
+        Ok(RichValue::new(value, loc))
     }
 
     fn import_value_with(
@@ -322,8 +430,8 @@ impl Heap {
         value: &Value,
         externals: &HashMap<String, PersistentValue>,
         prototypes: &mut HashMap<*const BytecodeFunction, Handle>,
-    ) -> Result<RuntimeValue, HeapError> {
-        Ok(match value {
+    ) -> Result<RichValue, HeapError> {
+        Ok(RichValue::unknown(match value {
             Value::Int(value) => RuntimeValue::Int(*value),
             Value::Float(value) => RuntimeValue::Float(*value),
             Value::String(value) => self.string(background, value),
@@ -383,7 +491,7 @@ impl Heap {
                     upvalues,
                 }))
             }
-        })
+        }))
     }
 
     pub(crate) fn link_bytecode_resolved(
@@ -464,7 +572,7 @@ pub(crate) struct HeapView<'a> {
 
 type BytecodeLinks<'a> = (
     &'a Arc<FuncByteCode>,
-    &'a [RuntimeValue],
+    &'a [RichValue],
     &'a [InternId],
     &'a [RuntimePrototype],
 );
@@ -509,7 +617,7 @@ impl<'a> HeapView<'a> {
     pub(crate) fn closure(
         &self,
         handle: Handle,
-    ) -> Result<(RuntimePrototype, &'a [RuntimeValue]), HeapError> {
+    ) -> Result<(RuntimePrototype, &'a [RichValue]), HeapError> {
         let Object::Closure {
             prototype,
             upvalues,
@@ -534,7 +642,7 @@ impl<'a> HeapView<'a> {
         }
     }
 
-    pub(crate) fn up_link(&self, handle: Handle) -> Result<Option<RuntimeValue>, HeapError> {
+    pub(crate) fn up_link(&self, handle: Handle) -> Result<Option<RichValue>, HeapError> {
         let Object::UpLink { value } = self.object(handle)? else {
             return Err(HeapError("handle is not an up-link"));
         };
@@ -545,7 +653,7 @@ impl<'a> HeapView<'a> {
         &self,
         handle: Handle,
         tuple: bool,
-    ) -> Result<&'a [RuntimeValue], HeapError> {
+    ) -> Result<&'a [RichValue], HeapError> {
         match self.object(handle)? {
             Object::Array(values) if !tuple => Ok(values),
             Object::Tuple(values) if tuple => Ok(values),
@@ -557,7 +665,7 @@ impl<'a> HeapView<'a> {
         &self,
         handle: Handle,
         field: InternId,
-    ) -> Result<Option<RuntimeValue>, HeapError> {
+    ) -> Result<Option<RichValue>, HeapError> {
         let Object::Dict { shape, values } = self.object(handle)? else {
             return Err(HeapError("handle is not a Dict"));
         };
@@ -588,7 +696,7 @@ impl<'a> HeapView<'a> {
     pub(crate) fn dict_parts(
         &self,
         handle: Handle,
-    ) -> Result<(&'a [InternId], &'a [RuntimeValue]), HeapError> {
+    ) -> Result<(&'a [InternId], &'a [RichValue]), HeapError> {
         let Object::Dict { shape, values } = self.object(handle)? else {
             return Err(HeapError("handle is not a Dict"));
         };
@@ -599,7 +707,7 @@ impl<'a> HeapView<'a> {
         &self,
         handle: Handle,
         field: &str,
-    ) -> Result<Option<RuntimeValue>, HeapError> {
+    ) -> Result<Option<RichValue>, HeapError> {
         let Object::Dict { shape, values } = self.object(handle)? else {
             return Err(HeapError("handle is not a Dict"));
         };
@@ -610,8 +718,8 @@ impl<'a> HeapView<'a> {
         Ok(index.and_then(|index| values.get(index).copied()))
     }
 
-    pub(crate) fn string_text(&self, value: RuntimeValue) -> Result<Option<&'a str>, HeapError> {
-        match value {
+    pub(crate) fn string_text(&self, value: RichValue) -> Result<Option<&'a str>, HeapError> {
+        match value.value {
             RuntimeValue::ShortString(id) => Ok(Some(self.text(id)?)),
             RuntimeValue::String(handle) => match self.object(handle)? {
                 Object::String(value) => Ok(Some(value)),
@@ -621,8 +729,8 @@ impl<'a> HeapView<'a> {
         }
     }
 
-    pub(crate) fn atom_text(&self, value: RuntimeValue) -> Result<Option<&'a str>, HeapError> {
-        match value {
+    pub(crate) fn atom_text(&self, value: RichValue) -> Result<Option<&'a str>, HeapError> {
+        match value.value {
             RuntimeValue::BuiltinAtom(atom) => Ok(Some(atom.name())),
             RuntimeValue::Atom(id) => Ok(Some(self.text(id)?)),
             _ => Ok(None),
@@ -631,10 +739,10 @@ impl<'a> HeapView<'a> {
 
     pub(crate) fn values_equal(
         &self,
-        left: RuntimeValue,
-        right: RuntimeValue,
+        left: RichValue,
+        right: RichValue,
     ) -> Result<bool, HeapError> {
-        self.values_equal_with(left, right, &mut HashSet::new())
+        self.values_equal_with(left.value, right.value, &mut HashSet::new())
     }
 
     fn values_equal_with(
@@ -674,7 +782,7 @@ impl<'a> HeapView<'a> {
             }
             (left @ RuntimeValue::BuiltinAtom(_), right @ RuntimeValue::Atom(_))
             | (left @ RuntimeValue::Atom(_), right @ RuntimeValue::BuiltinAtom(_)) => {
-                Ok(self.atom_text(left)? == self.atom_text(right)?)
+                Ok(self.atom_text(left.into())? == self.atom_text(right.into())?)
             }
             (
                 left @ (RuntimeValue::ShortString(_) | RuntimeValue::String(_)),
@@ -685,7 +793,7 @@ impl<'a> HeapView<'a> {
                 {
                     return Ok(true);
                 }
-                Ok(self.string_text(left)? == self.string_text(right)?)
+                Ok(self.string_text(left.into())? == self.string_text(right.into())?)
             }
             (RuntimeValue::Bytes(left), RuntimeValue::Bytes(right)) => {
                 if left == right {
@@ -774,23 +882,23 @@ impl<'a> HeapView<'a> {
 
     fn value_slices_equal(
         &self,
-        left: &[RuntimeValue],
-        right: &[RuntimeValue],
+        left: &[RichValue],
+        right: &[RichValue],
         visited: &mut HashSet<(Handle, Handle)>,
     ) -> Result<bool, HeapError> {
         if left.len() != right.len() {
             return Ok(false);
         }
         for (left, right) in left.iter().zip(right) {
-            if !self.values_equal_with(*left, *right, visited)? {
+            if !self.values_equal_with(left.value, right.value, visited)? {
                 return Ok(false);
             }
         }
         Ok(true)
     }
 
-    pub(crate) fn export_value(&self, value: RuntimeValue) -> Result<Value, HeapError> {
-        self.export_value_with(value, &mut HashSet::new())
+    pub(crate) fn export_value(&self, value: RichValue) -> Result<Value, HeapError> {
+        self.export_value_with(value.value, &mut HashSet::new())
     }
 
     fn export_value_with(
@@ -830,7 +938,7 @@ impl<'a> HeapView<'a> {
                 };
                 let values = values
                     .iter()
-                    .map(|value| self.export_value_with(*value, visiting))
+                    .map(|value| self.export_value_with(value.value, visiting))
                     .collect::<Result<Vec<_>, _>>()?;
                 visiting.remove(&handle);
                 if tuple {
@@ -850,7 +958,7 @@ impl<'a> HeapView<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 let values = values
                     .iter()
-                    .map(|value| self.export_value_with(*value, visiting))
+                    .map(|value| self.export_value_with(value.value, visiting))
                     .collect::<Result<Vec<_>, _>>()?;
                 visiting.remove(&handle);
                 let owner = self.heap(shape.storage)?;
@@ -879,7 +987,7 @@ impl<'a> HeapView<'a> {
                 let prototype = self.export_prototype(prototype, visiting)?;
                 let upvalues = upvalues
                     .iter()
-                    .map(|value| self.export_value_with(*value, visiting))
+                    .map(|value| self.export_value_with(value.value, visiting))
                     .collect::<Result<Vec<_>, _>>()?;
                 visiting.remove(&handle);
                 Value::Func(Arc::new(Closure::from_parts_with_identity(
@@ -897,7 +1005,7 @@ impl<'a> HeapView<'a> {
                 let value = self
                     .up_link(handle)?
                     .ok_or(HeapError("up-link is uninitialized"))?;
-                let value = self.export_value_with(value, visiting)?;
+                let value = self.export_value_with(value.value, visiting)?;
                 visiting.remove(&handle);
                 value
             }
@@ -936,7 +1044,7 @@ impl<'a> HeapView<'a> {
                 };
                 let values = values
                     .iter()
-                    .map(|value| self.export_value_with(*value, visiting))
+                    .map(|value| self.export_value_with(value.value, visiting))
                     .collect::<Result<Vec<_>, _>>()?;
                 let text = text
                     .iter()
@@ -968,8 +1076,8 @@ impl<'a> HeapView<'a> {
 fn copy_roots(
     target: &mut Heap,
     source: HeapView<'_>,
-    roots: &[RuntimeValue],
-) -> Result<Vec<RuntimeValue>, HeapError> {
+    roots: &[RichValue],
+) -> Result<Vec<RichValue>, HeapError> {
     let mut pending = PendingCopy::new(target);
     let roots = roots
         .iter()
@@ -983,7 +1091,7 @@ fn copy_roots(
 pub(crate) fn publish_root(
     target: &mut Heap,
     current: &Heap,
-    root: RuntimeValue,
+    root: RichValue,
 ) -> Result<PersistentValue, HeapError> {
     if target.storage != Storage::Persistent || current.storage != Storage::Local {
         return Err(HeapError(
@@ -1043,10 +1151,12 @@ impl PendingCopy {
         &mut self,
         target: &Heap,
         source: &HeapView<'_>,
-        value: RuntimeValue,
-    ) -> Result<RuntimeValue, HeapError> {
-        Ok(match value {
-            RuntimeValue::Int(_) | RuntimeValue::Float(_) | RuntimeValue::BuiltinAtom(_) => value,
+        value: RichValue,
+    ) -> Result<RichValue, HeapError> {
+        let copied = match value.value {
+            RuntimeValue::Int(_) | RuntimeValue::Float(_) | RuntimeValue::BuiltinAtom(_) => {
+                value.value
+            }
             RuntimeValue::Atom(id) => RuntimeValue::Atom(self.copy_text(target, source, id)?),
             RuntimeValue::ShortString(id) => {
                 RuntimeValue::ShortString(self.copy_text(target, source, id)?)
@@ -1072,7 +1182,8 @@ impl PendingCopy {
             RuntimeValue::UpLink(handle) => {
                 RuntimeValue::UpLink(self.copy_object(target, source, handle)?)
             }
-        })
+        };
+        Ok(RichValue::new(copied, value.loc))
     }
 
     fn copy_object(
@@ -1109,7 +1220,7 @@ impl PendingCopy {
         source: &HeapView<'_>,
         object: &Object,
     ) -> Result<Object, HeapError> {
-        let copy_values = |this: &mut Self, values: &[RuntimeValue]| {
+        let copy_values = |this: &mut Self, values: &[RichValue]| {
             values
                 .iter()
                 .map(|value| this.copy_value(target, source, *value))
@@ -1285,22 +1396,28 @@ fn value_contains_foreign(value: RuntimeValue, target: Storage) -> bool {
     }
 }
 
+fn rich_value_contains_foreign(value: RichValue, target: Storage) -> bool {
+    value_contains_foreign(value.value, target)
+}
+
 fn object_contains_foreign(object: &Object, target: Storage) -> bool {
     match object {
         Object::Reserved => true,
         Object::Array(values) | Object::Tuple(values) => values
             .iter()
-            .any(|value| value_contains_foreign(*value, target)),
+            .any(|value| rich_value_contains_foreign(*value, target)),
         Object::Dict { shape, values } => {
             shape.storage != target
                 || values
                     .iter()
-                    .any(|value| value_contains_foreign(*value, target))
+                    .any(|value| rich_value_contains_foreign(*value, target))
         }
         Object::Closure { upvalues, .. } => upvalues
             .iter()
-            .any(|value| value_contains_foreign(*value, target)),
-        Object::UpLink { value } => value.is_none_or(|value| value_contains_foreign(value, target)),
+            .any(|value| rich_value_contains_foreign(*value, target)),
+        Object::UpLink { value } => {
+            value.is_none_or(|value| rich_value_contains_foreign(value, target))
+        }
         Object::ByteCodeProto {
             values,
             text,
@@ -1309,7 +1426,7 @@ fn object_contains_foreign(object: &Object, target: Storage) -> bool {
         } => {
             values
                 .iter()
-                .any(|value| value_contains_foreign(*value, target))
+                .any(|value| rich_value_contains_foreign(*value, target))
                 || text.iter().any(|id| id.storage != target)
                 || prototypes.iter().any(|prototype| match prototype {
                     RuntimePrototype::Bytecode(handle) => handle.storage != target,
@@ -1336,6 +1453,64 @@ fn builtin_atom(text: &str) -> Option<BuiltinAtom> {
 mod tests {
     use super::*;
 
+    fn location(name: &str, range: std::ops::Range<usize>) -> Loc {
+        let mut sources = crate::SourceDatabase::default();
+        let source = sources.add(name, "0123456789");
+        Loc::from_usize(source, range).unwrap()
+    }
+
+    fn rv(value: RuntimeValue) -> RichValue {
+        value.into()
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn rich_value_is_compact_and_copy() {
+        fn assert_copy<T: Copy>() {}
+
+        assert_copy::<RichValue>();
+        assert_eq!(std::mem::size_of::<RichValue>(), 32);
+    }
+
+    #[test]
+    fn rich_value_equality_ignores_location() {
+        let left = RichValue::new(RuntimeValue::Int(42), Some(location("left", 1..2)));
+        let right = RichValue::new(RuntimeValue::Int(42), Some(location("right", 3..4)));
+
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn copy_preserves_root_and_collection_edge_locations() {
+        let root_loc = location("root", 0..5);
+        let item_loc = location("item", 6..7);
+        let mut world = Heap::persistent();
+        let mut current = Heap::local();
+        let array = current.allocate(Object::Array(
+            vec![RichValue::new(RuntimeValue::Int(42), Some(item_loc))].into(),
+        ));
+        let root = RichValue::new(RuntimeValue::Array(array), Some(root_loc));
+
+        let copied = copy_roots(
+            &mut world,
+            HeapView {
+                current: &current,
+                background: None,
+            },
+            &[root],
+        )
+        .unwrap()[0];
+
+        assert_eq!(copied.loc, Some(root_loc));
+        let RuntimeValue::Array(handle) = copied.value else {
+            panic!("expected copied Array")
+        };
+        let Object::Array(items) = world.object(handle).unwrap() else {
+            panic!("expected copied Array object")
+        };
+        assert_eq!(items[0].loc, Some(item_loc));
+    }
+
     #[test]
     fn copy_is_reachable_reinterning_and_target_self_contained() {
         let mut world = Heap::persistent();
@@ -1344,7 +1519,7 @@ mod tests {
         let atom = current.atom(Some(&world), "Custom");
         let string = current.string(Some(&world), "Custom");
         let root = current.allocate(Object::Tuple(
-            vec![atom, string, RuntimeValue::Bytes(shared)].into(),
+            vec![rv(atom), rv(string), rv(RuntimeValue::Bytes(shared))].into(),
         ));
         current.allocate(Object::Bytes(vec![1, 2, 3].into()));
 
@@ -1354,22 +1529,22 @@ mod tests {
                 current: &current,
                 background: None,
             },
-            &[RuntimeValue::Tuple(root)],
+            &[rv(RuntimeValue::Tuple(root))],
         )
         .unwrap();
 
         assert_eq!(world.counts(), (2, 1, 0));
-        let RuntimeValue::Tuple(root) = copied[0] else {
+        let RuntimeValue::Tuple(root) = copied[0].value else {
             panic!("expected tuple root")
         };
         let Object::Tuple(values) = world.object(root).unwrap() else {
             panic!("expected tuple object")
         };
-        assert_eq!(values[2], RuntimeValue::Bytes(shared));
+        assert_eq!(values[2], rv(RuntimeValue::Bytes(shared)));
         assert!(
             !values
                 .iter()
-                .any(|value| value_contains_foreign(*value, Storage::Persistent))
+                .any(|value| rich_value_contains_foreign(*value, Storage::Persistent))
         );
     }
 
@@ -1381,7 +1556,7 @@ mod tests {
         current
             .initialize(
                 cycle,
-                Object::Array(vec![RuntimeValue::Array(cycle)].into()),
+                Object::Array(vec![rv(RuntimeValue::Array(cycle))].into()),
             )
             .unwrap();
         copy_roots(
@@ -1390,7 +1565,7 @@ mod tests {
                 current: &current,
                 background: None,
             },
-            &[RuntimeValue::Array(cycle)],
+            &[rv(RuntimeValue::Array(cycle))],
         )
         .unwrap();
         assert_eq!(world.counts().0, 1);
@@ -1407,7 +1582,7 @@ mod tests {
                     current: &current,
                     background: None,
                 },
-                &[invalid],
+                &[rv(invalid)],
             )
             .is_err()
         );
@@ -1425,7 +1600,10 @@ mod tests {
                 current: &source,
                 background: None,
             },
-            &[RuntimeValue::Bytes(shared), RuntimeValue::Bytes(shared)],
+            &[
+                rv(RuntimeValue::Bytes(shared)),
+                rv(RuntimeValue::Bytes(shared)),
+            ],
         )
         .unwrap();
         assert_eq!(roots[0], roots[1]);
@@ -1530,13 +1708,16 @@ mod tests {
         let mut local = Heap::local();
         let left = local.reserve();
         local
-            .initialize(left, Object::Array(vec![RuntimeValue::Array(left)].into()))
+            .initialize(
+                left,
+                Object::Array(vec![rv(RuntimeValue::Array(left))].into()),
+            )
             .unwrap();
         let right = local.reserve();
         local
             .initialize(
                 right,
-                Object::Array(vec![RuntimeValue::Array(right)].into()),
+                Object::Array(vec![rv(RuntimeValue::Array(right))].into()),
             )
             .unwrap();
         let world = Heap::persistent();
@@ -1545,7 +1726,10 @@ mod tests {
                 current: &local,
                 background: Some(&world),
             }
-            .values_equal(RuntimeValue::Array(left), RuntimeValue::Array(right))
+            .values_equal(
+                rv(RuntimeValue::Array(left)),
+                rv(RuntimeValue::Array(right))
+            )
             .unwrap()
         );
     }
@@ -1554,15 +1738,16 @@ mod tests {
     fn promotion_copies_ready_up_links_and_rejects_uninitialized_links() {
         let mut local = Heap::local();
         let link = local.allocate(Object::UpLink { value: None });
-        let array = local.allocate(Object::Array(vec![RuntimeValue::UpLink(link)].into()));
+        let array = local.allocate(Object::Array(vec![rv(RuntimeValue::UpLink(link))].into()));
         local
-            .initialize_up_link(link, RuntimeValue::Array(array))
+            .initialize_up_link(link, rv(RuntimeValue::Array(array)))
             .unwrap();
         let mut world = Heap::persistent();
         let RuntimeValue::UpLink(persistent_link) =
-            publish_root(&mut world, &local, RuntimeValue::UpLink(link))
+            publish_root(&mut world, &local, rv(RuntimeValue::UpLink(link)))
                 .unwrap()
                 .runtime()
+                .value
         else {
             panic!("expected persistent up-link")
         };
@@ -1575,17 +1760,18 @@ mod tests {
             .up_link(persistent_link)
             .unwrap()
             .expect("published up-link is ready")
+            .value
         else {
             panic!("expected Array")
         };
         assert_eq!(
             view.sequence(array, false).unwrap(),
-            &[RuntimeValue::UpLink(persistent_link)]
+            &[rv(RuntimeValue::UpLink(persistent_link))]
         );
 
         let mut uninitialized = Heap::local();
         let link = uninitialized.allocate(Object::UpLink { value: None });
-        assert!(publish_root(&mut world, &uninitialized, RuntimeValue::UpLink(link)).is_err());
+        assert!(publish_root(&mut world, &uninitialized, rv(RuntimeValue::UpLink(link))).is_err());
     }
 
     #[test]
@@ -1599,7 +1785,8 @@ mod tests {
             vec![Value::Int(1), Value::Int(2), Value::Int(3)],
         ));
         let mut world = Heap::persistent();
-        let RuntimeValue::Dict(dict) = publish_value(&mut world, &value).unwrap().runtime() else {
+        let RuntimeValue::Dict(dict) = publish_value(&mut world, &value).unwrap().runtime().value
+        else {
             panic!("expected persistent Dict")
         };
         let mut local = Heap::local();
@@ -1610,11 +1797,11 @@ mod tests {
         };
         assert_eq!(
             view.dict_get(dict, field).unwrap(),
-            Some(RuntimeValue::Int(2))
+            Some(rv(RuntimeValue::Int(2)))
         );
         assert_eq!(
             view.dict_get_text(dict, "c").unwrap(),
-            Some(RuntimeValue::Int(3))
+            Some(rv(RuntimeValue::Int(3)))
         );
     }
 

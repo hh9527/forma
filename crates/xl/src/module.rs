@@ -5,7 +5,7 @@ use crate::core::{
     array_module_value, codec_module_value, debug_module_value, dict_module_value,
     json_module_value, result_module_value,
 };
-use crate::heap::{Heap, PersistentValue, publish_value};
+use crate::heap::{Heap, PersistentValue, publish_root, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
 use crate::parser::parse_registered;
 use crate::source::SourceDatabase;
@@ -266,7 +266,11 @@ impl ModuleLoader {
                             )
                         })
                         .and_then(|sourced| {
-                            let root = publish_value(&mut self.world, &sourced.value)
+                            let mut local = Heap::local();
+                            let local_root = local
+                                .import_sourced_value(Some(&self.world), &sourced)
+                                .map_err(|error| ModuleError::new(error.to_string()))?;
+                            let root = publish_root(&mut self.world, &local, local_root)
                                 .map_err(|error| ModuleError::new(error.to_string()))?;
                             Ok((sourced, root, false))
                         })
@@ -770,6 +774,24 @@ mod tests {
         let failure = module.execute(100_000).unwrap_err();
         assert!(failure.message.contains("$.v"), "{}", failure.message);
         assert!(failure.message.contains("String"), "{}", failure.message);
+        let data_location = failure
+            .data_location
+            .expect("codec failure must retain the invalid JSON value location");
+        assert_eq!(
+            module.sources.get(data_location.source).name.as_ref(),
+            directory.join("abc.json").display().to_string()
+        );
+        assert_eq!(
+            module
+                .sources
+                .get(data_location.source)
+                .slice(data_location),
+            Some("1")
+        );
+        let rendered = failure.to_string();
+        assert!(rendered.contains("abc.json:1:6:"), "{rendered}");
+        assert!(rendered.contains("operation originated here"), "{rendered}");
+        assert!(rendered.contains("main.xl:"), "{rendered}");
         fs::remove_dir_all(directory).unwrap();
     }
 

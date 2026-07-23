@@ -1,10 +1,21 @@
 use std::fmt;
+use std::num::NonZeroU32;
 use std::ops::Range;
 use std::sync::Arc;
 
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct SourceId(u32);
+pub struct SourceId(NonZeroU32);
+
+impl SourceId {
+    pub const fn get(self) -> u32 {
+        self.0.get()
+    }
+
+    const fn index(self) -> u32 {
+        self.get() - 1
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TextRange {
@@ -39,20 +50,38 @@ impl TextRange {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct Location {
+pub struct Loc {
     pub source: SourceId,
-    pub range: TextRange,
+    pub start: u32,
+    pub end: u32,
 }
 
-impl Location {
+impl Loc {
     pub fn new(source: SourceId, range: TextRange) -> Self {
-        Self { source, range }
+        Self {
+            source,
+            start: range.start,
+            end: range.end,
+        }
     }
 
     pub fn from_usize(source: SourceId, range: Range<usize>) -> Result<Self, LocationError> {
         Ok(Self::new(source, TextRange::from_usize(range)?))
     }
+
+    pub fn range(self) -> Range<usize> {
+        self.start as usize..self.end as usize
+    }
+
+    pub const fn text_range(self) -> TextRange {
+        TextRange {
+            start: self.start,
+            end: self.end,
+        }
+    }
 }
+
+pub type Location = Loc;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LocationError {
@@ -159,13 +188,18 @@ pub struct Position {
 
 #[derive(Clone, Debug)]
 pub struct SourceFile {
+    id: SourceId,
     pub name: Arc<str>,
     pub text: Arc<str>,
     line_starts: Vec<u32>,
 }
 
 impl SourceFile {
-    fn new(name: impl Into<Arc<str>>, text: impl Into<Arc<str>>) -> Result<Self, LocationError> {
+    fn new(
+        id: SourceId,
+        name: impl Into<Arc<str>>,
+        text: impl Into<Arc<str>>,
+    ) -> Result<Self, LocationError> {
         let text = text.into();
         if text.len() > u32::MAX as usize {
             return Err(LocationError::SourceTooLarge);
@@ -175,10 +209,17 @@ impl SourceFile {
             line_starts.push(u32::try_from(offset + 1).map_err(|_| LocationError::SourceTooLarge)?);
         }
         Ok(Self {
+            id,
             name: name.into(),
             text,
             line_starts,
         })
+    }
+
+    pub fn slice(&self, location: Loc) -> Option<&str> {
+        (location.source == self.id)
+            .then(|| self.text.get(location.range()))
+            .flatten()
     }
 
     pub fn position(&self, offset: u32) -> Position {
@@ -203,9 +244,13 @@ impl SourceDatabase {
         name: impl Into<Arc<str>>,
         text: impl Into<Arc<str>>,
     ) -> Result<SourceId, LocationError> {
-        let id =
-            SourceId(u32::try_from(self.files.len()).map_err(|_| LocationError::SourceTooLarge)?);
-        self.files.push(SourceFile::new(name, text)?);
+        let raw = u32::try_from(self.files.len())
+            .ok()
+            .and_then(|length| length.checked_add(1))
+            .and_then(NonZeroU32::new)
+            .ok_or(LocationError::SourceTooLarge)?;
+        let id = SourceId(raw);
+        self.files.push(SourceFile::new(id, name, text)?);
         Ok(id)
     }
 
@@ -215,7 +260,7 @@ impl SourceDatabase {
     }
 
     pub fn get(&self, id: SourceId) -> &SourceFile {
-        &self.files[id.0 as usize]
+        &self.files[id.index() as usize]
     }
 
     pub fn render(&self, diagnostic: &Diagnostic) -> String {
@@ -223,14 +268,14 @@ impl SourceDatabase {
             return diagnostic.message.clone();
         };
         let file = self.get(label.location.source);
-        let position = file.position(label.location.range.start);
+        let position = file.position(label.location.start);
         let mut rendered = format!(
             "{}:{}:{}: {}",
             file.name, position.line, position.column, diagnostic.message
         );
         for secondary in diagnostic.labels.iter().filter(|label| !label.primary) {
             let file = self.get(secondary.location.source);
-            let position = file.position(secondary.location.range.start);
+            let position = file.position(secondary.location.start);
             rendered.push_str(&format!(
                 "\n  {}:{}:{}: {}",
                 file.name, position.line, position.column, secondary.message
@@ -257,8 +302,18 @@ mod tests {
         assert_eq!(std::mem::size_of::<SourceId>(), 4);
         assert_eq!(std::mem::size_of::<TextRange>(), 8);
         assert_eq!(std::mem::size_of::<Location>(), 12);
+        assert_eq!(std::mem::size_of::<Option<Location>>(), 12);
         assert!(TextRange::new(2, 1).is_err());
         assert!(TextRange::from_usize(0..usize::MAX).is_err());
+
+        let mut sources = SourceDatabase::default();
+        let first = sources.add("first", "abc");
+        let second = sources.add("second", "xyz");
+        assert_eq!(first.get(), 1);
+        assert_eq!(second.get(), 2);
+        let location = Location::from_usize(first, 1..2).unwrap();
+        assert_eq!(sources.get(first).slice(location), Some("b"));
+        assert_eq!(sources.get(second).slice(location), None);
     }
 
     #[test]

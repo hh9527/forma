@@ -29,7 +29,8 @@ pub use module::{
     load_module_with_quota_and_debug_sink,
 };
 pub use source::{
-    Diagnostic, Label, Located, Location, Origin, SourceDatabase, SourceId, TextRange, WithOrigin,
+    Diagnostic, Label, Loc, Located, Location, Origin, SourceDatabase, SourceId, TextRange,
+    WithOrigin,
 };
 pub use types::{
     Analysis, TypeDescriptor, analyze_source, analyze_source_with_fuel, analyze_source_with_quota,

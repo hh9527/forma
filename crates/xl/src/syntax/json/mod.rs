@@ -77,10 +77,7 @@ mod tests {
         let id = sources.add("escape.json", source);
         let parsed = parse(id, source);
         assert_eq!(parsed.diagnostics.len(), 1);
-        assert_eq!(
-            parsed.diagnostics[0].labels[0].location.range.to_usize(),
-            2..8
-        );
+        assert_eq!(parsed.diagnostics[0].labels[0].location.range(), 2..8);
         let tokens = collect_tokens(&parsed.syntax, NodeRef::ROOT);
         assert_eq!(
             tokens,

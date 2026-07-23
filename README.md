@@ -17,7 +17,7 @@ The current MVP demonstrates:
 - `.xl` and `.json` modules in a closed dependency graph;
 - explicit external JSON input through the CLI.
 - Logos + Lelwel lossless CSTs shared by compilation and future editor tooling;
-- byte-range diagnostics and path-addressable JSON source provenance.
+- byte-range diagnostics and source locations carried by runtime values.
 
 ## Try it
 
@@ -139,9 +139,10 @@ falls back to `Any` where the focused checker has no precise model.
 Both XL and JSON use Logos lexers and Lelwel-generated resilient parsers. Their
 owned lossless CSTs preserve trivia and byte ranges, while `SourceDatabase`
 converts ranges to display positions. Parsing always reparses the complete
-file. JSON lowering can additionally return a provenance side table through
-`parse_json_with_provenance`; provenance is deliberately not stored in runtime
-`Value` objects.
+file. JSON lowering can additionally return a compatibility provenance side
+table through `parse_json_with_provenance`. Module loading attaches those
+locations to compact rich runtime values, so nested data locations survive
+ordinary evaluation, heap promotion, and codec normalization.
 
 Tooling and module loaders use `parse_registered` and `parse_json_registered`
 with one shared `SourceDatabase`. These APIs retain all recovered diagnostics;

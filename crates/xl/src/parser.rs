@@ -60,7 +60,7 @@ fn compatibility_error(
     let offset = diagnostic
         .labels
         .first()
-        .map_or(0, |label| label.location.range.start);
+        .map_or(0, |label| label.location.start);
     let position = sources.get(source_id).position(offset);
     FrontendError::new(
         sources.get(source_id).name.as_ref(),
@@ -1245,14 +1245,8 @@ mod tests {
         let parsed = parse_registered(&sources, id);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let program = parsed.program.unwrap();
-        assert_eq!(program.location.range.to_usize(), 0..17);
-        assert_eq!(
-            program.value.body.value.bindings[0]
-                .location
-                .range
-                .to_usize(),
-            0..10
-        );
+        assert_eq!(program.location.range(), 0..17);
+        assert_eq!(program.value.body.value.bindings[0].location.range(), 0..10);
         assert!(matches!(
             &program.value.body.value.result.value,
             ExprKind::Binary {
@@ -1362,7 +1356,7 @@ mod tests {
             StringPartKind::Expression(expression)
                 if matches!(&expression.value, ExprKind::Variable(name) if name.value == "name")
         ));
-        assert_eq!(parts[1].location.range.to_usize(), 25..29);
+        assert_eq!(parts[1].location.range(), 25..29);
     }
 
     #[test]

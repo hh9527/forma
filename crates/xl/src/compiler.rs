@@ -144,12 +144,12 @@ impl<'a> Compiler<'a> {
     fn error_at(&self, location: Location, message: impl Into<String>) -> FrontendError {
         let message = message.into();
         if let Some(source_file) = self.source_file {
-            let position = source_file.position(location.range.start);
+            let position = source_file.position(location.start);
             let diagnostic = Diagnostic::error(message.clone(), location);
             FrontendError {
                 source_name: source_file.name.to_string(),
                 location: SourceLocation {
-                    offset: location.range.start as usize,
+                    offset: location.start as usize,
                     line: position.line,
                     column: position.column,
                 },
@@ -1707,7 +1707,7 @@ mod tests {
         let Origin::Source(location) = error.origin().expect("runtime origin") else {
             panic!("expected source origin");
         };
-        assert_eq!(location.range.start, 23);
+        assert_eq!(location.start, 23);
         assert!(error.to_string().contains("test:2:3"));
 
         let tail = run("let divide = fn(x) { x / 0 }; divide(4)").unwrap_err();
