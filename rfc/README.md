@@ -48,3 +48,4 @@ semantics from an earlier RFC.
 28. Unified lowercase Struct, Enum, and Union model constructors.
 29. Built-in normalized Bool, Option, and Result types.
 30. Standard JSON model attribute decorators and payload vocabulary.
+31. Attribute-aware bidirectional Struct JSON codecs.
