@@ -39,3 +39,8 @@ semantics from an earlier RFC.
 20. Derived structural codecs, an explicit Result boundary, and strict JSON
     output.
 21. Rich runtime values with compact inline source locations.
+22. First-class rich TypeMetadata and contract blame.
+23. Two-tier Main/Work execution worlds.
+24. Declarative native bindings in XL source.
+25. Contextual functional decorators.
+26. Flat attributed values and transparent TypeMetadata wrappers.
