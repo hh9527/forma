@@ -98,6 +98,7 @@ pub(crate) fn compile_expression_with_bindings(
         function_name: function_name.to_owned(),
         environment: HashMap::new(),
         up_link_bindings: HashSet::new(),
+        preserved_up_link_reads: HashSet::new(),
         definition_bindings: HashSet::new(),
         constants: Vec::new(),
         external_constant_links: Vec::new(),
@@ -125,6 +126,7 @@ struct Compiler<'a> {
     function_name: String,
     environment: HashMap<String, RegisterId>,
     up_link_bindings: HashSet<String>,
+    preserved_up_link_reads: HashSet<String>,
     definition_bindings: HashSet<String>,
     constants: Vec<Value>,
     external_constant_links: Vec<(usize, String)>,
@@ -187,6 +189,7 @@ impl<'a> Compiler<'a> {
             function_name: source_name.to_owned(),
             environment: HashMap::new(),
             up_link_bindings: HashSet::new(),
+            preserved_up_link_reads: HashSet::new(),
             definition_bindings: HashSet::new(),
             constants: Vec::new(),
             external_constant_links: Vec::new(),
@@ -276,6 +279,7 @@ impl<'a> Compiler<'a> {
             function_name,
             environment,
             up_link_bindings: captured_up_links.clone(),
+            preserved_up_link_reads: HashSet::new(),
             definition_bindings: captured_definitions.clone(),
             constants: Vec::new(),
             external_constant_links: Vec::new(),
@@ -336,6 +340,7 @@ impl<'a> Compiler<'a> {
         let outer_up_links = self.up_link_bindings.clone();
         let outer_definitions = self.definition_bindings.clone();
         let mut declared = HashMap::<String, (RegisterId, Location, Option<u32>)>::new();
+        let mut type_links = HashMap::<String, (RegisterId, Location)>::new();
         let mut native_declarations = HashMap::<String, Location>::new();
         let mut definition_counts = HashMap::<String, usize>::new();
 
@@ -429,6 +434,25 @@ impl<'a> Compiler<'a> {
                 .and_then(function_contract_arity);
             declared.insert(name.clone(), (link, binding.location, arity));
         }
+        for binding in &block.value.bindings {
+            if binding.value.kind != BindingKind::Type
+                || !self.retained_names.contains(&binding.value.name.value)
+            {
+                continue;
+            }
+            let name = &binding.value.name.value;
+            if self.environment.contains_key(name) {
+                return Err(self.error_at(
+                    binding.location,
+                    format!("type definition {name:?} cannot shadow a visible binding"),
+                ));
+            }
+            let link = self.allocate();
+            self.emit(Operation::MakeUpLink { dst: link }, binding.location);
+            self.environment.insert(name.clone(), link);
+            self.up_link_bindings.insert(name.clone());
+            type_links.insert(name.clone(), (link, binding.location));
+        }
         for (name, count) in &definition_counts {
             if *count > 1 {
                 return Err(self.error_at(
@@ -457,9 +481,17 @@ impl<'a> Compiler<'a> {
                 BindingKind::Decl => continue,
                 BindingKind::Type => {
                     if self.retained_names.contains(&binding.value.name.value) {
+                        self.preserved_up_link_reads = type_links.keys().cloned().collect();
                         let register = self.compile_expr(&binding.value.value)?;
-                        self.environment
-                            .insert(binding.value.name.value.clone(), register);
+                        self.preserved_up_link_reads.clear();
+                        let (link, _) = type_links[&binding.value.name.value];
+                        self.emit(
+                            Operation::InitializeUpLink {
+                                link,
+                                src: register,
+                            },
+                            binding.location,
+                        );
                     }
                     continue;
                 }
@@ -536,6 +568,9 @@ impl<'a> Compiler<'a> {
         for (link, location, _) in declared.values() {
             self.emit(Operation::AssertUpLinkReady { link: *link }, *location);
         }
+        for (link, location) in type_links.values() {
+            self.emit(Operation::AssertUpLinkReady { link: *link }, *location);
+        }
         let result = if tail {
             self.compile_tail_expr(&block.value.result)?;
             None
@@ -591,7 +626,9 @@ impl<'a> Compiler<'a> {
                         format!("unknown binding {:?}", name.value),
                     )
                 })?;
-                if self.up_link_bindings.contains(&name.value) {
+                if self.up_link_bindings.contains(&name.value)
+                    && !self.preserved_up_link_reads.contains(&name.value)
+                {
                     let dst = self.allocate();
                     self.emit(
                         Operation::ReadUpLink {

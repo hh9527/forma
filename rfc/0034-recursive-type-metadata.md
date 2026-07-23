@@ -1,6 +1,6 @@
 # RFC 0034: Recursive TypeMetadata through hidden up-links
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0013, RFC 0027, RFC 0033
 
 ## Summary
@@ -149,4 +149,31 @@ the generated `$defs` and `$ref` values normally.
 
 ## Implementation result
 
-Pending.
+Implemented by preallocating hidden up-links for retained type bindings before
+their runtime RHS expressions are compiled. During a type RHS only, references
+to those names preserve the slot value; normal expressions continue to emit
+`ReadUpLink`. Each RHS initializes its own slot exactly once and the existing
+block seal and heap publication machinery reject pending links.
+
+The tool stage predeclares all module type names with `Any` metadata. Sequential
+acyclic references regain precision as definitions replace their shadows;
+self-recursive and forward edges remain conservative. Runtime metadata is not
+degraded. Native and model TypeMetadata constructors admit private link edges,
+while ordinary native values retain the public `ValueKind` boundary.
+
+Codec nodes retain lazy `UpLink` handles and resolve them only while traversing
+actual input. Struct planning transparently resolves ordinary type aliases one
+level while preserving recursive child edges. JSON Schema generation memoizes
+link handles, assigns deterministic traversal names (`Type0`, `Type1`, ...),
+and emits `$defs`/`$ref`; source names are unavailable in current normalized
+metadata and remain deferred. When the root was obtained through an ordinary
+resolved binding, it is emitted inline and its recursive backlink receives the
+definition, which is valid but may duplicate the root shape once.
+
+The end-to-end module fixture exports self-recursive `Node` and mutually
+recursive `Left`/`Right` metadata through the persistent world, decodes and
+encodes finite recursive values, and generates terminating schemas containing
+multiple references. A located invalid JSON leaf retains both its deep data
+path and rule location. Direct JSON stringification of the same recursive
+metadata rejects the hidden link, confirming that it has not become an XL data
+type. Existing eager `decl/def` failure tests remain unchanged.

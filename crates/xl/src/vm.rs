@@ -120,6 +120,25 @@ pub struct ValueRef<'a> {
 }
 
 impl<'a> ValueRef<'a> {
+    pub(crate) fn is_hidden_up_link(self) -> bool {
+        matches!(self.value.value, RuntimeValue::UpLink(_))
+    }
+
+    pub(crate) fn resolve_hidden_up_link(self) -> Result<Self, String> {
+        let RuntimeValue::UpLink(handle) = self.value.value else {
+            return Ok(self);
+        };
+        let value = self
+            .view
+            .up_link(handle)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "recursive type link is not initialized".to_owned())?;
+        Ok(Self {
+            value,
+            view: self.view,
+        })
+    }
+
     pub fn kind(self) -> ValueKind {
         match self.value.value {
             RuntimeValue::Int(_) => ValueKind::Int,
@@ -2933,9 +2952,11 @@ fn run_core_model(
             flatten_attributes(member, &path, function, pc, current, background)?;
         match operation {
             CoreModelFunction::Struct => {
-                decode_runtime_type_at(inner, &path, current, background).map_err(|message| {
-                    error(RuntimeErrorKind::TypeMismatch, message, function, pc)
-                })?;
+                if !matches!(inner.value, RuntimeValue::UpLink(_)) {
+                    decode_runtime_type_at(inner, &path, current, background).map_err(
+                        |message| error(RuntimeErrorKind::TypeMismatch, message, function, pc),
+                    )?;
+                }
             }
             CoreModelFunction::Enum => {
                 let view = HeapView {
@@ -2946,7 +2967,7 @@ fn run_core_model(
                     .atom_text(inner)
                     .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
                     == Some("None");
-                if !unit {
+                if !unit && !matches!(inner.value, RuntimeValue::UpLink(_)) {
                     decode_runtime_type_at(inner, &path, current, background).map_err(
                         |message| error(RuntimeErrorKind::TypeMismatch, message, function, pc),
                     )?;
@@ -3049,8 +3070,10 @@ fn run_core_union_model(
         let path = format!("variants[{index}]");
         let (inner, attributes) =
             flatten_attributes(variant, &path, function, pc, current, background)?;
-        decode_runtime_type_at(inner, &path, current, background)
-            .map_err(|message| error(RuntimeErrorKind::TypeMismatch, message, function, pc))?;
+        if !matches!(inner.value, RuntimeValue::UpLink(_)) {
+            decode_runtime_type_at(inner, &path, current, background)
+                .map_err(|message| error(RuntimeErrorKind::TypeMismatch, message, function, pc))?;
+        }
         normalized.push(allocate_attributes_wrapper(
             inner,
             attributes,
@@ -3147,8 +3170,11 @@ fn allocate_builtin_enum(
         let (inner, attributes) = if let Some(payload) = payload {
             let (inner, attributes) =
                 flatten_attributes(payload, &path, function, pc, current, background)?;
-            decode_runtime_type_at(inner, &path, current, background)
-                .map_err(|message| error(RuntimeErrorKind::TypeMismatch, message, function, pc))?;
+            if !matches!(inner.value, RuntimeValue::UpLink(_)) {
+                decode_runtime_type_at(inner, &path, current, background).map_err(|message| {
+                    error(RuntimeErrorKind::TypeMismatch, message, function, pc)
+                })?;
+            }
             (inner, attributes)
         } else {
             (
@@ -3250,6 +3276,7 @@ struct CodecType {
 
 #[derive(Clone, Debug)]
 enum CodecKind {
+    UpLink(Handle),
     Any,
     Int,
     Float,
@@ -3381,6 +3408,13 @@ fn decode_runtime_type_at(
     current: &Heap,
     background: &Heap,
 ) -> Result<CodecType, String> {
+    if let RuntimeValue::UpLink(handle) = value.value {
+        return Ok(CodecType {
+            kind: CodecKind::UpLink(handle),
+            rule: value,
+            attributes: BTreeMap::new(),
+        });
+    }
     let view = HeapView {
         current,
         background: Some(background),
@@ -3678,6 +3712,17 @@ fn transform_codec(
         background: Some(background),
     };
     match &schema.kind {
+        CodecKind::UpLink(handle) => {
+            let resolved = view
+                .up_link(*handle)
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?
+                .ok_or_else(|| {
+                    CodecFailure::new("recursive type link is not initialized", value, schema.rule)
+                })?;
+            let resolved = decode_runtime_type(resolved, current, background)
+                .map_err(|message| CodecFailure::new(message, value, schema.rule))?;
+            transform_codec(&resolved, value, direction, path, current, background)
+        }
         CodecKind::Any => Ok(CodecNode::Existing(value)),
         CodecKind::Int if matches!(value.value, RuntimeValue::Int(_)) => {
             Ok(CodecNode::Existing(value))
@@ -3957,6 +4002,7 @@ fn plan_struct(
     let mut planned = Vec::with_capacity(fields.len());
     let mut external_names: BTreeMap<String, RichValue> = BTreeMap::new();
     for (internal_name, field) in fields {
+        let field_schema = resolve_codec_type_once(field, data, view)?;
         let rename = field.attributes.get("core:json.rename").copied();
         let rename = rename
             .map(|rule| {
@@ -4027,7 +4073,7 @@ fn plan_struct(
             .or_else(|| field.attributes.get("core:json.rename").copied())
             .unwrap_or(field.rule);
         let (external_name, flattened) = if flatten {
-            let CodecKind::Struct(nested_fields) = &field.kind else {
+            let CodecKind::Struct(nested_fields) = &field_schema.kind else {
                 return Err(CodecFailure::new(
                     format!("{path}.{internal_name}: flatten requires Struct metadata"),
                     data,
@@ -4035,7 +4081,7 @@ fn plan_struct(
                 ));
             };
             let nested = plan_struct(
-                field,
+                &field_schema,
                 nested_fields,
                 data,
                 &format!("{path}.{internal_name}"),
@@ -4074,7 +4120,7 @@ fn plan_struct(
         planned.push(StructFieldPlan {
             internal_name: internal_name.clone(),
             external_name,
-            schema: field.clone(),
+            schema: field_schema,
             flattened,
             default,
             skip,
@@ -4082,6 +4128,31 @@ fn plan_struct(
         });
     }
     Ok(StructPlan { fields: planned })
+}
+
+fn resolve_codec_type_once(
+    schema: &CodecType,
+    data: RichValue,
+    view: &HeapView<'_>,
+) -> Result<CodecType, CodecFailure> {
+    let CodecKind::UpLink(handle) = schema.kind else {
+        return Ok(schema.clone());
+    };
+    let resolved = view
+        .up_link(handle)
+        .map_err(|error| CodecFailure::new(error.to_string(), data, schema.rule))?
+        .ok_or_else(|| {
+            CodecFailure::new("recursive type link is not initialized", data, schema.rule)
+        })?;
+    let mut resolved = decode_runtime_type(
+        resolved,
+        view.current,
+        view.background.expect("codec views have a background heap"),
+    )
+    .map_err(|message| CodecFailure::new(message, data, schema.rule))?;
+    resolved.attributes.extend(schema.attributes.clone());
+    resolved.rule = schema.rule;
+    Ok(resolved)
 }
 
 fn struct_plan_external_names(plan: &StructPlan) -> Vec<(String, RichValue)> {
@@ -4791,6 +4862,37 @@ fn generate_json_schema(
     current: &Heap,
     background: &Heap,
 ) -> Result<CodecNode, CodecFailure> {
+    let mut links = HashMap::new();
+    let mut definitions = BTreeMap::new();
+    let mut root = generate_json_schema_node(
+        schema,
+        data,
+        current,
+        background,
+        &mut links,
+        &mut definitions,
+    )?;
+    if !definitions.is_empty() {
+        let CodecNode::Dict(fields, _) = &mut root else {
+            unreachable!("every generated schema is an object")
+        };
+        fields.push((
+            "$defs".into(),
+            CodecNode::Dict(definitions.into_iter().collect(), schema.rule.loc),
+        ));
+    }
+    Ok(root)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_json_schema_node(
+    schema: &CodecType,
+    data: RichValue,
+    current: &Heap,
+    background: &Heap,
+    links: &mut HashMap<Handle, String>,
+    definitions: &mut BTreeMap<String, CodecNode>,
+) -> Result<CodecNode, CodecFailure> {
     let loc = schema.rule.loc;
     if let Some(item) = option_item(schema) {
         return Ok(schema_dict(
@@ -4799,7 +4901,14 @@ fn generate_json_schema(
                 CodecNode::Array(
                     vec![
                         schema_dict(vec![("type", schema_string("null", loc))], loc),
-                        generate_json_schema(item, data, current, background)?,
+                        generate_json_schema_node(
+                            item,
+                            data,
+                            current,
+                            background,
+                            links,
+                            definitions,
+                        )?,
                     ],
                     loc,
                 ),
@@ -4808,6 +4917,41 @@ fn generate_json_schema(
         ));
     }
     match &schema.kind {
+        CodecKind::UpLink(handle) => {
+            if let Some(name) = links.get(handle) {
+                return Ok(schema_dict(
+                    vec![("$ref", schema_string(&format!("#/$defs/{name}"), loc))],
+                    loc,
+                ));
+            }
+            let name = format!("Type{}", links.len());
+            links.insert(*handle, name.clone());
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            let resolved = view
+                .up_link(*handle)
+                .map_err(|error| CodecFailure::new(error.to_string(), data, schema.rule))?
+                .ok_or_else(|| {
+                    CodecFailure::new("recursive type link is not initialized", data, schema.rule)
+                })?;
+            let resolved = decode_runtime_type(resolved, current, background)
+                .map_err(|message| CodecFailure::new(message, data, schema.rule))?;
+            let definition = generate_json_schema_node(
+                &resolved,
+                data,
+                current,
+                background,
+                links,
+                definitions,
+            )?;
+            definitions.insert(name.clone(), definition);
+            Ok(schema_dict(
+                vec![("$ref", schema_string(&format!("#/$defs/{name}"), loc))],
+                loc,
+            ))
+        }
         CodecKind::Any => Ok(CodecNode::Dict(Vec::new(), loc)),
         CodecKind::Int => Ok(schema_dict(
             vec![("type", schema_string("integer", loc))],
@@ -4830,7 +4974,7 @@ fn generate_json_schema(
                 ("type", schema_string("array", loc)),
                 (
                     "items",
-                    generate_json_schema(item, data, current, background)?,
+                    generate_json_schema_node(item, data, current, background, links, definitions)?,
                 ),
             ],
             loc,
@@ -4838,7 +4982,9 @@ fn generate_json_schema(
         CodecKind::Tuple(items) => {
             let schemas = items
                 .iter()
-                .map(|item| generate_json_schema(item, data, current, background))
+                .map(|item| {
+                    generate_json_schema_node(item, data, current, background, links, definitions)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             let length = RichValue::unknown(RuntimeValue::Int(items.len() as i64));
             Ok(schema_dict(
@@ -4857,8 +5003,14 @@ fn generate_json_schema(
                 background: Some(background),
             };
             let plan = plan_struct(schema, fields, data, "$", &view)?;
-            let (properties, required) =
-                generate_struct_schema_fields(&plan, data, current, background)?;
+            let (properties, required) = generate_struct_schema_fields(
+                &plan,
+                data,
+                current,
+                background,
+                links,
+                definitions,
+            )?;
             let mut fields = vec![
                 ("type", schema_string("object", loc)),
                 ("properties", CodecNode::Dict(properties, loc)),
@@ -4895,11 +5047,13 @@ fn generate_json_schema(
                 plan.variants
                     .iter()
                     .map(|variant| {
-                        generate_json_schema(
+                        generate_json_schema_node(
                             variant.payload.as_ref().expect("planned untagged payload"),
                             data,
                             current,
                             background,
+                            links,
+                            definitions,
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?
@@ -4908,8 +5062,14 @@ fn generate_json_schema(
                     .iter()
                     .map(|variant| {
                         if let Some(payload) = &variant.payload {
-                            let property =
-                                generate_json_schema(payload, data, current, background)?;
+                            let property = generate_json_schema_node(
+                                payload,
+                                data,
+                                current,
+                                background,
+                                links,
+                                definitions,
+                            )?;
                             Ok(schema_dict(
                                 vec![
                                     ("type", schema_string("object", variant.rule.loc)),
@@ -4960,7 +5120,16 @@ fn generate_json_schema(
                 CodecNode::Array(
                     variants
                         .iter()
-                        .map(|variant| generate_json_schema(variant, data, current, background))
+                        .map(|variant| {
+                            generate_json_schema_node(
+                                variant,
+                                data,
+                                current,
+                                background,
+                                links,
+                                definitions,
+                            )
+                        })
                         .collect::<Result<Vec<_>, _>>()?,
                     loc,
                 ),
@@ -4983,19 +5152,34 @@ fn generate_struct_schema_fields(
     data: RichValue,
     current: &Heap,
     background: &Heap,
+    links: &mut HashMap<Handle, String>,
+    definitions: &mut BTreeMap<String, CodecNode>,
 ) -> Result<(SchemaProperties, Vec<String>), CodecFailure> {
     let mut properties = Vec::new();
     let mut required = Vec::new();
     for field in &plan.fields {
         if let Some(nested) = &field.flattened {
-            let (nested_properties, nested_required) =
-                generate_struct_schema_fields(nested, data, current, background)?;
+            let (nested_properties, nested_required) = generate_struct_schema_fields(
+                nested,
+                data,
+                current,
+                background,
+                links,
+                definitions,
+            )?;
             properties.extend(nested_properties);
             required.extend(nested_required);
             continue;
         }
         let external = field.external_name.clone().expect("ordinary field name");
-        let mut property = generate_json_schema(&field.schema, data, current, background)?;
+        let mut property = generate_json_schema_node(
+            &field.schema,
+            data,
+            current,
+            background,
+            links,
+            definitions,
+        )?;
         if let Some(default) = field.default {
             let encoded = transform_codec_field(
                 &field.schema,
@@ -5020,6 +5204,7 @@ fn generate_struct_schema_fields(
 
 fn codec_type_name(schema: &CodecType) -> &'static str {
     match &schema.kind {
+        CodecKind::UpLink(_) => "recursive Type",
         CodecKind::Any => "Any",
         CodecKind::Int => "Int",
         CodecKind::Float => "Float",

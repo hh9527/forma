@@ -2170,6 +2170,93 @@ mod tests {
     }
 
     #[test]
+    fn recursive_type_metadata_publishes_and_drives_codecs_and_schema_refs() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("Types.xl"),
+            r#"@struct type Node = {
+                   value: Int,
+                   children: Array(Node),
+               };
+               @struct type Left = {right: Option(Right)};
+               @struct type Right = {left: Option(Left)};
+               {Node: Node, Left: Left, Right: Right}"#,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import Types from "./Types.xl";
+               import codec from "core:codec";
+               import json from "core:json";
+               import result from "core:result";
+               let node = codec.decode(Types.Node, {
+                   value: 1,
+                   children: [{value: 2, children: []}],
+               }) |> result.unwrap;
+               let pair = codec.decode(Types.Left, {
+                   right: {left: 'None},
+               }) |> result.unwrap;
+               {
+                   node: node,
+                   encoded: codec.encode(Types.Node, node) |> result.unwrap,
+                   pair: pair,
+                   schema: json.schema(Types.Node),
+                   mutual_schema: json.schema(Types.Left),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let output = module.execute(100_000).unwrap().to_string();
+        assert!(
+            output.contains("children: [{children: [], value: 2}]"),
+            "{output}"
+        );
+        assert!(
+            output.contains("pair: {right: ('Some, {left: 'None})}"),
+            "{output}"
+        );
+        assert!(output.contains("$defs"), "{output}");
+        assert!(output.contains("#/$defs/Type0"), "{output}");
+        assert!(output.contains("#/$defs/Type1"), "{output}");
+
+        fs::write(
+            directory.join("bad.json"),
+            r#"{"value":1,"children":[{"value":"wrong","children":[]}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("bad.xl"),
+            r#"import data from "./bad.json";
+               import Types from "./Types.xl";
+               import codec from "core:codec";
+               import result from "core:result";
+               codec.decode(Types.Node, data) |> result.unwrap"#,
+        )
+        .unwrap();
+        let bad = load_module(directory.join("bad.xl"), BTreeMap::new(), 100_000).unwrap();
+        let failure = bad.execute(100_000).unwrap_err();
+        assert!(failure.message.contains("$.children[0].value"));
+        assert!(failure.data_location().is_some());
+        assert!(failure.rule_location().is_some());
+
+        fs::write(
+            directory.join("leak.xl"),
+            r#"import Types from "./Types.xl";
+               import json from "core:json";
+               json.stringify(Types.Node)"#,
+        )
+        .unwrap();
+        let leak = load_module(directory.join("leak.xl"), BTreeMap::new(), 100_000).unwrap();
+        assert!(
+            leak.execute(100_000)
+                .unwrap_err()
+                .message
+                .contains("internal up-link")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn builtin_bool_option_and_result_are_normalized_enum_metadata() {
         let directory = fixture_dir();
         fs::write(

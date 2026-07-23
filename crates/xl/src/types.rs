@@ -290,6 +290,19 @@ pub(crate) fn analyze_program_with_bindings_observed(
     let mut binding_types = BTreeMap::new();
     let mut declared_type_spans = HashMap::new();
 
+    // Tool-stage descriptors are currently trees. Predeclare type names with
+    // conservative metadata so self and forward references can be evaluated;
+    // the runtime retains the authoritative recursive metadata graph.
+    let any_metadata = prelude
+        .get("Any")
+        .expect("core prelude defines Any")
+        .clone();
+    for binding in &program.value.body.value.bindings {
+        if binding.value.kind == BindingKind::Type {
+            tool_values.insert(binding.value.name.value.clone(), any_metadata.clone());
+        }
+    }
+
     for name in dynamic_bindings {
         if !external_values.contains_key(name) {
             return Err(frontend_error(
@@ -743,7 +756,10 @@ fn native_atom_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError
 
 fn native_array_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
     let item = context.argument(0)?;
-    decode_native_type(context.value(item)?)?;
+    let value = context.value(item)?;
+    if !value.is_hidden_up_link() {
+        decode_native_type(value)?;
+    }
     write_native_type_record(context, "Array", &[("item", item)])
 }
 
@@ -753,7 +769,10 @@ fn native_tuple_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeErro
         return Err(NativeError::new("Tuple expects an Array of Types"));
     }
     for index in 0..value.sequence_len().expect("Array has a length") {
-        decode_native_type(value.sequence_get(index).expect("valid Array index"))?;
+        let item = value.sequence_get(index).expect("valid Array index");
+        if !item.is_hidden_up_link() {
+            decode_native_type(item)?;
+        }
     }
     write_native_type_record(context, "Tuple", &[("items", context.argument(0)?)])
 }
@@ -764,14 +783,18 @@ fn native_function_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeE
         return Err(NativeError::new("Fn expects an Array of parameter Types"));
     }
     for index in 0..parameters_value.sequence_len().expect("Array has a length") {
-        decode_native_type(
-            parameters_value
-                .sequence_get(index)
-                .expect("valid Array index"),
-        )?;
+        let parameter = parameters_value
+            .sequence_get(index)
+            .expect("valid Array index");
+        if !parameter.is_hidden_up_link() {
+            decode_native_type(parameter)?;
+        }
     }
     let result = context.argument(1)?;
-    decode_native_type(context.value(result)?)?;
+    let result_value = context.value(result)?;
+    if !result_value.is_hidden_up_link() {
+        decode_native_type(result_value)?;
+    }
     write_native_type_record(
         context,
         "Function",
@@ -820,6 +843,7 @@ fn decode_native_type(value: ValueRef<'_>) -> Result<TypeDescriptor, NativeError
 }
 
 fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, String> {
+    let value = value.resolve_hidden_up_link()?;
     let fields = value
         .dict_fields()
         .ok_or_else(|| format!("{path} must be a Dict"))?;
