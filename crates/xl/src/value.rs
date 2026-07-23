@@ -146,6 +146,36 @@ pub(crate) enum CoreDictFunction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreAttributesFunction {
+    Normalize,
+    Add,
+    Get,
+    Has,
+    All,
+    Strip,
+}
+
+impl CoreAttributesFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Normalize => "core:attributes.normalize",
+            Self::Add => "core:attributes.add",
+            Self::Get => "core:attributes.get",
+            Self::Has => "core:attributes.has",
+            Self::All => "core:attributes.all",
+            Self::Strip => "core:attributes.strip",
+        }
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        match self {
+            Self::Normalize | Self::All | Self::Strip => 1,
+            Self::Add | Self::Get | Self::Has => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CoreDebugFunction {
     Dbg,
     DbgWith,
@@ -265,6 +295,7 @@ impl CoreArrayFunction {
 pub(crate) enum NativeKind {
     Synchronous,
     CoreArray(CoreArrayFunction),
+    CoreAttributes(CoreAttributesFunction),
     CoreDict(CoreDictFunction),
     CoreDebug(CoreDebugFunction),
     CoreCodec(CoreCodecFunction),
@@ -296,6 +327,15 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreArray(function),
+        }
+    }
+
+    pub(crate) const fn core_attributes(function: CoreAttributesFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreAttributes(function),
         }
     }
 

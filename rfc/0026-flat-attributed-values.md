@@ -1,6 +1,6 @@
 # RFC 0026: Flat attributed values
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0016, RFC 0022, RFC 0025
 
 ## Summary
@@ -67,7 +67,7 @@ values.
 native normalize: fn(Any) -> Any;
 native add: fn(Any, Any) -> Any;
 native get: fn(Any, String) -> Any;
-native has: fn(Any, String) -> Atom;
+native has: fn(Any, String) -> Any;
 native all: fn(Any) -> Any;
 native strip: fn(Any) -> Any;
 ```
@@ -200,4 +200,28 @@ using the same model.
 
 ## Implementation result
 
-Pending.
+`core:attributes` is registered through the declarative native-module path and
+publishes all six operations as ordinary `Func` values. VM execution inspects
+wrappers through `HeapView`, retains rich inner and payload values, and only
+allocates the canonical Dicts or tagged lookup result required by each
+operation. It never deep-exports through the legacy `Value` boundary. Wrapper,
+Dict, and tuple allocation is charged to the active quota.
+
+Normalization recursively validates the exact wrapper shape and attributes
+Dict. It merges inner layers before outer layers, and `add` merges last, giving
+the specified precedence. Attribute keys remain arbitrary Dict field Strings.
+The current declarative signature for `has` returns `Any` because bare `Atom`
+is a constructor rather than TypeMetadata; its runtime result is nevertheless
+restricted to the built-in `'True` and `'False` atoms.
+
+Both rich runtime and legacy TypeMetadata decoders transparently unwrap valid
+wrappers. The independent runtime codec decoder does the same and retains the
+wrapper as the rule value for diagnostics. Constructors continue to store
+their original rich arguments, so a `Struct` accepts attributed field types
+without erasing their wrappers.
+
+Tests cover arbitrary plain values, nested flattening, outer and added-key
+precedence, qualified opaque keys, every inspection operation, malformed
+wrappers, allocation exhaustion, contextual decorator integration, top-level
+and field TypeMetadata transparency, validation and codec use, and preservation
+of raw attributed metadata.

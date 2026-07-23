@@ -4,8 +4,9 @@ use crate::heap::{
 };
 use crate::lir::RegisterId;
 use crate::value::{
-    BuiltinAtom, CoreArrayFunction, CoreCodecFunction, CoreDebugFunction, CoreDictFunction,
-    CoreJsonFunction, CoreResultFunction, Dict, NativeError, NativeKind, NativeLimit, Shape, Value,
+    BuiltinAtom, CoreArrayFunction, CoreAttributesFunction, CoreCodecFunction, CoreDebugFunction,
+    CoreDictFunction, CoreJsonFunction, CoreResultFunction, Dict, NativeError, NativeKind,
+    NativeLimit, Shape, Value,
 };
 use crate::{Diagnostic, Origin, SourceDatabase};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1950,6 +1951,16 @@ fn drive_vm_action(
                             current,
                             background,
                         )?,
+                        NativeKind::CoreAttributes(function) => run_core_attributes(
+                            function,
+                            &arguments,
+                            return_target,
+                            &call_function,
+                            call_pc,
+                            current,
+                            background,
+                            account,
+                        )?,
                         NativeKind::CoreDict(function) => run_core_dict(
                             function,
                             &arguments,
@@ -2637,6 +2648,219 @@ fn core_dict_heap_error(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_core_attributes(
+    operation: CoreAttributesFunction,
+    arguments: &[RichValue],
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let (inner, mut attributes) =
+        flatten_attributes(arguments[0], "value", function, pc, current, background)?;
+    let call_loc = instruction_location(function, pc);
+    let value = match operation {
+        CoreAttributesFunction::Normalize => allocate_attributes_wrapper(
+            inner, attributes, call_loc, function, pc, current, account,
+        )?,
+        CoreAttributesFunction::Add => {
+            let additions = core_dict_entries(
+                arguments[1],
+                "attributes Dict",
+                function,
+                pc,
+                current,
+                background,
+            )?;
+            for (key, value) in additions {
+                attributes.insert(key, value);
+            }
+            allocate_attributes_wrapper(
+                inner, attributes, call_loc, function, pc, current, account,
+            )?
+        }
+        CoreAttributesFunction::Get | CoreAttributesFunction::Has => {
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            let key = view
+                .string_text(arguments[1])
+                .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                .ok_or_else(|| {
+                    runtime_type_error("String key", &arguments[1], &view, function, pc)
+                })?;
+            let found = attributes.get(key).copied();
+            if operation == CoreAttributesFunction::Has {
+                RichValue::new(
+                    RuntimeValue::BuiltinAtom(if found.is_some() {
+                        BuiltinAtom::True
+                    } else {
+                        BuiltinAtom::False
+                    }),
+                    call_loc,
+                )
+            } else if let Some(payload) = found {
+                charge_allocation(
+                    account,
+                    logical_value_bytes(2)
+                        .map_err(|error| allocation_error(error.message, function, pc))?,
+                    function,
+                    pc,
+                )?;
+                RichValue::new(
+                    RuntimeValue::Tuple(
+                        current.allocate(Object::Tuple(
+                            vec![
+                                RichValue::new(
+                                    RuntimeValue::BuiltinAtom(BuiltinAtom::Some),
+                                    call_loc,
+                                ),
+                                payload,
+                            ]
+                            .into(),
+                        )),
+                    ),
+                    call_loc,
+                )
+            } else {
+                RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::None), call_loc)
+            }
+        }
+        CoreAttributesFunction::All => allocate_core_dict(
+            attributes.into_iter().collect(),
+            function,
+            pc,
+            current,
+            account,
+        )?,
+        CoreAttributesFunction::Strip => inner,
+    };
+    Ok(VmAction::Return {
+        value,
+        return_target,
+    })
+}
+
+fn flatten_attributes(
+    mut value: RichValue,
+    path: &str,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &Heap,
+    background: &Heap,
+) -> Result<(RichValue, BTreeMap<String, RichValue>), RuntimeError> {
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let mut layers = Vec::new();
+    while let RuntimeValue::Dict(handle) = value.value {
+        let Some(kind) = view
+            .dict_get_text(handle, "kind")
+            .map_err(|error| core_dict_heap_error(error, function, pc))?
+        else {
+            break;
+        };
+        let Some(kind) = view
+            .atom_text(kind)
+            .map_err(|error| core_dict_heap_error(error, function, pc))?
+        else {
+            break;
+        };
+        if kind != "WithAttributes" {
+            break;
+        }
+        let fields = view
+            .dict_fields(handle)
+            .map_err(|error| core_dict_heap_error(error, function, pc))?;
+        if fields != ["attributes", "inner", "kind"] {
+            return Err(error(
+                RuntimeErrorKind::TypeMismatch,
+                format!(
+                    "{path} WithAttributes wrapper must have exactly attributes, inner, and kind fields"
+                ),
+                function,
+                pc,
+            ));
+        }
+        let inner = view
+            .dict_get_text(handle, "inner")
+            .map_err(|error| core_dict_heap_error(error, function, pc))?
+            .expect("validated wrapper field");
+        let attributes = view
+            .dict_get_text(handle, "attributes")
+            .map_err(|error| core_dict_heap_error(error, function, pc))?
+            .expect("validated wrapper field");
+        let RuntimeValue::Dict(attributes) = attributes.value else {
+            return Err(error(
+                RuntimeErrorKind::TypeMismatch,
+                format!("{path}.attributes must be a Dict"),
+                function,
+                pc,
+            ));
+        };
+        let (names, values) = view
+            .dict_parts(attributes)
+            .map_err(|error| core_dict_heap_error(error, function, pc))?;
+        let layer = names
+            .iter()
+            .zip(values)
+            .map(|(name, value)| {
+                Ok((
+                    view.text(*name)
+                        .map_err(|error| core_dict_heap_error(error, function, pc))?
+                        .to_owned(),
+                    *value,
+                ))
+            })
+            .collect::<Result<Vec<_>, RuntimeError>>()?;
+        layers.push(layer);
+        value = inner;
+    }
+    let mut merged = BTreeMap::new();
+    for layer in layers.into_iter().rev() {
+        merged.extend(layer);
+    }
+    Ok((value, merged))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn allocate_attributes_wrapper(
+    inner: RichValue,
+    attributes: BTreeMap<String, RichValue>,
+    loc: Option<crate::Loc>,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    account: &mut QuotaAccount,
+) -> Result<RichValue, RuntimeError> {
+    let attributes = allocate_core_dict(
+        attributes.into_iter().collect(),
+        function,
+        pc,
+        current,
+        account,
+    )?;
+    allocate_core_dict(
+        vec![
+            ("attributes".into(), attributes),
+            ("inner".into(), inner),
+            (
+                "kind".into(),
+                RichValue::new(RuntimeValue::Atom(current.intern("WithAttributes")), loc),
+            ),
+        ],
+        function,
+        pc,
+        current,
+        account,
+    )
+}
+
 #[derive(Clone, Debug)]
 struct CodecType {
     kind: CodecKind,
@@ -2779,6 +3003,30 @@ fn decode_runtime_type_at(
         .map_err(|error| error.to_string())?
         .and_then(|kind| view.atom_text(kind).ok().flatten())
         .ok_or_else(|| format!("{path}.kind must be an Atom"))?;
+    if kind == "WithAttributes" {
+        let fields = view
+            .dict_fields(handle)
+            .map_err(|error| error.to_string())?;
+        if fields != ["attributes", "inner", "kind"] {
+            return Err(format!(
+                "{path} WithAttributes wrapper must have exactly attributes, inner, and kind fields"
+            ));
+        }
+        let attributes = view
+            .dict_get_text(handle, "attributes")
+            .map_err(|error| error.to_string())?
+            .expect("validated wrapper field");
+        if !matches!(attributes.value, RuntimeValue::Dict(_)) {
+            return Err(format!("{path}.attributes must be a Dict"));
+        }
+        let inner = view
+            .dict_get_text(handle, "inner")
+            .map_err(|error| error.to_string())?
+            .expect("validated wrapper field");
+        let mut decoded = decode_runtime_type_at(inner, path, current, background)?;
+        decoded.rule = value;
+        return Ok(decoded);
+    }
     let kind = match kind {
         "Any" => CodecKind::Any,
         "Int" => CodecKind::Int,

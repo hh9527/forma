@@ -789,6 +789,23 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
         .dict_get("kind")
         .and_then(ValueRef::as_atom)
         .ok_or_else(|| format!("{path}.kind must be an Atom"))?;
+    if kind == "WithAttributes" {
+        if fields != ["attributes", "inner", "kind"] {
+            return Err(format!(
+                "{path} WithAttributes wrapper must have exactly attributes, inner, and kind fields"
+            ));
+        }
+        let attributes = value
+            .dict_get("attributes")
+            .expect("validated wrapper field");
+        if attributes.kind() != ValueKind::Dict {
+            return Err(format!("{path}.attributes must be a Dict"));
+        }
+        return decode_type_ref(
+            value.dict_get("inner").expect("validated wrapper field"),
+            path,
+        );
+    }
     let require = |expected: &[&str]| -> Result<(), String> {
         if fields.iter().copied().eq(expected.iter().copied()) {
             Ok(())
@@ -1009,6 +1026,13 @@ fn decode_type(value: &Value, path: &str) -> Result<TypeDescriptor, String> {
     let Value::Atom(kind) = kind else {
         return Err(format!("{path}.kind must be an Atom"));
     };
+    if kind.name() == "WithAttributes" {
+        require_fields(metadata, path, &["attributes", "inner", "kind"])?;
+        if !matches!(metadata.get("attributes"), Some(Value::Dict(_))) {
+            return Err(format!("{path}.attributes must be a Dict"));
+        }
+        return decode_type(metadata.get("inner").expect("required field"), path);
+    }
     let descriptor = match kind.name() {
         "Any" => {
             require_fields(metadata, path, &["kind"])?;
@@ -1621,6 +1645,13 @@ mod tests {
     fn rejects_invalid_metadata_protocol() {
         let error = analyze_source("test", "type Broken = {kind: 'Unknown}; 0").unwrap_err();
         assert!(error.message.contains("unknown value"));
+
+        let malformed = analyze_source(
+            "test",
+            "type Broken = {kind: 'WithAttributes, inner: Int, attributes: []}; 0",
+        )
+        .unwrap_err();
+        assert!(malformed.message.contains("attributes must be a Dict"));
     }
 
     #[test]

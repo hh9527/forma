@@ -1,9 +1,10 @@
 use crate::value::{
-    CoreArrayFunction, CoreCodecFunction, CoreDebugFunction, CoreDictFunction, CoreJsonFunction,
-    CoreResultFunction, NativeFunction,
+    CoreArrayFunction, CoreAttributesFunction, CoreCodecFunction, CoreDebugFunction,
+    CoreDictFunction, CoreJsonFunction, CoreResultFunction, NativeFunction,
 };
 
 pub(crate) const ARRAY_MODULE: &str = "core:array";
+pub(crate) const ATTRIBUTES_MODULE: &str = "core:attributes";
 pub(crate) const DICT_MODULE: &str = "core:dict";
 pub(crate) const DEBUG_MODULE: &str = "core:debug";
 pub(crate) const CODEC_MODULE: &str = "core:codec";
@@ -18,6 +19,44 @@ pub(crate) struct CoreModuleSpec {
 
 pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
     vec![
+        CoreModuleSpec {
+            name: ATTRIBUTES_MODULE,
+            source: r#"
+native normalize: fn(Any) -> Any;
+native add: fn(Any, Any) -> Any;
+native get: fn(Any, String) -> Any;
+native has: fn(Any, String) -> Any;
+native all: fn(Any) -> Any;
+native strip: fn(Any) -> Any;
+{ normalize: normalize, add: add, get: get, has: has, all: all, strip: strip }
+"#,
+            functions: vec![
+                (
+                    "add",
+                    NativeFunction::core_attributes(CoreAttributesFunction::Add),
+                ),
+                (
+                    "all",
+                    NativeFunction::core_attributes(CoreAttributesFunction::All),
+                ),
+                (
+                    "get",
+                    NativeFunction::core_attributes(CoreAttributesFunction::Get),
+                ),
+                (
+                    "has",
+                    NativeFunction::core_attributes(CoreAttributesFunction::Has),
+                ),
+                (
+                    "normalize",
+                    NativeFunction::core_attributes(CoreAttributesFunction::Normalize),
+                ),
+                (
+                    "strip",
+                    NativeFunction::core_attributes(CoreAttributesFunction::Strip),
+                ),
+            ],
+        },
         CoreModuleSpec {
             name: ARRAY_MODULE,
             source: r#"

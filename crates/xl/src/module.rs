@@ -1590,6 +1590,192 @@ mod tests {
     }
 
     #[test]
+    fn core_attributes_normalizes_flattens_and_inspects_arbitrary_values() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import attributes from "core:attributes";
+               let nested = {
+                   kind: 'WithAttributes,
+                   inner: {
+                       kind: 'WithAttributes,
+                       inner: 42,
+                       attributes: { shared: "inner", only_inner: 1 },
+                   },
+                   attributes: { shared: "outer", only_outer: 2 },
+               };
+               let augmented = attributes.add(
+                   nested,
+                   { shared: "addition", "vendor:acme.flag": 'True },
+               );
+               {
+                   normalized: attributes.normalize(nested),
+                   all: attributes.all(augmented),
+                   shared: attributes.get(augmented, "shared"),
+                   missing: attributes.get(augmented, "missing"),
+                   has: attributes.has(augmented, "vendor:acme.flag"),
+                   lacks: attributes.has(augmented, "missing"),
+                   stripped: attributes.strip(augmented),
+                   plain: attributes.normalize("plain"),
+               }"#,
+        )
+        .unwrap();
+
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(result) = module.execute(100_000).unwrap() else {
+            panic!("expected Dict result")
+        };
+        assert_eq!(
+            result.get("all").unwrap().to_string(),
+            "{only_inner: 1, only_outer: 2, shared: \"addition\", vendor:acme.flag: 'True}"
+        );
+        assert_eq!(
+            result.get("shared").unwrap().to_string(),
+            "('Some, \"addition\")"
+        );
+        assert_eq!(result.get("missing").unwrap().to_string(), "'None");
+        assert_eq!(result.get("has").unwrap().to_string(), "'True");
+        assert_eq!(result.get("lacks").unwrap().to_string(), "'False");
+        assert_eq!(result.get("stripped").unwrap().to_string(), "42");
+
+        let Value::Dict(normalized) = result.get("normalized").unwrap() else {
+            panic!("expected normalized wrapper")
+        };
+        assert_eq!(
+            normalized.get("attributes").unwrap().to_string(),
+            "{only_inner: 1, only_outer: 2, shared: \"outer\"}"
+        );
+        assert_eq!(normalized.get("inner").unwrap().to_string(), "42");
+        let Value::Dict(plain) = result.get("plain").unwrap() else {
+            panic!("expected plain wrapper")
+        };
+        assert_eq!(plain.get("attributes").unwrap().to_string(), "{}");
+        assert_eq!(plain.get("inner").unwrap().to_string(), "\"plain\"");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn attributed_type_metadata_is_transparent_and_preserved() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import attributes from "core:attributes";
+               import codec from "core:codec";
+               let rename = fn(name) {
+                   fn(ctx, value) {
+                       attributes.add(value, { "core:json.rename": name })
+                   }
+               };
+               let model = fn(ctx, value) {
+                   attributes.add(Struct(value), { "vendor:acme.model": ctx.name })
+               };
+               @model
+               type User = {
+                   @rename("type")
+                   ty: String,
+               };
+               let user: User = { ty: "admin" };
+               {
+                   metadata: User,
+                   checked: validate(User, user),
+                   decoded: codec.decode(User, { ty: "member" }),
+               }"#,
+        )
+        .unwrap();
+
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(result) = module.execute(100_000).unwrap() else {
+            panic!("expected Dict result")
+        };
+        assert!(
+            result
+                .get("checked")
+                .unwrap()
+                .to_string()
+                .starts_with("('Ok,")
+        );
+        assert!(
+            result
+                .get("decoded")
+                .unwrap()
+                .to_string()
+                .starts_with("('Ok,")
+        );
+
+        let Value::Dict(metadata) = result.get("metadata").unwrap() else {
+            panic!("expected attributed type metadata")
+        };
+        assert_eq!(metadata.get("kind").unwrap().to_string(), "'WithAttributes");
+        let Value::Dict(model_attributes) = metadata.get("attributes").unwrap() else {
+            panic!("expected model attributes")
+        };
+        assert_eq!(
+            model_attributes
+                .get("vendor:acme.model")
+                .unwrap()
+                .to_string(),
+            "\"User\""
+        );
+        let Value::Dict(struct_metadata) = metadata.get("inner").unwrap() else {
+            panic!("expected Struct metadata")
+        };
+        let Value::Dict(fields) = struct_metadata.get("fields").unwrap() else {
+            panic!("expected Struct fields")
+        };
+        let Value::Dict(field) = fields.get("ty").unwrap() else {
+            panic!("expected attributed field metadata")
+        };
+        assert_eq!(field.get("kind").unwrap().to_string(), "'WithAttributes");
+        let Value::Dict(field_attributes) = field.get("attributes").unwrap() else {
+            panic!("expected field attributes")
+        };
+        assert_eq!(
+            field_attributes
+                .get("core:json.rename")
+                .unwrap()
+                .to_string(),
+            "\"type\""
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn core_attributes_rejects_malformed_wrappers_and_obeys_allocation_quota() {
+        let directory = fixture_dir();
+        let path = directory.join("main.xl");
+        fs::write(
+            &path,
+            r#"import attributes from "core:attributes";
+               attributes.normalize({kind: 'WithAttributes, inner: 1, attributes: []})"#,
+        )
+        .unwrap();
+        let module = load_module(&path, BTreeMap::new(), 100_000).unwrap();
+        let error = module.execute(100_000).unwrap_err();
+        assert!(error.message.contains("attributes must be a Dict"));
+
+        fs::write(
+            &path,
+            r#"import attributes from "core:attributes";
+               attributes.normalize(1)"#,
+        )
+        .unwrap();
+        let module = load_module(&path, BTreeMap::new(), 100_000).unwrap();
+        let mut account = QuotaAccount::new(Quota::new(10, 1_000, 0));
+        let error = Vm::new()
+            .execute_in_work(
+                &module.runtime.main.heap,
+                &module.runtime.externals,
+                &module.function,
+                &[],
+                &mut account,
+            )
+            .err()
+            .expect("normalization must exhaust allocation quota");
+        assert_eq!(error.kind, crate::RuntimeErrorKind::AllocationQuotaExceeded);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn core_dict_rejects_invalid_arguments_pairs_and_duplicates() {
         let directory = fixture_dir();
         let run_error = |name: &str, expression: &str| {

@@ -178,10 +178,29 @@ validate them, or adopt a library convention such as flat `WithAttributes`;
 the language assigns no attribute keys or model-specific meaning. Original
 decorator syntax and locations remain available in the semantic AST.
 
+## Attributed values
+
+`core:attributes` provides a flat ordinary-data convention for model metadata:
+
+```xl
+import attributes from "core:attributes";
+
+let rename = fn(name) {
+    fn(ctx, value) {
+        value |> attributes.add({ "core:json.rename": name })
+    }
+};
+```
+
+The module exports `normalize`, `add`, `get`, `has`, `all`, and `strip`.
+Nested wrappers are flattened and later additions win. Wrapped TypeMetadata is
+transparent to checking, validation, and derived codecs, while constructors
+such as `Struct` preserve the raw wrappers for generators and future LSP views.
+
 ## Current limits
 
 The MVP has no effects, package manager, LSP server, traits, HKT, YAML/TOML
-modules, normalization protocol, or production garbage collector.
+modules, domain model library, or production garbage collector.
 Function signatures are dynamically checked and static inference deliberately
 falls back to `Any` where the focused checker has no precise model.
 
