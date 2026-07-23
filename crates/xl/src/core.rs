@@ -161,6 +161,7 @@ native rename: fn(String) -> fn(Any, Any) -> Any;
 native rename_all: fn(Any) -> fn(Any, Any) -> Any;
 native flatten: fn(Any, Any) -> Any;
 native untagged: fn(Any, Any) -> Any;
+native schema: fn(Any) -> Any;
 native default: fn(Any) -> fn(Any, Any) -> Any;
 native skip_serializing_if: fn(Any) -> fn(Any, Any) -> Any;
 {
@@ -170,6 +171,7 @@ native skip_serializing_if: fn(Any) -> fn(Any, Any) -> Any;
     rename_all: rename_all,
     flatten: flatten,
     untagged: untagged,
+    schema: schema,
     default: default,
     skip_serializing_if: skip_serializing_if,
 }
@@ -186,6 +188,10 @@ native skip_serializing_if: fn(Any) -> fn(Any, Any) -> Any;
                 (
                     "untagged",
                     NativeFunction::core_json(CoreJsonFunction::Untagged),
+                ),
+                (
+                    "schema",
+                    NativeFunction::core_json(CoreJsonFunction::Schema),
                 ),
                 (
                     "rename",

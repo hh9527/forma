@@ -1,6 +1,6 @@
 # RFC 0033: JSON Schema generation from codec metadata
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0031, RFC 0032
 
 ## Summary
@@ -35,6 +35,8 @@ XL value can be encoded by the field codec.
 - `Any` becomes an unconstrained schema `{}`.
 - `Int`, `Float`, and `String` use JSON Schema primitive types.
 - `Atom('None)` uses `{type: "null"}`; other Atom values use `const` Strings.
+- canonical `Bool` and `Option(T)` Enum shapes retain their natural JSON
+  boolean and `null | T` representations at every nesting level.
 - `Array(T)` uses `{type: "array", items: schema(T)}`.
 - Tuple uses a fixed `prefixItems` array and equal `minItems`/`maxItems`.
 - Struct uses `type: "object"`, planned external `properties`, deterministic
@@ -98,4 +100,20 @@ diagnostics remain rich values rather than generator-specific exceptions.
 
 ## Implementation result
 
-Pending.
+Implemented as `json.schema(Type)`, an ordinary native function returning an XL
+Dict. It decodes runtime TypeMetadata, reuses the Struct and Enum plans from the
+codec, builds a metered `CodecNode` tree, adds the 2020-12 dialect URI, and
+materializes the result into the current work world.
+
+Focused fixtures cover Union, Array, Tuple, Bool, Option, stringification, and
+allocation quota failure. The vertical fixture loads located JSON, decodes a
+model combining nested flatten, CamelCase, default, skip, externally tagged
+Enum, and untagged Enum, re-encodes it, generates and stringifies its schema,
+then replaces the input with invalid JSON and verifies both data and rule
+locations survive through `result.unwrap`.
+
+No separate schema-side interpretation of JSON attributes was introduced.
+Required fields, external names, flatten merging, defaults, strict object
+boundaries, and Enum representations all come from the same plans used for
+runtime transformation. This validates the intended metadata architecture for
+the supported feature set rather than merely duplicating its surface syntax.

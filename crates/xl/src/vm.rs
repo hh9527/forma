@@ -3652,6 +3652,16 @@ fn option_item(schema: &CodecType) -> Option<&CodecType> {
     none.then_some(some).flatten()
 }
 
+fn is_bool_enum(variants: &BTreeMap<String, CodecEnumVariant>) -> bool {
+    variants.len() == 2
+        && variants
+            .get("False")
+            .is_some_and(|variant| variant.payload.is_none())
+        && variants
+            .get("True")
+            .is_some_and(|variant| variant.payload.is_none())
+}
+
 fn transform_codec(
     schema: &CodecType,
     value: RichValue,
@@ -3660,6 +3670,9 @@ fn transform_codec(
     current: &Heap,
     background: &Heap,
 ) -> Result<CodecNode, CodecFailure> {
+    if option_item(schema).is_some() {
+        return transform_codec_field(schema, value, direction, path, current, background);
+    }
     let view = HeapView {
         current,
         background: Some(background),
@@ -3791,6 +3804,20 @@ fn transform_codec(
                 value,
                 schema.rule,
             ))
+        }
+        CodecKind::Enum(variants) if is_bool_enum(variants) => {
+            if matches!(
+                value.value,
+                RuntimeValue::BuiltinAtom(BuiltinAtom::True | BuiltinAtom::False)
+            ) {
+                Ok(CodecNode::Existing(value))
+            } else {
+                Err(CodecFailure::new(
+                    format!("{path}: expected Bool"),
+                    value,
+                    schema.rule,
+                ))
+            }
         }
         CodecKind::Enum(variants) => transform_codec_enum(
             schema, variants, value, direction, path, current, background,
@@ -4742,6 +4769,255 @@ fn codec_should_skip(
     }
 }
 
+fn schema_dict(fields: Vec<(&str, CodecNode)>, loc: Option<crate::Loc>) -> CodecNode {
+    CodecNode::Dict(
+        fields
+            .into_iter()
+            .map(|(name, value)| (name.to_owned(), value))
+            .collect(),
+        loc,
+    )
+}
+
+fn schema_string(value: &str, loc: Option<crate::Loc>) -> CodecNode {
+    CodecNode::String(value.to_owned(), loc)
+}
+
+type SchemaProperties = Vec<(String, CodecNode)>;
+
+fn generate_json_schema(
+    schema: &CodecType,
+    data: RichValue,
+    current: &Heap,
+    background: &Heap,
+) -> Result<CodecNode, CodecFailure> {
+    let loc = schema.rule.loc;
+    if let Some(item) = option_item(schema) {
+        return Ok(schema_dict(
+            vec![(
+                "anyOf",
+                CodecNode::Array(
+                    vec![
+                        schema_dict(vec![("type", schema_string("null", loc))], loc),
+                        generate_json_schema(item, data, current, background)?,
+                    ],
+                    loc,
+                ),
+            )],
+            loc,
+        ));
+    }
+    match &schema.kind {
+        CodecKind::Any => Ok(CodecNode::Dict(Vec::new(), loc)),
+        CodecKind::Int => Ok(schema_dict(
+            vec![("type", schema_string("integer", loc))],
+            loc,
+        )),
+        CodecKind::Float => Ok(schema_dict(
+            vec![("type", schema_string("number", loc))],
+            loc,
+        )),
+        CodecKind::String => Ok(schema_dict(
+            vec![("type", schema_string("string", loc))],
+            loc,
+        )),
+        CodecKind::Atom(tag) if tag == "None" => {
+            Ok(schema_dict(vec![("type", schema_string("null", loc))], loc))
+        }
+        CodecKind::Atom(tag) => Ok(schema_dict(vec![("const", schema_string(tag, loc))], loc)),
+        CodecKind::Array(item) => Ok(schema_dict(
+            vec![
+                ("type", schema_string("array", loc)),
+                (
+                    "items",
+                    generate_json_schema(item, data, current, background)?,
+                ),
+            ],
+            loc,
+        )),
+        CodecKind::Tuple(items) => {
+            let schemas = items
+                .iter()
+                .map(|item| generate_json_schema(item, data, current, background))
+                .collect::<Result<Vec<_>, _>>()?;
+            let length = RichValue::unknown(RuntimeValue::Int(items.len() as i64));
+            Ok(schema_dict(
+                vec![
+                    ("type", schema_string("array", loc)),
+                    ("prefixItems", CodecNode::Array(schemas, loc)),
+                    ("minItems", CodecNode::Existing(length)),
+                    ("maxItems", CodecNode::Existing(length)),
+                ],
+                loc,
+            ))
+        }
+        CodecKind::Struct(fields) => {
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            let plan = plan_struct(schema, fields, data, "$", &view)?;
+            let (properties, required) =
+                generate_struct_schema_fields(&plan, data, current, background)?;
+            let mut fields = vec![
+                ("type", schema_string("object", loc)),
+                ("properties", CodecNode::Dict(properties, loc)),
+                (
+                    "additionalProperties",
+                    CodecNode::Atom(BuiltinAtom::False, loc),
+                ),
+            ];
+            if !required.is_empty() {
+                fields.push((
+                    "required",
+                    CodecNode::Array(
+                        required
+                            .into_iter()
+                            .map(|name| CodecNode::String(name, loc))
+                            .collect(),
+                        loc,
+                    ),
+                ));
+            }
+            Ok(schema_dict(fields, loc))
+        }
+        CodecKind::Enum(variants) if is_bool_enum(variants) => Ok(schema_dict(
+            vec![("type", schema_string("boolean", loc))],
+            loc,
+        )),
+        CodecKind::Enum(variants) => {
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            let plan = plan_enum(schema, variants, data, "$", &view)?;
+            let branches = if plan.untagged {
+                plan.variants
+                    .iter()
+                    .map(|variant| {
+                        generate_json_schema(
+                            variant.payload.as_ref().expect("planned untagged payload"),
+                            data,
+                            current,
+                            background,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            } else {
+                plan.variants
+                    .iter()
+                    .map(|variant| {
+                        if let Some(payload) = &variant.payload {
+                            let property =
+                                generate_json_schema(payload, data, current, background)?;
+                            Ok(schema_dict(
+                                vec![
+                                    ("type", schema_string("object", variant.rule.loc)),
+                                    (
+                                        "properties",
+                                        CodecNode::Dict(
+                                            vec![(variant.external_name.clone(), property)],
+                                            variant.rule.loc,
+                                        ),
+                                    ),
+                                    (
+                                        "required",
+                                        CodecNode::Array(
+                                            vec![schema_string(
+                                                &variant.external_name,
+                                                variant.rule.loc,
+                                            )],
+                                            variant.rule.loc,
+                                        ),
+                                    ),
+                                    (
+                                        "additionalProperties",
+                                        CodecNode::Atom(BuiltinAtom::False, variant.rule.loc),
+                                    ),
+                                ],
+                                variant.rule.loc,
+                            ))
+                        } else {
+                            Ok(schema_dict(
+                                vec![(
+                                    "const",
+                                    schema_string(&variant.external_name, variant.rule.loc),
+                                )],
+                                variant.rule.loc,
+                            ))
+                        }
+                    })
+                    .collect::<Result<Vec<_>, CodecFailure>>()?
+            };
+            Ok(schema_dict(
+                vec![("oneOf", CodecNode::Array(branches, loc))],
+                loc,
+            ))
+        }
+        CodecKind::Union(variants) => Ok(schema_dict(
+            vec![(
+                "anyOf",
+                CodecNode::Array(
+                    variants
+                        .iter()
+                        .map(|variant| generate_json_schema(variant, data, current, background))
+                        .collect::<Result<Vec<_>, _>>()?,
+                    loc,
+                ),
+            )],
+            loc,
+        )),
+        CodecKind::Bytes | CodecKind::Function => Err(CodecFailure::new(
+            format!(
+                "Type {} has no JSON Schema mapping",
+                codec_type_name(schema)
+            ),
+            data,
+            schema.rule,
+        )),
+    }
+}
+
+fn generate_struct_schema_fields(
+    plan: &StructPlan,
+    data: RichValue,
+    current: &Heap,
+    background: &Heap,
+) -> Result<(SchemaProperties, Vec<String>), CodecFailure> {
+    let mut properties = Vec::new();
+    let mut required = Vec::new();
+    for field in &plan.fields {
+        if let Some(nested) = &field.flattened {
+            let (nested_properties, nested_required) =
+                generate_struct_schema_fields(nested, data, current, background)?;
+            properties.extend(nested_properties);
+            required.extend(nested_required);
+            continue;
+        }
+        let external = field.external_name.clone().expect("ordinary field name");
+        let mut property = generate_json_schema(&field.schema, data, current, background)?;
+        if let Some(default) = field.default {
+            let encoded = transform_codec_field(
+                &field.schema,
+                default,
+                CodecDirection::Encode,
+                &format!("$.{}", field.internal_name),
+                current,
+                background,
+            )
+            .map_err(|failure| CodecFailure::new(failure.message, default, default))?;
+            let CodecNode::Dict(fields, _) = &mut property else {
+                unreachable!("every generated schema is an object")
+            };
+            fields.push(("default".into(), encoded));
+        } else if option_item(&field.schema).is_none() {
+            required.push(external.clone());
+        }
+        properties.push((external, property));
+    }
+    Ok((properties, required))
+}
+
 fn codec_type_name(schema: &CodecType) -> &'static str {
     match &schema.kind {
         CodecKind::Any => "Any",
@@ -5010,6 +5286,40 @@ fn run_core_json(
             return_target,
         });
     }
+    if operation == CoreJsonFunction::Schema {
+        let schema = decode_runtime_type(arguments[0], current, background)
+            .map_err(|message| error(RuntimeErrorKind::TypeMismatch, message, function, pc))?;
+        let mut node = generate_json_schema(&schema, arguments[0], current, background).map_err(
+            |failure| {
+                let mut runtime = error(
+                    RuntimeErrorKind::TypeMismatch,
+                    failure.message,
+                    function,
+                    pc,
+                );
+                runtime.set_locations(failure.data.loc, failure.rule.loc);
+                runtime
+            },
+        )?;
+        let CodecNode::Dict(fields, _) = &mut node else {
+            unreachable!("root schema is always an object")
+        };
+        fields.push((
+            "$schema".into(),
+            CodecNode::String(
+                "https://json-schema.org/draft/2020-12/schema".into(),
+                arguments[0].loc,
+            ),
+        ));
+        let bytes = codec_node_bytes(&node)
+            .map_err(|native_error| allocation_error(native_error.message, function, pc))?;
+        charge_allocation(account, bytes, function, pc)?;
+        let value = materialize_codec_node(node, current, background);
+        return Ok(VmAction::Return {
+            value,
+            return_target,
+        });
+    }
     if matches!(
         operation,
         CoreJsonFunction::Flatten
@@ -5143,6 +5453,7 @@ fn run_core_json(
         | CoreJsonFunction::RenameAllDecorator
         | CoreJsonFunction::Flatten
         | CoreJsonFunction::Untagged
+        | CoreJsonFunction::Schema
         | CoreJsonFunction::Default
         | CoreJsonFunction::DefaultDecorator
         | CoreJsonFunction::SkipSerializingIf

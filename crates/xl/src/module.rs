@@ -2001,6 +2001,175 @@ mod tests {
     }
 
     #[test]
+    fn json_schema_and_codecs_share_one_vertical_model_plan() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("data.json"),
+            r#"{"userId":7,"city_name":"London","event":{"userJoined":{"name":"Ada"}},"scalar":"active","notes":""}"#,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import data from "./data.json";
+               import codec from "core:codec";
+               import json from "core:json";
+               import result from "core:result";
+               @struct type User = {name: String};
+               @struct type Details = {city_name: String};
+               @json.rename_all('CamelCase)
+               @enum type Event = {Idle: 'None, UserJoined: User};
+               @json.untagged @enum type Scalar = {Text: String, Count: Int};
+               @json.rename_all('CamelCase)
+               @struct type Model = {
+                   user_id: Int,
+                   @json.flatten details: Details,
+                   @json.default('None) nickname: Option(String),
+                   event: Event,
+                   scalar: Scalar,
+                   @json.skip_serializing_if('Empty) notes: String,
+               };
+               let decoded = codec.decode(Model, data) |> result.unwrap;
+               let schema = json.schema(Model);
+               {
+                   decoded: decoded,
+                   encoded: codec.encode(Model, decoded) |> result.unwrap,
+                   schema: schema,
+                   schema_text: json.stringify(schema),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(output) = module.execute(100_000).unwrap() else {
+            panic!("expected vertical model output")
+        };
+        let Value::Dict(schema) = output.get("schema").unwrap() else {
+            panic!("expected schema Dict")
+        };
+        assert_eq!(schema.get("type").unwrap().to_string(), "\"object\"");
+        assert_eq!(
+            schema.get("additionalProperties").unwrap().to_string(),
+            "'False"
+        );
+        let Value::Dict(properties) = schema.get("properties").unwrap() else {
+            panic!("expected properties")
+        };
+        for key in [
+            "userId",
+            "city_name",
+            "nickname",
+            "event",
+            "scalar",
+            "notes",
+        ] {
+            assert!(
+                properties.get(key).is_some(),
+                "missing schema property {key}"
+            );
+        }
+        assert!(
+            schema
+                .get("required")
+                .unwrap()
+                .to_string()
+                .contains("userId")
+        );
+        assert!(
+            !schema
+                .get("required")
+                .unwrap()
+                .to_string()
+                .contains("nickname")
+        );
+        assert!(
+            output
+                .get("schema_text")
+                .unwrap()
+                .to_string()
+                .contains("$schema")
+        );
+        assert!(!output.get("encoded").unwrap().to_string().contains("notes"));
+        assert!(
+            output
+                .get("encoded")
+                .unwrap()
+                .to_string()
+                .contains("userId")
+        );
+
+        fs::write(
+            directory.join("data.json"),
+            r#"{"userId":"wrong","city_name":"London","event":"idle","scalar":1,"notes":""}"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let failure = module.execute(100_000).unwrap_err();
+        assert!(failure.message.contains("$.userId"));
+        assert!(failure.data_location().is_some());
+        assert!(failure.rule_location().is_some());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn json_schema_maps_composites_and_obeys_allocation_quota() {
+        let directory = fixture_dir();
+        let path = directory.join("main.xl");
+        fs::write(
+            &path,
+            r#"import json from "core:json";
+               json.schema(union('None, [Int, Array(String), {kind: 'Tuple, items: [Int, String]}]))"#,
+        )
+        .unwrap();
+        let module = load_module(&path, BTreeMap::new(), 100_000).unwrap();
+        let output = module.execute(100_000).unwrap().to_string();
+        assert!(output.contains("anyOf"));
+        assert!(output.contains("prefixItems"));
+        assert!(output.contains("items"));
+
+        let mut account = QuotaAccount::new(Quota::new(10, 1_000, 1));
+        let error = Vm::new()
+            .execute_in_work(
+                &module.runtime.main.heap,
+                &module.runtime.externals,
+                &module.function,
+                &[],
+                &mut account,
+            )
+            .err()
+            .expect("schema generation must exhaust allocation quota");
+        assert_eq!(error.kind, crate::RuntimeErrorKind::AllocationQuotaExceeded);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn builtin_bool_and_option_keep_natural_json_codec_and_schema_forms() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import codec from "core:codec";
+               import json from "core:json";
+               import result from "core:result";
+               {
+                   boolean: codec.decode(Bool, 'True) |> result.unwrap,
+                   none: codec.decode(Option(Int), 'None) |> result.unwrap,
+                   some: codec.decode(Option(Int), 3) |> result.unwrap,
+                   encoded: codec.encode(Option(Int), ('Some, 4)) |> result.unwrap,
+                   bool_schema: json.schema(Bool),
+                   option_schema: json.schema(Option(Int)),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let output = module.execute(100_000).unwrap().to_string();
+        assert!(output.contains("boolean: 'True"), "{output}");
+        assert!(output.contains("none: 'None"), "{output}");
+        assert!(output.contains("some: ('Some, 3)"), "{output}");
+        assert!(output.contains("encoded: 4"), "{output}");
+        assert!(output.contains("type: \"boolean\""), "{output}");
+        assert!(output.contains("type: \"null\""), "{output}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn builtin_bool_option_and_result_are_normalized_enum_metadata() {
         let directory = fixture_dir();
         fs::write(
