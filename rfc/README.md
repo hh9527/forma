@@ -49,3 +49,4 @@ semantics from an earlier RFC.
 29. Built-in normalized Bool, Option, and Result types.
 30. Standard JSON model attribute decorators and payload vocabulary.
 31. Attribute-aware bidirectional Struct JSON codecs.
+32. Serde-style externally tagged and untagged Enum JSON codecs.
