@@ -51,3 +51,4 @@ semantics from an earlier RFC.
 31. Attribute-aware bidirectional Struct JSON codecs.
 32. Serde-style externally tagged and untagged Enum JSON codecs.
 33. JSON Schema generation from the shared codec metadata plan.
+34. Recursive TypeMetadata graphs through hidden up-links.
