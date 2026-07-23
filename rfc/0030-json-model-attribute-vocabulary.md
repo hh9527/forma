@@ -1,6 +1,6 @@
 # RFC 0030: JSON model attribute vocabulary
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0025, RFC 0026, RFC 0027
 
 ## Summary
@@ -137,4 +137,25 @@ locations. Applying a decorator preserves the RHS inner location.
 
 ## Implementation result
 
-Pending.
+The declarative `core:json` interface now exports all five decorator functions
+beside stringify. Configured functions validate their payload and return an
+ordinary native closure with one rich upvalue; the configured closure has the
+same two-argument ABI as a bytecode decorator. `flatten` directly implements
+that ABI without configuration.
+
+Decorator application uses the existing direct HeapView attribute flattening,
+adds the canonical key with outer precedence, and allocates one normalized
+wrapper. It never exports through legacy Value or stores hidden state. Captured
+configuration values and RHS inner values retain their locations, while closure
+and wrapper allocations are charged to the active account.
+
+`rename_all` currently accepts only `'CamelCase`. Skip policy validation accepts
+exactly `'None`, `'False`, and `'Empty`; defaults retain arbitrary values.
+Placement remains deliberately unchecked until codec planning consumes the
+metadata.
+
+Tests cover Struct-root and field decorators, configured and bare forms,
+stacking and same-key precedence, exact flat wrapper shape, every payload key,
+invalid configuration policies, and allocation exhaustion. Existing codec
+tests remain unchanged, confirming this RFC adds metadata without yet changing
+encoding behavior.

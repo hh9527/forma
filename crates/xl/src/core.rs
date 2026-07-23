@@ -157,9 +157,42 @@ native unwrap: fn(Any) -> Any;
             source: r#"
 native stringify: fn(Any) -> String;
 native stringify_pretty: fn(Int) -> fn(Any) -> String;
-{ stringify: stringify, stringify_pretty: stringify_pretty }
+native rename: fn(String) -> fn(Any, Any) -> Any;
+native rename_all: fn(Any) -> fn(Any, Any) -> Any;
+native flatten: fn(Any, Any) -> Any;
+native default: fn(Any) -> fn(Any, Any) -> Any;
+native skip_serializing_if: fn(Any) -> fn(Any, Any) -> Any;
+{
+    stringify: stringify,
+    stringify_pretty: stringify_pretty,
+    rename: rename,
+    rename_all: rename_all,
+    flatten: flatten,
+    default: default,
+    skip_serializing_if: skip_serializing_if,
+}
 "#,
             functions: vec![
+                (
+                    "default",
+                    NativeFunction::core_json(CoreJsonFunction::Default),
+                ),
+                (
+                    "flatten",
+                    NativeFunction::core_json(CoreJsonFunction::Flatten),
+                ),
+                (
+                    "rename",
+                    NativeFunction::core_json(CoreJsonFunction::Rename),
+                ),
+                (
+                    "rename_all",
+                    NativeFunction::core_json(CoreJsonFunction::RenameAll),
+                ),
+                (
+                    "skip_serializing_if",
+                    NativeFunction::core_json(CoreJsonFunction::SkipSerializingIf),
+                ),
                 (
                     "stringify",
                     NativeFunction::core_json(CoreJsonFunction::Stringify),

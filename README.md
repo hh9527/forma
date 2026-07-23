@@ -232,6 +232,25 @@ normalized Enum `{None, Some(T)}`, and `Result(T, E)` is `{Err(E), Ok(T)}`.
 They add no runtime value kind: values remain Atoms or two-element tagged
 Tuples.
 
+`core:json` exports model decorators that write ordinary flat attributes:
+
+```xl
+@json.rename_all('CamelCase)
+@struct
+type User = {
+    @json.rename("id")
+    user_id: Int,
+
+    @json.default('None)
+    @json.skip_serializing_if('None)
+    nickname: Option(String),
+};
+```
+
+The initial vocabulary is `rename`, `rename_all`, `flatten`, `default`, and
+`skip_serializing_if`. At this stage the decorators only construct metadata;
+the following codec RFCs define how encoding and decoding consume it.
+
 ## Current limits
 
 The MVP has no effects, package manager, LSP server, traits, HKT, YAML/TOML

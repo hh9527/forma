@@ -4094,6 +4094,107 @@ fn run_core_json(
     background: &Heap,
     account: &mut QuotaAccount,
 ) -> Result<VmAction, RuntimeError> {
+    if matches!(
+        operation,
+        CoreJsonFunction::Rename
+            | CoreJsonFunction::RenameAll
+            | CoreJsonFunction::Default
+            | CoreJsonFunction::SkipSerializingIf
+    ) {
+        validate_json_attribute_configuration(
+            operation,
+            arguments[0],
+            function,
+            pc,
+            current,
+            background,
+        )?;
+        let configured = match operation {
+            CoreJsonFunction::Rename => CoreJsonFunction::RenameDecorator,
+            CoreJsonFunction::RenameAll => CoreJsonFunction::RenameAllDecorator,
+            CoreJsonFunction::Default => CoreJsonFunction::DefaultDecorator,
+            CoreJsonFunction::SkipSerializingIf => CoreJsonFunction::SkipSerializingIfDecorator,
+            _ => unreachable!(),
+        };
+        charge_allocation(
+            account,
+            logical_value_bytes(1)
+                .map_err(|error| allocation_error(error.message, function, pc))?,
+            function,
+            pc,
+        )?;
+        let value = RichValue::new(
+            RuntimeValue::Func(current.allocate(Object::Closure {
+                identity: Arc::new(()),
+                prototype: crate::heap::RuntimePrototype::Native(crate::NativeFunction::core_json(
+                    configured,
+                )),
+                upvalues: vec![arguments[0]].into(),
+            })),
+            instruction_location(function, pc),
+        );
+        return Ok(VmAction::Return {
+            value,
+            return_target,
+        });
+    }
+    if matches!(
+        operation,
+        CoreJsonFunction::Flatten
+            | CoreJsonFunction::RenameDecorator
+            | CoreJsonFunction::RenameAllDecorator
+            | CoreJsonFunction::DefaultDecorator
+            | CoreJsonFunction::SkipSerializingIfDecorator
+    ) {
+        let (key, payload) = match operation {
+            CoreJsonFunction::Flatten => (
+                "core:json.flatten",
+                RichValue::new(
+                    RuntimeValue::BuiltinAtom(BuiltinAtom::True),
+                    instruction_location(function, pc),
+                ),
+            ),
+            CoreJsonFunction::RenameDecorator => (
+                "core:json.rename",
+                configured_json_attribute(upvalues, function, pc)?,
+            ),
+            CoreJsonFunction::RenameAllDecorator => (
+                "core:json.rename_all",
+                configured_json_attribute(upvalues, function, pc)?,
+            ),
+            CoreJsonFunction::DefaultDecorator => (
+                "core:json.default",
+                configured_json_attribute(upvalues, function, pc)?,
+            ),
+            CoreJsonFunction::SkipSerializingIfDecorator => (
+                "core:json.skip_serializing_if",
+                configured_json_attribute(upvalues, function, pc)?,
+            ),
+            _ => unreachable!(),
+        };
+        let (inner, mut attributes) = flatten_attributes(
+            arguments[1],
+            "decorated value",
+            function,
+            pc,
+            current,
+            background,
+        )?;
+        attributes.insert(key.to_owned(), payload);
+        let value = allocate_attributes_wrapper(
+            inner,
+            attributes,
+            instruction_location(function, pc),
+            function,
+            pc,
+            current,
+            account,
+        )?;
+        return Ok(VmAction::Return {
+            value,
+            return_target,
+        });
+    }
     if operation == CoreJsonFunction::StringifyPretty {
         let RuntimeValue::Int(indent) = arguments[0].value else {
             let view = HeapView {
@@ -4155,7 +4256,16 @@ fn run_core_json(
                 ));
             }
         },
-        CoreJsonFunction::StringifyPretty => unreachable!(),
+        CoreJsonFunction::StringifyPretty
+        | CoreJsonFunction::Rename
+        | CoreJsonFunction::RenameDecorator
+        | CoreJsonFunction::RenameAll
+        | CoreJsonFunction::RenameAllDecorator
+        | CoreJsonFunction::Flatten
+        | CoreJsonFunction::Default
+        | CoreJsonFunction::DefaultDecorator
+        | CoreJsonFunction::SkipSerializingIf
+        | CoreJsonFunction::SkipSerializingIfDecorator => unreachable!(),
     };
     let view = HeapView {
         current,
@@ -4175,6 +4285,66 @@ fn run_core_json(
         value,
         return_target,
     })
+}
+
+fn configured_json_attribute(
+    upvalues: &[RichValue],
+    function: &BytecodeFunction,
+    pc: usize,
+) -> Result<RichValue, RuntimeError> {
+    match upvalues {
+        [payload] => Ok(*payload),
+        _ => Err(error(
+            RuntimeErrorKind::InvalidBytecode,
+            "configured JSON decorator has invalid upvalues",
+            function,
+            pc,
+        )),
+    }
+}
+
+fn validate_json_attribute_configuration(
+    operation: CoreJsonFunction,
+    payload: RichValue,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &Heap,
+    background: &Heap,
+) -> Result<(), RuntimeError> {
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let valid = match operation {
+        CoreJsonFunction::Rename => view
+            .string_text(payload)
+            .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+            .is_some(),
+        CoreJsonFunction::RenameAll => {
+            view.atom_text(payload)
+                .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                == Some("CamelCase")
+        }
+        CoreJsonFunction::Default => true,
+        CoreJsonFunction::SkipSerializingIf => matches!(
+            view.atom_text(payload)
+                .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?,
+            Some("None" | "False" | "Empty")
+        ),
+        _ => unreachable!(),
+    };
+    if valid {
+        return Ok(());
+    }
+    let message = match operation {
+        CoreJsonFunction::Rename => "core:json.rename expects a String",
+        CoreJsonFunction::RenameAll => "core:json.rename_all currently expects 'CamelCase",
+        CoreJsonFunction::SkipSerializingIf => {
+            "core:json.skip_serializing_if expects 'None, 'False, or 'Empty"
+        }
+        _ => unreachable!(),
+    };
+    Err(error(RuntimeErrorKind::TypeMismatch, message, function, pc))
 }
 
 struct JsonWriter<'a> {

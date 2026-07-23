@@ -2131,6 +2131,140 @@ mod tests {
     }
 
     #[test]
+    fn core_json_decorators_build_flat_standard_attribute_metadata() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import json from "core:json";
+               @json.rename_all('CamelCase)
+               @struct
+               type Model = {
+                   @json.rename("outerName")
+                   @json.rename("innerName")
+                   @json.default(7)
+                   @json.skip_serializing_if('None)
+                   value_name: Option(Int),
+
+                   @json.flatten
+                   nested: struct('None, { child_value: String }),
+               };
+               Model"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(root) = module.execute(100_000).unwrap() else {
+            panic!("expected attributed model")
+        };
+        let Value::Dict(root_attributes) = root.get("attributes").unwrap() else {
+            panic!("expected root attributes")
+        };
+        assert_eq!(
+            root_attributes
+                .get("core:json.rename_all")
+                .unwrap()
+                .to_string(),
+            "'CamelCase"
+        );
+        let Value::Dict(metadata) = root.get("inner").unwrap() else {
+            panic!("expected Struct metadata")
+        };
+        let Value::Dict(fields) = metadata.get("fields").unwrap() else {
+            panic!("expected fields")
+        };
+        let Value::Dict(value) = fields.get("value_name").unwrap() else {
+            panic!("expected normalized field wrapper")
+        };
+        assert!(
+            !matches!(value.get("inner"), Some(Value::Dict(inner)) if matches!(inner.get("kind"), Some(Value::Atom(kind)) if kind.name() == "WithAttributes"))
+        );
+        let Value::Dict(attributes) = value.get("attributes").unwrap() else {
+            panic!("expected field attributes")
+        };
+        assert_eq!(
+            attributes.get("core:json.rename").unwrap().to_string(),
+            "\"outerName\""
+        );
+        assert_eq!(
+            attributes.get("core:json.default").unwrap().to_string(),
+            "7"
+        );
+        assert_eq!(
+            attributes
+                .get("core:json.skip_serializing_if")
+                .unwrap()
+                .to_string(),
+            "'None"
+        );
+        let Value::Dict(nested) = fields.get("nested").unwrap() else {
+            panic!("expected nested field wrapper")
+        };
+        let Value::Dict(nested_attributes) = nested.get("attributes").unwrap() else {
+            panic!("expected nested attributes")
+        };
+        assert_eq!(
+            nested_attributes
+                .get("core:json.flatten")
+                .unwrap()
+                .to_string(),
+            "'True"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn core_json_decorators_validate_policies_and_charge_allocations() {
+        let directory = fixture_dir();
+        let run_error = |name: &str, expression: &str| {
+            let path = directory.join(name);
+            fs::write(
+                &path,
+                format!("import json from \"core:json\"; {expression}"),
+            )
+            .unwrap();
+            load_module(path, BTreeMap::new(), 100_000)
+                .unwrap()
+                .execute(100_000)
+                .unwrap_err()
+        };
+        assert!(
+            run_error("rename.xl", "json.rename(1)")
+                .message
+                .contains("expects a String")
+        );
+        assert!(
+            run_error("case.xl", "json.rename_all('SnakeCase)")
+                .message
+                .contains("CamelCase")
+        );
+        assert!(
+            run_error("skip.xl", "json.skip_serializing_if('Zero)")
+                .message
+                .contains("'Empty")
+        );
+
+        let path = directory.join("quota.xl");
+        fs::write(
+            &path,
+            "import json from \"core:json\"; json.rename(\"name\")",
+        )
+        .unwrap();
+        let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
+        let mut account = QuotaAccount::new(Quota::new(10, 1_000, 0));
+        let error = Vm::new()
+            .execute_in_work(
+                &module.runtime.main.heap,
+                &module.runtime.externals,
+                &module.function,
+                &[],
+                &mut account,
+            )
+            .err()
+            .expect("decorator factory must exhaust allocation quota");
+        assert_eq!(error.kind, crate::RuntimeErrorKind::AllocationQuotaExceeded);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn core_dict_rejects_invalid_arguments_pairs_and_duplicates() {
         let directory = fixture_dir();
         let run_error = |name: &str, expression: &str| {
