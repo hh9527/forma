@@ -64,6 +64,23 @@ mod tests {
     }
 
     #[test]
+    fn cst_preserves_native_declarations_losslessly() {
+        let source = "native map: fn(Array(Any), fn(Any) -> Any) -> Array(Any); map";
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("native.xl", source);
+        let parsed = parse(id, source);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+        let program = Program::cast(&parsed.syntax, NodeRef::ROOT).unwrap();
+        assert!(matches!(
+            program.body().unwrap().bindings().next(),
+            Some(Binding::Native(_))
+        ));
+    }
+
+    #[test]
     fn cst_preserves_string_quotes_text_escapes_and_interpolation() {
         let source = r#""hi\n \{name}""#;
         let mut sources = crate::source::SourceDatabase::default();

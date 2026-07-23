@@ -1,6 +1,6 @@
 # RFC 0024: Declarative native bindings
 
-- Status: Accepted for implementation
+- Status: Implemented
 - Depends on: RFC 0006, RFC 0009, RFC 0013, RFC 0022, RFC 0023
 
 ## Summary
@@ -155,3 +155,27 @@ function ABI established by RFC 0009.
 7. No new call opcode or runtime-visible native reference kind is introduced.
 8. Existing source locations, quotas, recursive definitions, and CLI behavior
    remain compatible.
+
+## Implementation result
+
+`native` is now a dedicated token, lossless CST rule, typed CST node, and
+located semantic `BindingKind`. Its mandatory function contract is lowered as
+ordinary XL metadata and evaluated by the existing analysis pass. Compilation
+loads the resolved stable external value directly; it creates no UpLink and no
+new opcode.
+
+All six core modules are now embedded XL declaration sources. Their exports are
+ordinary XL Dict expressions over declared native names. At MainWorld startup,
+the loader parses, lowers, analyzes, compiles, executes, and publishes these
+modules through the normal pipeline. Rust provides only each module's symbol
+registry. The old Rust-built core Dict constructors were removed.
+
+Core linking verifies that every declaration has an implementation, every
+implementation has a declaration, and declared function arity agrees with the
+native ABI. Core installation remains outside module quota accounts. Native
+declarations in ordinary filesystem modules currently produce a located
+unregistered-symbol error because user-provided registries remain deferred.
+
+Tests cover CST reconstruction, AST kind/contract/location retention,
+unregistered and nested declaration diagnostics, all existing core behavior,
+quota boundaries, and CLI compatibility.

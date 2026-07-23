@@ -1,9 +1,7 @@
-use crate::Vm;
 use crate::value::{
-    Closure, CoreArrayFunction, CoreCodecFunction, CoreDebugFunction, CoreDictFunction,
-    CoreJsonFunction, CoreResultFunction, NativeFunction, Value,
+    CoreArrayFunction, CoreCodecFunction, CoreDebugFunction, CoreDictFunction, CoreJsonFunction,
+    CoreResultFunction, NativeFunction,
 };
-use std::sync::Arc;
 
 pub(crate) const ARRAY_MODULE: &str = "core:array";
 pub(crate) const DICT_MODULE: &str = "core:dict";
@@ -12,118 +10,126 @@ pub(crate) const CODEC_MODULE: &str = "core:codec";
 pub(crate) const RESULT_MODULE: &str = "core:result";
 pub(crate) const JSON_MODULE: &str = "core:json";
 
-pub(crate) fn array_module_value() -> Value {
-    let functions = [
-        ("filter", CoreArrayFunction::Filter),
-        ("flat_map", CoreArrayFunction::FlatMap),
-        ("fold", CoreArrayFunction::Fold),
-        ("length", CoreArrayFunction::Length),
-        ("map", CoreArrayFunction::Map),
-    ];
-    Vm::new()
-        .make_dict(functions.into_iter().map(|(name, function)| {
-            (
-                name.to_owned(),
-                Value::Func(Arc::new(Closure::native(NativeFunction::core_array(
-                    function,
-                )))),
-            )
-        }))
-        .expect("core:array fields are unique")
+pub(crate) struct CoreModuleSpec {
+    pub(crate) name: &'static str,
+    pub(crate) source: &'static str,
+    pub(crate) functions: Vec<(&'static str, NativeFunction)>,
 }
 
-pub(crate) fn dict_module_value() -> Value {
-    let functions = [
-        ("from_pairs", CoreDictFunction::FromPairs),
-        ("keys", CoreDictFunction::Keys),
-        ("merge", CoreDictFunction::Merge),
-        ("pairs", CoreDictFunction::Pairs),
-        ("values", CoreDictFunction::Values),
-    ];
-    Vm::new()
-        .make_dict(functions.into_iter().map(|(name, function)| {
-            (
-                name.to_owned(),
-                Value::Func(Arc::new(Closure::native(NativeFunction::core_dict(
-                    function,
-                )))),
-            )
-        }))
-        .expect("core:dict fields are unique")
-}
-
-pub(crate) fn debug_module_value() -> Value {
-    let functions = [
-        ("dbg", CoreDebugFunction::Dbg),
-        ("dbg_with", CoreDebugFunction::DbgWith),
-    ];
-    Vm::new()
-        .make_dict(functions.into_iter().map(|(name, function)| {
-            (
-                name.to_owned(),
-                Value::Func(Arc::new(Closure::native(NativeFunction::core_debug(
-                    function,
-                )))),
-            )
-        }))
-        .expect("core:debug fields are unique")
-}
-
-pub(crate) fn codec_module_value() -> Value {
-    core_function_dict(
-        [
-            (
-                "decode",
-                NativeFunction::core_codec(CoreCodecFunction::Decode),
-            ),
-            (
-                "encode",
-                NativeFunction::core_codec(CoreCodecFunction::Encode),
-            ),
-        ]
-        .into_iter(),
-        "core:codec",
-    )
-}
-
-pub(crate) fn result_module_value() -> Value {
-    core_function_dict(
-        [(
-            "unwrap",
-            NativeFunction::core_result(CoreResultFunction::Unwrap),
-        )]
-        .into_iter(),
-        "core:result",
-    )
-}
-
-pub(crate) fn json_module_value() -> Value {
-    core_function_dict(
-        [
-            (
-                "stringify",
-                NativeFunction::core_json(CoreJsonFunction::Stringify),
-            ),
-            (
-                "stringify_pretty",
-                NativeFunction::core_json(CoreJsonFunction::StringifyPretty),
-            ),
-        ]
-        .into_iter(),
-        "core:json",
-    )
-}
-
-fn core_function_dict(
-    functions: impl Iterator<Item = (&'static str, NativeFunction)>,
-    module: &str,
-) -> Value {
-    Vm::new()
-        .make_dict(functions.map(|(name, function)| {
-            (
-                name.to_owned(),
-                Value::Func(Arc::new(Closure::native(function))),
-            )
-        }))
-        .unwrap_or_else(|_| panic!("{module} fields are unique"))
+pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
+    vec![
+        CoreModuleSpec {
+            name: ARRAY_MODULE,
+            source: r#"
+native length: fn(Array(Any)) -> Int;
+native map: fn(Array(Any), fn(Any) -> Any) -> Array(Any);
+native filter: fn(Array(Any), fn(Any) -> Any) -> Array(Any);
+native flat_map: fn(Array(Any), fn(Any) -> Array(Any)) -> Array(Any);
+native fold: fn(Array(Any), Any, fn(Any, Any) -> Any) -> Any;
+{ length: length, map: map, filter: filter, flat_map: flat_map, fold: fold }
+"#,
+            functions: vec![
+                (
+                    "filter",
+                    NativeFunction::core_array(CoreArrayFunction::Filter),
+                ),
+                (
+                    "flat_map",
+                    NativeFunction::core_array(CoreArrayFunction::FlatMap),
+                ),
+                ("fold", NativeFunction::core_array(CoreArrayFunction::Fold)),
+                (
+                    "length",
+                    NativeFunction::core_array(CoreArrayFunction::Length),
+                ),
+                ("map", NativeFunction::core_array(CoreArrayFunction::Map)),
+            ],
+        },
+        CoreModuleSpec {
+            name: DICT_MODULE,
+            source: r#"
+native keys: fn(Any) -> Array(String);
+native values: fn(Any) -> Array(Any);
+native pairs: fn(Any) -> Array(Any);
+native from_pairs: fn(Array(Any)) -> Any;
+native merge: fn(Any, Any) -> Any;
+{ keys: keys, values: values, pairs: pairs, from_pairs: from_pairs, merge: merge }
+"#,
+            functions: vec![
+                (
+                    "from_pairs",
+                    NativeFunction::core_dict(CoreDictFunction::FromPairs),
+                ),
+                ("keys", NativeFunction::core_dict(CoreDictFunction::Keys)),
+                ("merge", NativeFunction::core_dict(CoreDictFunction::Merge)),
+                ("pairs", NativeFunction::core_dict(CoreDictFunction::Pairs)),
+                (
+                    "values",
+                    NativeFunction::core_dict(CoreDictFunction::Values),
+                ),
+            ],
+        },
+        CoreModuleSpec {
+            name: DEBUG_MODULE,
+            source: r#"
+native dbg: fn(Any) -> Any;
+native dbg_with: fn(String, Any) -> Any;
+{ dbg: dbg, dbg_with: dbg_with }
+"#,
+            functions: vec![
+                ("dbg", NativeFunction::core_debug(CoreDebugFunction::Dbg)),
+                (
+                    "dbg_with",
+                    NativeFunction::core_debug(CoreDebugFunction::DbgWith),
+                ),
+            ],
+        },
+        CoreModuleSpec {
+            name: CODEC_MODULE,
+            source: r#"
+native decode: fn(Any, Any) -> Any;
+native encode: fn(Any, Any) -> Any;
+{ decode: decode, encode: encode }
+"#,
+            functions: vec![
+                (
+                    "decode",
+                    NativeFunction::core_codec(CoreCodecFunction::Decode),
+                ),
+                (
+                    "encode",
+                    NativeFunction::core_codec(CoreCodecFunction::Encode),
+                ),
+            ],
+        },
+        CoreModuleSpec {
+            name: RESULT_MODULE,
+            source: r#"
+native unwrap: fn(Any) -> Any;
+{ unwrap: unwrap }
+"#,
+            functions: vec![(
+                "unwrap",
+                NativeFunction::core_result(CoreResultFunction::Unwrap),
+            )],
+        },
+        CoreModuleSpec {
+            name: JSON_MODULE,
+            source: r#"
+native stringify: fn(Any) -> String;
+native stringify_pretty: fn(Int) -> fn(Any) -> String;
+{ stringify: stringify, stringify_pretty: stringify_pretty }
+"#,
+            functions: vec![
+                (
+                    "stringify",
+                    NativeFunction::core_json(CoreJsonFunction::Stringify),
+                ),
+                (
+                    "stringify_pretty",
+                    NativeFunction::core_json(CoreJsonFunction::StringifyPretty),
+                ),
+            ],
+        },
+    ]
 }

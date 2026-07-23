@@ -336,7 +336,39 @@ impl<'a> Compiler<'a> {
         let outer_up_links = self.up_link_bindings.clone();
         let outer_definitions = self.definition_bindings.clone();
         let mut declared = HashMap::<String, (RegisterId, Location, Option<u32>)>::new();
+        let mut native_declarations = HashMap::<String, Location>::new();
         let mut definition_counts = HashMap::<String, usize>::new();
+
+        for binding in &block.value.bindings {
+            if binding.value.kind != BindingKind::Native {
+                continue;
+            }
+            let name = &binding.value.name.value;
+            if native_declarations
+                .insert(name.clone(), binding.location)
+                .is_some()
+            {
+                return Err(self.error_at(
+                    binding.location,
+                    format!("duplicate native declaration {name:?}"),
+                ));
+            }
+            if outer.contains_key(name) {
+                return Err(self.error_at(
+                    binding.location,
+                    format!("native binding {name:?} cannot shadow an outer binding"),
+                ));
+            }
+        }
+        for binding in &block.value.bindings {
+            let name = &binding.value.name.value;
+            if native_declarations.contains_key(name) && binding.value.kind != BindingKind::Native {
+                return Err(self.error_at(
+                    binding.location,
+                    format!("binding {name:?} conflicts with a native declaration"),
+                ));
+            }
+        }
 
         for binding in &block.value.bindings {
             let name = &binding.value.name.value;
@@ -431,7 +463,7 @@ impl<'a> Compiler<'a> {
                     }
                     continue;
                 }
-                BindingKind::Import => {
+                BindingKind::Import | BindingKind::Native => {
                     let value = self
                         .external_values
                         .get(&binding.value.name.value)
@@ -440,7 +472,7 @@ impl<'a> Compiler<'a> {
                             frontend_error(
                                 self.source_name,
                                 format!(
-                                    "import {} has not been resolved",
+                                    "external binding {} has not been resolved",
                                     binding.value.name.value
                                 ),
                             )
@@ -1136,7 +1168,7 @@ fn atom_value(name: &str) -> Value {
     })
 }
 
-fn function_contract_arity(contract: &Expr) -> Option<u32> {
+pub(crate) fn function_contract_arity(contract: &Expr) -> Option<u32> {
     let ExprKind::Call { callee, arguments } = &contract.value else {
         return None;
     };
@@ -1156,13 +1188,13 @@ fn free_block(block: &Block, bound: &mut HashSet<String>, free: &mut BTreeSet<St
     for binding in &block.value.bindings {
         if matches!(
             binding.value.kind,
-            BindingKind::Decl | BindingKind::NamedFunction
+            BindingKind::Decl | BindingKind::Native | BindingKind::NamedFunction
         ) {
             bound.insert(binding.value.name.value.clone());
         }
     }
     for binding in &block.value.bindings {
-        if binding.value.kind != BindingKind::Decl {
+        if !matches!(binding.value.kind, BindingKind::Decl | BindingKind::Native) {
             free_expr(&binding.value.value, bound, free);
         }
         bound.insert(binding.value.name.value.clone());

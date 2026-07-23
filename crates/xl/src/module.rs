@@ -1,16 +1,14 @@
 use crate::ast::{BindingKind, Expr, ExprKind, Program, StringPartKind};
-use crate::compiler::compile_program_analyzed_in;
-use crate::core::{
-    ARRAY_MODULE, CODEC_MODULE, DEBUG_MODULE, DICT_MODULE, JSON_MODULE, RESULT_MODULE,
-    array_module_value, codec_module_value, debug_module_value, dict_module_value,
-    json_module_value, result_module_value,
-};
+use crate::compiler::{compile_program_analyzed_in, function_contract_arity};
+use crate::core::module_specs;
 use crate::heap::{Heap, PersistentValue, publish_root, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
 use crate::parser::parse_registered;
 use crate::source::SourceDatabase;
 use crate::types::{Analysis, analyze_program_with_bindings_observed};
-use crate::{BytecodeFunction, DebugSink, DiscardDebugSink, Quota, QuotaAccount, Value, Vm};
+use crate::{
+    BytecodeFunction, Closure, DebugSink, DiscardDebugSink, Quota, QuotaAccount, Value, Vm,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
@@ -77,19 +75,104 @@ struct FrozenMainWorld {
 
 fn install_core_modules(
     main: &mut MainWorld,
+    sources: &mut SourceDatabase,
+    debug_sink: &Arc<dyn DebugSink>,
 ) -> Result<HashMap<&'static str, (Value, PersistentValue)>, ModuleError> {
     let mut modules = HashMap::new();
-    for (name, value) in [
-        (ARRAY_MODULE, array_module_value()),
-        (DICT_MODULE, dict_module_value()),
-        (DEBUG_MODULE, debug_module_value()),
-        (CODEC_MODULE, codec_module_value()),
-        (RESULT_MODULE, result_module_value()),
-        (JSON_MODULE, json_module_value()),
-    ] {
-        let root = publish_value(&mut main.heap, &value)
+    for spec in module_specs() {
+        let source_name = format!("<{}>", spec.name);
+        let source_id = sources.add(source_name.clone(), spec.source);
+        let parsed = parse_registered(sources, source_id);
+        let program = parsed.program.ok_or_else(|| {
+            ModuleError::new(
+                parsed
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| sources.render(diagnostic))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+        })?;
+        let implementations = spec.functions.into_iter().collect::<HashMap<_, _>>();
+        let mut external_values = BTreeMap::new();
+        let mut external_roots = HashMap::new();
+        for binding in &program.value.body.value.bindings {
+            if binding.value.kind != BindingKind::Native {
+                continue;
+            }
+            let symbol = binding.value.name.value.as_str();
+            let implementation = implementations.get(symbol).copied().ok_or_else(|| {
+                ModuleError::new(sources.render(&crate::source::Diagnostic::error(
+                    format!(
+                        "native symbol {symbol:?} is not registered for {}",
+                        spec.name
+                    ),
+                    binding.location,
+                )))
+            })?;
+            let declared_arity = binding
+                .value
+                .annotation
+                .as_ref()
+                .and_then(function_contract_arity)
+                .expect("native grammar requires a function contract");
+            if declared_arity as usize != implementation.arity() {
+                return Err(ModuleError::new(sources.render(
+                    &crate::source::Diagnostic::error(
+                        format!(
+                            "native symbol {symbol:?} declares arity {declared_arity}, but its implementation has arity {}",
+                            implementation.arity()
+                        ),
+                        binding.location,
+                    ),
+                )));
+            }
+            let value = Value::Func(Arc::new(Closure::native(implementation)));
+            let root = publish_value(&mut main.heap, &value)
+                .map_err(|error| ModuleError::new(error.to_string()))?;
+            external_values.insert(symbol.to_owned(), value);
+            external_roots.insert(symbol.to_owned(), root);
+        }
+        if external_values.len() != implementations.len() {
+            let undeclared = implementations
+                .keys()
+                .find(|symbol| !external_values.contains_key(**symbol))
+                .expect("registry size differs");
+            return Err(ModuleError::new(format!(
+                "native symbol {undeclared:?} for {} has no XL declaration",
+                spec.name
+            )));
+        }
+        let mut account = QuotaAccount::new(Quota::new(100_000, 1_000, u64::MAX));
+        let analysis = analyze_program_with_bindings_observed(
+            &source_name,
+            &program,
+            &mut account,
+            &external_values,
+            &HashSet::new(),
+            sources,
+            &BTreeMap::new(),
+            debug_sink,
+        )
+        .map_err(|error| {
+            error.diagnostic.as_ref().map_or_else(
+                || ModuleError::new(error.to_string()),
+                |diagnostic| ModuleError::new(sources.render(diagnostic)),
+            )
+        })?;
+        let function = compile_program_analyzed_in(sources.get(source_id), &program, &analysis)
             .map_err(|error| ModuleError::new(error.to_string()))?;
-        modules.insert(name, (value, root));
+        let arena = Vm::new()
+            .with_debug_sink(Arc::clone(debug_sink))
+            .execute_in_work(&main.heap, &external_roots, &function, &[], &mut account)
+            .map_err(|error| ModuleError::new(error.with_sources(sources).to_string()))?;
+        let value = arena
+            .export(&main.heap)
+            .map_err(|error| ModuleError::new(error.to_string()))?;
+        let root = arena
+            .publish(&mut main.heap)
+            .map_err(|error| ModuleError::new(error.to_string()))?;
+        modules.insert(spec.name, (value, root));
     }
     Ok(modules)
 }
@@ -223,7 +306,8 @@ pub fn load_module_with_quota_and_debug_sink(
         return Err(ModuleError::new("root module must have an .xl extension"));
     }
     let mut main = MainWorld::building();
-    let core_modules = install_core_modules(&mut main)?;
+    let mut sources = SourceDatabase::default();
+    let core_modules = install_core_modules(&mut main, &mut sources, &debug_sink)?;
     let mut loader = ModuleLoader {
         cache: HashMap::new(),
         core_modules,
@@ -232,7 +316,7 @@ pub fn load_module_with_quota_and_debug_sink(
         dependencies: BTreeSet::new(),
         module_quota,
         debug_sink,
-        sources: SourceDatabase::default(),
+        sources,
     };
     loader.load_root(root, external_bindings)
 }
@@ -434,6 +518,24 @@ impl ModuleLoader {
             }
             external_bindings.insert(binding.value.name.value.clone(), sourced.value);
         }
+        if let Some(binding) = program
+            .value
+            .body
+            .value
+            .bindings
+            .iter()
+            .find(|binding| binding.value.kind == BindingKind::Native)
+        {
+            return Err(ModuleError::new(self.sources.render(
+                &crate::source::Diagnostic::error(
+                    format!(
+                        "native symbol {:?} is not registered for this module",
+                        binding.value.name.value
+                    ),
+                    binding.location,
+                ),
+            )));
+        }
 
         let mut dynamic_bindings = opaque_bindings;
         if is_root && external_bindings.contains_key("input") {
@@ -499,13 +601,13 @@ fn reject_nested_imports(program: &Program, source_name: &str) -> Result<(), Mod
         ) && expression_has_import(&binding.value.value)
         {
             return Err(ModuleError::new(format!(
-                "{source_name}: imports are only allowed at module top level"
+                "{source_name}: imports and native declarations are only allowed at module top level"
             )));
         }
     }
     if expression_has_import(&program.value.body.value.result) {
         return Err(ModuleError::new(format!(
-            "{source_name}: imports are only allowed at module top level"
+            "{source_name}: imports and native declarations are only allowed at module top level"
         )));
     }
     Ok(())
@@ -514,16 +616,16 @@ fn reject_nested_imports(program: &Program, source_name: &str) -> Result<(), Mod
 fn expression_has_import(expression: &Expr) -> bool {
     match &expression.value {
         ExprKind::Block(block) => {
-            block
+            block.value.bindings.iter().any(|binding| {
+                matches!(
+                    binding.value.kind,
+                    BindingKind::Import | BindingKind::Native
+                )
+            }) || block
                 .value
                 .bindings
                 .iter()
-                .any(|binding| binding.value.kind == BindingKind::Import)
-                || block
-                    .value
-                    .bindings
-                    .iter()
-                    .any(|binding| expression_has_import(&binding.value.value))
+                .any(|binding| expression_has_import(&binding.value.value))
                 || expression_has_import(&block.value.result)
         }
         ExprKind::Array(items) | ExprKind::Tuple(items) => items.iter().any(expression_has_import),
@@ -969,6 +1071,38 @@ mod tests {
         fs::write(directory.join("b.xl"), "import a from \"./a.xl\"; a").unwrap();
         let error = load_module(directory.join("a.xl"), BTreeMap::new(), 100_000).unwrap_err();
         assert!(error.message().contains("cycle"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn rejects_unregistered_and_nested_native_declarations_with_locations() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("missing-native.xl"),
+            "native missing: fn(Int) -> Int; missing(1)",
+        )
+        .unwrap();
+        let missing = load_module(
+            directory.join("missing-native.xl"),
+            BTreeMap::new(),
+            100_000,
+        )
+        .unwrap_err();
+        assert!(missing.message().contains("not registered"));
+        assert!(missing.to_string().contains("missing-native.xl:1:1"));
+
+        fs::write(
+            directory.join("nested-native.xl"),
+            "let value = { native hidden: fn(Int) -> Int; 1 }; value",
+        )
+        .unwrap();
+        let nested =
+            load_module(directory.join("nested-native.xl"), BTreeMap::new(), 100_000).unwrap_err();
+        assert!(
+            nested
+                .message()
+                .contains("only allowed at module top level")
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

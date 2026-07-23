@@ -34,6 +34,7 @@ pub enum BindingKind {
     Let,
     Decl,
     Def,
+    Native,
     NamedFunction,
     Type,
     Import,

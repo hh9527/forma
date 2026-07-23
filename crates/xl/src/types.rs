@@ -281,7 +281,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
         ) {
             *definition_counts.entry(name.clone()).or_default() += 1;
         }
-        if binding.value.kind != BindingKind::Decl {
+        if !matches!(binding.value.kind, BindingKind::Decl | BindingKind::Native) {
             continue;
         }
         if definition_contracts.contains_key(name) {
@@ -311,8 +311,10 @@ pub(crate) fn analyze_program_with_bindings_observed(
         })?;
         static_environment.insert(name.clone(), descriptor.clone());
         binding_types.insert(name.clone(), descriptor.clone());
-        definition_contracts.insert(name.clone(), descriptor);
-        declaration_locations.insert(name.clone(), binding.location);
+        if binding.value.kind == BindingKind::Decl {
+            definition_contracts.insert(name.clone(), descriptor);
+            declaration_locations.insert(name.clone(), binding.location);
+        }
     }
     for binding in &program.value.body.value.bindings {
         if binding.value.kind != BindingKind::NamedFunction {
@@ -373,6 +375,24 @@ pub(crate) fn analyze_program_with_bindings_observed(
         }
         match binding.value.kind {
             BindingKind::Decl => continue,
+            BindingKind::Native => {
+                let value = external_values
+                    .get(&binding.value.name.value)
+                    .cloned()
+                    .ok_or_else(|| {
+                        FrontendError::from_diagnostic(
+                            sources,
+                            Diagnostic::error(
+                                format!(
+                                    "native symbol {:?} has not been linked",
+                                    binding.value.name.value
+                                ),
+                                binding.location,
+                            ),
+                        )
+                    })?;
+                tool_values.insert(binding.value.name.value.clone(), value);
+            }
             BindingKind::Type => {
                 let value = evaluate_tool_expression(
                     source_name,
@@ -1302,7 +1322,7 @@ fn check_block_interpolations(
     for binding in &block.value.bindings {
         if matches!(
             binding.value.kind,
-            BindingKind::Decl | BindingKind::NamedFunction
+            BindingKind::Decl | BindingKind::Native | BindingKind::NamedFunction
         ) {
             environment.insert(binding.value.name.value.clone(), TypeDescriptor::Any);
         }
@@ -1344,7 +1364,7 @@ fn infer_block(block: &Block, environment: &HashMap<String, TypeDescriptor>) -> 
     for binding in &block.value.bindings {
         if matches!(
             binding.value.kind,
-            BindingKind::Decl | BindingKind::NamedFunction
+            BindingKind::Decl | BindingKind::Native | BindingKind::NamedFunction
         ) {
             environment.insert(binding.value.name.value.clone(), TypeDescriptor::Any);
         }

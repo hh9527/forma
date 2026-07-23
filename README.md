@@ -15,6 +15,7 @@ The current MVP demonstrates:
 - ordinary functions that compute Type metadata in a tool-stage VM;
 - structural annotations and runtime validation from the same metadata;
 - `.xl` and `.json` modules in a closed dependency graph;
+- declarative `native name: contract;` host bindings for analyzable core interfaces;
 - explicit external JSON input through the CLI.
 - Logos + Lelwel lossless CSTs shared by compilation and future editor tooling;
 - byte-range diagnostics and source locations carried by runtime values.
@@ -142,6 +143,17 @@ Module publication copies reachable Work values into Main while preserving
 existing Main references. After loading, Main is frozen; serving results are
 exported directly and Work is discarded, so repeated sessions cannot mutate
 the loaded application.
+
+## Native bindings
+
+Core interfaces are XL source declarations rather than Dict values assembled
+by Rust. For example, an interface may declare
+`native map: fn(Array(Any), fn(Any) -> Any) -> Array(Any);` and export `map`
+through an ordinary module Dict. The declaration contract and source location
+are available to parsing and analysis; the host registry supplies only the
+`NativeFunction`. Linking produces an ordinary `Func`, so native and bytecode
+calls share the same VM ABI. User-provided native registries are not exposed
+yet.
 
 ## Current limits
 

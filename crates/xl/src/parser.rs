@@ -133,6 +133,7 @@ impl<'a> Lowerer<'a> {
                     Rule::LetBinding
                     | Rule::DeclBinding
                     | Rule::DefBinding
+                    | Rule::NativeBinding
                     | Rule::TypeBinding
                     | Rule::ImportBinding
                     | Rule::NamedFunction,
@@ -221,6 +222,27 @@ impl<'a> Lowerer<'a> {
                 Ok(located(
                     BindingData {
                         kind: BindingKind::Decl,
+                        name,
+                        annotation: Some(contract.clone()),
+                        value: contract,
+                    },
+                    self.location(node),
+                ))
+            }
+            Rule::NativeBinding => {
+                let contract_node = self
+                    .rule_children(node)
+                    .find(|child| {
+                        matches!(
+                            self.rule(*child),
+                            Some(Rule::Contract | Rule::ContractExpr | Rule::FunctionContract)
+                        )
+                    })
+                    .ok_or_else(|| self.error(node, "native declaration has no contract"))?;
+                let contract = self.contract_expression(contract_node)?;
+                Ok(located(
+                    BindingData {
+                        kind: BindingKind::Native,
                         name,
                         annotation: Some(contract.clone()),
                         value: contract,
@@ -1379,6 +1401,20 @@ mod tests {
                 .map(|annotation| &annotation.value),
             Some(ExprKind::Call { .. })
         ));
+    }
+
+    #[test]
+    fn lowers_located_native_bindings_with_contracts() {
+        let program = parse(
+            "native.xl",
+            "native map: fn(Array(Any), fn(Any) -> Any) -> Array(Any); map",
+        )
+        .unwrap();
+        let binding = &program.value.body.value.bindings[0];
+        assert_eq!(binding.value.kind, BindingKind::Native);
+        assert_eq!(binding.value.name.value, "map");
+        assert!(binding.value.annotation.is_some());
+        assert_eq!(binding.location.range(), 0..57);
     }
 
     #[test]

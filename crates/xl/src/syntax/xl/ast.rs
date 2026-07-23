@@ -127,6 +127,7 @@ pub enum Binding<'tree> {
     Let(LetBinding<'tree>),
     Decl(DeclBinding<'tree>),
     Def(DefBinding<'tree>),
+    Native(NativeBinding<'tree>),
     Type(TypeBinding<'tree>),
     Import(ImportBinding<'tree>),
     Function(NamedFunction<'tree>),
@@ -141,6 +142,7 @@ impl<'tree> Binding<'tree> {
             Rule::LetBinding => Some(Self::Let(LetBinding { syntax })),
             Rule::DeclBinding => Some(Self::Decl(DeclBinding { syntax })),
             Rule::DefBinding => Some(Self::Def(DefBinding { syntax })),
+            Rule::NativeBinding => Some(Self::Native(NativeBinding { syntax })),
             Rule::TypeBinding => Some(Self::Type(TypeBinding { syntax })),
             Rule::ImportBinding => Some(Self::Import(ImportBinding { syntax })),
             Rule::NamedFunction => Some(Self::Function(NamedFunction { syntax })),
@@ -153,6 +155,7 @@ impl<'tree> Binding<'tree> {
             Self::Let(node) => node.syntax,
             Self::Decl(node) => node.syntax,
             Self::Def(node) => node.syntax,
+            Self::Native(node) => node.syntax,
             Self::Type(node) => node.syntax,
             Self::Import(node) => node.syntax,
             Self::Function(node) => node.syntax,
@@ -164,6 +167,7 @@ impl<'tree> Binding<'tree> {
             Self::Let(node) => node.name(),
             Self::Decl(node) => node.name(),
             Self::Def(node) => node.name(),
+            Self::Native(node) => node.name(),
             Self::Type(node) => node.name(),
             Self::Import(node) => node.name(),
             Self::Function(node) => node.name(),
@@ -193,6 +197,7 @@ macro_rules! binding_node {
 binding_node!(LetBinding);
 binding_node!(DeclBinding);
 binding_node!(DefBinding);
+binding_node!(NativeBinding);
 binding_node!(TypeBinding);
 binding_node!(ImportBinding);
 binding_node!(NamedFunction);
@@ -217,6 +222,17 @@ impl<'tree> LetBinding<'tree> {
 }
 
 impl<'tree> DeclBinding<'tree> {
+    pub fn contract(self) -> Option<SyntaxNode<'tree>> {
+        self.syntax.children().find(|child| {
+            matches!(
+                child.rule(),
+                Some(Rule::Contract | Rule::ContractExpr | Rule::FunctionContract)
+            )
+        })
+    }
+}
+
+impl<'tree> NativeBinding<'tree> {
     pub fn contract(self) -> Option<SyntaxNode<'tree>> {
         self.syntax.children().find(|child| {
             matches!(
@@ -492,6 +508,7 @@ fn missing_after_keyword(source: SourceId, binding: Binding<'_>) -> SyntaxIssue 
         Binding::Let(_) => Token::Let,
         Binding::Decl(_) => Token::Decl,
         Binding::Def(_) => Token::Def,
+        Binding::Native(_) => Token::Native,
         Binding::Type(_) => Token::Type,
         Binding::Import(_) => Token::Import,
         Binding::Function(_) => Token::Fn,
