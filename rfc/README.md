@@ -45,3 +45,4 @@ semantics from an earlier RFC.
 25. Contextual functional decorators.
 26. Flat attributed values and transparent TypeMetadata wrappers.
 27. Normalized Struct and Enum model metadata.
+28. Unified lowercase Struct, Enum, and Union model constructors.
