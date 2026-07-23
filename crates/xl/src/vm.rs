@@ -3245,6 +3245,7 @@ fn validate_model_context(
 struct CodecType {
     kind: CodecKind,
     rule: RichValue,
+    attributes: BTreeMap<String, RichValue>,
 }
 
 #[derive(Clone, Debug)]
@@ -3397,14 +3398,25 @@ fn decode_runtime_type_at(
             .dict_get_text(handle, "attributes")
             .map_err(|error| error.to_string())?
             .expect("validated wrapper field");
-        if !matches!(attributes.value, RuntimeValue::Dict(_)) {
+        let RuntimeValue::Dict(attribute_handle) = attributes.value else {
             return Err(format!("{path}.attributes must be a Dict"));
-        }
+        };
         let inner = view
             .dict_get_text(handle, "inner")
             .map_err(|error| error.to_string())?
             .expect("validated wrapper field");
         let mut decoded = decode_runtime_type_at(inner, path, current, background)?;
+        let (names, values) = view
+            .dict_parts(attribute_handle)
+            .map_err(|error| error.to_string())?;
+        for (name, attribute) in names.iter().zip(values) {
+            decoded.attributes.insert(
+                view.text(*name)
+                    .map_err(|error| error.to_string())?
+                    .to_owned(),
+                *attribute,
+            );
+        }
         decoded.rule = value;
         return Ok(decoded);
     }
@@ -3532,7 +3544,11 @@ fn decode_runtime_type_at(
         "Function" => CodecKind::Function,
         other => return Err(format!("{path}.kind has unsupported value '{other}")),
     };
-    Ok(CodecType { kind, rule: value })
+    Ok(CodecType {
+        kind,
+        rule: value,
+        attributes: BTreeMap::new(),
+    })
 }
 
 fn strip_runtime_attributes(
@@ -3796,81 +3812,507 @@ fn transform_codec_struct(
         .map(|(name, value)| Ok((view.text(*name)?.to_owned(), *value)))
         .collect::<Result<BTreeMap<_, _>, crate::heap::HeapError>>()
         .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?;
-    if let Some(unknown) = input.keys().find(|name| !fields.contains_key(*name)) {
-        return Err(CodecFailure::new(
-            format!("{path}.{unknown}: unknown field"),
-            value,
-            schema.rule,
-        ));
-    }
-    let mut output = Vec::with_capacity(fields.len());
-    for (name, field) in fields {
-        let field_path = format!("{path}.{name}");
-        let node = match (direction, input.get(name).copied(), option_item(field)) {
-            (CodecDirection::Decode, None, Some(_)) => {
-                CodecNode::Atom(BuiltinAtom::None, value.loc)
-            }
-            (_, None, _) => {
+    let plan = plan_struct(schema, fields, value, path, &view)?;
+    match direction {
+        CodecDirection::Decode => {
+            let mut consumed = HashSet::new();
+            let output = decode_struct_fields(
+                &plan,
+                &input,
+                &mut consumed,
+                value,
+                path,
+                current,
+                background,
+            )?;
+            if let Some(unknown) = input.keys().find(|name| !consumed.contains(*name)) {
                 return Err(CodecFailure::new(
-                    format!("{field_path}: missing required field"),
-                    value,
-                    field.rule,
+                    format!("{path}.{unknown}: unknown field"),
+                    input[unknown],
+                    schema.rule,
                 ));
             }
-            (CodecDirection::Decode, Some(input), Some(_))
-                if input.value == RuntimeValue::BuiltinAtom(BuiltinAtom::None) =>
+            Ok(CodecNode::Dict(output, value.loc))
+        }
+        CodecDirection::Encode => {
+            let mut emitted = BTreeMap::new();
+            encode_struct_fields(
+                &plan,
+                &input,
+                &mut emitted,
+                value,
+                path,
+                current,
+                background,
+            )?;
+            Ok(CodecNode::Dict(emitted.into_iter().collect(), value.loc))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum SkipPolicy {
+    None,
+    False,
+    Empty,
+}
+
+#[derive(Clone, Debug)]
+struct StructFieldPlan {
+    internal_name: String,
+    external_name: Option<String>,
+    schema: CodecType,
+    flattened: Option<Box<StructPlan>>,
+    default: Option<RichValue>,
+    skip: Option<SkipPolicy>,
+    config_rule: RichValue,
+}
+
+#[derive(Clone, Debug)]
+struct StructPlan {
+    fields: Vec<StructFieldPlan>,
+}
+
+fn plan_struct(
+    schema: &CodecType,
+    fields: &BTreeMap<String, CodecType>,
+    data: RichValue,
+    path: &str,
+    view: &HeapView<'_>,
+) -> Result<StructPlan, CodecFailure> {
+    let rename_all = match schema.attributes.get("core:json.rename_all").copied() {
+        Some(rule) => {
+            if view
+                .atom_text(rule)
+                .map_err(|error| CodecFailure::new(error.to_string(), data, rule))?
+                != Some("CamelCase")
             {
-                CodecNode::Atom(BuiltinAtom::None, input.loc)
+                return Err(CodecFailure::new(
+                    format!("{path}: rename_all must be 'CamelCase"),
+                    data,
+                    rule,
+                ));
             }
-            (CodecDirection::Decode, Some(input), Some(item)) => CodecNode::Tuple(
-                vec![
-                    CodecNode::Atom(BuiltinAtom::Some, input.loc),
-                    transform_codec(item, input, direction, &field_path, current, background)?,
-                ],
-                input.loc,
-            ),
-            (CodecDirection::Encode, Some(input), Some(_))
-                if input.value == RuntimeValue::BuiltinAtom(BuiltinAtom::None) =>
+            true
+        }
+        None => false,
+    };
+    let mut planned = Vec::with_capacity(fields.len());
+    let mut external_names: BTreeMap<String, RichValue> = BTreeMap::new();
+    for (internal_name, field) in fields {
+        if let Some(rule) = field.attributes.get("core:json.rename_all").copied() {
+            return Err(CodecFailure::new(
+                format!("{path}.{internal_name}: rename_all is only valid on a Struct"),
+                data,
+                rule,
+            ));
+        }
+        let rename = field.attributes.get("core:json.rename").copied();
+        let rename = rename
+            .map(|rule| {
+                view.string_text(rule)
+                    .map_err(|error| CodecFailure::new(error.to_string(), data, rule))?
+                    .map(str::to_owned)
+                    .ok_or_else(|| {
+                        CodecFailure::new(
+                            format!("{path}.{internal_name}: rename must be a String"),
+                            data,
+                            rule,
+                        )
+                    })
+            })
+            .transpose()?;
+        let flatten_rule = field.attributes.get("core:json.flatten").copied();
+        let flatten = if let Some(rule) = flatten_rule {
+            if view
+                .atom_text(rule)
+                .map_err(|error| CodecFailure::new(error.to_string(), data, rule))?
+                != Some("True")
             {
-                CodecNode::Atom(BuiltinAtom::None, input.loc)
+                return Err(CodecFailure::new(
+                    format!("{path}.{internal_name}: flatten must be 'True"),
+                    data,
+                    rule,
+                ));
             }
-            (CodecDirection::Encode, Some(input), Some(item))
-                if matches!(input.value, RuntimeValue::Tuple(_)) =>
-            {
-                let RuntimeValue::Tuple(handle) = input.value else {
-                    unreachable!()
-                };
-                let tuple = view
-                    .sequence(handle, true)
-                    .map_err(|error| CodecFailure::new(error.to_string(), input, field.rule))?;
-                if tuple.len() != 2
-                    || view
-                        .atom_text(tuple[0])
-                        .map_err(|error| CodecFailure::new(error.to_string(), input, field.rule))?
-                        != Some("Some")
-                {
+            true
+        } else {
+            false
+        };
+        let default = field.attributes.get("core:json.default").copied();
+        if flatten && (rename.is_some() || default.is_some()) {
+            let rule = rename
+                .and_then(|_| field.attributes.get("core:json.rename").copied())
+                .or_else(|| field.attributes.get("core:json.default").copied())
+                .unwrap_or(field.rule);
+            return Err(CodecFailure::new(
+                format!(
+                    "{path}.{internal_name}: flatten cannot be combined with rename or default"
+                ),
+                data,
+                rule,
+            ));
+        }
+        let skip = field
+            .attributes
+            .get("core:json.skip_serializing_if")
+            .copied()
+            .map(|rule| {
+                let policy = view
+                    .atom_text(rule)
+                    .map_err(|error| CodecFailure::new(error.to_string(), data, rule))?;
+                match policy {
+                    Some("None") => Ok(SkipPolicy::None),
+                    Some("False") => Ok(SkipPolicy::False),
+                    Some("Empty") => Ok(SkipPolicy::Empty),
+                    _ => Err(CodecFailure::new(
+                        format!("{path}.{internal_name}: invalid skip_serializing_if policy"),
+                        data,
+                        rule,
+                    )),
+                }
+            })
+            .transpose()?;
+        let config_rule = flatten_rule
+            .or_else(|| field.attributes.get("core:json.rename").copied())
+            .unwrap_or(field.rule);
+        let (external_name, flattened) = if flatten {
+            let CodecKind::Struct(nested_fields) = &field.kind else {
+                return Err(CodecFailure::new(
+                    format!("{path}.{internal_name}: flatten requires Struct metadata"),
+                    data,
+                    flatten_rule.unwrap_or(field.rule),
+                ));
+            };
+            let nested = plan_struct(
+                field,
+                nested_fields,
+                data,
+                &format!("{path}.{internal_name}"),
+                view,
+            )?;
+            for (name, rule) in struct_plan_external_names(&nested) {
+                if external_names.insert(name.clone(), rule).is_some() {
                     return Err(CodecFailure::new(
-                        format!("{field_path}: expected Option"),
-                        input,
-                        field.rule,
+                        format!("{path}.{name}: duplicate external field name"),
+                        data,
+                        rule,
                     ));
                 }
-                transform_codec(item, tuple[1], direction, &field_path, current, background)?
             }
-            (CodecDirection::Encode, Some(input), Some(_)) => {
+            (None, Some(Box::new(nested)))
+        } else {
+            let external = rename.unwrap_or_else(|| {
+                if rename_all {
+                    lower_camel_case(internal_name)
+                } else {
+                    internal_name.clone()
+                }
+            });
+            if external_names
+                .insert(external.clone(), config_rule)
+                .is_some()
+            {
                 return Err(CodecFailure::new(
-                    format!("{field_path}: expected Option"),
-                    input,
-                    field.rule,
+                    format!("{path}.{external}: duplicate external field name"),
+                    data,
+                    config_rule,
                 ));
             }
-            (_, Some(value), None) => {
-                transform_codec(field, value, direction, &field_path, current, background)?
+            (Some(external), None)
+        };
+        planned.push(StructFieldPlan {
+            internal_name: internal_name.clone(),
+            external_name,
+            schema: field.clone(),
+            flattened,
+            default,
+            skip,
+            config_rule,
+        });
+    }
+    Ok(StructPlan { fields: planned })
+}
+
+fn struct_plan_external_names(plan: &StructPlan) -> Vec<(String, RichValue)> {
+    plan.fields
+        .iter()
+        .flat_map(|field| {
+            if let Some(nested) = &field.flattened {
+                struct_plan_external_names(nested)
+            } else {
+                vec![(
+                    field.external_name.clone().expect("ordinary field name"),
+                    field.config_rule,
+                )]
+            }
+        })
+        .collect()
+}
+
+fn lower_camel_case(name: &str) -> String {
+    let mut output = String::with_capacity(name.len());
+    let mut uppercase = false;
+    for character in name.chars() {
+        if character == '_' {
+            uppercase = true;
+        } else if uppercase {
+            output.extend(character.to_uppercase());
+            uppercase = false;
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_struct_fields(
+    plan: &StructPlan,
+    input: &BTreeMap<String, RichValue>,
+    consumed: &mut HashSet<String>,
+    container: RichValue,
+    path: &str,
+    current: &Heap,
+    background: &Heap,
+) -> Result<Vec<(String, CodecNode)>, CodecFailure> {
+    let mut output = Vec::with_capacity(plan.fields.len());
+    for field in &plan.fields {
+        let internal_path = format!("{path}.{}", field.internal_name);
+        let node = if let Some(nested) = &field.flattened {
+            CodecNode::Dict(
+                decode_struct_fields(
+                    nested,
+                    input,
+                    consumed,
+                    container,
+                    &internal_path,
+                    current,
+                    background,
+                )?,
+                container.loc,
+            )
+        } else {
+            let external = field.external_name.as_ref().expect("ordinary field name");
+            let external_path = format!("{path}.{external}");
+            if let Some(value) = input.get(external).copied() {
+                if !consumed.insert(external.clone()) {
+                    return Err(CodecFailure::new(
+                        format!("{external_path}: field was consumed more than once"),
+                        value,
+                        field.config_rule,
+                    ));
+                }
+                transform_codec_field(
+                    &field.schema,
+                    value,
+                    CodecDirection::Decode,
+                    &external_path,
+                    current,
+                    background,
+                )?
+            } else if let Some(default) = field.default {
+                // A default is already canonical XL data. Validate it through the
+                // encode direction before retaining the original rich value.
+                transform_codec_field(
+                    &field.schema,
+                    default,
+                    CodecDirection::Encode,
+                    &internal_path,
+                    current,
+                    background,
+                )
+                .map_err(|failure| CodecFailure::new(failure.message, default, default))?;
+                CodecNode::Existing(default)
+            } else if option_item(&field.schema).is_some() {
+                CodecNode::Atom(BuiltinAtom::None, container.loc)
+            } else {
+                return Err(CodecFailure::new(
+                    format!("{external_path}: missing required field"),
+                    container,
+                    field.schema.rule,
+                ));
             }
         };
-        output.push((name.clone(), node));
+        output.push((field.internal_name.clone(), node));
     }
-    Ok(CodecNode::Dict(output, value.loc))
+    Ok(output)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn encode_struct_fields(
+    plan: &StructPlan,
+    input: &BTreeMap<String, RichValue>,
+    emitted: &mut BTreeMap<String, CodecNode>,
+    container: RichValue,
+    path: &str,
+    current: &Heap,
+    background: &Heap,
+) -> Result<(), CodecFailure> {
+    let expected = plan
+        .fields
+        .iter()
+        .map(|field| field.internal_name.as_str())
+        .collect::<HashSet<_>>();
+    if let Some(unknown) = input.keys().find(|name| !expected.contains(name.as_str())) {
+        return Err(CodecFailure::new(
+            format!("{path}.{unknown}: unknown internal field"),
+            input[unknown],
+            plan.fields
+                .first()
+                .map(|field| field.schema.rule)
+                .unwrap_or(container),
+        ));
+    }
+    for field in &plan.fields {
+        let field_path = format!("{path}.{}", field.internal_name);
+        let Some(value) = input.get(&field.internal_name).copied() else {
+            return Err(CodecFailure::new(
+                format!("{field_path}: missing required field"),
+                container,
+                field.schema.rule,
+            ));
+        };
+        if field
+            .skip
+            .is_some_and(|policy| codec_should_skip(policy, value, current, background))
+        {
+            continue;
+        }
+        if let Some(nested) = &field.flattened {
+            let RuntimeValue::Dict(handle) = value.value else {
+                return Err(CodecFailure::new(
+                    format!("{field_path}: expected Dict"),
+                    value,
+                    field.schema.rule,
+                ));
+            };
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            let (names, values) = view
+                .dict_parts(handle)
+                .map_err(|error| CodecFailure::new(error.to_string(), value, field.schema.rule))?;
+            let nested_input = names
+                .iter()
+                .zip(values)
+                .map(|(name, value)| Ok((view.text(*name)?.to_owned(), *value)))
+                .collect::<Result<BTreeMap<_, _>, crate::heap::HeapError>>()
+                .map_err(|error| CodecFailure::new(error.to_string(), value, field.schema.rule))?;
+            encode_struct_fields(
+                nested,
+                &nested_input,
+                emitted,
+                value,
+                &field_path,
+                current,
+                background,
+            )?;
+        } else {
+            let external = field.external_name.as_ref().expect("ordinary field name");
+            let node = transform_codec_field(
+                &field.schema,
+                value,
+                CodecDirection::Encode,
+                &field_path,
+                current,
+                background,
+            )?;
+            if emitted.insert(external.clone(), node).is_some() {
+                return Err(CodecFailure::new(
+                    format!("{path}.{external}: duplicate encoded field"),
+                    value,
+                    field.config_rule,
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn transform_codec_field(
+    schema: &CodecType,
+    value: RichValue,
+    direction: CodecDirection,
+    path: &str,
+    current: &Heap,
+    background: &Heap,
+) -> Result<CodecNode, CodecFailure> {
+    let Some(item) = option_item(schema) else {
+        return transform_codec(schema, value, direction, path, current, background);
+    };
+    if value.value == RuntimeValue::BuiltinAtom(BuiltinAtom::None) {
+        return Ok(CodecNode::Atom(BuiltinAtom::None, value.loc));
+    }
+    match direction {
+        CodecDirection::Decode => Ok(CodecNode::Tuple(
+            vec![
+                CodecNode::Atom(BuiltinAtom::Some, value.loc),
+                transform_codec(item, value, direction, path, current, background)?,
+            ],
+            value.loc,
+        )),
+        CodecDirection::Encode => {
+            let RuntimeValue::Tuple(handle) = value.value else {
+                return Err(CodecFailure::new(
+                    format!("{path}: expected Option"),
+                    value,
+                    schema.rule,
+                ));
+            };
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            let tuple = view
+                .sequence(handle, true)
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?;
+            if tuple.len() != 2
+                || view
+                    .atom_text(tuple[0])
+                    .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?
+                    != Some("Some")
+            {
+                return Err(CodecFailure::new(
+                    format!("{path}: expected Option"),
+                    value,
+                    schema.rule,
+                ));
+            }
+            transform_codec(item, tuple[1], direction, path, current, background)
+        }
+    }
+}
+
+fn codec_should_skip(
+    policy: SkipPolicy,
+    value: RichValue,
+    current: &Heap,
+    background: &Heap,
+) -> bool {
+    match policy {
+        SkipPolicy::None => value.value == RuntimeValue::BuiltinAtom(BuiltinAtom::None),
+        SkipPolicy::False => value.value == RuntimeValue::BuiltinAtom(BuiltinAtom::False),
+        SkipPolicy::Empty => {
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            match value.value {
+                RuntimeValue::String(_) | RuntimeValue::ShortString(_) => {
+                    view.string_text(value).ok().flatten() == Some("")
+                }
+                RuntimeValue::Array(handle) => view
+                    .sequence(handle, false)
+                    .is_ok_and(|values| values.is_empty()),
+                RuntimeValue::Dict(handle) => view
+                    .dict_parts(handle)
+                    .is_ok_and(|(names, _)| names.is_empty()),
+                _ => false,
+            }
+        }
+    }
 }
 
 fn codec_type_name(schema: &CodecType) -> &'static str {

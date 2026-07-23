@@ -1675,7 +1675,7 @@ mod tests {
                {
                    metadata: User,
                    checked: validate(User, user),
-                   decoded: codec.decode(User, { ty: "member" }),
+                   decoded: codec.decode(User, { "type": "member" }),
                }"#,
         )
         .unwrap();
@@ -2208,6 +2208,117 @@ mod tests {
                 .to_string(),
             "'True"
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn struct_json_codecs_apply_serde_style_attributes_bidirectionally() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import codec from "core:codec";
+               import json from "core:json";
+               import result from "core:result";
+
+               @struct type Coordinates = {
+                   latitude: Int,
+               };
+               @struct type Address = {
+                   city_name: String,
+                   @json.flatten coordinates: Coordinates,
+               };
+               @json.rename_all('CamelCase)
+               @struct type User = {
+                   user_id: Int,
+                   @json.rename("display") display_name: String,
+                   @json.flatten address: Address,
+                   @json.default('None)
+                   @json.skip_serializing_if('None)
+                   nickname: Option(String),
+                   @json.skip_serializing_if('False) hidden: Any,
+                   @json.skip_serializing_if('Empty) notes: String,
+                   @json.skip_serializing_if('Empty) tags: Array(String),
+                   @json.skip_serializing_if('Empty) extras: Any,
+               };
+               let decoded = codec.decode(User, {
+                   userId: 7,
+                   display: "Ada",
+                   city_name: "London",
+                   latitude: 51,
+                   hidden: 'False,
+                   notes: "",
+                   tags: [],
+                   extras: {},
+               }) |> result.unwrap;
+               { decoded: decoded, encoded: codec.encode(User, decoded) |> result.unwrap }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(output) = module.execute(100_000).unwrap() else {
+            panic!("expected codec results")
+        };
+        assert_eq!(
+            output.get("decoded").unwrap().to_string(),
+            "{address: {city_name: \"London\", coordinates: {latitude: 51}}, display_name: \"Ada\", extras: {}, hidden: 'False, nickname: 'None, notes: \"\", tags: [], user_id: 7}"
+        );
+        assert_eq!(
+            output.get("encoded").unwrap().to_string(),
+            "{city_name: \"London\", display: \"Ada\", latitude: 51, userId: 7}"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn struct_json_codecs_reject_attribute_conflicts_and_invalid_defaults() {
+        let directory = fixture_dir();
+        let cases = [
+            (
+                "collision.xl",
+                r#"import codec from "core:codec";
+                   import json from "core:json";
+                   @struct type T = {
+                       @json.rename("same") first: Int,
+                       @json.rename("same") second: Int,
+                   };
+                   codec.decode(T, {same: 1})"#,
+                "duplicate external field name",
+            ),
+            (
+                "flatten-type.xl",
+                r#"import codec from "core:codec";
+                   import json from "core:json";
+                   @struct type T = {@json.flatten value: Int};
+                   codec.decode(T, {})"#,
+                "flatten requires Struct metadata",
+            ),
+            (
+                "flatten-rename.xl",
+                r#"import codec from "core:codec";
+                   import json from "core:json";
+                   @struct type Inner = {value: Int};
+                   @struct type T = {
+                       @json.flatten @json.rename("x") inner: Inner,
+                   };
+                   codec.decode(T, {value: 1})"#,
+                "flatten cannot be combined",
+            ),
+            (
+                "default.xl",
+                r#"import codec from "core:codec";
+                   import json from "core:json";
+                   @struct type T = {@json.default("wrong") value: Int};
+                   codec.decode(T, {})"#,
+                "expected Int",
+            ),
+        ];
+        for (name, source, expected) in cases {
+            let path = directory.join(name);
+            fs::write(&path, source).unwrap();
+            let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
+            let result = module.execute(100_000).unwrap();
+            assert!(result.to_string().contains("'Err"), "{result}");
+            assert!(result.to_string().contains(expected), "{result}");
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 

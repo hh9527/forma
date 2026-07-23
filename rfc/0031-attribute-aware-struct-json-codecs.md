@@ -1,6 +1,6 @@
 # RFC 0031: Attribute-aware Struct JSON codecs
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0020, RFC 0026, RFC 0030
 
 ## Summary
@@ -158,4 +158,23 @@ unaccounted XL heap allocation.
 
 ## Implementation result
 
-Pending.
+Implemented by retaining flattened attributes on runtime codec nodes and
+planning Struct fields before either transformation direction. Decode and
+encode now share external naming, recursively flatten Struct fields, validate
+value defaults, apply the three skip policies, and reject unknown fields and
+name collisions without overwrite behavior.
+
+The end-to-end fixture covers CamelCase, explicit rename precedence, recursive
+flatten, default-before-Option behavior, and the `'None`, `'False`, and
+`'Empty` skip policies in one bidirectional model. Separate negative fixtures
+cover duplicate external names, non-Struct flatten targets, incompatible
+flatten attributes, and invalid defaults. Existing undecorated codecs remain
+compatible, including rich data/rule locations and allocation accounting.
+
+One placement check is intentionally narrower than the proposal. Because the
+flat attributed-value protocol erases wrapper nesting, a Struct node cannot
+tell whether a field-only attribute came from its parent's field wrapper or
+was written directly on the Struct expression. The codec therefore rejects
+misplacement only where context remains observable, such as `rename_all` on a
+field or `flatten` on a non-Struct field. Syntax-aware linting can diagnose the
+erased cases before normalization.
