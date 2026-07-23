@@ -1,6 +1,6 @@
 # RFC 0028: Unified lowercase model constructors
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0026, RFC 0027
 - Supersedes: the uppercase `Struct` and `Union` prelude APIs from RFC 0003
 
@@ -143,4 +143,28 @@ Whether they should gain lowercase decorator-compatible forms is deferred.
 
 ## Implementation result
 
-Pending.
+`CoreModelFunction` now includes `Union`, published as the ordinary two-argument
+prelude `union` Func beside `struct` and `enum`. Both decorator and explicit
+calls enter the same VM-managed operation. It validates the shared context,
+requires a non-empty Array, directly flattens and validates each variant through
+`HeapView`, allocates one canonical wrapper per element, builds a fresh Array
+and Union metadata Dict, and wraps the root. All generated slots and Dicts are
+charged to the active allocation account; retained inner and attribute rich
+values are not deep-exported or rebuilt.
+
+The uppercase `Struct` and `Union` registrations and their synchronous native
+callbacks have been removed. Attempts to use either name now produce the
+ordinary unknown-binding diagnostic. Canonical metadata decoding and internal
+`TypeDescriptor::Struct` and `TypeDescriptor::Union` remain unchanged, so
+hand-written metadata data is compatible.
+
+All executable XL in examples, CLI coverage, module fixtures, type-analysis
+tests, and the current README now uses `@struct`, `@union`, or explicit
+lowercase construction. Historical RFCs retain their original API descriptions
+and this RFC records the superseding change.
+
+Tests cover decorator and explicit Union construction, uniform root and member
+wrappers, retained variant attributes, static Union annotations, empty and
+invalid variants, malformed wrappers, allocation exhaustion, removal of both
+uppercase names, existing Struct/Enum behavior, codec behavior, examples, and
+CLI workflows.

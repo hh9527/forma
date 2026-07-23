@@ -24,7 +24,7 @@ fn check_run_and_types_cover_the_closed_world_loop() {
     fs::write(
         directory.join("main.xl"),
         "import data from \"./data.json\";\
-         type User = Struct({name: String, age: Int});\
+         @struct type User = {name: String, age: Int};\
          let user: User = data;\
          validate(User, user)",
     )

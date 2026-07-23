@@ -862,9 +862,9 @@ mod tests {
             r#"import codec from "core:codec";
                import result from "core:result";
                fn Optional(item) {
-                   Union([Atom('None), Tuple([Atom('Some), item])])
+                   union('None, [Atom('None), Tuple([Atom('Some), item])])
                }
-               type Type = Struct({v: Optional(String)});
+               @struct type Type = {v: Optional(String)};
                let decode = fn(value) { codec.decode(Type, value) };
                let encode = fn(value) {
                    codec.encode(Type, value) |> result.unwrap
@@ -923,7 +923,7 @@ mod tests {
             rendered.contains("contract rule declared here"),
             "{rendered}"
         );
-        assert!(rendered.contains("User.xl:6:48:"), "{rendered}");
+        assert!(rendered.contains("User.xl:6:49:"), "{rendered}");
 
         fs::write(
             directory.join("inspect.xl"),
@@ -990,14 +990,14 @@ mod tests {
             (
                 r#"import codec from "core:codec";
                    import result from "core:result";
-                   type T = Struct({name: String});
+                   @struct type T = {name: String};
                    codec.decode(T, {}) |> result.unwrap"#,
                 "$.name: missing required field",
             ),
             (
                 r#"import codec from "core:codec";
                    import result from "core:result";
-                   type T = Struct({name: String});
+                   @struct type T = {name: String};
                    codec.decode(T, {name: "Ada", extra: 1}) |> result.unwrap"#,
                 "$.extra: unknown field",
             ),
@@ -1049,7 +1049,7 @@ mod tests {
             directory.join("main.xl"),
             "import user from \"./user.json\";\
              import answer from \"./answer.xl\";\
-             type User = Struct({name: String, age: Int});\
+             @struct type User = {name: String, age: Int};\
              let checked: User = user;\
              (checked.name, answer)",
         )
@@ -1151,7 +1151,7 @@ mod tests {
         fs::write(
             directory.join("main.xl"),
             "import user from \"./user.json\";\n\
-             type User = Struct({name: String, age: Int});\n\
+             @struct type User = {name: String, age: Int};\n\
              let checked: User = user;\n\
              checked",
         )
@@ -1667,7 +1667,7 @@ mod tests {
                    }
                };
                let model = fn(ctx, value) {
-                   attributes.add(Struct(value), { "vendor:acme.model": ctx.name })
+                   attributes.add(struct(ctx, value), { "vendor:acme.model": ctx.name })
                };
                @model
                type User = {
@@ -1764,13 +1764,24 @@ mod tests {
                    User: User,
                };
 
+               @union
+               type Scalar = [
+                   attributes.add(Int, { marker: ("union", 4) }),
+                   String,
+               ];
+
                let explicit = struct('None, { value: Int });
+               let explicit_union = union('None, [Int, String]);
                let unit: Choice = 'None;
                let payload: Choice = ('User, { name: "Ada", role: "admin" });
+               let scalar_value: Scalar = 42;
                {
                    user: User,
                    choice: Choice,
                    explicit: explicit,
+                   explicit_union: explicit_union,
+                   scalar: Scalar,
+                   scalar_value: scalar_value,
                    unit: validate(Choice, unit),
                    payload: validate(Choice, payload),
                }"#,
@@ -1836,6 +1847,23 @@ mod tests {
             "{marker: (\"enum\", 3)}"
         );
 
+        let scalar = assert_wrapper(result.get("scalar").unwrap());
+        let Value::Dict(union_metadata) = scalar.get("inner").unwrap() else {
+            panic!("expected Union metadata")
+        };
+        assert_eq!(union_metadata.get("kind").unwrap().to_string(), "'Union");
+        let Value::Array(union_variants) = union_metadata.get("variants").unwrap() else {
+            panic!("expected normalized Union variants")
+        };
+        assert_eq!(union_variants.len(), 2);
+        let first = assert_wrapper(&union_variants[0]);
+        assert_eq!(
+            first.get("attributes").unwrap().to_string(),
+            "{marker: (\"union\", 4)}"
+        );
+        let second = assert_wrapper(&union_variants[1]);
+        assert_eq!(second.get("attributes").unwrap().to_string(), "{}");
+
         let explicit = assert_wrapper(result.get("explicit").unwrap());
         let Value::Dict(explicit_metadata) = explicit.get("inner").unwrap() else {
             panic!("expected explicit Struct metadata")
@@ -1844,6 +1872,17 @@ mod tests {
             panic!("expected explicit fields")
         };
         assert_wrapper(explicit_fields.get("value").unwrap());
+        let explicit_union = assert_wrapper(result.get("explicit_union").unwrap());
+        let Value::Dict(explicit_union_metadata) = explicit_union.get("inner").unwrap() else {
+            panic!("expected explicit Union metadata")
+        };
+        let Value::Array(explicit_variants) = explicit_union_metadata.get("variants").unwrap()
+        else {
+            panic!("expected explicit Union variants")
+        };
+        for variant in explicit_variants.iter() {
+            assert_wrapper(variant);
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1903,9 +1942,40 @@ mod tests {
                 .message
                 .contains("Type metadata")
         );
+        assert!(
+            run_error("empty-union.xl", "union('None, [])")
+                .message
+                .contains("at least one variant")
+        );
+        assert!(
+            run_error("union-variant.xl", "union('None, [1])")
+                .message
+                .contains("Type metadata")
+        );
+        assert!(
+            run_error(
+                "union-wrapper.xl",
+                "union('None, [{kind: 'WithAttributes, inner: Int, attributes: []}])",
+            )
+            .message
+            .contains("attributes must be a Dict")
+        );
+
+        for (name, source) in [
+            ("uppercase-struct.xl", "Struct({x: Int})"),
+            ("uppercase-union.xl", "Union([Int, String])"),
+        ] {
+            let path = directory.join(name);
+            fs::write(&path, source).unwrap();
+            let error = match load_module(path, BTreeMap::new(), 100_000) {
+                Ok(_) => panic!("uppercase constructor must be absent"),
+                Err(error) => error,
+            };
+            assert!(error.message.contains("unknown binding"));
+        }
 
         let path = directory.join("quota.xl");
-        fs::write(&path, "struct('None, {x: Int})").unwrap();
+        fs::write(&path, "union('None, [Int, String])").unwrap();
         let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
         let mut account = QuotaAccount::new(Quota::new(10, 1_000, 0));
         let error = Vm::new()

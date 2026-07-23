@@ -683,11 +683,10 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
     for function in [
         NativeFunction::core_model(CoreModelFunction::Struct),
         NativeFunction::core_model(CoreModelFunction::Enum),
+        NativeFunction::core_model(CoreModelFunction::Union),
         NativeFunction::new("Atom", 1, native_atom_type),
         NativeFunction::new("Array", 1, native_array_type),
         NativeFunction::new("Tuple", 1, native_tuple_type),
-        NativeFunction::new("Struct", 1, native_struct_type),
-        NativeFunction::new("Union", 1, native_union_type),
         NativeFunction::new("Fn", 2, native_function_type),
         NativeFunction::new("validate", 2, native_validate),
     ] {
@@ -723,32 +722,6 @@ fn native_tuple_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeErro
         decode_native_type(value.sequence_get(index).expect("valid Array index"))?;
     }
     write_native_type_record(context, "Tuple", &[("items", context.argument(0)?)])
-}
-
-fn native_struct_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
-    let value = context.value(context.argument(0)?)?;
-    let Some(names) = value.dict_fields() else {
-        return Err(NativeError::new("Struct expects a Dict of Types"));
-    };
-    for name in names {
-        decode_native_type(value.dict_get(name).expect("Dict field exists"))?;
-    }
-    write_native_type_record(context, "Struct", &[("fields", context.argument(0)?)])
-}
-
-fn native_union_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
-    let value = context.value(context.argument(0)?)?;
-    if value.kind() != ValueKind::Array {
-        return Err(NativeError::new("Union expects an Array of Types"));
-    }
-    let length = value.sequence_len().expect("Array has a length");
-    if length == 0 {
-        return Err(NativeError::new("Union requires at least one variant"));
-    }
-    for index in 0..length {
-        decode_native_type(value.sequence_get(index).expect("valid Array index"))?;
-    }
-    write_native_type_record(context, "Union", &[("variants", context.argument(0)?)])
 }
 
 fn native_function_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
@@ -1783,7 +1756,7 @@ mod tests {
     fn ordinary_closure_computes_type_metadata() {
         let analysis = analyze_source(
             "test",
-            "fn Optional(item) { Union([Atom('None), Tuple([Atom('Some), item])]) }\
+            "fn Optional(item) { union('None, [Atom('None), Tuple([Atom('Some), item])]) }\
              type MaybeInt = Optional(Int);\
              let value: MaybeInt = ('Some, 42);\
              value",
@@ -1797,7 +1770,7 @@ mod tests {
     fn reports_structural_annotation_mismatch() {
         let error = analyze_source(
             "test",
-            "type User = Struct({name: String, age: Int});\
+            "@struct type User = {name: String, age: Int};\
              let user: User = {name: \"Ada\", age: \"old\"};\
              user",
         )
@@ -1862,7 +1835,7 @@ mod tests {
     fn runtime_validation_uses_computed_metadata() {
         let accepted = crate::run_source(
             "test",
-            "type User = Struct({name: String, age: Int});\
+            "@struct type User = {name: String, age: Int};\
              validate(User, {age: 36, name: \"Ada\"})",
             100_000,
         )
@@ -1875,7 +1848,7 @@ mod tests {
 
         let rejected = crate::run_source(
             "test",
-            "type User = Struct({name: String, age: Int});\
+            "@struct type User = {name: String, age: Int};\
              validate(User, {age: \"old\", name: \"Ada\"})",
             100_000,
         )
@@ -1891,13 +1864,13 @@ mod tests {
     fn program_bytecode_erases_or_retains_type_metadata_by_use() {
         let erased = crate::compile_source(
             "test",
-            "type User = Struct({name: String}); let user: User = {name: \"Ada\"}; user.name",
+            "@struct type User = {name: String}; let user: User = {name: \"Ada\"}; user.name",
         )
         .unwrap();
         assert!(!erased.constants().iter().any(is_type_metadata));
 
         let retained =
-            crate::compile_source("test", "type User = Struct({name: String}); User").unwrap();
+            crate::compile_source("test", "@struct type User = {name: String}; User").unwrap();
         assert!(retained.constants().iter().any(is_type_metadata));
     }
 

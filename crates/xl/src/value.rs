@@ -179,6 +179,7 @@ impl CoreAttributesFunction {
 pub(crate) enum CoreModelFunction {
     Struct,
     Enum,
+    Union,
 }
 
 impl CoreModelFunction {
@@ -186,6 +187,7 @@ impl CoreModelFunction {
         match self {
             Self::Struct => "struct",
             Self::Enum => "enum",
+            Self::Union => "union",
         }
     }
 

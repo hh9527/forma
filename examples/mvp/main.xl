@@ -1,18 +1,18 @@
 import raw_user from "./user.json";
 
 fn Optional(item) {
-    Union([
+    union('None, [
         Atom('None),
         Tuple([Atom('Some), item]),
     ])
 }
 
-type User = Struct({
+@struct
+type User = {
     name: String,
     age: Int,
     nickname: Optional(String),
-});
+};
 
 let user: User = raw_user;
 validate(User, user)
-

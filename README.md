@@ -39,17 +39,18 @@ same metadata with `validate` at runtime.
 
 ```text
 fn Optional(item) {
-    Union([
+    union('None, [
         Atom('None),
         Tuple([Atom('Some), item]),
     ])
 }
 
-type User = Struct({
+@struct
+type User = {
     name: String,
     age: Int,
     nickname: Optional(String),
-});
+};
 
 let user: User = imported_user;
 validate(User, user)
@@ -195,8 +196,8 @@ let rename = fn(name) {
 
 The module exports `normalize`, `add`, `get`, `has`, `all`, and `strip`.
 Nested wrappers are flattened and later additions win. Wrapped TypeMetadata is
-transparent to checking, validation, and derived codecs, while constructors
-such as `Struct` preserve the raw wrappers for generators and future LSP views.
+transparent to checking, validation, and derived codecs, while raw wrappers
+remain available to generators and future LSP views.
 
 Normalized model declarations use decorator-compatible lowercase prelude
 functions:
@@ -212,13 +213,18 @@ type Lookup = {
     Missing: 'None,
     Found: User,
 };
+
+@union
+type Scalar = [Int, Float, String];
 ```
 
 The resulting Struct or Enum root and every field or variant have exactly one
 flat `WithAttributes` wrapper. Enum runtime values are `'Missing` for a unit
 variant and `('Found, user)` for a payload variant. Explicit construction uses
-`struct('None, fields)` or `enum('None, variants)`; uppercase metadata
-constructors remain available as lower-level compatibility functions.
+`struct('None, fields)`, `enum('None, variants)`, or
+`union('None, variants)`. The old `Struct` and `Union` prelude bindings have
+been removed; canonical `'Struct`, `'Enum`, and `'Union` metadata Dicts remain
+ordinary valid XL data.
 
 ## Current limits
 

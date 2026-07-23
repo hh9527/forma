@@ -2883,9 +2883,21 @@ fn run_core_model(
     account: &mut QuotaAccount,
 ) -> Result<VmAction, RuntimeError> {
     validate_model_context(arguments[0], function, pc, current, background)?;
+    if operation == CoreModelFunction::Union {
+        return run_core_union_model(
+            arguments[1],
+            return_target,
+            function,
+            pc,
+            current,
+            background,
+            account,
+        );
+    }
     let member_name = match operation {
         CoreModelFunction::Struct => "fields",
         CoreModelFunction::Enum => "variants",
+        CoreModelFunction::Union => unreachable!("Union handled above"),
     };
     let entries = core_dict_entries(
         arguments[1],
@@ -2930,6 +2942,7 @@ fn run_core_model(
                     )?;
                 }
             }
+            CoreModelFunction::Union => unreachable!("Union handled above"),
         }
         let member = allocate_attributes_wrapper(
             inner,
@@ -2947,6 +2960,7 @@ fn run_core_model(
     let kind_name = match operation {
         CoreModelFunction::Struct => "Struct",
         CoreModelFunction::Enum => "Enum",
+        CoreModelFunction::Union => unreachable!("Union handled above"),
     };
     let metadata = allocate_core_dict(
         BTreeMap::from([
@@ -2961,6 +2975,104 @@ fn run_core_model(
         ])
         .into_iter()
         .collect(),
+        function,
+        pc,
+        current,
+        account,
+    )?;
+    let value = allocate_attributes_wrapper(
+        metadata,
+        BTreeMap::new(),
+        instruction_location(function, pc),
+        function,
+        pc,
+        current,
+        account,
+    )?;
+    Ok(VmAction::Return {
+        value,
+        return_target,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_core_union_model(
+    variants: RichValue,
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let RuntimeValue::Array(handle) = variants.value else {
+        let view = HeapView {
+            current,
+            background: Some(background),
+        };
+        return Err(runtime_type_error(
+            "variants Array",
+            &variants,
+            &view,
+            function,
+            pc,
+        ));
+    };
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let variants = view
+        .sequence(handle, false)
+        .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+        .to_vec();
+    if variants.is_empty() {
+        return Err(error(
+            RuntimeErrorKind::TypeMismatch,
+            "union requires at least one variant",
+            function,
+            pc,
+        ));
+    }
+    let mut normalized = Vec::with_capacity(variants.len());
+    for (index, variant) in variants.into_iter().enumerate() {
+        let path = format!("variants[{index}]");
+        let (inner, attributes) =
+            flatten_attributes(variant, &path, function, pc, current, background)?;
+        decode_runtime_type_at(inner, &path, current, background)
+            .map_err(|message| error(RuntimeErrorKind::TypeMismatch, message, function, pc))?;
+        normalized.push(allocate_attributes_wrapper(
+            inner,
+            attributes,
+            variant.loc.or(instruction_location(function, pc)),
+            function,
+            pc,
+            current,
+            account,
+        )?);
+    }
+    charge_allocation(
+        account,
+        logical_value_bytes(normalized.len())
+            .map_err(|native_error| allocation_error(native_error.message, function, pc))?,
+        function,
+        pc,
+    )?;
+    let variants = RichValue::new(
+        RuntimeValue::Array(current.allocate(Object::Array(normalized.into()))),
+        instruction_location(function, pc),
+    );
+    let metadata = allocate_core_dict(
+        vec![
+            (
+                "kind".into(),
+                RichValue::new(
+                    RuntimeValue::Atom(current.intern("Union")),
+                    instruction_location(function, pc),
+                ),
+            ),
+            ("variants".into(), variants),
+        ],
         function,
         pc,
         current,

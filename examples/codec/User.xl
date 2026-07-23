@@ -2,13 +2,14 @@ import codec from "core:codec";
 import result from "core:result";
 
 fn Optional(item) {
-    Union([
+    union('None, [
         Atom('None),
         Tuple([Atom('Some), item]),
     ])
 }
 
-type Type = Struct({v: Optional(String)});
+@struct
+type Type = {v: Optional(String)};
 
 let decode = fn(value) {
     codec.decode(Type, value)
