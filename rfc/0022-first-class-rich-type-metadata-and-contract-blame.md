@@ -1,6 +1,6 @@
 # RFC 0022: First-class rich Type metadata and contract blame
 
-- Status: Accepted for implementation
+- Status: Implemented
 - Depends on: RFC 0003, RFC 0020, RFC 0021
 
 ## Summary
@@ -176,3 +176,27 @@ it into a runtime diagnostic.
 7. result.unwrap remains compatible with legacy String Err payloads.
 8. Existing static analysis, module, quota, codec, and CLI behavior remains
    compatible.
+
+## Implementation result
+
+Retained type bindings now compile their original XL expression into module
+initialization instead of embedding the location-free tool-stage Value. A
+fixed-point name scan retains constructor and dependent type bindings used by
+those expressions. Primitive prelude Type values materialize at each reference
+expression, so a field such as `v: String` carries the location of that exact
+rule occurrence. The separate tool-stage evaluation remains the static
+TypeDescriptor projection used by analysis.
+
+Atom, Array, Tuple, Struct, Union, and Fn constructors validate the canonical
+protocol but store their original rich arguments directly in newly constructed
+XL Dict metadata. User-written canonical Dict metadata and constructor output
+are accepted through the same codec path.
+
+The runtime codec projection is now a plan whose nodes retain their canonical
+rule RichValue. A failed transform returns the ordinary XL payload
+`{message, data, rule}` under `'Err`; it remains inspectable before unwrap.
+`core:result.unwrap` accepts this payload, derives exact data and rule labels,
+and retains its opcode origin in the trace. Legacy String Err payloads remain
+supported. Tests exercise an exact JSON scalar primary label, exact schema
+primitive secondary label, structured payload inspection, hand-built Type
+metadata, and legacy compatibility.

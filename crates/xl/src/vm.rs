@@ -510,9 +510,15 @@ pub struct RuntimeError {
     pub function: String,
     pub instruction: usize,
     pub trace: Vec<RuntimeFrame>,
-    pub data_location: Option<crate::Loc>,
+    locations: Option<Box<RuntimeLocations>>,
     rendered: Option<String>,
     trace_includes_active_frame: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RuntimeLocations {
+    data: Option<crate::Loc>,
+    rule: Option<crate::Loc>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -539,15 +545,42 @@ impl RuntimeError {
         self.trace.first().and_then(|frame| frame.origin)
     }
 
+    pub fn data_location(&self) -> Option<crate::Loc> {
+        self.locations
+            .as_deref()
+            .and_then(|locations| locations.data)
+    }
+
+    pub fn rule_location(&self) -> Option<crate::Loc> {
+        self.locations
+            .as_deref()
+            .and_then(|locations| locations.rule)
+    }
+
+    fn set_locations(&mut self, data: Option<crate::Loc>, rule: Option<crate::Loc>) {
+        self.locations =
+            (data.is_some() || rule.is_some()).then(|| Box::new(RuntimeLocations { data, rule }));
+    }
+
+    fn set_data_location(&mut self, data: Option<crate::Loc>) {
+        self.set_locations(data, self.rule_location());
+    }
+
     pub fn with_sources(mut self, sources: &SourceDatabase) -> Self {
-        let rule_location = self.origin().and_then(|origin| match origin {
+        let operation_location = self.origin().and_then(|origin| match origin {
             Origin::Source(location) => Some(location),
             Origin::Synthetic { derived_from } => derived_from,
         });
-        let diagnostic = match (self.data_location, rule_location) {
+        let rule_location = self.rule_location().or(operation_location);
+        let secondary_message = if self.rule_location().is_some() {
+            "contract rule declared here"
+        } else {
+            "operation originated here"
+        };
+        let diagnostic = match (self.data_location(), rule_location) {
             (Some(data), Some(rule)) if data != rule => Some(
                 Diagnostic::error(self.message.clone(), data)
-                    .with_secondary("operation originated here", rule),
+                    .with_secondary(secondary_message, rule),
             ),
             (Some(data), _) => Some(Diagnostic::error(self.message.clone(), data)),
             (None, Some(rule)) => Some(Diagnostic::error(self.message.clone(), rule)),
@@ -1727,7 +1760,7 @@ fn drive_vm_action(
                         function: "<vm>".into(),
                         instruction: 0,
                         trace: Vec::new(),
-                        data_location: None,
+                        locations: None,
                         rendered: None,
                         trace_includes_active_frame: false,
                     })?;
@@ -2589,17 +2622,23 @@ fn core_dict_heap_error(
 }
 
 #[derive(Clone, Debug)]
-enum CodecType {
+struct CodecType {
+    kind: CodecKind,
+    rule: RichValue,
+}
+
+#[derive(Clone, Debug)]
+enum CodecKind {
     Any,
     Int,
     Float,
     String,
     Bytes,
     Atom(String),
-    Array(Box<Self>),
-    Tuple(Vec<Self>),
-    Struct(BTreeMap<String, Self>),
-    Union(Vec<Self>),
+    Array(Box<CodecType>),
+    Tuple(Vec<CodecType>),
+    Struct(BTreeMap<String, CodecType>),
+    Union(Vec<CodecType>),
     Function,
 }
 
@@ -2622,14 +2661,16 @@ enum CodecDirection {
 #[derive(Clone, Debug)]
 struct CodecFailure {
     message: String,
-    loc: Option<crate::Loc>,
+    data: RichValue,
+    rule: RichValue,
 }
 
 impl CodecFailure {
-    fn at(message: impl Into<String>, value: RichValue) -> Self {
+    fn new(message: impl Into<String>, data: RichValue, rule: RichValue) -> Self {
         Self {
             message: message.into(),
-            loc: value.loc,
+            data,
+            rule,
         }
     }
 }
@@ -2654,10 +2695,20 @@ fn run_core_codec(
     let result = transform_codec(&schema, arguments[1], direction, "$", current, background);
     let (tag, payload) = match result {
         Ok(node) => (BuiltinAtom::Ok, node),
-        Err(failure) => (
-            BuiltinAtom::Err,
-            CodecNode::String(failure.message, failure.loc),
-        ),
+        Err(failure) => {
+            let loc = failure.data.loc;
+            (
+                BuiltinAtom::Err,
+                CodecNode::Dict(
+                    vec![
+                        ("message".into(), CodecNode::String(failure.message, loc)),
+                        ("data".into(), CodecNode::Existing(failure.data)),
+                        ("rule".into(), CodecNode::Existing(failure.rule)),
+                    ],
+                    loc,
+                ),
+            )
+        }
     };
     let bytes = codec_node_bytes(&payload)
         .and_then(|bytes| {
@@ -2712,26 +2763,26 @@ fn decode_runtime_type_at(
         .map_err(|error| error.to_string())?
         .and_then(|kind| view.atom_text(kind).ok().flatten())
         .ok_or_else(|| format!("{path}.kind must be an Atom"))?;
-    Ok(match kind {
-        "Any" => CodecType::Any,
-        "Int" => CodecType::Int,
-        "Float" => CodecType::Float,
-        "String" => CodecType::String,
-        "Bytes" => CodecType::Bytes,
+    let kind = match kind {
+        "Any" => CodecKind::Any,
+        "Int" => CodecKind::Int,
+        "Float" => CodecKind::Float,
+        "String" => CodecKind::String,
+        "Bytes" => CodecKind::Bytes,
         "Atom" => {
             let tag = view
                 .dict_get_text(handle, "tag")
                 .map_err(|error| error.to_string())?
                 .and_then(|tag| view.atom_text(tag).ok().flatten())
                 .ok_or_else(|| format!("{path}.tag must be an Atom"))?;
-            CodecType::Atom(tag.to_owned())
+            CodecKind::Atom(tag.to_owned())
         }
         "Array" => {
             let item = view
                 .dict_get_text(handle, "item")
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("{path}.item is missing"))?;
-            CodecType::Array(Box::new(decode_runtime_type_at(
+            CodecKind::Array(Box::new(decode_runtime_type_at(
                 item,
                 &format!("{path}.item"),
                 current,
@@ -2764,9 +2815,9 @@ fn decode_runtime_type_at(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             if kind == "Tuple" {
-                CodecType::Tuple(decoded)
+                CodecKind::Tuple(decoded)
             } else {
-                CodecType::Union(decoded)
+                CodecKind::Union(decoded)
             }
         }
         "Struct" => {
@@ -2784,7 +2835,7 @@ fn decode_runtime_type_at(
                 .map(|(name, value)| Ok((view.text(*name)?.to_owned(), *value)))
                 .collect::<Result<Vec<_>, crate::heap::HeapError>>()
                 .map_err(|error| error.to_string())?;
-            CodecType::Struct(
+            CodecKind::Struct(
                 entries
                     .into_iter()
                     .map(|(name, value)| {
@@ -2799,13 +2850,14 @@ fn decode_runtime_type_at(
                     .collect::<Result<_, String>>()?,
             )
         }
-        "Function" => CodecType::Function,
+        "Function" => CodecKind::Function,
         other => return Err(format!("{path}.kind has unsupported value '{other}")),
-    })
+    };
+    Ok(CodecType { kind, rule: value })
 }
 
 fn option_item(schema: &CodecType) -> Option<&CodecType> {
-    let CodecType::Union(variants) = schema else {
+    let CodecKind::Union(variants) = &schema.kind else {
         return None;
     };
     if variants.len() != 2 {
@@ -2813,13 +2865,15 @@ fn option_item(schema: &CodecType) -> Option<&CodecType> {
     }
     let none = variants
         .iter()
-        .any(|variant| matches!(variant, CodecType::Atom(tag) if tag == "None"));
+        .any(|variant| matches!(&variant.kind, CodecKind::Atom(tag) if tag == "None"));
     let some = variants.iter().find_map(|variant| {
-        let CodecType::Tuple(items) = variant else {
+        let CodecKind::Tuple(items) = &variant.kind else {
             return None;
         };
         match items.as_slice() {
-            [CodecType::Atom(tag), item] if tag == "Some" => Some(item),
+            [tag, item] if matches!(&tag.kind, CodecKind::Atom(name) if name == "Some") => {
+                Some(item)
+            }
             _ => None,
         }
     });
@@ -2838,42 +2892,47 @@ fn transform_codec(
         current,
         background: Some(background),
     };
-    match schema {
-        CodecType::Any => Ok(CodecNode::Existing(value)),
-        CodecType::Int if matches!(value.value, RuntimeValue::Int(_)) => {
+    match &schema.kind {
+        CodecKind::Any => Ok(CodecNode::Existing(value)),
+        CodecKind::Int if matches!(value.value, RuntimeValue::Int(_)) => {
             Ok(CodecNode::Existing(value))
         }
-        CodecType::Float if matches!(value.value, RuntimeValue::Float(_)) => {
+        CodecKind::Float if matches!(value.value, RuntimeValue::Float(_)) => {
             Ok(CodecNode::Existing(value))
         }
-        CodecType::String
+        CodecKind::String
             if view
                 .string_text(value)
-                .map_err(|error| CodecFailure::at(error.to_string(), value))?
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?
                 .is_some() =>
         {
             Ok(CodecNode::Existing(value))
         }
-        CodecType::Atom(expected) => {
+        CodecKind::Atom(expected) => {
             let actual = view
                 .atom_text(value)
-                .map_err(|error| CodecFailure::at(error.to_string(), value))?;
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?;
             if actual == Some(expected) {
                 Ok(CodecNode::Existing(value))
             } else {
-                Err(CodecFailure::at(
+                Err(CodecFailure::new(
                     format!("{path}: expected '{expected}"),
                     value,
+                    schema.rule,
                 ))
             }
         }
-        CodecType::Array(item) => {
+        CodecKind::Array(item) => {
             let RuntimeValue::Array(handle) = value.value else {
-                return Err(CodecFailure::at(format!("{path}: expected Array"), value));
+                return Err(CodecFailure::new(
+                    format!("{path}: expected Array"),
+                    value,
+                    schema.rule,
+                ));
             };
             let values = view
                 .sequence(handle, false)
-                .map_err(|error| CodecFailure::at(error.to_string(), value))?
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?
                 .to_vec();
             values
                 .into_iter()
@@ -2891,25 +2950,34 @@ fn transform_codec(
                 .collect::<Result<Vec<_>, _>>()
                 .map(|items| CodecNode::Array(items, value.loc))
         }
-        CodecType::Tuple(items) => {
+        CodecKind::Tuple(items) => {
             let (handle, input_is_tuple) = match (direction, value.value) {
                 (CodecDirection::Decode, RuntimeValue::Array(handle)) => (handle, false),
                 (CodecDirection::Encode, RuntimeValue::Tuple(handle)) => (handle, true),
                 (CodecDirection::Decode, _) => {
-                    return Err(CodecFailure::at(format!("{path}: expected Array"), value));
+                    return Err(CodecFailure::new(
+                        format!("{path}: expected Array"),
+                        value,
+                        schema.rule,
+                    ));
                 }
                 (CodecDirection::Encode, _) => {
-                    return Err(CodecFailure::at(format!("{path}: expected Tuple"), value));
+                    return Err(CodecFailure::new(
+                        format!("{path}: expected Tuple"),
+                        value,
+                        schema.rule,
+                    ));
                 }
             };
             let values = view
                 .sequence(handle, input_is_tuple)
-                .map_err(|error| CodecFailure::at(error.to_string(), value))?
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?
                 .to_vec();
             if values.len() != items.len() {
-                return Err(CodecFailure::at(
+                return Err(CodecFailure::new(
                     format!("{path}: expected {} items", items.len()),
                     value,
+                    schema.rule,
                 ));
             }
             let nodes = items
@@ -2932,10 +3000,10 @@ fn transform_codec(
                 CodecDirection::Encode => CodecNode::Array(nodes, value.loc),
             })
         }
-        CodecType::Struct(fields) => {
-            transform_codec_struct(fields, value, direction, path, current, background)
+        CodecKind::Struct(fields) => {
+            transform_codec_struct(schema, fields, value, direction, path, current, background)
         }
-        CodecType::Union(variants) => {
+        CodecKind::Union(variants) => {
             let mut errors = Vec::new();
             for variant in variants {
                 match transform_codec(variant, value, direction, path, current, background) {
@@ -2943,30 +3011,35 @@ fn transform_codec(
                     Err(failure) => errors.push(failure.message),
                 }
             }
-            Err(CodecFailure::at(
+            Err(CodecFailure::new(
                 format!(
                     "{path}: value matches no Union variant ({})",
                     errors.join("; ")
                 ),
                 value,
+                schema.rule,
             ))
         }
-        CodecType::Bytes => Err(CodecFailure::at(
+        CodecKind::Bytes => Err(CodecFailure::new(
             format!("{path}: Bytes has no JSON codec"),
             value,
+            schema.rule,
         )),
-        CodecType::Function => Err(CodecFailure::at(
+        CodecKind::Function => Err(CodecFailure::new(
             format!("{path}: Function has no JSON codec"),
             value,
+            schema.rule,
         )),
-        expected => Err(CodecFailure::at(
-            format!("{path}: expected {}", codec_type_name(expected)),
+        _ => Err(CodecFailure::new(
+            format!("{path}: expected {}", codec_type_name(schema)),
             value,
+            schema.rule,
         )),
     }
 }
 
 fn transform_codec_struct(
+    schema: &CodecType,
     fields: &BTreeMap<String, CodecType>,
     value: RichValue,
     direction: CodecDirection,
@@ -2975,7 +3048,11 @@ fn transform_codec_struct(
     background: &Heap,
 ) -> Result<CodecNode, CodecFailure> {
     let RuntimeValue::Dict(handle) = value.value else {
-        return Err(CodecFailure::at(format!("{path}: expected Dict"), value));
+        return Err(CodecFailure::new(
+            format!("{path}: expected Dict"),
+            value,
+            schema.rule,
+        ));
     };
     let view = HeapView {
         current,
@@ -2983,17 +3060,18 @@ fn transform_codec_struct(
     };
     let (names, values) = view
         .dict_parts(handle)
-        .map_err(|error| CodecFailure::at(error.to_string(), value))?;
+        .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?;
     let input = names
         .iter()
         .zip(values)
         .map(|(name, value)| Ok((view.text(*name)?.to_owned(), *value)))
         .collect::<Result<BTreeMap<_, _>, crate::heap::HeapError>>()
-        .map_err(|error| CodecFailure::at(error.to_string(), value))?;
+        .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?;
     if let Some(unknown) = input.keys().find(|name| !fields.contains_key(*name)) {
-        return Err(CodecFailure::at(
+        return Err(CodecFailure::new(
             format!("{path}.{unknown}: unknown field"),
             value,
+            schema.rule,
         ));
     }
     let mut output = Vec::with_capacity(fields.len());
@@ -3004,9 +3082,10 @@ fn transform_codec_struct(
                 CodecNode::Atom(BuiltinAtom::None, value.loc)
             }
             (_, None, _) => {
-                return Err(CodecFailure::at(
+                return Err(CodecFailure::new(
                     format!("{field_path}: missing required field"),
                     value,
+                    field.rule,
                 ));
             }
             (CodecDirection::Decode, Some(input), Some(_))
@@ -3034,24 +3113,26 @@ fn transform_codec_struct(
                 };
                 let tuple = view
                     .sequence(handle, true)
-                    .map_err(|error| CodecFailure::at(error.to_string(), input))?;
+                    .map_err(|error| CodecFailure::new(error.to_string(), input, field.rule))?;
                 if tuple.len() != 2
                     || view
                         .atom_text(tuple[0])
-                        .map_err(|error| CodecFailure::at(error.to_string(), input))?
+                        .map_err(|error| CodecFailure::new(error.to_string(), input, field.rule))?
                         != Some("Some")
                 {
-                    return Err(CodecFailure::at(
+                    return Err(CodecFailure::new(
                         format!("{field_path}: expected Option"),
                         input,
+                        field.rule,
                     ));
                 }
                 transform_codec(item, tuple[1], direction, &field_path, current, background)?
             }
             (CodecDirection::Encode, Some(input), Some(_)) => {
-                return Err(CodecFailure::at(
+                return Err(CodecFailure::new(
                     format!("{field_path}: expected Option"),
                     input,
+                    field.rule,
                 ));
             }
             (_, Some(value), None) => {
@@ -3064,18 +3145,18 @@ fn transform_codec_struct(
 }
 
 fn codec_type_name(schema: &CodecType) -> &'static str {
-    match schema {
-        CodecType::Any => "Any",
-        CodecType::Int => "Int",
-        CodecType::Float => "Float",
-        CodecType::String => "String",
-        CodecType::Bytes => "Bytes",
-        CodecType::Atom(_) => "Atom",
-        CodecType::Array(_) => "Array",
-        CodecType::Tuple(_) => "Tuple",
-        CodecType::Struct(_) => "Struct",
-        CodecType::Union(_) => "Union",
-        CodecType::Function => "Function",
+    match &schema.kind {
+        CodecKind::Any => "Any",
+        CodecKind::Int => "Int",
+        CodecKind::Float => "Float",
+        CodecKind::String => "String",
+        CodecKind::Bytes => "Bytes",
+        CodecKind::Atom(_) => "Atom",
+        CodecKind::Array(_) => "Array",
+        CodecKind::Tuple(_) => "Tuple",
+        CodecKind::Struct(_) => "Struct",
+        CodecKind::Union(_) => "Union",
+        CodecKind::Function => "Function",
     }
 }
 
@@ -3132,6 +3213,8 @@ fn materialize_codec_node(node: CodecNode, current: &mut Heap, background: &Heap
             )
         }
         CodecNode::Dict(fields, loc) => {
+            let mut fields = fields;
+            fields.sort_by(|left, right| left.0.cmp(&right.0));
             let (fields, values): (Vec<_>, Vec<_>) = fields
                 .into_iter()
                 .map(|(name, value)| {
@@ -3198,26 +3281,63 @@ fn run_core_result(
             return_target,
         }),
         Some("Err") => {
-            let message = view
-                .string_text(tuple[1])
-                .map_err(|heap_error| {
+            let (message, data_location, rule_location) = if let Some(message) =
+                view.string_text(tuple[1]).map_err(|heap_error| {
                     error(
                         RuntimeErrorKind::InvalidBytecode,
                         heap_error.to_string(),
                         function,
                         pc,
                     )
-                })?
-                .ok_or_else(|| {
-                    error(
-                        RuntimeErrorKind::TypeMismatch,
-                        "core:result.unwrap Err payload must be a String",
-                        function,
-                        pc,
-                    )
-                })?;
+                })? {
+                (message.to_owned(), tuple[1].loc, None)
+            } else if let RuntimeValue::Dict(handle) = tuple[1].value {
+                let message = view
+                    .dict_get_text(handle, "message")
+                    .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                    .and_then(|message| view.string_text(message).ok().flatten())
+                    .ok_or_else(|| {
+                        error(
+                            RuntimeErrorKind::TypeMismatch,
+                            "structured Err payload message must be a String",
+                            function,
+                            pc,
+                        )
+                    })?
+                    .to_owned();
+                let data = view
+                    .dict_get_text(handle, "data")
+                    .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                    .ok_or_else(|| {
+                        error(
+                            RuntimeErrorKind::TypeMismatch,
+                            "structured Err payload is missing data",
+                            function,
+                            pc,
+                        )
+                    })?;
+                let rule = view
+                    .dict_get_text(handle, "rule")
+                    .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                    .ok_or_else(|| {
+                        error(
+                            RuntimeErrorKind::TypeMismatch,
+                            "structured Err payload is missing rule",
+                            function,
+                            pc,
+                        )
+                    })?;
+                (message, data.loc, rule.loc)
+            } else {
+                return Err(error(
+                    RuntimeErrorKind::TypeMismatch,
+                    "core:result.unwrap Err payload must be a String or diagnostic Dict",
+                    function,
+                    pc,
+                ));
+            };
             let mut runtime_error = error(RuntimeErrorKind::TypeMismatch, message, function, pc);
-            runtime_error.data_location = tuple[1].loc;
+            runtime_error.set_locations(data_location, rule_location);
             Err(runtime_error)
         }
         _ => Err(error(
@@ -3952,7 +4072,7 @@ fn runtime_type_error(
             pc,
         ),
     };
-    runtime_error.data_location = actual.loc;
+    runtime_error.set_data_location(actual.loc);
     runtime_error
 }
 
@@ -3981,7 +4101,7 @@ fn runtime_shallow_type_error(
         function,
         pc,
     );
-    runtime_error.data_location = location;
+    runtime_error.set_data_location(location);
     runtime_error
 }
 
@@ -4001,7 +4121,7 @@ fn runtime_numeric_type_error(
             pc,
         ),
     };
-    runtime_error.data_location = left.loc.or(right.loc);
+    runtime_error.set_data_location(left.loc.or(right.loc));
     runtime_error
 }
 
@@ -4127,7 +4247,7 @@ fn error(
             instruction,
             origin: function.origin_at(instruction),
         }],
-        data_location: None,
+        locations: None,
         rendered: None,
         trace_includes_active_frame: true,
     }

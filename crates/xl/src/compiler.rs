@@ -107,7 +107,7 @@ pub(crate) fn compile_expression_with_bindings(
         parameter_count: 0,
         capture_count: 0,
         closure_index: 0,
-        resolved_types: HashMap::new(),
+        located_constants: HashMap::new(),
         retained_names: HashSet::new(),
         external_values: BTreeMap::new(),
         source_file: Some(source_file),
@@ -134,7 +134,7 @@ struct Compiler<'a> {
     parameter_count: u32,
     capture_count: u32,
     closure_index: usize,
-    resolved_types: HashMap<String, Value>,
+    located_constants: HashMap<String, Value>,
     retained_names: HashSet<String>,
     external_values: BTreeMap<String, Value>,
     source_file: Option<&'a SourceFile>,
@@ -169,6 +169,19 @@ impl<'a> Compiler<'a> {
     ) -> Result<BytecodeFunction, FrontendError> {
         let mut retained_names = HashSet::new();
         collect_runtime_names_block(&program.value.body, &mut retained_names);
+        loop {
+            let before = retained_names.len();
+            for binding in &program.value.body.value.bindings {
+                if binding.value.kind == BindingKind::Type
+                    && retained_names.contains(&binding.value.name.value)
+                {
+                    collect_runtime_names(&binding.value.value, &mut retained_names);
+                }
+            }
+            if retained_names.len() == before {
+                break;
+            }
+        }
         let mut compiler = Self {
             source_name,
             function_name: source_name.to_owned(),
@@ -183,15 +196,21 @@ impl<'a> Compiler<'a> {
             parameter_count: 0,
             capture_count: 0,
             closure_index: 0,
-            resolved_types: analysis.resolved_types.clone(),
+            located_constants: HashMap::new(),
             retained_names,
             external_values: analysis.external_values.clone(),
             source_file,
         };
         for (name, value) in &analysis.prelude {
             if compiler.retained_names.contains(name) {
-                let register = compiler.load_constant(value.clone(), program.location);
-                compiler.environment.insert(name.clone(), register);
+                if matches!(value, Value::Func(_)) {
+                    let register = compiler.load_constant(value.clone(), program.location);
+                    compiler.environment.insert(name.clone(), register);
+                } else {
+                    compiler
+                        .located_constants
+                        .insert(name.clone(), value.clone());
+                }
             }
         }
         for name in &analysis.dynamic_bindings {
@@ -269,7 +288,7 @@ impl<'a> Compiler<'a> {
             capture_count: u32::try_from(captures.len())
                 .map_err(|_| frontend_error(source_name, "too many closure captures"))?,
             closure_index: 0,
-            resolved_types: HashMap::new(),
+            located_constants: HashMap::new(),
             retained_names: HashSet::new(),
             external_values: BTreeMap::new(),
             source_file,
@@ -406,17 +425,7 @@ impl<'a> Compiler<'a> {
                 BindingKind::Decl => continue,
                 BindingKind::Type => {
                     if self.retained_names.contains(&binding.value.name.value) {
-                        let value = self
-                            .resolved_types
-                            .get(&binding.value.name.value)
-                            .cloned()
-                            .ok_or_else(|| {
-                                frontend_error(
-                                    self.source_name,
-                                    "nested type declarations are not supported in the MVP",
-                                )
-                            })?;
-                        let register = self.load_constant(value, binding.location);
+                        let register = self.compile_expr(&binding.value.value)?;
                         self.environment
                             .insert(binding.value.name.value.clone(), register);
                     }
@@ -541,6 +550,9 @@ impl<'a> Compiler<'a> {
             }
             ExprKind::Atom(name) => Ok(self.load_constant(atom_value(name), expression.location)),
             ExprKind::Variable(name) => {
+                if let Some(value) = self.located_constants.get(&name.value).cloned() {
+                    return Ok(self.load_constant(value, expression.location));
+                }
                 let register = self.environment.get(&name.value).copied().ok_or_else(|| {
                     self.error_at(
                         expression.location,

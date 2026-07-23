@@ -775,7 +775,7 @@ mod tests {
         assert!(failure.message.contains("$.v"), "{}", failure.message);
         assert!(failure.message.contains("String"), "{}", failure.message);
         let data_location = failure
-            .data_location
+            .data_location()
             .expect("codec failure must retain the invalid JSON value location");
         assert_eq!(
             module.sources.get(data_location.source).name.as_ref(),
@@ -790,8 +790,67 @@ mod tests {
         );
         let rendered = failure.to_string();
         assert!(rendered.contains("abc.json:1:6:"), "{rendered}");
-        assert!(rendered.contains("operation originated here"), "{rendered}");
-        assert!(rendered.contains("main.xl:"), "{rendered}");
+        assert!(
+            rendered.contains("contract rule declared here"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("User.xl:6:48:"), "{rendered}");
+
+        fs::write(
+            directory.join("inspect.xl"),
+            r#"import data from "./abc.json";
+               import User from "./User.xl";
+               data |> User.decode"#,
+        )
+        .unwrap();
+        let inspected = load_module(directory.join("inspect.xl"), BTreeMap::new(), 100_000)
+            .unwrap()
+            .execute(100_000)
+            .unwrap();
+        let Value::Tuple(result) = inspected else {
+            panic!("codec must return a tagged Result")
+        };
+        assert_eq!(result[0].to_string(), "'Err");
+        let Value::Dict(payload) = &result[1] else {
+            panic!("codec failure must be an ordinary diagnostic Dict")
+        };
+        assert!(payload.get("message").is_some());
+        assert_eq!(payload.get("data").unwrap().to_string(), "1");
+        assert_eq!(payload.get("rule").unwrap().to_string(), "{kind: 'String}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn codec_accepts_user_computed_canonical_type_metadata() {
+        let directory = fixture_dir();
+        fs::write(directory.join("data.json"), r#"{"v":"plain"}"#).unwrap();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import data from "./data.json";
+               import codec from "core:codec";
+               import result from "core:result";
+               type StringRule = {kind: 'String};
+               type UserRule = {kind: 'Struct, fields: {v: StringRule}};
+               codec.decode(UserRule, data) |> result.unwrap"#,
+        )
+        .unwrap();
+
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            module.execute(100_000).unwrap().to_string(),
+            "{v: \"plain\"}"
+        );
+
+        fs::write(
+            directory.join("legacy.xl"),
+            r#"import result from "core:result"; result.unwrap(('Err, "legacy"))"#,
+        )
+        .unwrap();
+        let legacy = load_module(directory.join("legacy.xl"), BTreeMap::new(), 100_000)
+            .unwrap()
+            .execute(100_000)
+            .unwrap_err();
+        assert_eq!(legacy.message, "legacy");
         fs::remove_dir_all(directory).unwrap();
     }
 

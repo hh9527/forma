@@ -153,7 +153,6 @@ pub struct Analysis {
     pub declared_types: BTreeMap<String, TypeDescriptor>,
     pub binding_types: BTreeMap<String, TypeDescriptor>,
     pub result_type: TypeDescriptor,
-    pub(crate) resolved_types: HashMap<String, Value>,
     pub(crate) prelude: BTreeMap<String, Value>,
     pub(crate) external_values: BTreeMap<String, Value>,
     pub(crate) dynamic_bindings: HashSet<String>,
@@ -258,7 +257,6 @@ pub(crate) fn analyze_program_with_bindings_observed(
     let mut static_environment = HashMap::new();
     let mut declared_types = BTreeMap::new();
     let mut binding_types = BTreeMap::new();
-    let mut resolved_types = HashMap::new();
     let mut declared_type_spans = HashMap::new();
 
     for name in dynamic_bindings {
@@ -395,7 +393,6 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 })?;
                 declared_types.insert(binding.value.name.value.clone(), descriptor);
                 declared_type_spans.insert(binding.value.name.value.clone(), binding.location);
-                resolved_types.insert(binding.value.name.value.clone(), value.clone());
                 tool_values.insert(binding.value.name.value.clone(), value);
             }
             BindingKind::Let => {
@@ -550,7 +547,6 @@ pub(crate) fn analyze_program_with_bindings_observed(
         declared_types,
         binding_types,
         result_type,
-        resolved_types,
         prelude,
         external_values: external_values.clone(),
         dynamic_bindings: dynamic_bindings.clone(),
@@ -654,17 +650,14 @@ fn native_atom_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError
     let Some(atom) = context.value(argument)?.as_atom() else {
         return Err(NativeError::new("Atom expects an Atom value"));
     };
-    let descriptor = TypeDescriptor::Atom(atom_from_name(atom));
-    write_native_type(context, context.result(), &descriptor)
+    let _ = atom_from_name(atom);
+    write_native_type_record(context, "Atom", &[("tag", argument)])
 }
 
 fn native_array_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
-    let item = decode_native_type(context.value(context.argument(0)?)?)?;
-    write_native_type(
-        context,
-        context.result(),
-        &TypeDescriptor::Array(Box::new(item)),
-    )
+    let item = context.argument(0)?;
+    decode_native_type(context.value(item)?)?;
+    write_native_type_record(context, "Array", &[("item", item)])
 }
 
 fn native_tuple_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
@@ -672,10 +665,10 @@ fn native_tuple_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeErro
     if value.kind() != ValueKind::Array {
         return Err(NativeError::new("Tuple expects an Array of Types"));
     }
-    let items = (0..value.sequence_len().expect("Array has a length"))
-        .map(|index| decode_native_type(value.sequence_get(index).expect("valid Array index")))
-        .collect::<Result<Vec<_>, _>>()?;
-    write_native_type(context, context.result(), &TypeDescriptor::Tuple(items))
+    for index in 0..value.sequence_len().expect("Array has a length") {
+        decode_native_type(value.sequence_get(index).expect("valid Array index"))?;
+    }
+    write_native_type_record(context, "Tuple", &[("items", context.argument(0)?)])
 }
 
 fn native_struct_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
@@ -683,16 +676,10 @@ fn native_struct_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeErr
     let Some(names) = value.dict_fields() else {
         return Err(NativeError::new("Struct expects a Dict of Types"));
     };
-    let fields = names
-        .iter()
-        .map(|name| {
-            Ok((
-                (*name).to_owned(),
-                decode_native_type(value.dict_get(name).expect("Dict field exists"))?,
-            ))
-        })
-        .collect::<Result<BTreeMap<_, _>, NativeError>>()?;
-    write_native_type(context, context.result(), &TypeDescriptor::Struct(fields))
+    for name in names {
+        decode_native_type(value.dict_get(name).expect("Dict field exists"))?;
+    }
+    write_native_type_record(context, "Struct", &[("fields", context.argument(0)?)])
 }
 
 fn native_union_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
@@ -704,10 +691,10 @@ fn native_union_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeErro
     if length == 0 {
         return Err(NativeError::new("Union requires at least one variant"));
     }
-    let variants = (0..length)
-        .map(|index| decode_native_type(value.sequence_get(index).expect("valid Array index")))
-        .collect::<Result<Vec<_>, _>>()?;
-    write_native_type(context, context.result(), &TypeDescriptor::Union(variants))
+    for index in 0..length {
+        decode_native_type(value.sequence_get(index).expect("valid Array index"))?;
+    }
+    write_native_type_record(context, "Union", &[("variants", context.argument(0)?)])
 }
 
 fn native_function_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
@@ -715,24 +702,37 @@ fn native_function_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeE
     if parameters_value.kind() != ValueKind::Array {
         return Err(NativeError::new("Fn expects an Array of parameter Types"));
     }
-    let parameters = (0..parameters_value.sequence_len().expect("Array has a length"))
-        .map(|index| {
-            decode_native_type(
-                parameters_value
-                    .sequence_get(index)
-                    .expect("valid Array index"),
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let result = decode_native_type(context.value(context.argument(1)?)?)?;
-    write_native_type(
+    for index in 0..parameters_value.sequence_len().expect("Array has a length") {
+        decode_native_type(
+            parameters_value
+                .sequence_get(index)
+                .expect("valid Array index"),
+        )?;
+    }
+    let result = context.argument(1)?;
+    decode_native_type(context.value(result)?)?;
+    write_native_type_record(
         context,
-        context.result(),
-        &TypeDescriptor::Function {
-            parameters,
-            result: Box::new(result),
-        },
+        "Function",
+        &[("parameters", context.argument(0)?), ("result", result)],
     )
+}
+
+fn write_native_type_record(
+    context: &mut CallContext<'_, '_>,
+    kind_name: &str,
+    preserved_fields: &[(&str, RegisterId)],
+) -> Result<(), NativeError> {
+    let kind = context.scratch()?;
+    context.set_atom(kind, kind_name)?;
+    let mut fields = Vec::with_capacity(preserved_fields.len() + 1);
+    fields.push(("kind".to_owned(), kind));
+    fields.extend(
+        preserved_fields
+            .iter()
+            .map(|(name, register)| ((*name).to_owned(), *register)),
+    );
+    context.make_dict(context.result(), &fields)
 }
 
 fn native_validate(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
@@ -886,91 +886,6 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
         }
         _ => return Err(format!("{path}.kind has unknown value '{kind}")),
     })
-}
-
-fn write_native_type(
-    context: &mut CallContext<'_, '_>,
-    destination: RegisterId,
-    descriptor: &TypeDescriptor,
-) -> Result<(), NativeError> {
-    let kind = context.scratch()?;
-    let name = match descriptor {
-        TypeDescriptor::Any => "Any",
-        TypeDescriptor::Int => "Int",
-        TypeDescriptor::Float => "Float",
-        TypeDescriptor::String => "String",
-        TypeDescriptor::Bytes => "Bytes",
-        TypeDescriptor::Atom(_) => "Atom",
-        TypeDescriptor::Array(_) => "Array",
-        TypeDescriptor::Tuple(_) => "Tuple",
-        TypeDescriptor::Struct(_) => "Struct",
-        TypeDescriptor::Union(_) => "Union",
-        TypeDescriptor::Function { .. } => "Function",
-    };
-    context.set_atom(kind, name)?;
-    let mut fields = vec![("kind".to_owned(), kind)];
-    match descriptor {
-        TypeDescriptor::Atom(atom) => {
-            let tag = context.scratch()?;
-            context.set_atom(tag, atom.name())?;
-            fields.push(("tag".into(), tag));
-        }
-        TypeDescriptor::Array(item) => {
-            let value = context.scratch()?;
-            write_native_type(context, value, item)?;
-            fields.push(("item".into(), value));
-        }
-        TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
-            let mut item_registers = Vec::with_capacity(items.len());
-            for item in items {
-                let register = context.scratch()?;
-                write_native_type(context, register, item)?;
-                item_registers.push(register);
-            }
-            let sequence = context.scratch()?;
-            context.make_array(sequence, &item_registers)?;
-            fields.push((
-                if matches!(descriptor, TypeDescriptor::Tuple(_)) {
-                    "items"
-                } else {
-                    "variants"
-                }
-                .into(),
-                sequence,
-            ));
-        }
-        TypeDescriptor::Struct(items) => {
-            let mut item_fields = Vec::with_capacity(items.len());
-            for (name, item) in items {
-                let register = context.scratch()?;
-                write_native_type(context, register, item)?;
-                item_fields.push((name.clone(), register));
-            }
-            let value = context.scratch()?;
-            context.make_dict(value, &item_fields)?;
-            fields.push(("fields".into(), value));
-        }
-        TypeDescriptor::Function { parameters, result } => {
-            let mut parameter_registers = Vec::with_capacity(parameters.len());
-            for parameter in parameters {
-                let register = context.scratch()?;
-                write_native_type(context, register, parameter)?;
-                parameter_registers.push(register);
-            }
-            let values = context.scratch()?;
-            context.make_array(values, &parameter_registers)?;
-            fields.push(("parameters".into(), values));
-            let value = context.scratch()?;
-            write_native_type(context, value, result)?;
-            fields.push(("result".into(), value));
-        }
-        TypeDescriptor::Any
-        | TypeDescriptor::Int
-        | TypeDescriptor::Float
-        | TypeDescriptor::String
-        | TypeDescriptor::Bytes => {}
-    }
-    context.make_dict(destination, &fields)
 }
 
 fn validate_value_ref(

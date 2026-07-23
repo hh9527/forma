@@ -127,6 +127,12 @@ shape, including missing and null fields, while `User.encode` returns a strict
 JSON-domain value. JSON serialization is deterministic and rejects XL-only
 values that have not crossed an explicit codec.
 
+Type declarations evaluate to the same canonical Dict/Array/Atom metadata that
+ordinary XL expressions can construct. Built-in constructors validate and wrap
+their rich XL arguments; they do not create a privileged schema object. Codec
+failures are ordinary `('Err, {message, data, rule})` values until
+`result.unwrap` renders data and contract-rule source labels.
+
 ## Current limits
 
 The MVP has no effects, package manager, LSP server, traits, HKT, YAML/TOML
