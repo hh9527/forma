@@ -156,7 +156,12 @@ because decorators remain explicit AST data.
 
 - decorators on other binding and member categories;
 - arbitrary decorator expressions;
-- `Struct { ... }` application sugar;
+- a uniform explicit-call convention in which decorator-capable functions
+  accept `ctx | 'None` as their first argument, so `@struct type T = fields`
+  and `struct('None, fields)` share one ordinary XL function;
+- replacing the preferred surface use of built-in TypeMetadata constructors
+  such as `Struct(fields)` with decorator-capable lowercase XL library
+  functions; the canonical `{kind: 'Struct, fields}` data remains authoritative;
 - standard WithAttributes constructors and scanning library;
 - resolved HIR representation and decorator expansion views;
 - LSP hover, definition navigation, and evaluated metadata display.
