@@ -47,3 +47,4 @@ semantics from an earlier RFC.
 27. Normalized Struct and Enum model metadata.
 28. Unified lowercase Struct, Enum, and Union model constructors.
 29. Built-in normalized Bool, Option, and Result types.
+30. Standard JSON model attribute decorators and payload vocabulary.
