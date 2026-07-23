@@ -1,6 +1,6 @@
 # RFC 0029: Built-in Bool, Option, and Result types
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0027, RFC 0028
 
 ## Summary
@@ -133,4 +133,31 @@ the standard spelling no longer requires repeating tagged Tuple structure.
 
 ## Implementation result
 
-Pending.
+The prelude now publishes `Bool` as a fully normalized legacy boundary value:
+its root and False/True unit variants are flat WithAttributes wrappers around
+ordinary `'Enum` metadata and `'None` markers. Linking that value into runtime
+bytecode preserves the same graph; Bool does not have a special runtime kind.
+
+`Option` and `Result` are VM-managed native Func values under a dedicated
+focused-type dispatch. Option builds normalized None/Some metadata; Result
+builds normalized Err/Ok metadata. Payload wrappers are flattened directly
+through `HeapView`, their attributes and rich inner values are retained, and
+every newly allocated wrapper, Dict, and metadata node is charged to the active
+quota. Invalid payload metadata fails at the constructor call.
+
+Enum assignability now handles an inferred Union as a source by requiring each
+of its alternatives to be assignable to the target Enum. This makes comparison
+results inferred as `'True | 'False` assignable to authoritative Bool metadata
+without rewriting either representation.
+
+The codec planner recognizes the normalized Enum shape of Option in addition
+to the historical structural Union encoding. Existing missing/null decoding
+and `'None`/`('Some, value)` encoding therefore continue to work. Other Enums,
+including Result, still require an explicit external representation policy.
+
+Examples, README snippets, and codec module fixtures now use built-in Option
+instead of repeating an Optional closure. Tests cover normalized raw metadata,
+payload attribute preservation, Bool comparison annotations, all valid runtime
+forms, invalid tags and payloads, constructor input errors, allocation
+exhaustion, Option codec round trips, and compatibility with a hand-written
+Union-based Optional definition.

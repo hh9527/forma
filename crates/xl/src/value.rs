@@ -197,6 +197,28 @@ impl CoreModelFunction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreBuiltinTypeFunction {
+    Option,
+    Result,
+}
+
+impl CoreBuiltinTypeFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Option => "Option",
+            Self::Result => "Result",
+        }
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        match self {
+            Self::Option => 1,
+            Self::Result => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CoreDebugFunction {
     Dbg,
     DbgWith,
@@ -318,6 +340,7 @@ pub(crate) enum NativeKind {
     CoreArray(CoreArrayFunction),
     CoreAttributes(CoreAttributesFunction),
     CoreModel(CoreModelFunction),
+    CoreBuiltinType(CoreBuiltinTypeFunction),
     CoreDict(CoreDictFunction),
     CoreDebug(CoreDebugFunction),
     CoreCodec(CoreCodecFunction),
@@ -367,6 +390,15 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreModel(function),
+        }
+    }
+
+    pub(crate) const fn core_builtin_type(function: CoreBuiltinTypeFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreBuiltinType(function),
         }
     }
 

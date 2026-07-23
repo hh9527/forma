@@ -1,17 +1,10 @@
 import raw_user from "./user.json";
 
-fn Optional(item) {
-    union('None, [
-        Atom('None),
-        Tuple([Atom('Some), item]),
-    ])
-}
-
 @struct
 type User = {
     name: String,
     age: Int,
-    nickname: Optional(String),
+    nickname: Option(String),
 };
 
 let user: User = raw_user;

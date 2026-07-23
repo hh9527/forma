@@ -861,10 +861,7 @@ mod tests {
             directory.join("User.xl"),
             r#"import codec from "core:codec";
                import result from "core:result";
-               fn Optional(item) {
-                   union('None, [Atom('None), Tuple([Atom('Some), item])])
-               }
-               @struct type Type = {v: Optional(String)};
+               @struct type Type = {v: Option(String)};
                let decode = fn(value) { codec.decode(Type, value) };
                let encode = fn(value) {
                    codec.encode(Type, value) |> result.unwrap
@@ -923,7 +920,7 @@ mod tests {
             rendered.contains("contract rule declared here"),
             "{rendered}"
         );
-        assert!(rendered.contains("User.xl:6:49:"), "{rendered}");
+        assert!(rendered.contains("User.xl:3:47:"), "{rendered}");
 
         fs::write(
             directory.join("inspect.xl"),
@@ -1910,6 +1907,111 @@ mod tests {
         for field in ["unknown", "missing", "unexpected", "wrong", "codec"] {
             assert!(result.get(field).unwrap().to_string().starts_with("('Err,"));
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn builtin_bool_option_and_result_are_normalized_enum_metadata() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import attributes from "core:attributes";
+               type Maybe = Option(attributes.add(Int, { marker: "payload" }));
+               type Outcome = Result(String, Int);
+               let compared: Bool = 1 < 2;
+               let none: Maybe = 'None;
+               let some: Maybe = ('Some, 42);
+               let ok: Outcome = ('Ok, "done");
+               let err: Outcome = ('Err, 7);
+               {
+                   bool: Bool,
+                   maybe: Maybe,
+                   outcome: Outcome,
+                   compared: validate(Bool, compared),
+                   none: validate(Maybe, none),
+                   some: validate(Maybe, some),
+                   ok: validate(Outcome, ok),
+                   err: validate(Outcome, err),
+                   wrong_bool: validate(Bool, 'Other),
+                   wrong_some: validate(Maybe, ('Some, "forty-two")),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(result) = module.execute(100_000).unwrap() else {
+            panic!("expected built-in type results")
+        };
+        for field in ["compared", "none", "some", "ok", "err"] {
+            assert!(result.get(field).unwrap().to_string().starts_with("('Ok,"));
+        }
+        for field in ["wrong_bool", "wrong_some"] {
+            assert!(result.get(field).unwrap().to_string().starts_with("('Err,"));
+        }
+
+        fn wrapper(value: &Value) -> &crate::Dict {
+            let Value::Dict(wrapper) = value else {
+                panic!("expected WithAttributes wrapper")
+            };
+            assert_eq!(wrapper.get("kind").unwrap().to_string(), "'WithAttributes");
+            assert!(matches!(wrapper.get("attributes"), Some(Value::Dict(_))));
+            wrapper
+        }
+        for field in ["bool", "maybe", "outcome"] {
+            let root = wrapper(result.get(field).unwrap());
+            let Value::Dict(metadata) = root.get("inner").unwrap() else {
+                panic!("expected Enum metadata")
+            };
+            assert_eq!(metadata.get("kind").unwrap().to_string(), "'Enum");
+            let Value::Dict(variants) = metadata.get("variants").unwrap() else {
+                panic!("expected Enum variants")
+            };
+            for variant in variants.values() {
+                wrapper(variant);
+            }
+        }
+        let maybe = wrapper(result.get("maybe").unwrap());
+        let Value::Dict(metadata) = maybe.get("inner").unwrap() else {
+            panic!("expected Option metadata")
+        };
+        let Value::Dict(variants) = metadata.get("variants").unwrap() else {
+            panic!("expected Option variants")
+        };
+        let some = wrapper(variants.get("Some").unwrap());
+        assert_eq!(
+            some.get("attributes").unwrap().to_string(),
+            "{marker: \"payload\"}"
+        );
+        let none = wrapper(variants.get("None").unwrap());
+        assert_eq!(none.get("inner").unwrap().to_string(), "'None");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn builtin_enum_type_constructors_validate_inputs_and_charge_quota() {
+        let directory = fixture_dir();
+        let invalid_path = directory.join("invalid.xl");
+        fs::write(&invalid_path, "Option(1)").unwrap();
+        let invalid = load_module(&invalid_path, BTreeMap::new(), 100_000)
+            .unwrap()
+            .execute(100_000)
+            .unwrap_err();
+        assert!(invalid.message.contains("Type metadata"));
+
+        let quota_path = directory.join("quota.xl");
+        fs::write(&quota_path, "Result(String, Int)").unwrap();
+        let module = load_module(&quota_path, BTreeMap::new(), 100_000).unwrap();
+        let mut account = QuotaAccount::new(Quota::new(10, 1_000, 0));
+        let error = Vm::new()
+            .execute_in_work(
+                &module.runtime.main.heap,
+                &module.runtime.externals,
+                &module.function,
+                &[],
+                &mut account,
+            )
+            .err()
+            .expect("Result construction must exhaust allocation quota");
+        assert_eq!(error.kind, crate::RuntimeErrorKind::AllocationQuotaExceeded);
         fs::remove_dir_all(directory).unwrap();
     }
 

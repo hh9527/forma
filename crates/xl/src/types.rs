@@ -8,7 +8,9 @@ use crate::lexer::{FrontendError, SourceLocation};
 use crate::lir::RegisterId;
 use crate::parser::parse_registered;
 use crate::source::{Diagnostic, SourceDatabase};
-use crate::value::{Atom, Closure, CoreModelFunction, NativeError, NativeFunction, Value};
+use crate::value::{
+    Atom, Closure, CoreBuiltinTypeFunction, CoreModelFunction, NativeError, NativeFunction, Value,
+};
 use crate::{
     BuiltinAtom, CallContext, DebugSink, DiscardDebugSink, Quota, QuotaAccount, ValueKind,
     ValueRef, Vm,
@@ -680,10 +682,13 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
     ] {
         prelude.insert(name.into(), descriptor.to_value(vm));
     }
+    prelude.insert("Bool".into(), normalized_bool_value(vm));
     for function in [
         NativeFunction::core_model(CoreModelFunction::Struct),
         NativeFunction::core_model(CoreModelFunction::Enum),
         NativeFunction::core_model(CoreModelFunction::Union),
+        NativeFunction::core_builtin_type(CoreBuiltinTypeFunction::Option),
+        NativeFunction::core_builtin_type(CoreBuiltinTypeFunction::Result),
         NativeFunction::new("Atom", 1, native_atom_type),
         NativeFunction::new("Array", 1, native_array_type),
         NativeFunction::new("Tuple", 1, native_tuple_type),
@@ -696,6 +701,35 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
         );
     }
     prelude
+}
+
+fn normalized_bool_value(vm: &mut Vm) -> Value {
+    let variants = ["False", "True"]
+        .into_iter()
+        .map(|name| (name.into(), normalized_legacy_value(vm, Value::none())))
+        .collect::<Vec<_>>();
+    let variants = vm
+        .make_dict(variants)
+        .expect("Bool variant names are unique");
+    let metadata = vm
+        .make_dict(vec![
+            ("kind".into(), Value::atom("Enum")),
+            ("variants".into(), variants),
+        ])
+        .expect("Bool metadata fields are unique");
+    normalized_legacy_value(vm, metadata)
+}
+
+fn normalized_legacy_value(vm: &mut Vm, inner: Value) -> Value {
+    let attributes = vm
+        .make_dict(Vec::new())
+        .expect("empty attributes are unique");
+    vm.make_dict(vec![
+        ("attributes".into(), attributes),
+        ("inner".into(), inner),
+        ("kind".into(), Value::atom("WithAttributes")),
+    ])
+    .expect("WithAttributes fields are unique")
 }
 
 fn native_atom_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
@@ -1586,6 +1620,9 @@ fn assignable(actual: &TypeDescriptor, expected: &TypeDescriptor) -> bool {
                             _ => false,
                         })
                 })
+        }
+        (TypeDescriptor::Union(variants), expected @ TypeDescriptor::Enum(_)) => {
+            variants.iter().all(|variant| assignable(variant, expected))
         }
         (actual, TypeDescriptor::Enum(variants)) => variants.iter().any(|(name, payload)| {
             assignable(actual, &enum_variant_type(name, payload.as_deref()))

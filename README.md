@@ -31,25 +31,18 @@ cargo run -p xl -- run examples/mvp/main.xl
 cargo run -p xl -- run examples/mvp/external.xl --input examples/mvp/request.json
 ```
 
-The core example defines `Optional` as an ordinary function over Type metadata,
-checks an imported JSON value against a computed structural type, and uses the
-same metadata with `validate` at runtime.
+The core example uses built-in normalized `Option` metadata, checks an imported
+JSON value against a computed structural type, and uses the same metadata with
+`validate` at runtime.
 
 ## Syntax snapshot
 
 ```text
-fn Optional(item) {
-    union('None, [
-        Atom('None),
-        Tuple([Atom('Some), item]),
-    ])
-}
-
 @struct
 type User = {
     name: String,
     age: Int,
-    nickname: Optional(String),
+    nickname: Option(String),
 };
 
 let user: User = imported_user;
@@ -225,6 +218,19 @@ variant and `('Found, user)` for a payload variant. Explicit construction uses
 `union('None, variants)`. The old `Struct` and `Union` prelude bindings have
 been removed; canonical `'Struct`, `'Enum`, and `'Union` metadata Dicts remain
 ordinary valid XL data.
+
+The focused built-in Enum types use the same metadata protocol:
+
+```xl
+let enabled: Bool = 'True;
+let nickname: Option(String) = ('Some, "Ada");
+let outcome: Result(Int, String) = ('Ok, 42);
+```
+
+`Bool` is the normalized unit Enum `{False, True}`. `Option(T)` is the
+normalized Enum `{None, Some(T)}`, and `Result(T, E)` is `{Err(E), Ok(T)}`.
+They add no runtime value kind: values remain Atoms or two-element tagged
+Tuples.
 
 ## Current limits
 

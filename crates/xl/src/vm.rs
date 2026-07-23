@@ -4,9 +4,9 @@ use crate::heap::{
 };
 use crate::lir::RegisterId;
 use crate::value::{
-    BuiltinAtom, CoreArrayFunction, CoreAttributesFunction, CoreCodecFunction, CoreDebugFunction,
-    CoreDictFunction, CoreJsonFunction, CoreModelFunction, CoreResultFunction, Dict, NativeError,
-    NativeKind, NativeLimit, Shape, Value,
+    BuiltinAtom, CoreArrayFunction, CoreAttributesFunction, CoreBuiltinTypeFunction,
+    CoreCodecFunction, CoreDebugFunction, CoreDictFunction, CoreJsonFunction, CoreModelFunction,
+    CoreResultFunction, Dict, NativeError, NativeKind, NativeLimit, Shape, Value,
 };
 use crate::{Diagnostic, Origin, SourceDatabase};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -1971,6 +1971,16 @@ fn drive_vm_action(
                             background,
                             account,
                         )?,
+                        NativeKind::CoreBuiltinType(function) => run_core_builtin_type(
+                            function,
+                            &arguments,
+                            return_target,
+                            &call_function,
+                            call_pc,
+                            current,
+                            background,
+                            account,
+                        )?,
                         NativeKind::CoreDict(function) => run_core_dict(
                             function,
                             &arguments,
@@ -3093,6 +3103,95 @@ fn run_core_union_model(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_core_builtin_type(
+    operation: CoreBuiltinTypeFunction,
+    arguments: &[RichValue],
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let variants = match operation {
+        CoreBuiltinTypeFunction::Option => vec![
+            ("None".to_owned(), None),
+            ("Some".to_owned(), Some(arguments[0])),
+        ],
+        CoreBuiltinTypeFunction::Result => vec![
+            ("Err".to_owned(), Some(arguments[1])),
+            ("Ok".to_owned(), Some(arguments[0])),
+        ],
+    };
+    let value = allocate_builtin_enum(variants, function, pc, current, background, account)?;
+    Ok(VmAction::Return {
+        value,
+        return_target,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn allocate_builtin_enum(
+    variants: Vec<(String, Option<RichValue>)>,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<RichValue, RuntimeError> {
+    let loc = instruction_location(function, pc);
+    let mut normalized = Vec::with_capacity(variants.len());
+    for (name, payload) in variants {
+        let path = format!("variants.{name}");
+        let (inner, attributes) = if let Some(payload) = payload {
+            let (inner, attributes) =
+                flatten_attributes(payload, &path, function, pc, current, background)?;
+            decode_runtime_type_at(inner, &path, current, background)
+                .map_err(|message| error(RuntimeErrorKind::TypeMismatch, message, function, pc))?;
+            (inner, attributes)
+        } else {
+            (
+                RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::None), loc),
+                BTreeMap::new(),
+            )
+        };
+        let variant = allocate_attributes_wrapper(
+            inner,
+            attributes,
+            inner.loc.or(loc),
+            function,
+            pc,
+            current,
+            account,
+        )?;
+        normalized.push((name, variant));
+    }
+    let variants = allocate_core_dict(normalized, function, pc, current, account)?;
+    let metadata = allocate_core_dict(
+        vec![
+            (
+                "kind".into(),
+                RichValue::new(RuntimeValue::Atom(current.intern("Enum")), loc),
+            ),
+            ("variants".into(), variants),
+        ],
+        function,
+        pc,
+        current,
+        account,
+    )?;
+    allocate_attributes_wrapper(
+        metadata,
+        BTreeMap::new(),
+        loc,
+        function,
+        pc,
+        current,
+        account,
+    )
+}
+
 fn validate_model_context(
     context: RichValue,
     function: &BytecodeFunction,
@@ -3473,6 +3572,15 @@ fn strip_runtime_attributes(
 }
 
 fn option_item(schema: &CodecType) -> Option<&CodecType> {
+    if let CodecKind::Enum(variants) = &schema.kind {
+        if variants.len() == 2 && matches!(variants.get("None"), Some(None)) {
+            return variants
+                .get("Some")
+                .and_then(Option::as_ref)
+                .map(Box::as_ref);
+        }
+        return None;
+    }
     let CodecKind::Union(variants) = &schema.kind else {
         return None;
     };
