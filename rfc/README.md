@@ -52,3 +52,4 @@ semantics from an earlier RFC.
 32. Serde-style externally tagged and untagged Enum JSON codecs.
 33. JSON Schema generation from the shared codec metadata plan.
 34. Recursive TypeMetadata graphs through hidden up-links.
+35. Once-only authoritative TypeMetadata promotion and graph analysis.
