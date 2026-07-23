@@ -46,3 +46,4 @@ semantics from an earlier RFC.
 26. Flat attributed values and transparent TypeMetadata wrappers.
 27. Normalized Struct and Enum model metadata.
 28. Unified lowercase Struct, Enum, and Union model constructors.
+29. Built-in normalized Bool, Option, and Result types.
