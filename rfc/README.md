@@ -69,3 +69,4 @@ semantics from an earlier RFC.
 48. Declaration-generic native capabilities.
 49. Explicit generic definition contracts.
 50. Unified function bindings and contracts.
+51. TypeMetadata metatype.
