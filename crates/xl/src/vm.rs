@@ -3923,6 +3923,7 @@ fn decode_runtime_type_at(
         return Ok(decoded);
     }
     let kind = match kind {
+        "Bound" => CodecKind::Any,
         "Any" => CodecKind::Any,
         "Int" => CodecKind::Int,
         "Float" => CodecKind::Float,

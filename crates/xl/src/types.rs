@@ -3073,6 +3073,18 @@ impl<'a> GenericInference<'a> {
                     payload: right,
                 },
             ) if left_tag == right_tag => self.unify(left, right),
+            (TypeDescriptor::Tagged { tag, payload }, TypeDescriptor::Enum(variants))
+            | (TypeDescriptor::Enum(variants), TypeDescriptor::Tagged { tag, payload }) => variants
+                .get(tag.name())
+                .and_then(Option::as_deref)
+                .ok_or_else(|| format!("Enum has no payload variant '{}", tag.name()))
+                .and_then(|expected| self.unify(payload, expected)),
+            (TypeDescriptor::Atom(tag), TypeDescriptor::Enum(variants))
+            | (TypeDescriptor::Enum(variants), TypeDescriptor::Atom(tag))
+                if variants.get(tag.name()).is_some_and(Option::is_none) =>
+            {
+                Ok(())
+            }
             (TypeDescriptor::Atom(tag), TypeDescriptor::Function { parameters, result })
             | (TypeDescriptor::Function { parameters, result }, TypeDescriptor::Atom(tag))
                 if parameters.len() == 1 =>
@@ -3099,6 +3111,20 @@ impl<'a> GenericInference<'a> {
             {
                 for (name, left) in left {
                     self.unify(left, &right[name])?;
+                }
+                Ok(())
+            }
+            (TypeDescriptor::Enum(left), TypeDescriptor::Enum(right))
+                if left.keys().eq(right.keys()) =>
+            {
+                for (name, left) in left {
+                    match (left.as_deref(), right[name].as_deref()) {
+                        (None, None) => {}
+                        (Some(left), Some(right)) => self.unify(left, right)?,
+                        _ => {
+                            return Err(format!("Enum variant {name} payload shape differs"));
+                        }
+                    }
                 }
                 Ok(())
             }

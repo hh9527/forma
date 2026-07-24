@@ -1,6 +1,6 @@
 # RFC 0053: Generic core combinators
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0015, RFC 0016, RFC 0029, RFC 0048, RFC 0052, RFC 0054
 
 ## Summary

@@ -8,6 +8,7 @@ pub(crate) const ATTRIBUTES_MODULE: &str = "core:attributes";
 pub(crate) const DICT_MODULE: &str = "core:dict";
 pub(crate) const DEBUG_MODULE: &str = "core:debug";
 pub(crate) const CODEC_MODULE: &str = "core:codec";
+pub(crate) const OPTION_MODULE: &str = "core:option";
 pub(crate) const RESULT_MODULE: &str = "core:result";
 pub(crate) const JSON_MODULE: &str = "core:json";
 
@@ -62,7 +63,7 @@ native strip: Fn(Any) -> Any;
             source: r#"
 native length: for(A) Fn(Array(A)) -> Int;
 native map: for(A, B) Fn(Array(A), Fn(A) -> B) -> Array(B);
-native filter: for(A) Fn(Array(A), Fn(A) -> Any) -> Array(A);
+native filter: for(A) Fn(Array(A), Fn(A) -> Bool) -> Array(A);
 native flat_map: for(A, B) Fn(Array(A), Fn(A) -> Array(B)) -> Array(B);
 native fold: for(A, B) Fn(Array(A), B, Fn(B, A) -> B) -> B;
 { length: length, map: map, filter: filter, flat_map: flat_map, fold: fold }
@@ -89,8 +90,8 @@ native fold: for(A, B) Fn(Array(A), B, Fn(B, A) -> B) -> B;
             source: r#"
 native keys: Fn(Any) -> Array(String);
 native values: Fn(Any) -> Array(Any);
-native pairs: Fn(Any) -> Array(Any);
-native from_pairs: Fn(Array(Any)) -> Any;
+native pairs: Fn(Any) -> Array(Tuple(String, Any));
+native from_pairs: Fn(Array(Tuple(String, Any))) -> Any;
 native merge: Fn(Any, Any) -> Any;
 { keys: keys, values: values, pairs: pairs, from_pairs: from_pairs, merge: merge }
 "#,
@@ -111,8 +112,8 @@ native merge: Fn(Any, Any) -> Any;
         CoreModuleSpec {
             name: DEBUG_MODULE,
             source: r#"
-native dbg: Fn(Any) -> Any;
-native dbg_with: Fn(String, Any) -> Any;
+native dbg: for(A) Fn(A) -> A;
+native dbg_with: for(A) Fn(String, A) -> A;
 { dbg: dbg, dbg_with: dbg_with }
 "#,
             functions: vec![
@@ -142,10 +143,41 @@ native encode: Fn(Any, Any) -> Any;
             ],
         },
         CoreModuleSpec {
+            name: OPTION_MODULE,
+            source: r#"
+def map: for(A, B) Fn(Option(A), Fn(A) -> B) -> Option(B) = fn(option, function) {
+    match option { 'None => 'None, 'Some(value) => 'Some(function(value)) }
+};
+def flat_map: for(A, B) Fn(Option(A), Fn(A) -> Option(B)) -> Option(B) = fn(option, function) {
+    match option { 'None => 'None, 'Some(value) => function(value) }
+};
+def unwrap_or: for(A) Fn(Option(A), A) -> A = fn(option, fallback) {
+    match option { 'None => fallback, 'Some(value) => value }
+};
+def is_some: for(A) Fn(Option(A)) -> Bool = fn(option) {
+    match option { 'None => 'False, 'Some(_) => 'True }
+};
+{ map: map, flat_map: flat_map, unwrap_or: unwrap_or, is_some: is_some }
+"#,
+            functions: vec![],
+        },
+        CoreModuleSpec {
             name: RESULT_MODULE,
             source: r#"
 native unwrap: Fn(Any) -> Any;
-{ unwrap: unwrap }
+def map: for(A, E, B) Fn(Result(A, E), Fn(A) -> B) -> Result(B, E) = fn(result, function) {
+    match result { 'Ok(value) => 'Ok(function(value)), 'Err(error) => 'Err(error) }
+};
+def map_err: for(A, E, F) Fn(Result(A, E), Fn(E) -> F) -> Result(A, F) = fn(result, function) {
+    match result { 'Ok(value) => 'Ok(value), 'Err(error) => 'Err(function(error)) }
+};
+def unwrap_or: for(A, E) Fn(Result(A, E), A) -> A = fn(result, fallback) {
+    match result { 'Ok(value) => value, 'Err(_) => fallback }
+};
+def is_ok: for(A, E) Fn(Result(A, E)) -> Bool = fn(result) {
+    match result { 'Ok(_) => 'True, 'Err(_) => 'False }
+};
+{ unwrap: unwrap, map: map, map_err: map_err, unwrap_or: unwrap_or, is_ok: is_ok }
 "#,
             functions: vec![(
                 "unwrap",

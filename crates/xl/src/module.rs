@@ -1362,10 +1362,8 @@ mod tests {
         .unwrap();
         let bad = engine
             .load_module(directory.join("bad-label.xl"), BTreeMap::new())
-            .unwrap()
-            .execute(100_000)
             .unwrap_err();
-        assert!(bad.message.contains("String"));
+        assert!(bad.to_string().contains("String"));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1973,7 +1971,7 @@ mod tests {
                    flattened: arrays.flat_map(values, fn(value) { [value, value] }),
                    folded: arrays.fold(values, 0, fn(total, value) { total + value }),
                    empty_map: arrays.map(empty, fn(value) { value / 0 }),
-                   empty_filter: arrays.filter(empty, fn(value) { value }),
+                   empty_filter: arrays.filter(empty, fn(unused) { 'True }),
                    empty_flat_map: arrays.flat_map(empty, fn(value) { [value] }),
                    empty_fold: arrays.fold(empty, 42, fn(total, value) { total + value }),
                    nested: arrays.map(values, fn(value) {
@@ -2202,9 +2200,9 @@ mod tests {
                 .contains("cannot unify")
         );
         assert!(
-            run_error("filter.xl", "arrays.filter([1], fn(value) { value })")
-                .message
-                .contains("must return 'True or 'False")
+            analysis_error("filter.xl", "arrays.filter([1], fn(value) { value })")
+                .to_string()
+                .contains("cannot unify Int with enum {False, True}")
         );
         assert!(
             analysis_error("flat-map.xl", "arrays.flat_map([1], fn(value) { value })")
@@ -2247,6 +2245,63 @@ mod tests {
                 .to_string()
                 .contains("unknown core module")
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn core_option_and_result_combinators_are_generic_xl_definitions() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import options from "core:option";
+               import results from "core:result";
+               let ok: Result(Int, String) = 'Ok(3);
+               let err: Result(Int, String) = 'Err("bad");
+               {
+                   option_map: options.map('Some(2), fn(value) { value + 1 }),
+                   option_map_none: options.map('None, fn(value) { value / 0 }),
+                   option_flat_map: options.flat_map('Some(2), fn(value) { 'Some(value + 2) }),
+                   option_flat_none: options.flat_map('None, fn(value) { 'Some(value / 0) }),
+                   option_some_or: options.unwrap_or('Some(4), 9),
+                   option_none_or: options.unwrap_or('None, 9),
+                   option_is_some: options.is_some('Some("x")),
+                   option_is_none: options.is_some('None),
+                   result_map: results.map(ok, fn(value) { value + 1 }),
+                   result_map_err: results.map(err, fn(value) { value / 0 }),
+                   result_err_map: results.map_err(err, fn(error) { error }),
+                   result_err_map_ok: results.map_err(ok, fn(error) { error }),
+                   result_ok_or: results.unwrap_or(ok, 9),
+                   result_err_or: results.unwrap_or(err, 9),
+                   result_is_ok: results.is_ok(ok),
+                   result_is_err: results.is_ok(err),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(result) = module.execute(100_000).unwrap() else {
+            panic!("expected combinator results")
+        };
+        let expected = [
+            ("option_map", "'Some(3)"),
+            ("option_map_none", "'None"),
+            ("option_flat_map", "'Some(4)"),
+            ("option_flat_none", "'None"),
+            ("option_some_or", "4"),
+            ("option_none_or", "9"),
+            ("option_is_some", "'True"),
+            ("option_is_none", "'False"),
+            ("result_map", "'Ok(4)"),
+            ("result_map_err", "'Err(\"bad\")"),
+            ("result_err_map", "'Err(\"bad\")"),
+            ("result_err_map_ok", "'Ok(3)"),
+            ("result_ok_or", "3"),
+            ("result_err_or", "9"),
+            ("result_is_ok", "'True"),
+            ("result_is_err", "'False"),
+        ];
+        for (name, expected) in expected {
+            assert_eq!(result.get(name).unwrap().to_string(), expected, "{name}");
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 

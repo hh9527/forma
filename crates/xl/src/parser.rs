@@ -880,6 +880,11 @@ impl<'a> Lowerer<'a> {
                 if arguments.is_empty() {
                     Ok(located(ExprKind::Variable(name), location))
                 } else {
+                    let arguments = if name.value == "Tuple" {
+                        vec![located(ExprKind::Array(arguments), location)]
+                    } else {
+                        arguments
+                    };
                     Ok(located(
                         ExprKind::Call {
                             callee: Box::new(located(ExprKind::Variable(name), location)),
@@ -1488,6 +1493,30 @@ mod tests {
             "{:?}",
             arms[0].value.pattern.value
         );
+    }
+
+    #[test]
+    fn lowers_heterogeneous_tuple_contracts_through_array_metadata() {
+        let program = parse(
+            "test.xl",
+            "native pairs: Fn(Any) -> Array(Tuple(String, Any)); 0",
+        )
+        .unwrap();
+        let annotation = program.value.body.value.bindings[0]
+            .value
+            .annotation
+            .as_ref()
+            .expect("native annotation");
+        let ExprKind::Call { arguments, .. } = &annotation.value else {
+            panic!("expected Fn metadata call");
+        };
+        let ExprKind::Call { arguments, .. } = &arguments[1].value else {
+            panic!("expected Array metadata call");
+        };
+        let ExprKind::Call { arguments, .. } = &arguments[0].value else {
+            panic!("expected Tuple metadata call");
+        };
+        assert!(matches!(&arguments[0].value, ExprKind::Array(items) if items.len() == 2));
     }
 
     #[test]
