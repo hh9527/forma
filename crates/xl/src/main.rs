@@ -5,8 +5,8 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::sync::Arc;
 use xl::{
-    DebugEvent, DebugSink, Engine, EngineConfig, Location, Quota, TextRange, Value,
-    WorkspaceSnapshot, parse_json,
+    DebugEvent, DebugSink, DefinitionKind, Engine, EngineConfig, Location, Quota, TextRange, Value,
+    WorkspaceSnapshot, WorkspaceTypeId, parse_json,
 };
 
 const EVALUATION_FUEL: usize = 1_000_000;
@@ -95,17 +95,57 @@ fn types_command(arguments: &[String]) -> Result<(), String> {
     let module = engine()
         .load_module(module_path, BTreeMap::new())
         .map_err(|error| error.to_string())?;
-    for (name, type_id) in &module.analysis.declared_types {
-        println!("type {name} = {}", module.analysis.display(*type_id));
+    let root = module
+        .workspace
+        .module_by_path(&module.path)
+        .ok_or_else(|| "loaded root is absent from the workspace snapshot".to_owned())?;
+    let mut definitions = module
+        .workspace
+        .definitions()
+        .iter()
+        .filter(|definition| definition.module == root.id)
+        .filter_map(|definition| definition.ty.map(|ty| (definition, ty)))
+        .collect::<Vec<_>>();
+    definitions.sort_by(|(left, _), (right, _)| left.name.cmp(&right.name));
+    for (definition, ty) in definitions
+        .iter()
+        .filter(|(definition, _)| definition.kind == DefinitionKind::Type)
+    {
+        println!(
+            "type {} = {}",
+            definition.name,
+            display_workspace_type(&module.workspace, *ty)?
+        );
     }
-    for (name, type_id) in &module.analysis.binding_types {
-        println!("let {name}: {}", module.analysis.display(*type_id));
+    for (definition, ty) in definitions
+        .iter()
+        .filter(|(definition, _)| definition.kind != DefinitionKind::Type)
+    {
+        println!(
+            "let {}: {}",
+            definition.name,
+            display_workspace_type(&module.workspace, *ty)?
+        );
     }
     println!(
         "result: {}",
-        module.analysis.display(module.analysis.result_type)
+        display_workspace_type(
+            &module.workspace,
+            root.result_type
+                .ok_or_else(|| "loaded root has no workspace result type".to_owned())?,
+        )?
     );
     Ok(())
+}
+
+fn display_workspace_type(
+    workspace: &WorkspaceSnapshot,
+    ty: WorkspaceTypeId,
+) -> Result<String, String> {
+    workspace
+        .types()
+        .display(ty)
+        .ok_or_else(|| format!("workspace type t{} is absent", ty.index()))
 }
 
 fn show_command(arguments: &[String]) -> Result<(), String> {

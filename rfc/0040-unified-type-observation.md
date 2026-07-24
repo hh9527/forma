@@ -1,6 +1,6 @@
 # RFC 0040: Unified type observation
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0039
 
 ## Summary
@@ -67,4 +67,18 @@ invariant violation reported as a CLI error rather than a panic.
 
 ## Implementation result
 
-Pending.
+`xl types` now resolves the canonical loaded root in `WorkspaceSnapshot`,
+selects its typed definitions, and renders every declaration, binding, import,
+and result through `WorkspaceTypeGraph::display`. The CLI contains no remaining
+access to `LoadedModule::analysis`.
+
+Type definitions are emitted only in the `type` section rather than repeated
+from the binding map with a `let` label. Other typed definitions retain the
+compact historical binding presentation. Missing root/result/type records are
+reported as CLI invariant errors instead of indexed with unchecked access.
+
+A CLI fixture verifies recursive TypeMetadata terminates through the workspace
+graph, appears exactly once as a type declaration, and retains the module
+result summary. The complete suite passes with 147 unit tests and six CLI tests,
+with one manual parsing baseline ignored. Strict workspace Clippy, formatting,
+and diff checks pass.

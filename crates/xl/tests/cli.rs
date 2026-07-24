@@ -188,3 +188,31 @@ fn show_observes_deterministic_workspace_and_position_queries() {
     assert!(output.contains(" = Int"), "{output}");
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn types_projects_recursive_types_from_the_workspace_snapshot() {
+    let directory = fixture_dir();
+    let main = directory.join("main.xl");
+    fs::write(
+        &main,
+        "@struct type Node = {children: Array(Node)}; {Node: Node}",
+    )
+    .unwrap();
+
+    let types = xl()
+        .args(["types", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        types.status.success(),
+        "{}",
+        String::from_utf8_lossy(&types.stderr)
+    );
+    let output = String::from_utf8_lossy(&types.stdout);
+    assert_eq!(output.matches("type Node =").count(), 1, "{output}");
+    assert!(!output.contains("let Node:"), "{output}");
+    assert!(output.contains("children: Array<"), "{output}");
+    assert!(output.contains("Node"), "{output}");
+    assert!(output.contains("result:"), "{output}");
+    fs::remove_dir_all(directory).unwrap();
+}
