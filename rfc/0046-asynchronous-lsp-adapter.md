@@ -339,9 +339,12 @@ semantics and remains the next tooling RFC.
 ## Implementation result
 
 Implemented as the separate `xl-lsp` crate and binary using `async-lsp 0.2.4`
-and a Tokio current-thread runtime. The binary selects its workspace root from
-the first workspace folder, `rootUri`, legacy `rootPath`, or finally its launch
-directory. LSP and runtime dependencies remain outside the `xl` crate.
+and a Tokio current-thread runtime. The binary records its workspace boundary
+from the first workspace folder, `rootUri`, legacy `rootPath`, or finally its
+launch directory. Because the core workspace is rooted at an entry module, a
+directory boundary defers engine construction until the first XL document is
+opened; an explicit file root is used immediately. LSP and runtime dependencies
+remain outside the `xl` crate.
 
 The adapter implements its own `Service<AnyRequest>` dispatch boundary so the
 wire request ID remains available when it creates an XL `CancellationToken`.
@@ -366,8 +369,10 @@ secondary source labels become related information. Hover, definition, and
 references resolve through immutable snapshot queries and convert all ranges
 through the negotiated document encoding.
 
-Adapter tests cover encoding selection, initialization capabilities and root
-selection, ordered UTF-16 edits, exact request-ID token cancellation, and a
-framed in-memory initialize/initialized/shutdown/exit exchange through the
+Adapter tests cover encoding selection and Unicode projection, initialization
+capabilities and root selection, transactional document lifecycles, diagnostic
+publication and clearing, hover/navigation/references, cooperative request
+cancellation, stale races, duplicate and unknown IDs, shutdown, EOF, abnormal
+exit, and a framed initialize/initialized/shutdown/exit exchange through the
 real asynchronous main loop. Workspace tests, strict Clippy, formatting, and
 diff checks pass with the implementation.

@@ -17,8 +17,8 @@ use lsp::request::Request as _;
 use serde::de::DeserializeOwned;
 use tower_service::Service;
 use xl::{
-    CancellationToken, DocumentVersion, Engine, EngineConfig, Location, PositionEncoding,
-    QueryError, TextEdit, TextPosition, TextRange, Workspace, WorkspaceSnapshot,
+    CancellationToken, DocumentVersion, Engine, EngineConfig, FactState, Location,
+    PositionEncoding, QueryError, TextEdit, TextPosition, TextRange, Workspace, WorkspaceSnapshot,
 };
 
 type RequestFuture =
@@ -27,8 +27,16 @@ type RequestFuture =
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Lifecycle {
     Uninitialized,
+    AwaitingInitialized,
     Running,
     Shutdown,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum NotificationOutcome {
+    Continue,
+    CleanExit,
+    AbnormalExit,
 }
 
 struct State {
@@ -87,13 +95,11 @@ impl Service<AnyRequest> for Server {
 impl LspService for Server {
     fn notify(&mut self, notification: AnyNotification) -> ControlFlow<async_lsp::Result<()>> {
         match dispatch_notification(Rc::clone(&self.state), notification) {
-            Ok(keep_running) => {
-                if keep_running {
-                    ControlFlow::Continue(())
-                } else {
-                    ControlFlow::Break(Ok(()))
-                }
-            }
+            Ok(NotificationOutcome::Continue) => ControlFlow::Continue(()),
+            Ok(NotificationOutcome::CleanExit) => ControlFlow::Break(Ok(())),
+            Ok(NotificationOutcome::AbnormalExit) => ControlFlow::Break(Err(
+                async_lsp::Error::Protocol("exit received before shutdown".to_owned()),
+            )),
             Err(error) => {
                 eprintln!("xl-lsp notification error: {error}");
                 ControlFlow::Continue(())
@@ -170,19 +176,35 @@ async fn semantic_request(
         let location =
             request_location(&snapshot, &params.text_document_position_params, encoding)?;
         let definition = definition_at(&snapshot, &context, location).await?;
-        let hover = definition.map(|definition| lsp::Hover {
-            contents: lsp::HoverContents::Scalar(lsp::MarkedString::String(format!(
-                "{}: {}",
-                definition.name,
-                definition
-                    .ty
-                    .value
-                    .and_then(|ty| snapshot.types().display(ty))
-                    .unwrap_or_else(|| "unknown".to_owned())
-            ))),
-            range: Some(
-                to_lsp_range(&snapshot, definition.location, encoding).expect("valid source range"),
-            ),
+        let ty = snapshot
+            .query_type_at(&context, location)
+            .await
+            .map_err(query_error)?
+            .and_then(|ty| snapshot.types().display(ty));
+        let contents = match (definition, ty) {
+            (Some(definition), Some(ty)) => Some(format!("{}: {ty}", definition.name)),
+            (Some(definition), None) => Some(format!("{}: unknown", definition.name)),
+            (None, Some(ty)) => Some(ty),
+            (None, None) => snapshot
+                .expression_at(location)
+                .map(|expression| fact_state_name(&expression.ty.state).to_owned()),
+        };
+        let hover_range = snapshot
+            .reference_at(location)
+            .map(|reference| reference.location)
+            .or_else(|| {
+                snapshot
+                    .definition_at(location)
+                    .map(|definition| definition.location)
+            })
+            .or_else(|| {
+                snapshot
+                    .expression_at(location)
+                    .map(|expression| expression.location)
+            });
+        let hover = contents.map(|contents| lsp::Hover {
+            contents: lsp::HoverContents::Scalar(lsp::MarkedString::String(contents)),
+            range: hover_range.and_then(|range| to_lsp_range(&snapshot, range, encoding)),
         });
         return encode(hover);
     }
@@ -240,17 +262,22 @@ fn initialize(
         ));
     }
     let root = initialize_root(&params).unwrap_or_else(|| state.fallback_root.clone());
-    state.workspace = Some(Rc::new(
-        Workspace::new(root, Engine::new(state.engine_config))
-            .map_err(|error| protocol_error(ErrorCode::INTERNAL_ERROR, error))?,
-    ));
+    state.fallback_root = root.clone();
+    state.workspace = root
+        .is_file()
+        .then(|| {
+            Workspace::new(root, Engine::new(state.engine_config))
+                .map(Rc::new)
+                .map_err(|error| protocol_error(ErrorCode::INTERNAL_ERROR, error))
+        })
+        .transpose()?;
     state.encoding = negotiate_encoding(
         params
             .capabilities
             .general
             .and_then(|general| general.position_encodings),
     );
-    state.lifecycle = Lifecycle::Running;
+    state.lifecycle = Lifecycle::AwaitingInitialized;
     encode(lsp::InitializeResult {
         capabilities: lsp::ServerCapabilities {
             position_encoding: Some(lsp_encoding(state.encoding)),
@@ -276,10 +303,15 @@ fn initialize(
 fn dispatch_notification(
     state: Rc<RefCell<State>>,
     notification: AnyNotification,
-) -> Result<bool, String> {
+) -> Result<NotificationOutcome, String> {
     if notification.method == lsp::notification::Exit::METHOD {
+        let clean = state.borrow().lifecycle == Lifecycle::Shutdown;
         cancel_all(&state.borrow().pending);
-        return Ok(false);
+        return Ok(if clean {
+            NotificationOutcome::CleanExit
+        } else {
+            NotificationOutcome::AbnormalExit
+        });
     }
     if notification.method == lsp::notification::Cancel::METHOD {
         let params: lsp::CancelParams =
@@ -288,10 +320,15 @@ fn dispatch_notification(
         if let Some(token) = state.borrow().pending.borrow_mut().remove(&id) {
             token.cancel();
         }
-        return Ok(true);
+        return Ok(NotificationOutcome::Continue);
     }
     if notification.method == lsp::notification::Initialized::METHOD {
-        return Ok(true);
+        let mut state = state.borrow_mut();
+        if state.lifecycle != Lifecycle::AwaitingInitialized {
+            return Err("initialized notification received out of order".to_owned());
+        }
+        state.lifecycle = Lifecycle::Running;
+        return Ok(NotificationOutcome::Continue);
     }
     if state.borrow().lifecycle != Lifecycle::Running {
         return Err("notification received while server is not running".to_owned());
@@ -304,6 +341,12 @@ fn dispatch_notification(
         let mut borrowed = state.borrow_mut();
         if borrowed.documents.contains_key(&path) {
             return Err(format!("document is already open: {}", path.display()));
+        }
+        if borrowed.workspace.is_none() {
+            borrowed.workspace = Some(Rc::new(
+                Workspace::new(&path, Engine::new(borrowed.engine_config))
+                    .map_err(|error| error.to_string())?,
+            ));
         }
         borrowed
             .workspace
@@ -320,14 +363,14 @@ fn dispatch_notification(
             .insert(path, params.text_document.version);
         drop(borrowed);
         schedule_rebuild(state);
-        return Ok(true);
+        return Ok(NotificationOutcome::Continue);
     }
     if notification.method == lsp::notification::DidChangeTextDocument::METHOD {
         let params: lsp::DidChangeTextDocumentParams =
             serde_json::from_value(notification.params).map_err(|error| error.to_string())?;
         apply_changes(&state, params)?;
         schedule_rebuild(state);
-        return Ok(true);
+        return Ok(NotificationOutcome::Continue);
     }
     if notification.method == lsp::notification::DidCloseTextDocument::METHOD {
         let params: lsp::DidCloseTextDocumentParams =
@@ -344,7 +387,7 @@ fn dispatch_notification(
         drop(borrowed);
         schedule_rebuild(state);
     }
-    Ok(true)
+    Ok(NotificationOutcome::Continue)
 }
 
 fn apply_changes(
@@ -622,8 +665,18 @@ fn protocol_error(code: ErrorCode, message: impl std::fmt::Display) -> ResponseE
     ResponseError::new(code, message)
 }
 
+fn fact_state_name(state: &FactState) -> &'static str {
+    match state {
+        FactState::Known => "known",
+        FactState::Unknown(_) => "unknown",
+        FactState::Conflicted(_) => "conflicted",
+        FactState::Incomputable(_) => "incomputable",
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::task::{Context, Poll, Waker};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
@@ -636,7 +689,7 @@ mod tests {
         }
     }
 
-    fn fixture() -> (PathBuf, Rc<RefCell<State>>) {
+    fn fixture_loop() -> (PathBuf, Rc<RefCell<State>>, async_lsp::MainLoop<Server>) {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
@@ -644,7 +697,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("xl-lsp-{unique}"));
         std::fs::create_dir_all(&root).expect("create fixture root");
         let captured = Rc::new(RefCell::new(None));
-        let (_, _) = async_lsp::MainLoop::new_server({
+        let (main_loop, _) = async_lsp::MainLoop::new_server({
             let root = root.clone();
             let captured = Rc::clone(&captured);
             move |client| {
@@ -654,6 +707,11 @@ mod tests {
             }
         });
         let state = captured.borrow_mut().take().expect("captured server state");
+        (root, state, main_loop)
+    }
+
+    fn fixture() -> (PathBuf, Rc<RefCell<State>>) {
+        let (root, state, _) = fixture_loop();
         (root, state)
     }
 
@@ -664,7 +722,58 @@ mod tests {
             params.root_uri = Some(lsp::Url::from_directory_path(root).expect("fixture URI"));
         }
         let value = initialize(state, params).expect("initialize server");
+        let initialized: AnyNotification = serde_json::from_value(serde_json::json!({
+            "method": "initialized",
+            "params": {}
+        }))
+        .expect("initialized notification");
+        assert_eq!(
+            dispatch_notification(Rc::clone(state), initialized).expect("finish initialization"),
+            NotificationOutcome::Continue
+        );
         serde_json::from_value(value).expect("initialize result")
+    }
+
+    fn request(id: i64, method: &str, params: serde_json::Value) -> AnyRequest {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "method": method,
+            "params": params
+        }))
+        .expect("request")
+    }
+
+    fn frame(message: serde_json::Value) -> Vec<u8> {
+        let body = serde_json::to_vec(&message).expect("serialize message");
+        let mut framed = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+        framed.extend(body);
+        framed
+    }
+
+    async fn semantic_fixture(source: &str) -> (PathBuf, Rc<RefCell<State>>, lsp::Url) {
+        let (root, state) = fixture();
+        initialize_state(&root, &state);
+        let path = root.join("main.xl");
+        let uri = lsp::Url::from_file_path(&path).expect("document URI");
+        if state.borrow().workspace.is_none() {
+            state.borrow_mut().workspace = Some(Rc::new(
+                Workspace::new(&path, Engine::new(config())).expect("create document workspace"),
+            ));
+        }
+        let workspace = Rc::clone(
+            state
+                .borrow()
+                .workspace
+                .as_ref()
+                .expect("initialized workspace"),
+        );
+        workspace
+            .open(&path, DocumentVersion(1), source)
+            .expect("open source");
+        state.borrow_mut().documents.insert(path.clone(), 1);
+        let context = workspace.context();
+        workspace.rebuild(&context).await.expect("build snapshot");
+        (path, state, uri)
     }
 
     #[test]
@@ -712,6 +821,9 @@ mod tests {
         let uri = lsp::Url::from_file_path(&path).expect("document URI");
         {
             let mut state = state.borrow_mut();
+            state.workspace = Some(Rc::new(
+                Workspace::new(&path, Engine::new(config())).expect("create document workspace"),
+            ));
             state
                 .workspace
                 .as_ref()
@@ -758,6 +870,99 @@ mod tests {
         assert_eq!(document.text().to_string(), "a中d");
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn notifications_apply_full_changes_and_reject_bad_transactions() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (root, state) = fixture();
+                initialize_state(&root, &state);
+                let path = root.join("new.xl");
+                let uri = lsp::Url::from_file_path(&path).expect("document URI");
+                let open: AnyNotification = serde_json::from_value(serde_json::json!({
+                    "method": "textDocument/didOpen",
+                    "params": {
+                        "textDocument": {
+                            "uri": uri,
+                            "languageId": "xl",
+                            "version": 1,
+                            "text": "a😀c"
+                        }
+                    }
+                }))
+                .expect("open notification");
+                assert_eq!(
+                    dispatch_notification(Rc::clone(&state), open).expect("open document"),
+                    NotificationOutcome::Continue
+                );
+
+                let full: AnyNotification = serde_json::from_value(serde_json::json!({
+                    "method": "textDocument/didChange",
+                    "params": {
+                        "textDocument": { "uri": uri, "version": 2 },
+                        "contentChanges": [{ "text": "valid" }]
+                    }
+                }))
+                .expect("change notification");
+                dispatch_notification(Rc::clone(&state), full).expect("full change");
+                let workspace = Rc::clone(state.borrow().workspace.as_ref().expect("workspace"));
+                let revision = workspace.revision();
+                assert_eq!(
+                    workspace
+                        .document(&path)
+                        .expect("document")
+                        .text()
+                        .to_string(),
+                    "valid"
+                );
+
+                let out_of_order: AnyNotification = serde_json::from_value(serde_json::json!({
+                    "method": "textDocument/didChange",
+                    "params": {
+                        "textDocument": { "uri": uri, "version": 2 },
+                        "contentChanges": [{ "text": "wrong" }]
+                    }
+                }))
+                .expect("change notification");
+                assert!(dispatch_notification(Rc::clone(&state), out_of_order).is_err());
+                assert_eq!(workspace.revision(), revision);
+
+                let invalid_boundary: AnyNotification = serde_json::from_value(serde_json::json!({
+                    "method": "textDocument/didChange",
+                    "params": {
+                        "textDocument": { "uri": uri, "version": 3 },
+                        "contentChanges": [{
+                            "range": {
+                                "start": { "line": 0, "character": 99 },
+                                "end": { "line": 0, "character": 99 }
+                            },
+                            "text": "wrong"
+                        }]
+                    }
+                }))
+                .expect("change notification");
+                assert!(dispatch_notification(Rc::clone(&state), invalid_boundary).is_err());
+                assert_eq!(workspace.revision(), revision);
+                assert_eq!(
+                    workspace
+                        .document(&path)
+                        .expect("document")
+                        .text()
+                        .to_string(),
+                    "valid"
+                );
+
+                let close: AnyNotification = serde_json::from_value(serde_json::json!({
+                    "method": "textDocument/didClose",
+                    "params": { "textDocument": { "uri": uri } }
+                }))
+                .expect("close notification");
+                dispatch_notification(Rc::clone(&state), close).expect("close document");
+                assert!(workspace.document(path).is_err());
+                assert!(state.borrow().documents.is_empty());
+            })
+            .await;
+    }
+
     #[test]
     fn cancel_notification_sets_registered_xl_token() {
         let (_, state) = fixture();
@@ -773,19 +978,346 @@ mod tests {
         }))
         .expect("cancel notification");
 
-        assert!(dispatch_notification(state, notification).expect("dispatch cancellation"));
+        assert_eq!(
+            dispatch_notification(state, notification).expect("dispatch cancellation"),
+            NotificationOutcome::Continue
+        );
         assert!(token.is_cancelled());
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn main_loop_completes_initialize_shutdown_and_exit() {
-        fn frame(message: serde_json::Value) -> Vec<u8> {
-            let body = serde_json::to_vec(&message).expect("serialize message");
-            let mut framed = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
-            framed.extend(body);
-            framed
-        }
+    async fn cancellation_reaches_a_pending_query_checkpoint() {
+        let (_, state, uri) = semantic_fixture("let value = 1;\nvalue").await;
+        let mut future = Box::pin(dispatch_request(
+            Rc::clone(&state),
+            request(
+                41,
+                lsp::request::HoverRequest::METHOD,
+                serde_json::json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": 1, "character": 1 }
+                }),
+            ),
+        ));
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+        assert!(
+            state
+                .borrow()
+                .pending
+                .borrow()
+                .contains_key(&RequestId::Number(41))
+        );
 
+        let cancel: AnyNotification = serde_json::from_value(serde_json::json!({
+            "method": "$/cancelRequest",
+            "params": { "id": 41 }
+        }))
+        .expect("cancel notification");
+        assert_eq!(
+            dispatch_notification(Rc::clone(&state), cancel).expect("cancel request"),
+            NotificationOutcome::Continue
+        );
+        let error = future.await.expect_err("cancelled response");
+        assert_eq!(error.code, ErrorCode::REQUEST_CANCELLED);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn edit_makes_a_pending_query_content_modified() {
+        let (path, state, uri) = semantic_fixture("let value = 1;\nvalue").await;
+        let mut future = Box::pin(dispatch_request(
+            Rc::clone(&state),
+            request(
+                42,
+                lsp::request::HoverRequest::METHOD,
+                serde_json::json!({
+                    "textDocument": { "uri": uri },
+                    "position": { "line": 1, "character": 1 }
+                }),
+            ),
+        ));
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(future.as_mut().poll(&mut context), Poll::Pending));
+
+        let workspace = Rc::clone(state.borrow().workspace.as_ref().expect("workspace"));
+        workspace
+            .change(
+                &path,
+                DocumentVersion(1),
+                DocumentVersion(2),
+                &[TextEdit::Full("let value = 2;\nvalue".to_owned())],
+            )
+            .expect("advance revision");
+        let error = future.await.expect_err("stale response");
+        assert_eq!(error.code, ErrorCode::CONTENT_MODIFIED);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn duplicate_ids_and_shutdown_with_pending_work_are_deterministic() {
+        let (root, state) = fixture();
+        initialize_state(&root, &state);
+        let original = CancellationToken::default();
+        state
+            .borrow()
+            .pending
+            .borrow_mut()
+            .insert(RequestId::Number(9), original.clone());
+        let duplicate = dispatch_request(
+            Rc::clone(&state),
+            request(9, lsp::request::HoverRequest::METHOD, serde_json::json!({})),
+        )
+        .await
+        .expect_err("duplicate request ID");
+        assert_eq!(duplicate.code, ErrorCode::INVALID_REQUEST);
+        assert!(!original.is_cancelled());
+
+        dispatch_request(
+            Rc::clone(&state),
+            request(10, lsp::request::Shutdown::METHOD, serde_json::Value::Null),
+        )
+        .await
+        .expect("shutdown response");
+        assert!(original.is_cancelled());
+        assert!(state.borrow().pending.borrow().is_empty());
+
+        let unknown_cancel: AnyNotification = serde_json::from_value(serde_json::json!({
+            "method": "$/cancelRequest",
+            "params": { "id": "missing" }
+        }))
+        .expect("cancel notification");
+        assert_eq!(
+            dispatch_notification(state, unknown_cancel).expect("ignore unknown ID"),
+            NotificationOutcome::Continue
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hover_definition_and_references_use_the_published_snapshot() {
+        let (_, state, uri) = semantic_fixture("let value = 1;\nvalue").await;
+        let position = serde_json::json!({
+            "textDocument": { "uri": uri },
+            "position": { "line": 1, "character": 1 }
+        });
+        let hover: Option<lsp::Hover> = serde_json::from_value(
+            dispatch_request(
+                Rc::clone(&state),
+                request(50, lsp::request::HoverRequest::METHOD, position.clone()),
+            )
+            .await
+            .expect("hover response"),
+        )
+        .expect("hover result");
+        let hover = hover.expect("hover information");
+        assert!(matches!(
+            hover.contents,
+            lsp::HoverContents::Scalar(lsp::MarkedString::String(ref text))
+                if text.contains("value")
+        ));
+        assert_eq!(hover.range.expect("hover range").start.line, 1);
+
+        let definition: Option<lsp::GotoDefinitionResponse> = serde_json::from_value(
+            dispatch_request(
+                Rc::clone(&state),
+                request(51, lsp::request::GotoDefinition::METHOD, position.clone()),
+            )
+            .await
+            .expect("definition response"),
+        )
+        .expect("definition result");
+        let Some(lsp::GotoDefinitionResponse::Scalar(definition)) = definition else {
+            panic!("expected scalar definition");
+        };
+        assert_eq!(definition.range.start.line, 0);
+
+        let references: Vec<lsp::Location> = serde_json::from_value(
+            dispatch_request(
+                state,
+                request(
+                    52,
+                    lsp::request::References::METHOD,
+                    serde_json::json!({
+                        "textDocument": position["textDocument"].clone(),
+                        "position": position["position"].clone(),
+                        "context": { "includeDeclaration": true }
+                    }),
+                ),
+            )
+            .await
+            .expect("references response"),
+        )
+        .expect("references result");
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0].range.start.line, 0);
+        assert_eq!(references[1].range.start.line, 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hover_reports_an_ordinary_expression_type() {
+        let (_, state, uri) = semantic_fixture("let count = 1 + 2;\ncount").await;
+        let hover: Option<lsp::Hover> = serde_json::from_value(
+            dispatch_request(
+                state,
+                request(
+                    53,
+                    lsp::request::HoverRequest::METHOD,
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": { "line": 0, "character": 12 }
+                    }),
+                ),
+            )
+            .await
+            .expect("hover response"),
+        )
+        .expect("hover result");
+        assert!(matches!(
+            hover.expect("expression hover").contents,
+            lsp::HoverContents::Scalar(lsp::MarkedString::String(ref text)) if text == "unknown"
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn protocol_encodings_map_unicode_and_crlf_to_the_same_bytes() {
+        let (_, state, uri) = semantic_fixture("\"😀\";\r\n1").await;
+        let snapshot = state
+            .borrow()
+            .workspace
+            .as_ref()
+            .expect("workspace")
+            .published()
+            .expect("snapshot");
+        let position = |line, character| lsp::TextDocumentPositionParams {
+            text_document: lsp::TextDocumentIdentifier { uri: uri.clone() },
+            position: lsp::Position::new(line, character),
+        };
+        assert_eq!(
+            request_location(&snapshot, &position(0, 5), PositionEncoding::Utf8)
+                .expect("UTF-8 position")
+                .start,
+            5
+        );
+        assert_eq!(
+            request_location(&snapshot, &position(0, 3), PositionEncoding::Utf16)
+                .expect("UTF-16 position")
+                .start,
+            5
+        );
+        assert_eq!(
+            request_location(&snapshot, &position(0, 2), PositionEncoding::Utf32)
+                .expect("UTF-32 position")
+                .start,
+            5
+        );
+        for encoding in [
+            PositionEncoding::Utf8,
+            PositionEncoding::Utf16,
+            PositionEncoding::Utf32,
+        ] {
+            assert_eq!(
+                request_location(&snapshot, &position(1, 0), encoding)
+                    .expect("position after CRLF")
+                    .start,
+                9
+            );
+        }
+        assert!(request_location(&snapshot, &position(0, 2), PositionEncoding::Utf16).is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn transport_eof_cancels_pending_tokens() {
+        let (_, state, main_loop) = fixture_loop();
+        let token = CancellationToken::default();
+        state
+            .borrow()
+            .pending
+            .borrow_mut()
+            .insert(RequestId::Number(61), token.clone());
+        let mut output = futures::io::Cursor::new(Vec::new());
+        let error = main_loop
+            .run_buffered(futures::io::Cursor::new(Vec::new()), &mut output)
+            .await
+            .expect_err("EOF terminates transport");
+        assert!(matches!(error, async_lsp::Error::Eof));
+        assert!(token.is_cancelled());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn exit_before_shutdown_is_a_protocol_error() {
+        let (root, _, main_loop) = fixture_loop();
+        let _ = root;
+        let input = frame(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "exit"
+        }));
+        let mut output = futures::io::Cursor::new(Vec::new());
+        let error = main_loop
+            .run_buffered(futures::io::Cursor::new(input), &mut output)
+            .await
+            .expect_err("early exit is abnormal");
+        assert!(matches!(error, async_lsp::Error::Protocol(_)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn diagnostics_publish_current_errors_and_an_empty_clear() {
+        let (root, state, main_loop) = fixture_loop();
+        initialize_state(&root, &state);
+        let path = root.join("main.xl");
+        let workspace = Rc::new(
+            Workspace::new(&path, Engine::new(config())).expect("create document workspace"),
+        );
+        workspace
+            .open(&path, DocumentVersion(1), "let =")
+            .expect("open invalid source");
+        {
+            let mut state = state.borrow_mut();
+            state.workspace = Some(Rc::clone(&workspace));
+            state.documents.insert(path.clone(), 1);
+        }
+        let context = workspace.context();
+        let invalid = workspace.rebuild(&context).await.expect("invalid snapshot");
+        assert!(!invalid.diagnostics().is_empty());
+        publish_diagnostics(&state, &invalid).await;
+
+        workspace
+            .change(
+                &path,
+                DocumentVersion(1),
+                DocumentVersion(2),
+                &[TextEdit::Full("1".to_owned())],
+            )
+            .expect("fix source");
+        state.borrow_mut().documents.insert(path, 2);
+        let context = workspace.context();
+        let valid = workspace.rebuild(&context).await.expect("valid snapshot");
+        assert!(valid.diagnostics().is_empty());
+        publish_diagnostics(&state, &valid).await;
+
+        let mut input = Vec::new();
+        input.extend(frame(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 70,
+            "method": "shutdown"
+        })));
+        input.extend(frame(serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "exit"
+        })));
+        let mut output = futures::io::Cursor::new(Vec::new());
+        main_loop
+            .run_buffered(futures::io::Cursor::new(input), &mut output)
+            .await
+            .expect("flush diagnostics");
+        let output = String::from_utf8(output.into_inner()).expect("UTF-8 output");
+        assert_eq!(output.matches("textDocument/publishDiagnostics").count(), 2);
+        assert!(output.contains("\"version\":1"));
+        assert!(output.contains("\"version\":2"));
+        assert!(output.contains("\"diagnostics\":[]"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn main_loop_completes_initialize_shutdown_and_exit() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock")

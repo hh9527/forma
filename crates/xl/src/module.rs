@@ -327,7 +327,11 @@ impl Engine {
             .checkpoint()
             .await
             .map_err(|error| ModuleError::new(error.to_string()))?;
-        let root = canonicalize(path.as_ref())?;
+        let root = if overlays.contains_key(path.as_ref()) {
+            path.as_ref().to_owned()
+        } else {
+            canonicalize(path.as_ref())?
+        };
         let mut main = MainWorld::building();
         let mut sources = SourceDatabase::default();
         let core_modules = install_core_modules(&mut main, &mut sources, &self.debug_sink)?

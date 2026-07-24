@@ -24,7 +24,7 @@ struct WorkspaceState {
 impl Workspace {
     pub fn new(root: impl AsRef<Path>, engine: Engine) -> Result<Self, WorkspaceError> {
         Ok(Self {
-            root: std::fs::canonicalize(root.as_ref()).map_err(WorkspaceError::Io)?,
+            root: canonical_document_path(root.as_ref())?,
             engine,
             clock: RevisionClock::default(),
             state: RwLock::new(WorkspaceState::default()),
