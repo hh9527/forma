@@ -1,6 +1,6 @@
 # RFC 0047: Conservative semantic completion
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0038, RFC 0039, RFC 0042, RFC 0046
 
 ## Summary
@@ -254,6 +254,31 @@ mutable overlay text that is newer than the published snapshot.
 6. map candidate ranges and kinds under all negotiated encodings;
 7. add cancellation, stale-race, capability, and protocol-result tests;
 8. run workspace tests, strict Clippy, formatting, and diff checks.
+
+## Implementation result
+
+Implemented in the semantic workspace and asynchronous LSP adapter. Completion
+context recognition tokenizes the rope-backed document with the existing XL
+lexer, keeps UTF-8 byte replacement ranges in the semantic result, and resolves
+only snapshot-backed import exports or exact Struct members. Empty-prefix
+module completion remains available when the parser recovers an incomplete
+trailing dot; the lexical fallback is deliberately restricted to a unique,
+preceding import definition in the same module.
+
+The asynchronous recoverable workspace now retains complete `Analysis` facts
+when strict analysis and evaluation succeed. This makes module result and
+expression types authoritative in the published snapshot, while invalid or
+failed modules continue to expose partial facts and conservative empty
+completion results. Query checkpoints cover context resolution, graph/member
+traversal, candidate construction, cancellation, and stale-revision checks.
+
+`xl-lsp` advertises `.` completion without resolve support and maps candidates
+to deterministic complete lists with explicit encoding-aware text edits.
+Tests cover module exports, Struct fields, typed and empty prefixes, recursive
+type references, conservative contexts, UTF-16 edits, request cancellation,
+and revision races. The final workspace run passed 174 core tests with one
+manual benchmark ignored, 9 CLI tests, 19 LSP tests, strict Clippy, formatting,
+and whitespace validation.
 
 ## Deferred work
 

@@ -537,19 +537,15 @@ impl RecoverableWorkspaceBuilder<'_> {
                     query: self.query,
                 },
             );
-            let strict_value = if self.cycle_members.contains(path) {
+            let strict = if self.cycle_members.contains(path) {
                 None
-            } else if self.overlays.contains_key(path) {
+            } else {
                 program.as_ref().and_then(|program| {
-                    self.evaluate_overlay(source_id, program, &external_values)
+                    self.analyze_and_evaluate(source_id, program, &external_values)
                         .ok()
                 })
-            } else {
-                self.engine
-                    .load_module(path, BTreeMap::new())
-                    .ok()
-                    .and_then(|module| self.engine.execute(&module).ok())
             };
+            let strict_value = strict.as_ref().map(|(_, value)| value);
             let state = if strict_value.is_some() {
                 WorkspaceModuleState::Known
             } else if self.cycle_members.contains(path)
@@ -567,14 +563,14 @@ impl RecoverableWorkspaceBuilder<'_> {
                     kind: WorkspaceModuleKind::Xl,
                     source: Some(source_id),
                     program,
-                    analysis: None,
+                    analysis: strict.as_ref().map(|(analysis, _)| analysis.clone()),
                     partial: Some(partial),
                     state,
                     imports: semantic_imports,
                     diagnostics,
                 },
             );
-            if let Some(value) = strict_value {
+            if let Some((_, value)) = strict {
                 self.values.insert(path.to_owned(), value.clone());
                 Some(value)
             } else {
@@ -637,12 +633,12 @@ impl RecoverableWorkspaceBuilder<'_> {
         value
     }
 
-    fn evaluate_overlay(
+    fn analyze_and_evaluate(
         &self,
         source_id: crate::SourceId,
         program: &Program,
         external_values: &BTreeMap<String, Value>,
-    ) -> Result<Value, ModuleError> {
+    ) -> Result<(crate::Analysis, Value), ModuleError> {
         let mut account = QuotaAccount::new(self.engine.config.module_quota);
         if let Some(query) = self.query {
             account = account.with_query(query.clone());
@@ -674,9 +670,10 @@ impl RecoverableWorkspaceBuilder<'_> {
             .with_debug_sink(Arc::clone(&self.engine.debug_sink))
             .execute_in_work(&main.heap, &external_roots, &function, &[], &mut account)
             .map_err(|error| ModuleError::new(error.with_sources(&self.sources).to_string()))?;
-        arena
+        let value = arena
             .export(&main.heap)
-            .map_err(|error| ModuleError::new(error.to_string()))
+            .map_err(|error| ModuleError::new(error.to_string()))?;
+        Ok((analysis, value))
     }
 }
 

@@ -17,7 +17,7 @@ use lsp::request::Request as _;
 use serde::de::DeserializeOwned;
 use tower_service::Service;
 use xl::{
-    CancellationToken, DocumentVersion, Engine, EngineConfig, FactState, Location,
+    CancellationToken, CompletionKind, DocumentVersion, Engine, EngineConfig, FactState, Location,
     PositionEncoding, QueryError, TextEdit, TextPosition, TextRange, Workspace, WorkspaceSnapshot,
 };
 
@@ -244,6 +244,43 @@ async fn semantic_request(
         });
         return encode(locations);
     }
+    if request.method == lsp::request::Completion::METHOD {
+        let params: lsp::CompletionParams = decode(request.params)?;
+        let location = request_location(&snapshot, &params.text_document_position, encoding)?;
+        let completion = snapshot
+            .query_completion_at(&context, location)
+            .await
+            .map_err(query_error)?;
+        let items = completion.map_or_else(Vec::new, |completion| {
+            let replacement = Location::new(location.source, completion.replacement);
+            let range = to_lsp_range(&snapshot, replacement, encoding);
+            completion
+                .candidates
+                .into_iter()
+                .filter_map(|candidate| {
+                    let range = range?;
+                    Some(lsp::CompletionItem {
+                        label: candidate.label.clone(),
+                        kind: Some(match candidate.kind {
+                            CompletionKind::ModuleExport => lsp::CompletionItemKind::MODULE,
+                            CompletionKind::StructField => lsp::CompletionItemKind::FIELD,
+                        }),
+                        detail: snapshot.types().display(candidate.ty),
+                        sort_text: Some(candidate.label.clone()),
+                        text_edit: Some(lsp::CompletionTextEdit::Edit(lsp::TextEdit {
+                            range,
+                            new_text: candidate.label,
+                        })),
+                        ..lsp::CompletionItem::default()
+                    })
+                })
+                .collect()
+        });
+        return encode(Some(lsp::CompletionResponse::List(lsp::CompletionList {
+            is_incomplete: false,
+            items,
+        })));
+    }
     Err(protocol_error(
         ErrorCode::METHOD_NOT_FOUND,
         "method not found",
@@ -291,6 +328,11 @@ fn initialize(
             hover_provider: Some(lsp::HoverProviderCapability::Simple(true)),
             definition_provider: Some(lsp::OneOf::Left(true)),
             references_provider: Some(lsp::OneOf::Left(true)),
+            completion_provider: Some(lsp::CompletionOptions {
+                resolve_provider: Some(false),
+                trigger_characters: Some(vec![".".to_owned()]),
+                ..lsp::CompletionOptions::default()
+            }),
             ..lsp::ServerCapabilities::default()
         },
         server_info: Some(lsp::ServerInfo {
@@ -776,6 +818,49 @@ mod tests {
         (path, state, uri)
     }
 
+    async fn disk_semantic_fixture(source: &str) -> (PathBuf, Rc<RefCell<State>>, lsp::Url) {
+        let (root, state) = fixture();
+        let path = root.join("main.xl");
+        std::fs::write(&path, source).expect("write source");
+        initialize_state(&root, &state);
+        let workspace = Rc::new(
+            Workspace::new(&path, Engine::new(config())).expect("create document workspace"),
+        );
+        let context = workspace.context();
+        workspace.rebuild(&context).await.expect("build snapshot");
+        state.borrow_mut().workspace = Some(workspace);
+        let uri = lsp::Url::from_file_path(&path).expect("document URI");
+        (path, state, uri)
+    }
+
+    async fn completion_response(
+        state: Rc<RefCell<State>>,
+        id: i64,
+        uri: lsp::Url,
+        position: lsp::Position,
+    ) -> lsp::CompletionList {
+        let response: Option<lsp::CompletionResponse> = serde_json::from_value(
+            dispatch_request(
+                state,
+                request(
+                    id,
+                    lsp::request::Completion::METHOD,
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": position
+                    }),
+                ),
+            )
+            .await
+            .expect("completion response"),
+        )
+        .expect("completion result");
+        match response.expect("completion list") {
+            lsp::CompletionResponse::List(list) => list,
+            lsp::CompletionResponse::Array(_) => panic!("expected complete list"),
+        }
+    }
+
     #[test]
     fn negotiates_supported_position_encodings() {
         assert_eq!(negotiate_encoding(None), PositionEncoding::Utf16);
@@ -811,6 +896,12 @@ mod tests {
                 }
             ))
         ));
+        let completion = result
+            .capabilities
+            .completion_provider
+            .expect("completion capability");
+        assert_eq!(completion.resolve_provider, Some(false));
+        assert_eq!(completion.trigger_characters, Some(vec![".".to_owned()]));
     }
 
     #[test]
@@ -1174,7 +1265,7 @@ mod tests {
         .expect("hover result");
         assert!(matches!(
             hover.expect("expression hover").contents,
-            lsp::HoverContents::Scalar(lsp::MarkedString::String(ref text)) if text == "unknown"
+            lsp::HoverContents::Scalar(lsp::MarkedString::String(ref text)) if text == "Int"
         ));
     }
 
@@ -1223,6 +1314,157 @@ mod tests {
             );
         }
         assert!(request_location(&snapshot, &position(0, 2), PositionEncoding::Utf16).is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lsp_completion_maps_struct_fields_and_utf16_text_edits() {
+        let source = "let face = \"😀\"; let value = {alpha: 1, beta: \"x\"}; value.alpha";
+        let (_, state, uri) = disk_semantic_fixture(source).await;
+        let document = state
+            .borrow()
+            .workspace
+            .as_ref()
+            .expect("workspace")
+            .published()
+            .expect("snapshot")
+            .sources()
+            .files()
+            .find(|file| file.name.ends_with("main.xl"))
+            .expect("main source")
+            .text()
+            .clone();
+        let cursor = document
+            .position(source.len() as u32, PositionEncoding::Utf16)
+            .expect("UTF-16 cursor");
+        let list = completion_response(
+            state,
+            80,
+            uri,
+            lsp::Position::new(cursor.line, cursor.character),
+        )
+        .await;
+        assert!(!list.is_incomplete);
+        assert_eq!(list.items.len(), 1);
+        let item = &list.items[0];
+        assert_eq!(item.label, "alpha");
+        assert_eq!(item.kind, Some(lsp::CompletionItemKind::FIELD));
+        assert_eq!(item.detail.as_deref(), Some("Int"));
+        let Some(lsp::CompletionTextEdit::Edit(edit)) = &item.text_edit else {
+            panic!("expected completion text edit");
+        };
+        assert_eq!(edit.new_text, "alpha");
+        assert_eq!(
+            edit.range.end,
+            lsp::Position::new(cursor.line, cursor.character)
+        );
+        assert_eq!(edit.range.end.character - edit.range.start.character, 5);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lsp_completion_maps_module_exports() {
+        let (root, state) = fixture();
+        let model = root.join("model.xl");
+        let main = root.join("main.xl");
+        std::fs::write(&model, "{alpha: 1, beta: \"x\"}").expect("write model");
+        let source = "import model from \"./model.xl\"; model.alpha";
+        std::fs::write(&main, source).expect("write main");
+        initialize_state(&root, &state);
+        let workspace = Rc::new(
+            Workspace::new(&main, Engine::new(config())).expect("create document workspace"),
+        );
+        let context = workspace.context();
+        workspace.rebuild(&context).await.expect("build snapshot");
+        state.borrow_mut().workspace = Some(workspace);
+        let uri = lsp::Url::from_file_path(main).expect("main URI");
+        let list =
+            completion_response(state, 81, uri, lsp::Position::new(0, source.len() as u32)).await;
+        assert_eq!(list.items.len(), 1);
+        assert_eq!(list.items[0].label, "alpha");
+        assert_eq!(list.items[0].kind, Some(lsp::CompletionItemKind::MODULE));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lsp_completion_supports_an_empty_prefix_in_recovered_source() {
+        let (root, state) = fixture();
+        let model = root.join("model.xl");
+        let main = root.join("main.xl");
+        std::fs::write(&model, "{alpha: 1, beta: \"x\"}").expect("write model");
+        let source = "import model from \"./model.xl\"; model.";
+        std::fs::write(&main, source).expect("write main");
+        initialize_state(&root, &state);
+        let workspace = Rc::new(
+            Workspace::new(&main, Engine::new(config())).expect("create document workspace"),
+        );
+        let context = workspace.context();
+        workspace.rebuild(&context).await.expect("build snapshot");
+        state.borrow_mut().workspace = Some(workspace);
+        let uri = lsp::Url::from_file_path(main).expect("main URI");
+        let list =
+            completion_response(state, 82, uri, lsp::Position::new(0, source.len() as u32)).await;
+        assert_eq!(
+            list.items
+                .iter()
+                .map(|item| item.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "beta"]
+        );
+        for item in list.items {
+            let Some(lsp::CompletionTextEdit::Edit(edit)) = item.text_edit else {
+                panic!("expected completion text edit");
+            };
+            assert_eq!(edit.range.start, edit.range.end);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completion_observes_cancellation_and_stale_revisions() {
+        let source = "let value = {alpha: 1, beta: 2}; value.alpha";
+        let (path, state, uri) = disk_semantic_fixture(source).await;
+        let completion_request = || {
+            request(
+                82,
+                lsp::request::Completion::METHOD,
+                serde_json::json!({
+                    "textDocument": { "uri": uri.clone() },
+                    "position": { "line": 0, "character": source.len() }
+                }),
+            )
+        };
+        let mut cancelled = Box::pin(dispatch_request(Rc::clone(&state), completion_request()));
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        assert!(matches!(
+            cancelled.as_mut().poll(&mut context),
+            Poll::Pending
+        ));
+        let cancel: AnyNotification = serde_json::from_value(serde_json::json!({
+            "method": "$/cancelRequest",
+            "params": { "id": 82 }
+        }))
+        .expect("cancel notification");
+        dispatch_notification(Rc::clone(&state), cancel).expect("cancel completion");
+        assert_eq!(
+            cancelled.await.expect_err("cancelled completion").code,
+            ErrorCode::REQUEST_CANCELLED
+        );
+
+        let mut stale = Box::pin(dispatch_request(Rc::clone(&state), completion_request()));
+        assert!(matches!(stale.as_mut().poll(&mut context), Poll::Pending));
+        state
+            .borrow()
+            .workspace
+            .as_ref()
+            .expect("workspace")
+            .open(
+                path,
+                DocumentVersion(1),
+                "let value = {alpha: 2}; value.alpha",
+            )
+            .expect("advance workspace revision");
+        assert_eq!(
+            stale.await.expect_err("stale completion").code,
+            ErrorCode::CONTENT_MODIFIED
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

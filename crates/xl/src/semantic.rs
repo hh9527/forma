@@ -199,6 +199,32 @@ pub struct WorkspaceExport {
     pub ty: WorkspaceTypeId,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum CompletionKind {
+    ModuleExport,
+    StructField,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompletionCandidate {
+    pub label: String,
+    pub kind: CompletionKind,
+    pub ty: WorkspaceTypeId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CompletionResult {
+    pub replacement: crate::source::TextRange,
+    pub candidates: Vec<CompletionCandidate>,
+}
+
+struct CompletionContext {
+    receiver_offset: Option<u32>,
+    receiver_name: Option<String>,
+    replacement: crate::source::TextRange,
+    prefix: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum WorkspaceTypeNode {
     Pending,
@@ -245,6 +271,29 @@ impl WorkspaceTypeGraph {
     pub fn display(&self, id: WorkspaceTypeId) -> Option<String> {
         self.node(id)?;
         Some(self.display_with(id, &mut HashSet::new()))
+    }
+
+    pub fn members_of(&self, id: WorkspaceTypeId) -> Vec<WorkspaceExport> {
+        let mut current = id;
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(current) {
+                return Vec::new();
+            }
+            match self.node(current) {
+                Some(WorkspaceTypeNode::Ref(target)) => current = *target,
+                Some(WorkspaceTypeNode::Struct(fields)) => {
+                    return fields
+                        .iter()
+                        .map(|(name, ty)| WorkspaceExport {
+                            name: name.clone(),
+                            ty: *ty,
+                        })
+                        .collect();
+                }
+                _ => return Vec::new(),
+            }
+        }
     }
 
     fn display_with(&self, id: WorkspaceTypeId, active: &mut HashSet<WorkspaceTypeId>) -> String {
@@ -554,6 +603,86 @@ impl WorkspaceSnapshot {
         Ok(references)
     }
 
+    pub async fn query_completion_at(
+        &self,
+        context: &crate::query::QueryContext,
+        location: Location,
+    ) -> Result<Option<CompletionResult>, crate::query::QueryError> {
+        context.checkpoint().await?;
+        context.ensure_snapshot(self.revision)?;
+        let Some(completion) = self.completion_context(location) else {
+            return Ok(None);
+        };
+        context.checkpoint().await?;
+
+        let Some(receiver_offset) = completion.receiver_offset else {
+            return Ok(Some(CompletionResult {
+                replacement: completion.replacement,
+                candidates: Vec::new(),
+            }));
+        };
+        let receiver = Location::new(
+            location.source,
+            crate::source::TextRange::at(receiver_offset),
+        );
+        let definition = self
+            .reference_at(receiver)
+            .and_then(|reference| reference.definition)
+            .and_then(|definition| self.definition(definition))
+            .or_else(|| self.definition_at(receiver))
+            .or_else(|| {
+                let name = completion.receiver_name.as_deref()?;
+                let module = self
+                    .modules
+                    .iter()
+                    .find(|module| module.source == Some(location.source))?;
+                let mut matches = self.definitions.iter().filter(|definition| {
+                    definition.module == module.id
+                        && definition.kind == DefinitionKind::Import
+                        && definition.name == name
+                        && definition.location.end <= receiver_offset
+                });
+                let definition = matches.next()?;
+                matches.next().is_none().then_some(definition)
+            });
+        let (kind, members) = if let Some(module) = definition.and_then(|item| item.import_target) {
+            (
+                CompletionKind::ModuleExport,
+                self.query_exports_of(context, module).await?,
+            )
+        } else {
+            let members = self
+                .type_at(receiver)
+                .map_or_else(Vec::new, |ty| self.types.members_of(ty));
+            (CompletionKind::StructField, members)
+        };
+
+        let mut candidates = Vec::new();
+        for (index, member) in members.into_iter().enumerate() {
+            if index % 256 == 0 {
+                context.checkpoint().await?;
+            }
+            if member.name.starts_with(&completion.prefix) {
+                candidates.push(CompletionCandidate {
+                    label: member.name,
+                    kind,
+                    ty: member.ty,
+                });
+            }
+        }
+        candidates.sort_by(|left, right| {
+            left.label
+                .cmp(&right.label)
+                .then_with(|| left.kind.cmp(&right.kind))
+        });
+        candidates.dedup_by(|left, right| left.label == right.label && left.kind == right.kind);
+        context.ensure_snapshot(self.revision)?;
+        Ok(Some(CompletionResult {
+            replacement: completion.replacement,
+            candidates,
+        }))
+    }
+
     pub fn modules(&self) -> &[WorkspaceModule] {
         &self.modules
     }
@@ -652,6 +781,77 @@ impl WorkspaceSnapshot {
         }
         self.expression_at(location)
             .and_then(|expression| expression.ty.value)
+    }
+
+    fn completion_context(&self, location: Location) -> Option<CompletionContext> {
+        use crate::syntax::xl::lexer::Token;
+
+        if location.start != location.end {
+            return None;
+        }
+        let file = self.sources.get(location.source);
+        let cursor = location.start as usize;
+        if cursor > file.text().byte_len() {
+            return None;
+        }
+        let mut diagnostics = Vec::new();
+        let (tokens, spans) =
+            crate::syntax::xl::lexer::tokenize_document(file.text(), &mut diagnostics);
+        let significant = tokens
+            .iter()
+            .zip(&spans)
+            .filter(|(token, _)| !matches!(token, Token::Whitespace | Token::Comment))
+            .take_while(|(_, span)| span.end <= cursor)
+            .collect::<Vec<_>>();
+        let (dot_span, replacement, prefix) = match significant.as_slice() {
+            [.., (Token::Dot, dot)] if dot.end == cursor => (
+                (*dot).clone(),
+                crate::source::TextRange::at(location.start),
+                String::new(),
+            ),
+            [.., (Token::Dot, dot), (Token::Identifier, prefix)]
+                if dot.end == prefix.start && prefix.end == cursor =>
+            {
+                let replacement = crate::source::TextRange::from_usize((*prefix).clone()).ok()?;
+                let prefix = file.text().slice(replacement).ok()?.into_owned();
+                ((*dot).clone(), replacement, prefix)
+            }
+            _ => return None,
+        };
+        let receiver_end = u32::try_from(dot_span.start).ok()?;
+        let lexical_receiver = significant
+            .iter()
+            .rev()
+            .find(|(_, span)| span.end <= dot_span.start)
+            .and_then(|(token, span)| {
+                (matches!(token, Token::Identifier) && span.end == dot_span.start)
+                    .then_some((*span).clone())
+            });
+        let receiver_location = self
+            .expressions
+            .iter()
+            .map(|expression| expression.location)
+            .chain(self.references.iter().map(|reference| reference.location))
+            .chain(
+                self.definitions
+                    .iter()
+                    .map(|definition| definition.location),
+            )
+            .filter(|candidate| {
+                candidate.source == location.source && candidate.end == receiver_end
+            })
+            .min_by_key(|candidate| candidate.end - candidate.start);
+        let receiver_range = receiver_location.map(Location::text_range).or_else(|| {
+            lexical_receiver.and_then(|range| crate::source::TextRange::from_usize(range).ok())
+        });
+        Some(CompletionContext {
+            receiver_offset: receiver_range.and_then(|receiver| receiver.end.checked_sub(1)),
+            receiver_name: receiver_range
+                .and_then(|receiver| file.text().slice(receiver).ok())
+                .map(|name| name.into_owned()),
+            replacement,
+            prefix,
+        })
     }
 
     pub fn types(&self) -> &WorkspaceTypeGraph {
@@ -1133,6 +1333,8 @@ mod tests {
     use super::*;
     use crate::{Engine, EngineConfig, Quota, TextRange};
     use std::fs;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn fixture_dir() -> PathBuf {
@@ -1150,6 +1352,113 @@ mod tests {
             module_quota: Quota::with_fuel(1_000_000),
             session_quota: Quota::with_fuel(1_000_000),
         })
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            if let Poll::Ready(result) = future.as_mut().poll(&mut context) {
+                return result;
+            }
+        }
+    }
+
+    fn completion_at(snapshot: &WorkspaceSnapshot, needle: &str) -> Option<CompletionResult> {
+        let (source, offset) = snapshot
+            .sources()
+            .files()
+            .find_map(|file| {
+                file.text()
+                    .to_string()
+                    .find(needle)
+                    .map(|offset| (file.id(), offset + needle.len()))
+            })
+            .expect("completion text");
+        let context = crate::query::QueryContext::current(crate::query::RevisionClock::default());
+        block_on(snapshot.query_completion_at(
+            &context,
+            Location::new(source, TextRange::at(offset as u32)),
+        ))
+        .expect("completion query")
+    }
+
+    #[test]
+    fn type_members_follow_refs_and_reject_cycles_any_and_unions() {
+        let mut types = WorkspaceTypeGraph::default();
+        let int = WorkspaceTypeId(0);
+        let structure = WorkspaceTypeId(1);
+        let reference = WorkspaceTypeId(2);
+        let cycle = WorkspaceTypeId(3);
+        let any = WorkspaceTypeId(4);
+        let union = WorkspaceTypeId(5);
+        types.nodes = vec![
+            WorkspaceTypeNode::Int,
+            WorkspaceTypeNode::Struct(BTreeMap::from([("field".to_owned(), int)])),
+            WorkspaceTypeNode::Ref(structure),
+            WorkspaceTypeNode::Ref(cycle),
+            WorkspaceTypeNode::Any,
+            WorkspaceTypeNode::Union(vec![structure]),
+        ];
+        assert_eq!(types.members_of(reference)[0].name, "field");
+        assert!(types.members_of(cycle).is_empty());
+        assert!(types.members_of(any).is_empty());
+        assert!(types.members_of(union).is_empty());
+    }
+
+    #[test]
+    fn completion_returns_struct_fields_and_filters_prefixes() {
+        let directory = fixture_dir();
+        let main = directory.join("main.xl");
+        fs::write(&main, "let value = {alpha: 1, beta: \"x\"}; value.alpha").unwrap();
+        let snapshot = engine().recover_workspace(&main).unwrap();
+        let completion = completion_at(&snapshot, "value.alpha").expect("member context");
+        assert_eq!(completion.replacement.end - completion.replacement.start, 5);
+        assert_eq!(
+            completion.candidates,
+            vec![CompletionCandidate {
+                label: "alpha".to_owned(),
+                kind: CompletionKind::StructField,
+                ty: completion.candidates[0].ty,
+            }]
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn completion_returns_only_resolved_module_exports() {
+        let directory = fixture_dir();
+        let model = directory.join("model.xl");
+        let main = directory.join("main.xl");
+        fs::write(&model, "{alpha: 1, beta: \"x\"}").unwrap();
+        fs::write(&main, "import model from \"./model.xl\"; model.alpha").unwrap();
+        let snapshot = engine().recover_workspace(&main).unwrap();
+        let completion = completion_at(&snapshot, "model.alpha").expect("module context");
+        assert_eq!(completion.candidates.len(), 1);
+        assert_eq!(completion.candidates[0].label, "alpha");
+        assert_eq!(completion.candidates[0].kind, CompletionKind::ModuleExport);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn completion_does_not_recognize_strings_comments_or_bare_names() {
+        for source_text in [
+            "\"value.alpha\"",
+            "1 // value.alpha",
+            "let value = 1; value",
+        ] {
+            let snapshot = WorkspaceSnapshot::recover_source("context.xl", source_text);
+            let source = snapshot.modules()[0].source.unwrap();
+            let context =
+                crate::query::QueryContext::current(crate::query::RevisionClock::default());
+            let result = block_on(snapshot.query_completion_at(
+                &context,
+                Location::new(source, TextRange::at(source_text.len() as u32)),
+            ))
+            .unwrap();
+            assert!(result.is_none(), "unexpected context in {source_text:?}");
+        }
     }
 
     #[test]
