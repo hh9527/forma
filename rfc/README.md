@@ -58,3 +58,4 @@ semantics from an earlier RFC.
 37. Type-erased native continuation dispatch.
 38. Semantic tooling and LSP roadmap.
 39. Workspace-wide semantic snapshots and read-only queries.
+40. Unified CLI type observation through the workspace snapshot.
