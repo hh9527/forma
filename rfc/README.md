@@ -70,3 +70,4 @@ semantics from an earlier RFC.
 49. Explicit generic definition contracts.
 50. Unified function bindings and contracts.
 51. TypeMetadata metatype.
+52. Unified bidirectional type checking.
