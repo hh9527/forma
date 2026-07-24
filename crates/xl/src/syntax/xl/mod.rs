@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn cst_preserves_native_declarations_losslessly() {
-        let source = "native map: for(A, B) fn(Array(A), fn(A) -> B) -> Array(B); map";
+        let source = "native map: for(A, B) Fn(Array(A), Fn(A) -> B) -> Array(B); map";
         let mut sources = crate::source::SourceDatabase::default();
         let id = sources.add("native.xl", source);
         let parsed = parse(id, source);
@@ -101,7 +101,7 @@ mod tests {
     #[test]
     fn cst_preserves_generic_definition_declarations_losslessly() {
         let source =
-            "decl identity: for(A) fn(A) -> A; def identity = fn(value) { value }; identity";
+            "decl identity: for(A) Fn(A) -> A; def identity = fn(value) { value }; identity";
         let mut sources = crate::source::SourceDatabase::default();
         let id = sources.add("identity.xl", source);
         let parsed = parse(id, source);
@@ -118,8 +118,34 @@ mod tests {
     }
 
     #[test]
+    fn cst_preserves_annotated_definitions_and_rejects_removed_function_forms() {
+        let source = "def identity: for(A) Fn(A) -> A = fn(value) { value }; identity";
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("annotated-def.xl", source);
+        let parsed = parse(id, source);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+        let program = Program::cast(&parsed.syntax, NodeRef::ROOT).unwrap();
+        let Some(Binding::Def(definition)) = program.body().unwrap().bindings().next() else {
+            panic!("expected definition");
+        };
+        assert!(definition.type_parameters().is_some());
+        assert!(definition.contract().is_some());
+
+        for removed in [
+            "fn identity(value) { value } identity",
+            "decl identity: fn(Int) -> Int; def identity = fn(value) { value }; identity",
+        ] {
+            let id = sources.add("removed-function-form.xl", removed);
+            assert!(parse(id, removed).has_errors());
+        }
+    }
+
+    #[test]
     fn native_type_schemes_reject_nested_for_binders() {
-        let source = "native use: fn(for(A) fn(A) -> A) -> Int; use";
+        let source = "native use: Fn(for(A) Fn(A) -> A) -> Int; use";
         let mut sources = crate::source::SourceDatabase::default();
         let id = sources.add("nested-scheme.xl", source);
         let parsed = parse(id, source);

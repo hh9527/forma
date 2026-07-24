@@ -1176,10 +1176,8 @@ impl ModuleLoader {
 
 fn reject_nested_imports(program: &Program, source_name: &str) -> Result<(), ModuleError> {
     for binding in &program.value.body.value.bindings {
-        if matches!(
-            binding.value.kind,
-            BindingKind::Let | BindingKind::Def | BindingKind::NamedFunction
-        ) && expression_has_import(&binding.value.value)
+        if matches!(binding.value.kind, BindingKind::Let | BindingKind::Def)
+            && expression_has_import(&binding.value.value)
         {
             return Err(ModuleError::new(format!(
                 "{source_name}: imports and native declarations are only allowed at module top level"
@@ -1465,7 +1463,7 @@ mod tests {
         fs::write(
             directory.join("erased.xl"),
             r#"import debug from "core:debug";
-               fn observe(value) { debug.dbg_with("metadata", value) }
+               def observe = fn(value) { debug.dbg_with("metadata", value) };
                type Observed = observe(Int);
                0"#,
         )
@@ -1491,7 +1489,7 @@ mod tests {
         fs::write(
             directory.join("retained.xl"),
             r#"import debug from "core:debug";
-               fn observe(value) { debug.dbg_with("observed", value) }
+               def observe = fn(value) { debug.dbg_with("observed", value) };
                type Observed = observe(Int);
                observe(1)"#,
         )
@@ -1760,7 +1758,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("missing-native.xl"),
-            "native missing: fn(Int) -> Int; missing(1)",
+            "native missing: Fn(Int) -> Int; missing(1)",
         )
         .unwrap();
         let missing = load_module(
@@ -1774,7 +1772,7 @@ mod tests {
 
         fs::write(
             directory.join("nested-native.xl"),
-            "let value = { native hidden: fn(Int) -> Int; 1 }; value",
+            "let value = { native hidden: Fn(Int) -> Int; 1 }; value",
         )
         .unwrap();
         let nested =
@@ -1792,7 +1790,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("countdown.xl"),
-            "fn countdown(n) { if n < 1 { 0 } else { countdown(n - 1) } } countdown",
+            "def countdown: Fn(Int) -> Int = fn(n) { if n < 1 { 0 } else { countdown(n - 1) } }; countdown",
         )
         .unwrap();
         fs::write(
@@ -2044,7 +2042,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("identity.xl"),
-            r#"decl identity: for(A) fn(A) -> A;
+            r#"decl identity: for(A) Fn(A) -> A;
                def identity = fn(value) { value };
                {identity: identity}"#,
         )
@@ -2198,7 +2196,7 @@ mod tests {
 
         let nested_depth = run_error(
             "nested-depth.xl",
-            "decl nest: fn(Int) -> Int;
+            "decl nest: Fn(Int) -> Int;
              def nest = fn(n) {
                  if n < 1 { 0 } else {
                      arrays.fold([n], 0, fn(total, value) { nest(value - 1) })
@@ -3412,7 +3410,7 @@ mod tests {
                import debug from "core:debug";
                import json from "core:json";
                let zero = 0;
-               fn is_zero(value) { value == zero }
+               def is_zero = fn(value) { value == zero };
                @struct type Model = {
                    @json.skip_serializing_if(is_zero) omitted: Int,
                    @json.skip_serializing_if(is_zero) retained: Int,
@@ -3452,7 +3450,7 @@ mod tests {
         fs::write(
             directory.join("arity.xl"),
             r#"import json from "core:json";
-               fn wrong(left, right) { 'False }
+               def wrong = fn(left, right) { 'False };
                @struct type Model = {
                    @json.skip_serializing_if(wrong) value: Int,
                };
@@ -3466,7 +3464,7 @@ mod tests {
             directory.join("result.xl"),
             r#"import codec from "core:codec";
                import json from "core:json";
-               fn identity(value) { value }
+               def identity = fn(value) { value };
                @struct type Model = {
                    @json.skip_serializing_if(identity) value: Int,
                };
@@ -3488,7 +3486,7 @@ mod tests {
             directory.join("callback.xl"),
             r#"import codec from "core:codec";
                import json from "core:json";
-               fn fails(value) { 1 / 0 }
+               def fails = fn(value) { 1 / 0 };
                @struct type Model = {
                    @json.skip_serializing_if(fails) value: Int,
                };
@@ -3521,8 +3519,8 @@ mod tests {
             directory.join("main.xl"),
             r#"import codec from "core:codec";
                import json from "core:json";
-               fn is_zero(value) { value == 0 }
-               fn always(value) { 'True }
+               def is_zero = fn(value) { value == 0 };
+               def always = fn(value) { 'True };
                @struct type Item = {
                    @json.skip_serializing_if(is_zero) value: Int,
                };

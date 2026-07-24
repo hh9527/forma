@@ -1,4 +1,4 @@
-token Let='let' Decl='decl' Def='def' Native='native' For='for' Type='type' Fn='fn' If='if' Else='else' Match='match';
+token Let='let' Decl='decl' Def='def' Native='native' For='for' Type='type' Fn='fn' FunctionType='Fn' If='if' Else='else' Match='match';
 token Import='import' From='from';
 token SectionLParen='\\(' LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
 token Comma=',' Colon=':' Semicolon=';' Dot='.' At='@';
@@ -16,16 +16,15 @@ start program;
 
 program: body;
 body: (?1 binding)* expression;
-binding^: let_binding | decl_binding | def_binding | native_binding | type_binding | import_binding | named_function;
+binding^: let_binding | decl_binding | def_binding | native_binding | type_binding | import_binding;
 let_binding: 'let' Identifier [':' expression] '=' expression ';';
 decl_binding: 'decl' Identifier ':' type_scheme ';';
-def_binding: 'def' Identifier '=' expression ';';
+def_binding: 'def' Identifier [':' type_scheme] '=' expression ';';
 native_binding: 'native' Identifier ':' type_scheme ';';
 type_scheme: ['for' type_parameters] contract;
 type_parameters: '(' Identifier (?1 ',' Identifier)* [','] ')';
 type_binding: decorator* 'type' Identifier '=' expression ';';
 import_binding: 'import' Identifier 'from' string_literal ';';
-named_function: 'fn' Identifier annotated_parameters ['->' contract] block;
 
 expression:
   expression arguments @call_expr
@@ -64,11 +63,9 @@ decorator: '@' decorator_path [arguments];
 decorator_path: Identifier ('.' Identifier)*;
 block: '{' body '}';
 closure: 'fn' parameters block;
-function_contract: 'fn' '(' [contract (?1 ',' contract)* [',']] ')' '->' contract;
+function_contract: 'Fn' '(' [contract (?1 ',' contract)* [',']] ')' '->' contract;
 contract: Identifier [?1 '(' [contract (?2 ',' contract)* [',']] ')'] @contract_expr | function_contract;
 parameters: '(' [Identifier (?1 ',' Identifier)* [',']] ')';
-annotated_parameters: '(' [annotated_parameter (?1 ',' annotated_parameter)* [',']] ')';
-annotated_parameter: Identifier [':' contract];
 arguments: '(' [expression (?1 ',' expression)* [',']] ')';
 section_arguments: '\\(' [argument (?1 ',' argument)* [',']] ')';
 argument: expression | Placeholder | IndexedPlaceholder;

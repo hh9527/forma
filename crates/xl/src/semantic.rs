@@ -349,7 +349,7 @@ impl WorkspaceTypeGraph {
                 .collect::<Vec<_>>()
                 .join(" | "),
             WorkspaceTypeNode::Function { parameters, result } => format!(
-                "fn({}) -> {}",
+                "Fn({}) -> {}",
                 parameters
                     .iter()
                     .map(|item| self.display_with(*item, active))

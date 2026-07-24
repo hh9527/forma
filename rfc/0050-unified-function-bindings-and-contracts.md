@@ -1,6 +1,6 @@
 # RFC 0050: Unified function bindings and contracts
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0013, RFC 0048, RFC 0049
 
 ## Summary
@@ -261,6 +261,28 @@ an actively implemented RFC's result would otherwise claim current syntax.
 - higher-rank or constrained schemes;
 - generic data type declarations;
 - explicit type application.
+
+## Implementation result
+
+Implemented with one `DefBinding` CST/AST/HIR/compiler path. An optional root
+scheme is lowered on `def`; annotated definitions are predeclared for recursion,
+count as their slot's sole initialization, undergo the existing rigid scheme
+check, and export through the existing static `ModuleInterface`. A prior
+`decl` plus annotated `def` is rejected as a duplicate declaration.
+
+The named-function grammar, typed view, `BindingKind`, `HirDefinitionKind`,
+analysis branches, compiler branches, and dedicated recovery expectations were
+removed. Repository XL sources now use `def name = fn(...) { ... };` or
+annotated `def name: type_scheme = fn(...) { ... };`. Lowercase `fn` appears
+only in closure grammar, while uppercase `Fn` appears only in function contract
+grammar. Type diagnostics and semantic displays also render `Fn(...)`.
+
+Tests cover lossless annotated definitions, generic fresh instantiation, rigid
+implementation rejection, duplicate contracts, recursive annotated functions,
+split mutual recursion, rejection of both removed syntaxes, standard-library
+contracts, modules, CLI behavior, and LSP queries. The final workspace run
+passed 187 core tests with one manual benchmark ignored, 9 CLI tests, and 19
+LSP tests. Strict Clippy, formatting, and whitespace validation also pass.
 
 ## Rejected alternatives
 

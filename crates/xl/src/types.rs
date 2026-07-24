@@ -405,7 +405,7 @@ impl TypeGraph {
                 .collect::<Vec<_>>()
                 .join(" | "),
             TypeNode::Function { parameters, result } => format!(
-                "fn({}) -> {}",
+                "Fn({}) -> {}",
                 parameters
                     .iter()
                     .map(|item| self.display_with(*item, active))
@@ -661,7 +661,7 @@ impl TypeDescriptor {
                 .collect::<Vec<_>>()
                 .join(" | "),
             Self::Function { parameters, result } => format!(
-                "fn({}) -> {}",
+                "Fn({}) -> {}",
                 parameters
                     .iter()
                     .map(Self::display_name)
@@ -1267,13 +1267,12 @@ pub(crate) fn analyze_program_with_bindings_observed(
     let mut definition_counts = HashMap::<String, usize>::new();
     for binding in &program.value.body.value.bindings {
         let name = &binding.value.name.value;
-        if matches!(
-            binding.value.kind,
-            BindingKind::Def | BindingKind::NamedFunction
-        ) {
+        if binding.value.kind == BindingKind::Def {
             *definition_counts.entry(name.clone()).or_default() += 1;
         }
-        if !matches!(binding.value.kind, BindingKind::Decl | BindingKind::Native) {
+        if !matches!(binding.value.kind, BindingKind::Decl | BindingKind::Native)
+            && !(binding.value.kind == BindingKind::Def && binding.value.annotation.is_some())
+        {
             continue;
         }
         if definition_contracts.contains_key(name) {
@@ -1337,52 +1336,9 @@ pub(crate) fn analyze_program_with_bindings_observed(
         let erased = erase_type_variables(&descriptor);
         static_environment.insert(name.clone(), erased.clone());
         binding_types.insert(name.clone(), erased);
-        if binding.value.kind == BindingKind::Decl {
+        if matches!(binding.value.kind, BindingKind::Decl | BindingKind::Def) {
             definition_contracts.insert(name.clone(), descriptor);
             declaration_locations.insert(name.clone(), binding.location);
-        }
-    }
-    for binding in &program.value.body.value.bindings {
-        if binding.value.kind != BindingKind::NamedFunction {
-            continue;
-        }
-        let name = &binding.value.name.value;
-        let Some(contract) = &binding.value.annotation else {
-            continue;
-        };
-        let metadata = evaluate_tool_expression(
-            source_name,
-            contract,
-            &tool_values,
-            account,
-            sources,
-            debug_sink,
-        )?;
-        let descriptor = TypeDescriptor::from_value(&metadata).map_err(|message| {
-            frontend_error(
-                source_name,
-                format!("function {name} has invalid contract metadata: {message}"),
-            )
-        })?;
-        if let Some(declared) = definition_contracts.get(name) {
-            if !assignable(&descriptor, declared) {
-                return Err(FrontendError::from_diagnostic(
-                    sources,
-                    Diagnostic::error(
-                        format!(
-                            "function {name} contract {} is incompatible with declared {}",
-                            descriptor.display_name(),
-                            declared.display_name()
-                        ),
-                        contract.location,
-                    )
-                    .with_secondary("contract declared here", declaration_locations[name]),
-                ));
-            }
-        } else {
-            static_environment.insert(name.clone(), descriptor.clone());
-            binding_types.insert(name.clone(), descriptor.clone());
-            definition_contracts.insert(name.clone(), descriptor);
         }
     }
     for (name, count) in &definition_counts {
@@ -1523,7 +1479,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
                     tool_values.insert(binding.value.name.value.clone(), value);
                 }
             }
-            BindingKind::Def | BindingKind::NamedFunction => {
+            BindingKind::Def => {
                 let name = &binding.value.name.value;
                 let inferred = inferred_expression;
                 let checked = if let Some(expected) = definition_contracts.get(name) {
@@ -1634,10 +1590,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
             }
             if matches!(
                 binding.value.kind,
-                BindingKind::Let
-                    | BindingKind::Def
-                    | BindingKind::NamedFunction
-                    | BindingKind::Import
+                BindingKind::Let | BindingKind::Def | BindingKind::Import
             ) {
                 generic_environment.insert(binding.value.name.value.clone(), inferred.clone());
                 binding_types.insert(binding.value.name.value.clone(), inferred);
@@ -2932,10 +2885,7 @@ impl<'a> GenericInference<'a> {
             let inferred = self.infer(&binding.value.value, &environment, None)?;
             if matches!(
                 binding.value.kind,
-                BindingKind::Let
-                    | BindingKind::Def
-                    | BindingKind::NamedFunction
-                    | BindingKind::Import
+                BindingKind::Let | BindingKind::Def | BindingKind::Import
             ) {
                 environment.insert(binding.value.name.value.clone(), inferred);
             }
@@ -3192,10 +3142,7 @@ fn check_block_interpolations(
 ) -> Result<(), FrontendError> {
     let mut environment = environment.clone();
     for binding in &block.value.bindings {
-        if matches!(
-            binding.value.kind,
-            BindingKind::Decl | BindingKind::Native | BindingKind::NamedFunction
-        ) {
+        if matches!(binding.value.kind, BindingKind::Decl | BindingKind::Native) {
             environment.insert(binding.value.name.value.clone(), TypeDescriptor::Any);
         }
     }
@@ -3206,7 +3153,7 @@ fn check_block_interpolations(
         }
         if matches!(
             binding.value.kind,
-            BindingKind::Let | BindingKind::Def | BindingKind::NamedFunction | BindingKind::Import
+            BindingKind::Let | BindingKind::Def | BindingKind::Import
         ) {
             let inferred = infer_expr(&binding.value.value, &environment);
             environment.insert(binding.value.name.value.clone(), inferred);
@@ -3242,10 +3189,7 @@ fn infer_block_with(
 ) -> TypeDescriptor {
     let mut environment = environment.clone();
     for binding in &block.value.bindings {
-        if matches!(
-            binding.value.kind,
-            BindingKind::Decl | BindingKind::Native | BindingKind::NamedFunction
-        ) {
+        if matches!(binding.value.kind, BindingKind::Decl | BindingKind::Native) {
             environment.insert(binding.value.name.value.clone(), TypeDescriptor::Any);
         }
     }
@@ -3256,7 +3200,7 @@ fn infer_block_with(
         let inferred = infer_expr_with(&binding.value.value, &environment, record);
         if matches!(
             binding.value.kind,
-            BindingKind::Let | BindingKind::Def | BindingKind::NamedFunction | BindingKind::Import
+            BindingKind::Let | BindingKind::Def | BindingKind::Import
         ) {
             environment.insert(binding.value.name.value.clone(), inferred);
         }
@@ -3537,8 +3481,8 @@ mod tests {
     #[test]
     fn generic_native_calls_instantiate_fresh_types_and_check_callbacks() {
         let analysis = analyze_with_natives(
-            "native identity: for(A) fn(A) -> A;\
-             native map: for(A, B) fn(Array(A), fn(A) -> B) -> Array(B);\
+            "native identity: for(A) Fn(A) -> A;\
+             native map: for(A, B) Fn(Array(A), Fn(A) -> B) -> Array(B);\
              (identity(1), identity(\"x\"), map([1, 2], fn(x) { x + 1 }))",
             &[("identity", 1), ("map", 2)],
         )
@@ -3574,9 +3518,9 @@ mod tests {
     #[test]
     fn generic_definition_contracts_check_rigidly_and_instantiate_at_each_use() {
         let analysis = analyze_with_natives(
-            "decl identity: for(A) fn(A) -> A;\
+            "decl identity: for(A) Fn(A) -> A;\
              def identity = fn(value) { value };\
-             decl apply: for(A, B) fn(fn(A) -> B, A) -> B;\
+             decl apply: for(A, B) Fn(Fn(A) -> B, A) -> B;\
              def apply = fn(function, value) { function(value) };\
              (identity(1), identity(\"x\"), apply(fn(value) { value + 1 }, 2))",
             &[],
@@ -3586,7 +3530,7 @@ mod tests {
         assert!(analysis.module_interface.exports.is_empty());
 
         let invalid = analyze_with_natives(
-            "decl identity: for(A) fn(A) -> A;\
+            "decl identity: for(A) Fn(A) -> A;\
              def identity = fn(value) { 1 };\
              identity",
             &[],
@@ -3595,7 +3539,7 @@ mod tests {
         assert!(
             invalid
                 .message
-                .contains("is not assignable to fn(T0) -> T0"),
+                .contains("is not assignable to Fn(T0) -> T0"),
             "{}",
             invalid.message
         );
@@ -3604,7 +3548,7 @@ mod tests {
     #[test]
     fn generic_definition_aliases_instantiate_once_and_exports_retain_schemes() {
         let alias_error = analyze_with_natives(
-            "decl identity: for(A) fn(A) -> A;\
+            "decl identity: for(A) Fn(A) -> A;\
              def identity = fn(value) { value };\
              let local = identity;\
              (local(1), local(\"x\"))",
@@ -3614,7 +3558,7 @@ mod tests {
         assert!(alias_error.message.contains("cannot unify String with Int"));
 
         let exported = analyze_with_natives(
-            "decl identity: for(A) fn(A) -> A;\
+            "decl identity: for(A) Fn(A) -> A;\
              def identity = fn(value) { value };\
              {identity: identity}",
             &[],
@@ -3631,9 +3575,44 @@ mod tests {
     }
 
     #[test]
+    fn annotated_definitions_are_atomic_generic_contracts() {
+        let analysis = analyze_with_natives(
+            "def identity: for(A) Fn(A) -> A = fn(value) { value };\
+             (identity(1), identity(\"x\"))",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(analysis.display(analysis.result_type), "(Int, String)");
+
+        let duplicate = analyze_with_natives(
+            "decl identity: for(A) Fn(A) -> A;\
+             def identity: for(A) Fn(A) -> A = fn(value) { value };\
+             identity",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            duplicate
+                .message
+                .contains("duplicate declaration \"identity\"")
+        );
+
+        let specialized = analyze_with_natives(
+            "def identity: for(A) Fn(A) -> A = fn(value) { 1 }; identity",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            specialized
+                .message
+                .contains("is not assignable to Fn(T0) -> T0")
+        );
+    }
+
+    #[test]
     fn generic_native_result_uses_expected_type_and_rejects_missing_or_conflicting_evidence() {
         let inferred = analyze_with_natives(
-            "native empty: for(A) fn() -> Array(A);\
+            "native empty: for(A) Fn() -> Array(A);\
              let values: Array(Int) = empty();\
              values",
             &[("empty", 0)],
@@ -3642,14 +3621,14 @@ mod tests {
         assert_eq!(inferred.display(inferred.result_type), "Array<Int>");
 
         let missing = analyze_with_natives(
-            "native empty: for(A) fn() -> Array(A); empty()",
+            "native empty: for(A) Fn() -> Array(A); empty()",
             &[("empty", 0)],
         )
         .unwrap_err();
         assert!(missing.message.contains("cannot infer generic result type"));
 
         let conflicting = analyze_with_natives(
-            "native choose: for(A) fn(A, A) -> A; choose(1, \"x\")",
+            "native choose: for(A) Fn(A, A) -> A; choose(1, \"x\")",
             &[("choose", 2)],
         )
         .unwrap_err();
@@ -3663,14 +3642,14 @@ mod tests {
     #[test]
     fn generic_native_parameters_must_be_unique() {
         let error = analyze_with_natives(
-            "native identity: for(A, A) fn(A) -> A; identity(1)",
+            "native identity: for(A, A) Fn(A) -> A; identity(1)",
             &[("identity", 1)],
         )
         .unwrap_err();
         assert!(error.message.contains("duplicate type parameter"));
 
         let leaked =
-            analyze_with_natives("native identity: for(A) fn(A) -> A; A", &[("identity", 1)])
+            analyze_with_natives("native identity: for(A) Fn(A) -> A; A", &[("identity", 1)])
                 .unwrap_err();
         assert!(leaked.message.contains("unknown binding \"A\""));
     }
@@ -3678,7 +3657,7 @@ mod tests {
     #[test]
     fn generic_native_schemes_are_data_and_occurs_checks_reject_infinite_types() {
         let analysis = analyze_with_natives(
-            "native identity: for(A) fn(A) -> A; {identity: identity}",
+            "native identity: for(A) Fn(A) -> A; {identity: identity}",
             &[("identity", 1)],
         )
         .unwrap();
@@ -3730,7 +3709,7 @@ mod tests {
     fn ordinary_closure_computes_type_metadata() {
         let analysis = analyze_source(
             "test",
-            "fn Optional(item) { union('None, [Atom('None), Tuple([Atom('Some), item])]) }\
+            "def Optional = fn(item) { union('None, [Atom('None), Tuple([Atom('Some), item])]) };\
              type MaybeInt = Optional(Int);\
              let value: MaybeInt = ('Some, 42);\
              value",

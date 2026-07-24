@@ -27,7 +27,6 @@ hir_id!(HirExpressionId);
 pub enum HirDefinitionKind {
     Let,
     DefinitionSlot,
-    NamedFunction,
     Type,
     Import,
     Native,
@@ -241,7 +240,6 @@ impl Resolver {
         let kind = match binding.value.kind {
             BindingKind::Let => HirDefinitionKind::Let,
             BindingKind::Decl | BindingKind::Def => HirDefinitionKind::DefinitionSlot,
-            BindingKind::NamedFunction => HirDefinitionKind::NamedFunction,
             BindingKind::Type => HirDefinitionKind::Type,
             BindingKind::Import => HirDefinitionKind::Import,
             BindingKind::Native => HirDefinitionKind::Native,
@@ -302,11 +300,9 @@ impl Resolver {
         for binding in bindings {
             if matches!(
                 binding.value.kind,
-                BindingKind::Decl
-                    | BindingKind::Native
-                    | BindingKind::NamedFunction
-                    | BindingKind::Type
-            ) {
+                BindingKind::Decl | BindingKind::Native | BindingKind::Type
+            ) || binding.value.kind == BindingKind::Def && binding.value.annotation.is_some()
+            {
                 self.define(
                     binding,
                     scopes.last_mut().expect("block has a scope"),
@@ -331,9 +327,11 @@ impl Resolver {
                 BindingKind::Def => {
                     let definition =
                         if let Some(id) = resolve_name(scopes, &binding.value.name.value) {
-                            self.hir.definitions[id.index()]
-                                .additional_locations
-                                .push(binding.value.name.location);
+                            if binding.value.annotation.is_none() {
+                                self.hir.definitions[id.index()]
+                                    .additional_locations
+                                    .push(binding.value.name.location);
+                            }
                             id
                         } else {
                             self.define(
@@ -342,13 +340,14 @@ impl Resolver {
                                 top_level,
                             )
                         };
-                    let value = self.index_expr(&binding.value.value, scopes);
+                    let value = if binding.value.annotation.is_some() {
+                        self.index_binding_expr(binding, &binding.value.value, scopes)
+                    } else {
+                        self.index_expr(&binding.value.value, scopes)
+                    };
                     self.hir.definitions[definition.index()].value = Some(value);
                 }
-                BindingKind::Decl
-                | BindingKind::Native
-                | BindingKind::Type
-                | BindingKind::NamedFunction => {
+                BindingKind::Decl | BindingKind::Native | BindingKind::Type => {
                     let value = self.index_binding_expr(binding, &binding.value.value, scopes);
                     let definition = resolve_name(scopes, &binding.value.name.value)
                         .expect("predeclared binding has a definition");
@@ -547,7 +546,7 @@ mod tests {
     fn resolves_slots_shadowing_parameters_patterns_and_externals() {
         let program = parse(
             "hir.xl",
-            "decl loop: fn(Int) -> Int;\
+            "decl loop: Fn(Int) -> Int;\
              def loop = fn(n) { if n < 1 { n } else { loop(n - 1) } };\
              let f = fn(x) { let x = x; match ('Ok, x) { ('Ok, y) => y, _ => ext } };\
              f(loop(2))",

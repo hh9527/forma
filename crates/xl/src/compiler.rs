@@ -560,13 +560,12 @@ impl<'a> Compiler<'a> {
 
         for binding in &block.value.bindings {
             let name = &binding.value.name.value;
-            if matches!(
-                binding.value.kind,
-                BindingKind::Def | BindingKind::NamedFunction
-            ) {
+            if binding.value.kind == BindingKind::Def {
                 *definition_counts.entry(name.clone()).or_default() += 1;
             }
-            if binding.value.kind == BindingKind::Decl {
+            if binding.value.kind == BindingKind::Decl
+                || binding.value.kind == BindingKind::Def && binding.value.annotation.is_some()
+            {
                 if declared.contains_key(name) {
                     return Err(
                         self.error_at(binding.location, format!("duplicate declaration {name:?}"))
@@ -590,32 +589,6 @@ impl<'a> Compiler<'a> {
                     .and_then(function_contract_arity);
                 declared.insert(name.clone(), (link, binding.location, arity));
             }
-        }
-        for binding in &block.value.bindings {
-            if binding.value.kind != BindingKind::NamedFunction {
-                continue;
-            }
-            let name = &binding.value.name.value;
-            if declared.contains_key(name) {
-                continue;
-            }
-            if outer.contains_key(name) {
-                return Err(self.error_at(
-                    binding.location,
-                    format!("definition {name:?} cannot shadow an outer definition"),
-                ));
-            }
-            let link = self.allocate();
-            self.emit(Operation::MakeUpLink { dst: link }, binding.location);
-            self.environment.insert(name.clone(), link);
-            self.up_link_bindings.insert(name.clone());
-            self.definition_bindings.insert(name.clone());
-            let arity = binding
-                .value
-                .annotation
-                .as_ref()
-                .and_then(function_contract_arity);
-            declared.insert(name.clone(), (link, binding.location, arity));
         }
         for binding in &block.value.bindings {
             if binding.value.kind != BindingKind::Type
@@ -648,10 +621,7 @@ impl<'a> Compiler<'a> {
         for binding in &block.value.bindings {
             let name = &binding.value.name.value;
             if declared.contains_key(name)
-                && !matches!(
-                    binding.value.kind,
-                    BindingKind::Decl | BindingKind::Def | BindingKind::NamedFunction
-                )
+                && !matches!(binding.value.kind, BindingKind::Decl | BindingKind::Def)
             {
                 return Err(self.error_at(
                     binding.location,
@@ -712,7 +682,7 @@ impl<'a> Compiler<'a> {
                         .insert(binding.value.name.value.clone(), register);
                     continue;
                 }
-                BindingKind::Let | BindingKind::Def | BindingKind::NamedFunction => {}
+                BindingKind::Let | BindingKind::Def => {}
             }
             if binding.value.kind == BindingKind::Def
                 && !declared.contains_key(&binding.value.name.value)
@@ -728,10 +698,8 @@ impl<'a> Compiler<'a> {
             }
             let value = self.compile_expr(&binding.value.value)?;
             let name = binding.value.name.value.clone();
-            if matches!(
-                binding.value.kind,
-                BindingKind::Def | BindingKind::NamedFunction
-            ) && let Some((link, _, arity)) = declared.get(&name)
+            if binding.value.kind == BindingKind::Def
+                && let Some((link, _, arity)) = declared.get(&name)
             {
                 if let Some(arity) = arity {
                     self.emit(
@@ -1417,10 +1385,7 @@ pub(crate) fn function_contract_arity(contract: &Expr) -> Option<u32> {
 
 fn free_block(block: &Block, bound: &mut HashSet<String>, free: &mut BTreeSet<String>) {
     for binding in &block.value.bindings {
-        if matches!(
-            binding.value.kind,
-            BindingKind::Decl | BindingKind::Native | BindingKind::NamedFunction
-        ) {
+        if matches!(binding.value.kind, BindingKind::Decl | BindingKind::Native) {
             bound.insert(binding.value.name.value.clone());
         }
     }
@@ -1533,10 +1498,7 @@ fn bind_pattern(pattern: &Pattern, bound: &mut HashSet<String>) {
 
 fn collect_runtime_names_block(block: &Block, names: &mut HashSet<String>) {
     for binding in &block.value.bindings {
-        if matches!(
-            binding.value.kind,
-            BindingKind::Let | BindingKind::Def | BindingKind::NamedFunction
-        ) {
+        if matches!(binding.value.kind, BindingKind::Let | BindingKind::Def) {
             collect_runtime_names(&binding.value.value, names);
         }
     }
@@ -1690,51 +1652,55 @@ let decorators = {
     #[test]
     fn executes_single_assignment_recursive_definitions() {
         let explicit = run(
-            "decl countdown: fn(Int) -> Int; def countdown = fn(n) { if n < 1 { 0 } else { countdown(n - 1) } }; countdown(4)",
+            "decl countdown: Fn(Int) -> Int; def countdown = fn(n) { if n < 1 { 0 } else { countdown(n - 1) } }; countdown(4)",
         )
         .unwrap();
         assert!(matches!(explicit, Value::Int(0)));
 
         let mutual = run(
-            "decl even: fn(Int) -> Int; decl odd: fn(Int) -> Int; def even = fn(n) { if n < 1 { 0 } else { odd(n - 1) } }; def odd = fn(n) { if n < 1 { 1 } else { even(n - 1) } }; even(4)",
+            "decl even: Fn(Int) -> Int; decl odd: Fn(Int) -> Int; def even = fn(n) { if n < 1 { 0 } else { odd(n - 1) } }; def odd = fn(n) { if n < 1 { 1 } else { even(n - 1) } }; even(4)",
         )
         .unwrap();
         assert!(matches!(mutual, Value::Int(0)));
 
         let higher_order = run(
-            "decl loop: fn(Int) -> Int; let build = fn(body) { body }; def loop = build(fn(n) { if n < 1 { 0 } else { loop(n - 1) } }); loop(3)",
+            "decl loop: Fn(Int) -> Int; let build = fn(body) { body }; def loop = build(fn(n) { if n < 1 { 0 } else { loop(n - 1) } }); loop(3)",
         )
         .unwrap();
         assert!(matches!(higher_order, Value::Int(0)));
 
         let passed_as_value = run(
-            "decl countdown: fn(Int) -> Int; def countdown = fn(n) { if n < 1 { 0 } else { countdown(n - 1) } }; let invoke = fn(f, n) { f(n) }; invoke(countdown, 4)",
+            "decl countdown: Fn(Int) -> Int; def countdown = fn(n) { if n < 1 { 0 } else { countdown(n - 1) } }; let invoke = fn(f, n) { f(n) }; invoke(countdown, 4)",
         )
         .unwrap();
         assert!(matches!(passed_as_value, Value::Int(0)));
 
-        let named = run("fn loop(n) { if n < 1 { 0 } else { loop(n - 1) } } loop(3)").unwrap();
+        let named = run(
+            "def loop: Fn(Int) -> Int = fn(n) { if n < 1 { 0 } else { loop(n - 1) } }; loop(3)",
+        )
+        .unwrap();
         assert!(matches!(named, Value::Int(0)));
 
-        let annotated = run("fn increment(value: Int) -> Int { value + 1 } increment(41)").unwrap();
+        let annotated =
+            run("def increment: Fn(Int) -> Int = fn(value) { value + 1 }; increment(41)").unwrap();
         assert!(matches!(annotated, Value::Int(42)));
     }
 
     #[test]
     fn proper_tail_calls_cross_recursive_branches_and_match_arms() {
         let direct =
-            run("fn countdown(n) { if n < 1 { 0 } else { countdown(n - 1) } } countdown(1500)")
+            run("def countdown: Fn(Int) -> Int = fn(n) { if n < 1 { 0 } else { countdown(n - 1) } }; countdown(1500)")
                 .unwrap();
         assert!(matches!(direct, Value::Int(0)));
 
         let mutual = run(
-            "decl even: fn(Int) -> Int; decl odd: fn(Int) -> Int; def even = fn(n) { if n < 1 { 0 } else { odd(n - 1) } }; def odd = fn(n) { if n < 1 { 1 } else { even(n - 1) } }; even(1500)",
+            "decl even: Fn(Int) -> Int; decl odd: Fn(Int) -> Int; def even = fn(n) { if n < 1 { 0 } else { odd(n - 1) } }; def odd = fn(n) { if n < 1 { 1 } else { even(n - 1) } }; even(1500)",
         )
         .unwrap();
         assert!(matches!(mutual, Value::Int(0)));
 
         let matched = run(
-            "fn countdown(n) { match n { 0 => 0, value => countdown(value - 1) } } countdown(1500)",
+            "def countdown: Fn(Int) -> Int = fn(n) { match n { 0 => 0, value => countdown(value - 1) } }; countdown(1500)",
         )
         .unwrap();
         assert!(matches!(matched, Value::Int(0)));
@@ -1746,7 +1712,7 @@ let decorators = {
         assert!(matches!(higher_order, Value::Int(0)));
 
         let non_tail =
-            run("fn descend(n) { if n < 1 { 0 } else { 1 + descend(n - 1) } } descend(1500)")
+            run("def descend: Fn(Int) -> Int = fn(n) { if n < 1 { 0 } else { 1 + descend(n - 1) } }; descend(1500)")
                 .unwrap_err();
         assert!(matches!(
             non_tail,
@@ -1799,7 +1765,7 @@ let decorators = {
 
     #[test]
     fn definition_contract_failures_keep_source_origins() {
-        let missing = run("decl missing: fn(Int) -> Int; 0").unwrap_err();
+        let missing = run("decl missing: Fn(Int) -> Int; 0").unwrap_err();
         assert!(
             missing
                 .to_string()
@@ -1826,7 +1792,7 @@ let decorators = {
         assert!(declaration_conflict.to_string().contains("conflicts"));
 
         let wrong_arity = run(
-            "decl f: fn(Int) -> Int; let build = fn(value) { value }; def f = build(fn(a, b) { a + b }); f",
+            "decl f: Fn(Int) -> Int; let build = fn(value) { value }; def f = build(fn(a, b) { a + b }); f",
         )
         .unwrap_err();
         assert!(matches!(
@@ -1953,7 +1919,7 @@ let decorators = {
                 .contains("does not support Array<Int>")
         );
 
-        let dynamic_error = run(r#"fn render(x) { "x=\{x}" } render([1])"#).unwrap_err();
+        let dynamic_error = run(r#"def render = fn(x) { "x=\{x}" }; render([1])"#).unwrap_err();
         assert!(matches!(
             dynamic_error,
             ExecutionError::Runtime(RuntimeError {
@@ -2026,7 +1992,7 @@ let decorators = {
         assert!(field.to_string().contains("test:2:1"));
 
         let interpolation =
-            run("fn render(value) {\n  \"value=\\{value}\"\n}\nrender([1])").unwrap_err();
+            run("def render = fn(value) {\n  \"value=\\{value}\"\n};\nrender([1])").unwrap_err();
         assert!(interpolation.to_string().contains("test:2:3"));
     }
 

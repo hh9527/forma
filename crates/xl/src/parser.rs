@@ -183,8 +183,7 @@ impl<'a> Lowerer<'a> {
                     | Rule::DefBinding
                     | Rule::NativeBinding
                     | Rule::TypeBinding
-                    | Rule::ImportBinding
-                    | Rule::NamedFunction,
+                    | Rule::ImportBinding,
                 ) => bindings.push(self.binding(child)?),
                 Some(Rule::Binding) => {
                     let inner = self
@@ -209,7 +208,6 @@ impl<'a> Lowerer<'a> {
     }
 
     fn binding(&self, node: NodeRef) -> Result<Binding, Diagnostic> {
-        let rules = self.rule_children(node).collect::<Vec<_>>();
         let identifiers = self
             .token_children(node, Token::Identifier)
             .collect::<Vec<_>>();
@@ -336,6 +334,39 @@ impl<'a> Lowerer<'a> {
             }
             Rule::DefBinding => {
                 let equal = self.first_token(node, Token::Equal)?;
+                let scheme = self
+                    .rule_children(node)
+                    .find(|child| self.rule(*child) == Some(Rule::TypeScheme));
+                let type_parameters = scheme
+                    .and_then(|scheme| {
+                        self.rule_children(scheme)
+                            .find(|child| self.rule(*child) == Some(Rule::TypeParameters))
+                    })
+                    .map(|parameters| {
+                        self.token_children(parameters, Token::Identifier)
+                            .map(|parameter| {
+                                located(self.text(parameter).into_owned(), self.location(parameter))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let annotation = scheme
+                    .map(|scheme| {
+                        self.rule_children(scheme)
+                            .find(|child| {
+                                matches!(
+                                    self.rule(*child),
+                                    Some(
+                                        Rule::Contract
+                                            | Rule::ContractExpr
+                                            | Rule::FunctionContract
+                                    )
+                                )
+                            })
+                            .ok_or_else(|| self.error(node, "definition has no contract"))
+                            .and_then(|contract| self.contract_expression(contract))
+                    })
+                    .transpose()?;
                 let value_node = self
                     .children(node)
                     .find(|child| {
@@ -348,8 +379,8 @@ impl<'a> Lowerer<'a> {
                         decorators: Vec::new(),
                         kind: BindingKind::Def,
                         name,
-                        type_parameters: Vec::new(),
-                        annotation: None,
+                        type_parameters,
+                        annotation,
                         value: self.expression(value_node)?,
                     },
                     self.location(node),
@@ -395,57 +426,6 @@ impl<'a> Lowerer<'a> {
                         value: located(
                             ExprKind::String(self.plain_string(path, "import path")?),
                             self.location(path),
-                        ),
-                    },
-                    self.location(node),
-                ))
-            }
-            Rule::NamedFunction => {
-                let parameters = rules
-                    .iter()
-                    .find(|child| self.rule(**child) == Some(Rule::AnnotatedParameters))
-                    .copied()
-                    .ok_or_else(|| self.error(node, "function has no parameters"))?;
-                let block = rules
-                    .iter()
-                    .find(|child| self.rule(**child) == Some(Rule::Block))
-                    .copied()
-                    .ok_or_else(|| self.error(node, "function has no body"))?;
-                let (parameter_names, parameter_contracts, annotated) =
-                    self.annotated_parameters(parameters)?;
-                let result_contract = rules
-                    .iter()
-                    .copied()
-                    .find(|child| self.rule(*child) == Some(Rule::Contract))
-                    .map(|child| self.contract_expression(child))
-                    .transpose()?;
-                let annotation = if annotated || result_contract.is_some() {
-                    Some(self.function_contract_expression(
-                        parameter_contracts,
-                        result_contract.unwrap_or_else(|| {
-                            located(
-                                ExprKind::Variable(located("Any".to_owned(), self.location(node))),
-                                self.location(node),
-                            )
-                        }),
-                        self.location(node),
-                    ))
-                } else {
-                    None
-                };
-                Ok(located(
-                    BindingData {
-                        decorators: Vec::new(),
-                        kind: BindingKind::NamedFunction,
-                        name,
-                        type_parameters: Vec::new(),
-                        annotation,
-                        value: located(
-                            ExprKind::Closure {
-                                parameters: parameter_names,
-                                body: self.block_body(block)?,
-                            },
-                            self.location(node),
                         ),
                     },
                     self.location(node),
@@ -841,34 +821,6 @@ impl<'a> Lowerer<'a> {
         self.token_children(node, Token::Identifier)
             .map(|child| self.identifier(child))
             .collect()
-    }
-
-    fn annotated_parameters(
-        &self,
-        node: NodeRef,
-    ) -> Result<(Vec<Identifier>, Vec<Expr>, bool), Diagnostic> {
-        let mut names = Vec::new();
-        let mut contracts = Vec::new();
-        let mut annotated = false;
-        for parameter in self
-            .rule_children(node)
-            .filter(|child| self.rule(*child) == Some(Rule::AnnotatedParameter))
-        {
-            names.push(self.identifier(self.first_token(parameter, Token::Identifier)?));
-            let contract = self
-                .rule_children(parameter)
-                .find(|child| self.rule(*child) == Some(Rule::Contract))
-                .map(|child| self.contract_expression(child))
-                .transpose()?;
-            annotated |= contract.is_some();
-            contracts.push(contract.unwrap_or_else(|| {
-                located(
-                    ExprKind::Variable(located("Any".to_owned(), self.location(parameter))),
-                    self.location(parameter),
-                )
-            }));
-        }
-        Ok((names, contracts, annotated))
     }
 
     fn function_contract_expression(
@@ -1626,7 +1578,7 @@ mod tests {
 
     #[test]
     fn lowers_definition_bindings_and_function_contracts() {
-        let program = parse("defs.xl", "decl f: fn(Int) -> Int; def f = fn(x) { x }; f").unwrap();
+        let program = parse("defs.xl", "decl f: Fn(Int) -> Int; def f = fn(x) { x }; f").unwrap();
         assert_eq!(program.value.body.value.bindings.len(), 2);
         assert_eq!(
             program.value.body.value.bindings[0].value.kind,
@@ -1650,7 +1602,7 @@ mod tests {
     fn lowers_generic_definition_declarations_with_located_parameters() {
         let program = parse(
             "identity.xl",
-            "decl identity: for(A) fn(A) -> A; def identity = fn(value) { value }; identity",
+            "decl identity: for(A) Fn(A) -> A; def identity = fn(value) { value }; identity",
         )
         .unwrap();
         let declaration = &program.value.body.value.bindings[0];
@@ -1668,7 +1620,7 @@ mod tests {
     fn lowers_located_native_bindings_with_contracts() {
         let program = parse(
             "native.xl",
-            "native map: for(A, B) fn(Array(A), fn(A) -> B) -> Array(B); map",
+            "native map: for(A, B) Fn(Array(A), Fn(A) -> B) -> Array(B); map",
         )
         .unwrap();
         let binding = &program.value.body.value.bindings[0];

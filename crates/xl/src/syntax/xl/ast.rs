@@ -130,7 +130,6 @@ pub enum Binding<'tree> {
     Native(NativeBinding<'tree>),
     Type(TypeBinding<'tree>),
     Import(ImportBinding<'tree>),
-    Function(NamedFunction<'tree>),
 }
 
 impl<'tree> Binding<'tree> {
@@ -145,7 +144,6 @@ impl<'tree> Binding<'tree> {
             Rule::NativeBinding => Some(Self::Native(NativeBinding { syntax })),
             Rule::TypeBinding => Some(Self::Type(TypeBinding { syntax })),
             Rule::ImportBinding => Some(Self::Import(ImportBinding { syntax })),
-            Rule::NamedFunction => Some(Self::Function(NamedFunction { syntax })),
             _ => None,
         }
     }
@@ -158,7 +156,6 @@ impl<'tree> Binding<'tree> {
             Self::Native(node) => node.syntax,
             Self::Type(node) => node.syntax,
             Self::Import(node) => node.syntax,
-            Self::Function(node) => node.syntax,
         }
     }
 
@@ -170,7 +167,6 @@ impl<'tree> Binding<'tree> {
             Self::Native(node) => node.name(),
             Self::Type(node) => node.name(),
             Self::Import(node) => node.name(),
-            Self::Function(node) => node.name(),
         }
     }
 }
@@ -200,7 +196,6 @@ binding_node!(DefBinding);
 binding_node!(NativeBinding);
 binding_node!(TypeBinding);
 binding_node!(ImportBinding);
-binding_node!(NamedFunction);
 
 #[derive(Clone, Copy)]
 pub struct Decorator<'tree> {
@@ -274,6 +269,15 @@ fn contract_in_type_scheme(binding: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
 }
 
 impl<'tree> DefBinding<'tree> {
+    pub fn type_parameters(self) -> Option<SyntaxNode<'tree>> {
+        child_node(self.syntax, Rule::TypeScheme)
+            .and_then(|scheme| child_node(scheme, Rule::TypeParameters))
+    }
+
+    pub fn contract(self) -> Option<SyntaxNode<'tree>> {
+        contract_in_type_scheme(self.syntax)
+    }
+
     pub fn value(self) -> Option<Expr<'tree>> {
         expression_slots(self.syntax).first().copied().flatten()
     }
@@ -302,16 +306,6 @@ impl<'tree> TypeBinding<'tree> {
 impl<'tree> ImportBinding<'tree> {
     pub fn path(self) -> Option<StringLiteral<'tree>> {
         child_node(self.syntax, Rule::StringLiteral).map(|syntax| StringLiteral { syntax })
-    }
-}
-
-impl<'tree> NamedFunction<'tree> {
-    pub fn parameters(self) -> Option<SyntaxNode<'tree>> {
-        child_node(self.syntax, Rule::AnnotatedParameters)
-    }
-
-    pub fn body(self) -> Option<SyntaxNode<'tree>> {
-        child_node(self.syntax, Rule::Block)
     }
 }
 
@@ -375,8 +369,6 @@ pub enum ExpectedSyntax {
     BindingValue,
     BindingContract,
     ImportPath,
-    FunctionParameters,
-    FunctionBody,
     ResultExpression,
 }
 
@@ -438,22 +430,6 @@ pub fn validate(source: SourceId, tree: &CstData) -> Vec<SyntaxIssue> {
             )),
             Binding::Import(node) if node.path().is_none() => {
                 issues.push(missing_at(source, node.syntax, ExpectedSyntax::ImportPath))
-            }
-            Binding::Function(node) => {
-                if node.parameters().is_none() {
-                    issues.push(missing_at(
-                        source,
-                        node.syntax,
-                        ExpectedSyntax::FunctionParameters,
-                    ));
-                }
-                if node.body().is_none() {
-                    issues.push(missing_at(
-                        source,
-                        node.syntax,
-                        ExpectedSyntax::FunctionBody,
-                    ));
-                }
             }
             _ => {}
         }
@@ -547,7 +523,6 @@ fn missing_after_keyword(source: SourceId, binding: Binding<'_>) -> SyntaxIssue 
         Binding::Native(_) => Token::Native,
         Binding::Type(_) => Token::Type,
         Binding::Import(_) => Token::Import,
-        Binding::Function(_) => Token::Fn,
     };
     let syntax = binding.syntax();
     let mut found_keyword = false;
@@ -605,8 +580,6 @@ fn expected_name(expected: &ExpectedSyntax) -> &'static str {
         ExpectedSyntax::BindingValue => "binding value",
         ExpectedSyntax::BindingContract => "binding contract",
         ExpectedSyntax::ImportPath => "import path",
-        ExpectedSyntax::FunctionParameters => "function parameters",
-        ExpectedSyntax::FunctionBody => "function body",
         ExpectedSyntax::ResultExpression => "result expression",
     }
 }
