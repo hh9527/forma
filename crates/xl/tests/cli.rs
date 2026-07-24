@@ -138,3 +138,53 @@ fn run_writes_debug_events_only_to_stderr() {
     );
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn show_observes_deterministic_workspace_and_position_queries() {
+    let directory = fixture_dir();
+    let main = directory.join("main.xl");
+    fs::write(&main, "let answer = 42;\nanswer").unwrap();
+
+    let first = xl()
+        .args(["show", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let second = xl()
+        .args(["show", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert_eq!(first.stdout, second.stdout);
+    let report = String::from_utf8_lossy(&first.stdout);
+    assert!(report.contains("definitions:"));
+    assert!(report.contains("Let answer"));
+    assert!(report.contains("references:"));
+    assert!(report.contains("answer"));
+    assert!(report.contains(" = Int"));
+
+    let at = xl()
+        .args([
+            "show",
+            main.to_str().unwrap(),
+            "at",
+            main.to_str().unwrap(),
+            "2",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        at.status.success(),
+        "{}",
+        String::from_utf8_lossy(&at.stderr)
+    );
+    let output = String::from_utf8_lossy(&at.stdout);
+    assert!(output.contains("reference:"), "{output}");
+    assert!(output.contains("type:"), "{output}");
+    assert!(output.contains(" = Int"), "{output}");
+    fs::remove_dir_all(directory).unwrap();
+}

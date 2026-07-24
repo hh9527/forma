@@ -7,6 +7,10 @@ use crate::core::module_specs;
 use crate::heap::{Heap, PersistentValue, publish_root, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
 use crate::parser::parse_registered;
+use crate::semantic::{
+    SemanticImport, SemanticModuleInput, SemanticModuleTarget, WorkspaceModuleKind,
+    WorkspaceSnapshot,
+};
 use crate::source::SourceDatabase;
 use crate::types::{Analysis, analyze_program_with_bindings_observed};
 use crate::{
@@ -50,6 +54,7 @@ pub struct LoadedModule {
     pub analysis: Analysis,
     pub function: BytecodeFunction,
     pub sources: SourceDatabase,
+    pub workspace: WorkspaceSnapshot,
     runtime: Arc<ModuleRuntime>,
 }
 
@@ -320,6 +325,7 @@ pub fn load_module_with_quota_and_debug_sink(
         module_quota,
         debug_sink,
         sources,
+        semantic_inputs: BTreeMap::new(),
     };
     loader.load_root(root, external_bindings)
 }
@@ -333,6 +339,7 @@ struct ModuleLoader {
     module_quota: Quota,
     debug_sink: Arc<dyn DebugSink>,
     sources: SourceDatabase,
+    semantic_inputs: BTreeMap<String, SemanticModuleInput>,
 }
 
 #[derive(Clone)]
@@ -355,6 +362,10 @@ impl ModuleLoader {
         let result = self.compile_xl(&path, external_bindings, true, &mut account);
         self.leave(&path);
         let (analysis, function, externals) = result?;
+        let workspace = WorkspaceSnapshot::build(
+            self.sources.clone(),
+            self.semantic_inputs.values().cloned().collect(),
+        );
         let main = std::mem::replace(&mut self.main, MainWorld::building()).seal();
         Ok(LoadedModule {
             path,
@@ -362,6 +373,7 @@ impl ModuleLoader {
             analysis,
             function,
             sources: self.sources.clone(),
+            workspace,
             runtime: Arc::new(ModuleRuntime { main, externals }),
         })
     }
@@ -398,6 +410,18 @@ impl ModuleLoader {
                                 .map_err(|error| ModuleError::new(error.to_string()))?;
                             let root = publish_root(&mut self.main.heap, &local, local_root)
                                 .map_err(|error| ModuleError::new(error.to_string()))?;
+                            self.semantic_inputs.insert(
+                                path.to_string_lossy().into_owned(),
+                                SemanticModuleInput {
+                                    key: path.to_string_lossy().into_owned(),
+                                    path: Some(path.clone()),
+                                    kind: WorkspaceModuleKind::Json,
+                                    source: Some(source_id),
+                                    program: None,
+                                    analysis: None,
+                                    imports: Vec::new(),
+                                },
+                            );
                             Ok((sourced, root, false))
                         })
                 }
@@ -482,6 +506,7 @@ impl ModuleLoader {
         let mut external_provenance = BTreeMap::new();
         let mut external_roots = HashMap::new();
         let mut opaque_bindings = HashSet::new();
+        let mut semantic_imports = Vec::new();
 
         for binding in &program.value.body.value.bindings {
             if binding.value.kind != BindingKind::Import {
@@ -498,6 +523,11 @@ impl ModuleLoader {
             };
             if relative.starts_with("core:") {
                 let (value, root) = self.load_core_module(relative)?;
+                semantic_imports.push(SemanticImport {
+                    name: binding.value.name.value.clone(),
+                    location: binding.value.name.location,
+                    target: SemanticModuleTarget::Core(relative.clone()),
+                });
                 external_roots.insert(binding.value.name.value.clone(), root);
                 external_bindings.insert(binding.value.name.value.clone(), value);
                 continue;
@@ -508,6 +538,11 @@ impl ModuleLoader {
                 .join(relative);
             let sourced = self.load_value(&imported)?;
             let imported = canonicalize(&imported)?;
+            semantic_imports.push(SemanticImport {
+                name: binding.value.name.value.clone(),
+                location: binding.value.name.location,
+                target: SemanticModuleTarget::Path(imported.clone()),
+            });
             let ModuleState::Ready { root, opaque, .. } = self
                 .cache
                 .get(&imported)
@@ -627,6 +662,18 @@ impl ModuleLoader {
             )
         }
         .map_err(|error| ModuleError::new(error.to_string()))?;
+        self.semantic_inputs.insert(
+            path.to_string_lossy().into_owned(),
+            SemanticModuleInput {
+                key: path.to_string_lossy().into_owned(),
+                path: Some(path.to_owned()),
+                kind: WorkspaceModuleKind::Xl,
+                source: Some(source_id),
+                program: Some(program),
+                analysis: Some(analysis.clone()),
+                imports: semantic_imports,
+            },
+        );
         Ok((analysis, function, external_roots))
     }
 
@@ -1401,6 +1448,7 @@ mod tests {
             module_quota: Quota::with_fuel(100_000),
             debug_sink: Arc::new(DiscardDebugSink),
             sources: SourceDatabase::default(),
+            semantic_inputs: BTreeMap::new(),
         };
 
         let first = loader.load_value(&data).unwrap();
@@ -3133,6 +3181,7 @@ mod tests {
             module_quota: Quota::with_fuel(100_000),
             debug_sink: Arc::new(DiscardDebugSink),
             sources: SourceDatabase::default(),
+            semantic_inputs: BTreeMap::new(),
         };
 
         loader.load_value(&a).unwrap();

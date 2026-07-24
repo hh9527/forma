@@ -70,6 +70,13 @@ impl TypeGraph {
         self.names.iter().map(|(name, id)| (name.as_str(), *id))
     }
 
+    pub fn nodes(&self) -> impl ExactSizeIterator<Item = (TypeId, &TypeNode)> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| (TypeId(index as u32), node))
+    }
+
     pub fn display(&self, id: TypeId) -> String {
         self.display_with(id, &mut HashSet::new())
     }

@@ -1,6 +1,6 @@
 # RFC 0039: Workspace semantic queries
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0035, RFC 0038
 
 ## Summary
@@ -187,4 +187,35 @@ lowering and must not be approximated with rendered error strings here.
 
 ## Implementation result
 
-Pending.
+`LoadedModule` now retains a detached `WorkspaceSnapshot`. The loader records
+each successfully loaded user XL and JSON module after authoritative metadata
+promotion, resolves user and core import targets, and seals all observations
+into one deterministic workspace identity space. Core modules are represented
+as addressable targets without copying their internal syntax into the user
+index.
+
+The new `semantic` module exposes snapshot-local module, definition, reference,
+and workspace type IDs plus read-only lookup, position, reference-set,
+structured type-node, display, and Struct-export queries. Lexical indexing
+covers sequential bindings, predeclared types and definition slots, named
+recursion, closure parameters, nested blocks, and pattern bindings. `decl` and
+`def` name locations share one definition entity. Prelude names are explicitly
+classified as external rather than falsely reported as unresolved.
+
+Per-module authoritative TypeGraphs are copied and recursively remapped into a
+detached workspace graph. Recursive identity is preserved during each remap,
+qualified names terminate display, and the snapshot retains no runtime value,
+heap handle, AST, or `Analysis`. Struct module-result fields are exposed as
+typed exports. Type-at-position currently has the deliberately stated
+binding/reference/result coverage.
+
+`SourceFile` now provides the inverse UTF-aware line/column-to-byte conversion
+needed by position queries. `xl show` prints deterministic module, import,
+definition, reference, export, result, and graph records; its `at` mode uses the
+same snapshot queries and source conversion.
+
+Tests cover a mixed XL/JSON workspace, resolved import targets, nested closure
+scope, recursive TypeMetadata, exports, UTF-8 offsets, deterministic CLI
+output, and position type lookup. The complete suite passes with 147 unit tests
+and five CLI tests, with one manual parsing baseline ignored. Strict workspace
+Clippy, formatting, and diff checks pass.

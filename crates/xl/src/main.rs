@@ -4,7 +4,10 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::Path;
 use std::sync::Arc;
-use xl::{DebugEvent, DebugSink, Engine, EngineConfig, Quota, Value, parse_json};
+use xl::{
+    DebugEvent, DebugSink, Engine, EngineConfig, Location, Quota, TextRange, Value,
+    WorkspaceSnapshot, parse_json,
+};
 
 const EVALUATION_FUEL: usize = 1_000_000;
 const STACK_SLOTS: usize = 65_536;
@@ -44,6 +47,7 @@ fn run_cli(arguments: Vec<String>) -> Result<(), String> {
         "run" => run_command(&arguments[1..]),
         "check" => check_command(&arguments[1..]),
         "types" => types_command(&arguments[1..]),
+        "show" => show_command(&arguments[1..]),
         "help" | "--help" | "-h" => {
             println!("{}", usage());
             Ok(())
@@ -104,6 +108,167 @@ fn types_command(arguments: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn show_command(arguments: &[String]) -> Result<(), String> {
+    let Some(module_path) = arguments.first() else {
+        return Err(format!("show requires a module path\n{}", usage()));
+    };
+    let module = engine()
+        .load_module(module_path, BTreeMap::new())
+        .map_err(|error| error.to_string())?;
+    match &arguments[1..] {
+        [] => show_workspace(&module.workspace),
+        [mode, source_path, line, column] if mode == "at" => {
+            let line = line
+                .parse::<usize>()
+                .map_err(|_| format!("invalid line {line:?}"))?;
+            let column = column
+                .parse::<usize>()
+                .map_err(|_| format!("invalid column {column:?}"))?;
+            show_at(&module.workspace, source_path, line, column)
+        }
+        _ => Err(format!("invalid show arguments\n{}", usage())),
+    }
+}
+
+fn show_workspace(workspace: &WorkspaceSnapshot) -> Result<(), String> {
+    println!("modules:");
+    for module in workspace.modules() {
+        println!("  m{} {:?} {}", module.id.index(), module.kind, module.name);
+        for import in &module.imports {
+            println!("    import {} -> m{}", import.name, import.target.index());
+        }
+        if let Some(ty) = module.result_type {
+            println!(
+                "    result t{} = {}",
+                ty.index(),
+                workspace.types().display(ty).unwrap_or_else(|| "?".into())
+            );
+        }
+        for export in workspace.exports_of(module.id) {
+            println!(
+                "    export {}: t{} = {}",
+                export.name,
+                export.ty.index(),
+                workspace
+                    .types()
+                    .display(export.ty)
+                    .unwrap_or_else(|| "?".into())
+            );
+        }
+    }
+    println!("definitions:");
+    for definition in workspace.definitions() {
+        let location = show_location(workspace, definition.location);
+        let ty = definition.ty.map_or_else(String::new, |ty| {
+            format!(
+                " t{} = {}",
+                ty.index(),
+                workspace.types().display(ty).unwrap_or_else(|| "?".into())
+            )
+        });
+        let target = definition
+            .import_target
+            .map_or_else(String::new, |module| format!(" -> m{}", module.index()));
+        println!(
+            "  d{} {:?} {} {}{}{}",
+            definition.id.index(),
+            definition.kind,
+            definition.name,
+            location,
+            ty,
+            target
+        );
+    }
+    println!("references:");
+    for reference in workspace.references() {
+        let target = reference.definition.map_or_else(
+            || {
+                if reference.external {
+                    "external".into()
+                } else {
+                    "unresolved".into()
+                }
+            },
+            |id| format!("d{}", id.index()),
+        );
+        println!(
+            "  r{} {} {} -> {}",
+            reference.id.index(),
+            reference.name,
+            show_location(workspace, reference.location),
+            target
+        );
+    }
+    println!("types:");
+    for (id, node) in workspace.types().nodes() {
+        println!("  t{} {node:?}", id.index());
+    }
+    Ok(())
+}
+
+fn show_at(
+    workspace: &WorkspaceSnapshot,
+    source_path: &str,
+    line: usize,
+    column: usize,
+) -> Result<(), String> {
+    let canonical = fs::canonicalize(source_path).ok();
+    let source = workspace
+        .sources()
+        .files()
+        .find(|source| {
+            source.name.as_ref() == source_path
+                || canonical
+                    .as_ref()
+                    .is_some_and(|path| source.name.as_ref() == path.to_string_lossy())
+        })
+        .ok_or_else(|| format!("source {source_path:?} is not in the workspace"))?;
+    let offset = source
+        .offset(line, column)
+        .ok_or_else(|| format!("position {line}:{column} is outside {source_path}"))?;
+    let location = Location::new(source.id(), TextRange::at(offset));
+    println!("position: {}:{line}:{column}", source.name);
+    if let Some(definition) = workspace.definition_at(location) {
+        println!(
+            "definition: d{} {:?} {}",
+            definition.id.index(),
+            definition.kind,
+            definition.name
+        );
+    }
+    if let Some(reference) = workspace.reference_at(location) {
+        println!(
+            "reference: r{} {} -> {}",
+            reference.id.index(),
+            reference.name,
+            reference.definition.map_or_else(
+                || {
+                    if reference.external {
+                        "external".into()
+                    } else {
+                        "unresolved".into()
+                    }
+                },
+                |id| format!("d{}", id.index()),
+            )
+        );
+    }
+    if let Some(ty) = workspace.type_at(location) {
+        println!(
+            "type: t{} = {}",
+            ty.index(),
+            workspace.types().display(ty).unwrap_or_else(|| "?".into())
+        );
+    }
+    Ok(())
+}
+
+fn show_location(workspace: &WorkspaceSnapshot, location: Location) -> String {
+    let source = workspace.sources().get(location.source);
+    let position = source.position(location.start);
+    format!("{}:{}:{}", source.name, position.line, position.column)
+}
+
 fn read_input(path: &str) -> Result<Value, String> {
     let (source_name, source) = if path == "-" {
         let mut source = String::new();
@@ -120,5 +285,5 @@ fn read_input(path: &str) -> Result<Value, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  xl run <module.xl> [--input <file|->]\n  xl check <module.xl>\n  xl types <module.xl>".into()
+    "usage:\n  xl run <module.xl> [--input <file|->]\n  xl check <module.xl>\n  xl types <module.xl>\n  xl show <module.xl> [at <source> <line> <column>]".into()
 }

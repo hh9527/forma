@@ -8,6 +8,7 @@ pub mod lexer;
 pub mod lir;
 pub mod module;
 pub mod parser;
+pub mod semantic;
 pub mod source;
 pub mod syntax;
 pub mod types;
@@ -27,6 +28,11 @@ pub use lexer::{FrontendError, SourceLocation};
 pub use module::{
     Engine, EngineConfig, LoadedModule, ModuleError, load_module, load_module_with_quota,
     load_module_with_quota_and_debug_sink,
+};
+pub use semantic::{
+    Definition, DefinitionId, DefinitionKind, Reference, ReferenceId, WorkspaceExport,
+    WorkspaceModule, WorkspaceModuleId, WorkspaceModuleKind, WorkspaceSnapshot, WorkspaceTypeGraph,
+    WorkspaceTypeId, WorkspaceTypeNode,
 };
 pub use source::{
     Diagnostic, Label, Loc, Located, Location, Origin, SourceDatabase, SourceId, TextRange,

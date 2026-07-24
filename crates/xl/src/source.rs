@@ -222,6 +222,10 @@ impl SourceFile {
             .flatten()
     }
 
+    pub const fn id(&self) -> SourceId {
+        self.id
+    }
+
     pub fn position(&self, offset: u32) -> Position {
         let offset = offset.min(self.text.len() as u32);
         let line = self.line_starts.partition_point(|start| *start <= offset) - 1;
@@ -230,6 +234,23 @@ impl SourceFile {
             line: line + 1,
             column: self.text[start..offset as usize].chars().count() + 1,
         }
+    }
+
+    pub fn offset(&self, line: usize, column: usize) -> Option<u32> {
+        let line_start = *self.line_starts.get(line.checked_sub(1)?)? as usize;
+        let line_end = self
+            .text
+            .get(line_start..)?
+            .find('\n')
+            .map_or(self.text.len(), |relative| line_start + relative);
+        let line_text = self.text.get(line_start..line_end)?;
+        let character = column.checked_sub(1)?;
+        let relative = if character == line_text.chars().count() {
+            line_text.len()
+        } else {
+            line_text.char_indices().nth(character)?.0
+        };
+        u32::try_from(line_start + relative).ok()
     }
 }
 
@@ -261,6 +282,10 @@ impl SourceDatabase {
 
     pub fn get(&self, id: SourceId) -> &SourceFile {
         &self.files[id.index() as usize]
+    }
+
+    pub fn files(&self) -> impl ExactSizeIterator<Item = &SourceFile> {
+        self.files.iter()
     }
 
     pub fn render(&self, diagnostic: &Diagnostic) -> String {
@@ -323,6 +348,12 @@ mod tests {
         let location = Location::new(source, TextRange::new(9, 10).unwrap());
         let diagnostic = Diagnostic::error("bad value", location);
         assert_eq!(sources.render(&diagnostic), "utf8.xl:2:3: bad value");
+        let file = sources.get(source);
+        assert_eq!(file.offset(1, 1), Some(0));
+        assert_eq!(file.offset(1, 2), Some(3));
+        assert_eq!(file.offset(1, 3), Some(6));
+        assert_eq!(file.offset(1, 4), None);
+        assert_eq!(file.offset(2, 3), Some(9));
     }
 
     #[test]
