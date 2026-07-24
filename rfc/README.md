@@ -68,3 +68,4 @@ semantics from an earlier RFC.
 47. Conservative semantic completion.
 48. Declaration-generic native capabilities.
 49. Explicit generic definition contracts.
+50. Unified function bindings and contracts.
