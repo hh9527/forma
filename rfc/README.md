@@ -55,3 +55,4 @@ semantics from an earlier RFC.
 35. Once-only authoritative TypeMetadata promotion and graph analysis.
 36. Function-valued JSON skip predicates through reusable native
     continuations.
+37. Type-erased native continuation dispatch.
