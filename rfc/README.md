@@ -62,3 +62,4 @@ semantics from an earlier RFC.
 41. Resolved HIR identities and expression semantic facts.
 42. Recoverable HIR and explicit semantic fact states.
 43. Dependency-scoped partial tool evaluation for TypeMetadata.
+44. Recoverable workspace module graphs and cross-module fact blocking.
