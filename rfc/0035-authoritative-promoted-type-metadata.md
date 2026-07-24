@@ -218,10 +218,11 @@ sets. Recursive display uses the declared name on a back edge. The old
 
 Bootstrap analysis remains necessary to compile MetadataInit. For modules with
 type bindings its debug sink is intentionally discarded so this conservative
-pass is not observably mistaken for authoritative construction. It currently
-still consumes the shared module quota and may use `Any` internally while
-checking a forward edge, but that shadow is replaced by the persistent graph in
-the returned Analysis.
+pass is not observably mistaken for authoritative construction. It runs under a
+separate compiler-analysis account bounded by the same configured limits, so it
+cannot consume fuel or allocation from the semantic module-initialization
+quota. It may use `Any` internally while checking a forward edge, but that
+shadow is replaced by the persistent graph in the returned Analysis.
 
 The dependency closure is also compared with ordinary runtime reachability.
 Top-level helpers and imports reachable only from metadata roots are removed
@@ -232,4 +233,6 @@ during MetadataInit, while a retained helper observes each ordinary execution.
 
 The following RFC 0035 items therefore remain open:
 
-- eliminating duplicated bootstrap computation and its quota cost;
+- eliminating duplicated bootstrap CPU work by moving all checks to the
+  promoted graph; the duplicate shadow is already unobservable and does not
+  consume module quota.

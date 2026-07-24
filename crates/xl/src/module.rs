@@ -556,10 +556,17 @@ impl ModuleLoader {
         } else {
             Arc::clone(&self.debug_sink)
         };
+        let mut bootstrap_account;
+        let analysis_account = if has_type_bindings {
+            bootstrap_account = QuotaAccount::new(account.quota());
+            &mut bootstrap_account
+        } else {
+            &mut *account
+        };
         let mut analysis = analyze_program_with_bindings_observed(
             &source_name,
             &program,
-            account,
+            analysis_account,
             &external_bindings,
             &dynamic_bindings,
             &self.sources,
@@ -980,6 +987,32 @@ mod tests {
             .execute_with_quota_and_debug_sink(Quota::with_fuel(2), sink.clone())
             .unwrap();
         assert_eq!(sink.events.lock().unwrap().len(), 3);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn bootstrap_shadow_does_not_consume_the_module_initialization_quota() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import debug from "core:debug";
+               type Observed = debug.dbg(Int);
+               0"#,
+        )
+        .unwrap();
+        let sink = Arc::new(CapturingDebugSink::default());
+        load_module_with_quota_and_debug_sink(
+            directory.join("main.xl"),
+            BTreeMap::new(),
+            Quota::new(1, 1_000, u64::MAX),
+            sink.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            sink.events.lock().unwrap().len(),
+            1,
+            "only authoritative MetadataInit is observable and charged"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
