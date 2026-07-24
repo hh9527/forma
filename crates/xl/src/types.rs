@@ -40,6 +40,7 @@ pub enum TypeNode {
     Pending,
     Ref(TypeId),
     Any,
+    Type,
     Int,
     Float,
     String,
@@ -100,6 +101,7 @@ impl TypeGraph {
         let node = match descriptor {
             TypeDescriptor::Bound(_) | TypeDescriptor::Inference(_) => TypeNode::Any,
             TypeDescriptor::Any => TypeNode::Any,
+            TypeDescriptor::Type => TypeNode::Type,
             TypeDescriptor::Int => TypeNode::Int,
             TypeDescriptor::Float => TypeNode::Float,
             TypeDescriptor::String => TypeNode::String,
@@ -225,6 +227,10 @@ impl TypeGraph {
             "Any" => {
                 require(&["kind"])?;
                 TypeNode::Any
+            }
+            "Type" => {
+                require(&["kind"])?;
+                TypeNode::Type
             }
             "Int" => {
                 require(&["kind"])?;
@@ -366,6 +372,7 @@ impl TypeGraph {
             TypeNode::Pending => "<pending>".into(),
             TypeNode::Ref(target) => self.display_with(*target, active),
             TypeNode::Any => "Any".into(),
+            TypeNode::Type => "Type".into(),
             TypeNode::Int => "Int".into(),
             TypeNode::Float => "Float".into(),
             TypeNode::String => "String".into(),
@@ -510,6 +517,7 @@ pub enum TypeDescriptor {
     Bound(TypeParameterId),
     Inference(InferenceVariableId),
     Any,
+    Type,
     Int,
     Float,
     String,
@@ -535,6 +543,7 @@ impl TypeDescriptor {
             ],
             Self::Inference(_) => panic!("inference variables are not runtime type metadata"),
             Self::Any => vec![kind_entry("Any")],
+            Self::Type => vec![kind_entry("Type")],
             Self::Int => vec![kind_entry("Int")],
             Self::Float => vec![kind_entry("Float")],
             Self::String => vec![kind_entry("String")],
@@ -622,6 +631,7 @@ impl TypeDescriptor {
             Self::Bound(parameter) => format!("T{}", parameter.0),
             Self::Inference(variable) => format!("?{}", variable.0),
             Self::Any => "Any".into(),
+            Self::Type => "Type".into(),
             Self::Int => "Int".into(),
             Self::Float => "Float".into(),
             Self::String => "String".into(),
@@ -1231,7 +1241,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
         ));
     }
     let mut tool_values = prelude.clone();
-    let mut static_environment = HashMap::new();
+    let mut static_environment = core_static_prelude();
     let mut declared_types = BTreeMap::new();
     let mut binding_types = BTreeMap::new();
     let mut declared_type_spans = HashMap::new();
@@ -1247,6 +1257,8 @@ pub(crate) fn analyze_program_with_bindings_observed(
     for binding in &program.value.body.value.bindings {
         if binding.value.kind == BindingKind::Type {
             tool_values.insert(binding.value.name.value.clone(), any_metadata.clone());
+            static_environment.insert(binding.value.name.value.clone(), TypeDescriptor::Type);
+            binding_types.insert(binding.value.name.value.clone(), TypeDescriptor::Type);
         }
     }
 
@@ -1262,7 +1274,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
     }
 
     let mut definition_contracts = HashMap::new();
-    let mut generic_schemes = HashMap::new();
+    let mut binding_schemes = HashMap::new();
     let mut declaration_locations = HashMap::new();
     let mut definition_counts = HashMap::<String, usize>::new();
     for binding in &program.value.body.value.bindings {
@@ -1324,8 +1336,8 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 format!("declaration {name} has invalid contract metadata: {message}"),
             )
         })?;
-        if !binding.value.type_parameters.is_empty() {
-            generic_schemes.insert(
+        if !scheme_parameters.is_empty() || contains_metatype(&descriptor) {
+            binding_schemes.insert(
                 name.clone(),
                 TypeScheme {
                     parameters: scheme_parameters,
@@ -1405,6 +1417,13 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 declared_types.insert(binding.value.name.value.clone(), descriptor);
                 declared_type_spans.insert(binding.value.name.value.clone(), binding.location);
                 tool_values.insert(binding.value.name.value.clone(), value);
+                binding_schemes.insert(
+                    binding.value.name.value.clone(),
+                    TypeScheme {
+                        parameters: Vec::new(),
+                        body: TypeDescriptor::Type,
+                    },
+                );
             }
             BindingKind::Let => {
                 let inferred = inferred_expression;
@@ -1558,9 +1577,9 @@ pub(crate) fn analyze_program_with_bindings_observed(
         &static_environment,
         &mut expression_descriptors,
     );
-    if !generic_schemes.is_empty() || !external_interfaces.is_empty() {
+    if !binding_schemes.is_empty() || !external_interfaces.is_empty() {
         let mut inference = GenericInference::new(
-            &generic_schemes,
+            &binding_schemes,
             external_interfaces,
             account.query_context(),
         );
@@ -1572,11 +1591,15 @@ pub(crate) fn analyze_program_with_bindings_observed(
             ) {
                 continue;
             }
-            let expected = binding
-                .value
-                .annotation
-                .as_ref()
-                .and_then(|_| binding_types.get(&binding.value.name.value));
+            let expected = if binding.value.kind == BindingKind::Type {
+                Some(&TypeDescriptor::Type)
+            } else {
+                binding
+                    .value
+                    .annotation
+                    .as_ref()
+                    .and_then(|_| binding_types.get(&binding.value.name.value))
+            };
             let inferred = inference
                 .infer(&binding.value.value, &generic_environment, expected)
                 .map_err(|message| {
@@ -1640,11 +1663,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
         .iter()
         .map(|definition| {
             let ty = if definition.top_level {
-                if definition.kind == HirDefinitionKind::Type {
-                    declared_types.get(&definition.name).copied()
-                } else {
-                    binding_types.get(&definition.name).copied()
-                }
+                binding_types.get(&definition.name).copied()
             } else {
                 definition
                     .value
@@ -1662,7 +1681,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
                     let ExprKind::Variable(binding) = &field.value.value.value else {
                         return None;
                     };
-                    generic_schemes
+                    binding_schemes
                         .get(&binding.value)
                         .cloned()
                         .map(|scheme| (field.value.name.value.clone(), scheme))
@@ -1753,6 +1772,7 @@ fn evaluate_tool_expression(
 fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
     let mut prelude = BTreeMap::new();
     for (name, descriptor) in [
+        ("Type", TypeDescriptor::Type),
         ("Any", TypeDescriptor::Any),
         ("Int", TypeDescriptor::Int),
         ("Float", TypeDescriptor::Float),
@@ -1779,6 +1799,63 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
             Value::Func(std::sync::Arc::new(Closure::native(function))),
         );
     }
+    prelude
+}
+
+fn core_static_prelude() -> HashMap<String, TypeDescriptor> {
+    let metadata = TypeDescriptor::Type;
+    let function =
+        |parameters: Vec<TypeDescriptor>, result: TypeDescriptor| TypeDescriptor::Function {
+            parameters,
+            result: Box::new(result),
+        };
+    let mut prelude = HashMap::new();
+    for name in ["Type", "Any", "Int", "Float", "String", "Bytes", "Bool"] {
+        prelude.insert(name.into(), metadata.clone());
+    }
+    prelude.insert(
+        "Atom".into(),
+        function(vec![TypeDescriptor::Any], metadata.clone()),
+    );
+    prelude.insert(
+        "Array".into(),
+        function(vec![metadata.clone()], metadata.clone()),
+    );
+    prelude.insert(
+        "Tuple".into(),
+        function(
+            vec![TypeDescriptor::Array(Box::new(metadata.clone()))],
+            metadata.clone(),
+        ),
+    );
+    prelude.insert(
+        "Fn".into(),
+        function(
+            vec![
+                TypeDescriptor::Array(Box::new(metadata.clone())),
+                metadata.clone(),
+            ],
+            metadata.clone(),
+        ),
+    );
+    for name in ["Struct", "Enum", "Union"] {
+        prelude.insert(
+            name.into(),
+            function(vec![TypeDescriptor::Any], metadata.clone()),
+        );
+    }
+    prelude.insert(
+        "Option".into(),
+        function(vec![metadata.clone()], metadata.clone()),
+    );
+    prelude.insert(
+        "Result".into(),
+        function(vec![metadata.clone(), metadata.clone()], metadata.clone()),
+    );
+    prelude.insert(
+        "validate".into(),
+        function(vec![metadata, TypeDescriptor::Any], TypeDescriptor::Any),
+    );
     prelude
 }
 
@@ -1955,6 +2032,10 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
             require(&["kind"])?;
             TypeDescriptor::Any
         }
+        "Type" => {
+            require(&["kind"])?;
+            TypeDescriptor::Type
+        }
         "Int" => {
             require(&["kind"])?;
             TypeDescriptor::Int
@@ -2123,6 +2204,7 @@ fn validate_value_ref(
 ) -> Result<(), String> {
     match descriptor {
         TypeDescriptor::Any => Ok(()),
+        TypeDescriptor::Type => decode_type_ref(value, path).map(|_| ()),
         TypeDescriptor::Int if value.kind() == ValueKind::Int => Ok(()),
         TypeDescriptor::Float if value.kind() == ValueKind::Float => Ok(()),
         TypeDescriptor::String if value.kind() == ValueKind::String => Ok(()),
@@ -2262,6 +2344,10 @@ fn decode_type(value: &Value, path: &str) -> Result<TypeDescriptor, String> {
         "Any" => {
             require_fields(metadata, path, &["kind"])?;
             TypeDescriptor::Any
+        }
+        "Type" => {
+            require_fields(metadata, path, &["kind"])?;
+            TypeDescriptor::Type
         }
         "Int" => {
             require_fields(metadata, path, &["kind"])?;
@@ -2726,27 +2812,37 @@ impl<'a> GenericInference<'a> {
                 )
             }
             ExprKind::Dict(fields) => {
-                let expected_fields = match expected.map(|ty| self.resolve(ty)) {
-                    Some(TypeDescriptor::Struct(fields)) => fields,
-                    _ => BTreeMap::new(),
-                };
-                TypeDescriptor::Struct(
-                    fields
-                        .iter()
-                        .map(|field| {
-                            let name = field.value.name.value.clone();
-                            Ok((
-                                name.clone(),
-                                self.infer(
-                                    &field.value.value,
-                                    environment,
-                                    expected_fields.get(&name),
-                                )
-                                .map_err(|message| format!("field {name}: {message}"))?,
-                            ))
-                        })
-                        .collect::<Result<_, String>>()?,
-                )
+                if matches!(
+                    expected.map(|ty| self.resolve(ty)),
+                    Some(TypeDescriptor::Type)
+                ) {
+                    for field in fields {
+                        self.infer(&field.value.value, environment, None)?;
+                    }
+                    TypeDescriptor::Type
+                } else {
+                    let expected_fields = match expected.map(|ty| self.resolve(ty)) {
+                        Some(TypeDescriptor::Struct(fields)) => fields,
+                        _ => BTreeMap::new(),
+                    };
+                    TypeDescriptor::Struct(
+                        fields
+                            .iter()
+                            .map(|field| {
+                                let name = field.value.name.value.clone();
+                                Ok((
+                                    name.clone(),
+                                    self.infer(
+                                        &field.value.value,
+                                        environment,
+                                        expected_fields.get(&name),
+                                    )
+                                    .map_err(|message| format!("field {name}: {message}"))?,
+                                ))
+                            })
+                            .collect::<Result<_, String>>()?,
+                    )
+                }
             }
             ExprKind::Unary { operand, .. } => self.infer(operand, environment, expected)?,
             ExprKind::Binary {
@@ -2909,6 +3005,25 @@ fn contains_type_variable(ty: &TypeDescriptor) -> bool {
             .any(|payload| contains_type_variable(payload)),
         TypeDescriptor::Function { parameters, result } => {
             parameters.iter().any(contains_type_variable) || contains_type_variable(result)
+        }
+        _ => false,
+    }
+}
+
+fn contains_metatype(ty: &TypeDescriptor) -> bool {
+    match ty {
+        TypeDescriptor::Type => true,
+        TypeDescriptor::Array(item) => contains_metatype(item),
+        TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
+            items.iter().any(contains_metatype)
+        }
+        TypeDescriptor::Struct(fields) => fields.values().any(contains_metatype),
+        TypeDescriptor::Enum(variants) => variants
+            .values()
+            .flatten()
+            .any(|payload| contains_metatype(payload)),
+        TypeDescriptor::Function { parameters, result } => {
+            parameters.iter().any(contains_metatype) || contains_metatype(result)
         }
         _ => false,
     }
@@ -3174,6 +3289,7 @@ fn interpolation_type_supported(descriptor: &TypeDescriptor) -> bool {
             interpolation_type_supported(&enum_variant_type(name, payload.as_deref()))
         }),
         TypeDescriptor::Float
+        | TypeDescriptor::Type
         | TypeDescriptor::Bytes
         | TypeDescriptor::Array(_)
         | TypeDescriptor::Tuple(_)
@@ -3703,6 +3819,76 @@ mod tests {
         let bound = TypeDescriptor::Array(Box::new(TypeDescriptor::Bound(TypeParameterId(7))));
         let value = bound.to_value(&mut Vm::new());
         assert_eq!(TypeDescriptor::from_value(&value).unwrap(), bound);
+
+        let metatype = TypeDescriptor::Type;
+        let value = metatype.to_value(&mut Vm::new());
+        assert_eq!(TypeDescriptor::from_value(&value).unwrap(), metatype);
+    }
+
+    #[test]
+    fn metadata_values_and_typed_constructors_have_the_type_metatype() {
+        let analysis = analyze_source(
+            "metatype.xl",
+            "def Maybe: Fn(Type) -> Type = fn(Item) { Option(Item) };\
+             type MaybeInt = Maybe(Int);\
+             (Type, Int, Array(Int), Maybe)",
+        )
+        .unwrap();
+        assert_eq!(
+            analysis.display(analysis.result_type),
+            "(Type, Type, Type, Fn(Type) -> Type)"
+        );
+        let maybe_int = analysis
+            .hir
+            .definitions()
+            .iter()
+            .find(|definition| definition.name == "MaybeInt")
+            .expect("MaybeInt definition");
+        assert_eq!(
+            analysis.display(analysis.definition_types[&maybe_int.id]),
+            "Type"
+        );
+        assert!(matches!(
+            analysis.types.node(analysis.declared_types["MaybeInt"]),
+            TypeNode::Enum(_)
+        ));
+
+        let bad_argument = analyze_source(
+            "bad-argument.xl",
+            "def Broken: Fn(Type) -> Type = fn(Item) { Array(1) }; Broken",
+        )
+        .unwrap_err();
+        assert!(bad_argument.message.contains("cannot unify Int with Type"));
+
+        let bad_result = analyze_source(
+            "bad-result.xl",
+            "def Broken: Fn(Type) -> Type = fn(Item) { 1 }; Broken",
+        )
+        .unwrap_err();
+        assert!(
+            bad_result
+                .message
+                .contains("not assignable to Fn(Type) -> Type")
+        );
+    }
+
+    #[test]
+    fn type_validation_uses_the_authoritative_metadata_decoder() {
+        let valid = crate::compile_source("valid-type.xl", "validate(Type, Array(Int))").unwrap();
+        assert!(
+            Vm::new()
+                .execute(&valid, 100_000)
+                .unwrap()
+                .to_string()
+                .starts_with("('Ok,")
+        );
+
+        let invalid =
+            crate::compile_source("invalid-type.xl", "validate(Type, {kind: 'Array, item: 1})")
+                .unwrap();
+        let output = Vm::new().execute(&invalid, 100_000).unwrap().to_string();
+        assert!(output.starts_with("('Err,"), "{output}");
+        assert!(output.contains("value.item must be a Dict"), "{output}");
     }
 
     #[test]

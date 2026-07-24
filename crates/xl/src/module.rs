@@ -1542,12 +1542,12 @@ mod tests {
             directory.join("User.xl"),
             r#"import codec from "core:codec";
                import result from "core:result";
-               @struct type Type = {v: Option(String)};
-               let decode = fn(value) { codec.decode(Type, value) };
+               @struct type User = {v: Option(String)};
+               let decode = fn(value) { codec.decode(User, value) };
                let encode = fn(value) {
-                   codec.encode(Type, value) |> result.unwrap
+                   codec.encode(User, value) |> result.unwrap
                };
-               {Type: Type, decode: decode, encode: encode}"#,
+               {Type: User, decode: decode, encode: encode}"#,
         )
         .unwrap();
         fs::write(
@@ -2059,6 +2059,32 @@ mod tests {
             "(Int, String)"
         );
         assert_eq!(module.execute(100_000).unwrap().to_string(), "(1, \"x\")");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn typed_metadata_constructors_cross_module_interfaces() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("constructors.xl"),
+            r#"def Maybe: Fn(Type) -> Type = fn(Item) { Option(Item) };
+               {Maybe: Maybe}"#,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import constructors from "./constructors.xl";
+               type MaybeInt = constructors.Maybe(Int);
+               let value: MaybeInt = 'None;
+               value"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            module.analysis.display(module.analysis.result_type),
+            "'None"
+        );
+        assert_eq!(module.execute(100_000).unwrap().to_string(), "'None");
         fs::remove_dir_all(directory).unwrap();
     }
 

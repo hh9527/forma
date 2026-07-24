@@ -1,6 +1,6 @@
 # RFC 0051: TypeMetadata metatype
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0003, RFC 0022, RFC 0041, RFC 0050
 
 ## Summary
@@ -256,6 +256,33 @@ the binding's static type and asking what a type declaration represents.
 - precise static types for Struct/Enum/Union metadata input shapes;
 - metadata constructor purity or totality guarantees;
 - first-class `TypeScheme` values and higher-rank polymorphism.
+
+## Implementation result
+
+Implemented `Type` across `TypeDescriptor`, the local recursive `TypeGraph`,
+the workspace graph, semantic displays, metadata serialization and both owned
+and heap-backed decoders. `validate(Type, value)` delegates to the authoritative
+metadata decoder, including nested path diagnostics.
+
+Analysis now starts with a parallel static prelude for metadata constants and
+constructors. Type declaration names and right-hand expressions have static
+type `Type`, while their represented instance descriptors remain in
+`declared_types`. Expected `Type` flows into constructor calls and metadata
+dictionary candidates; known non-Type arguments and results are rejected, and
+computed metadata still undergoes final tool-stage decoding.
+
+`ModuleInterface` retains existing generic schemes plus zero-parameter schemes
+whose body contains `Type`, as well as directly exported type bindings. This
+preserves typed metadata constructors and values across modules without
+changing the established dynamic boundary behavior of unrelated monomorphic
+core functions.
+
+Tests cover metadata round trips, constructor and declaration facts, bad
+arguments and results, canonical metadata dictionaries, authoritative `Type`
+validation, represented-type separation, and cross-module constructors. The
+final workspace run passed 190 core tests with one manual benchmark ignored, 9
+CLI tests, and 19 LSP tests. Strict Clippy, formatting, and whitespace
+validation also pass.
 
 ## Rejected alternatives
 
