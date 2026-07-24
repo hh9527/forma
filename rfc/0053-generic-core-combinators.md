@@ -56,9 +56,10 @@ that value and a scheme parameter. This RFC therefore does not pretend that
 5. type Array filter predicates as Bool;
 6. type debug observation as an identity relationship;
 7. expose precise Dict pair collection shapes;
-8. propagate every new scheme through ordinary `ModuleInterface` data;
-9. erase all generic parameters before runtime execution;
-10. implement combinators with existing syntax, pattern matching, bytecode, and
+8. provide contract syntax for heterogeneous Tuple types;
+9. propagate every new scheme through ordinary `ModuleInterface` data;
+10. erase all generic parameters before runtime execution;
+11. implement combinators with existing syntax, pattern matching, bytecode, and
     VM behavior.
 
 ## Non-goals
@@ -175,13 +176,19 @@ monomorphic under RFC 0049.
 Dict pair contracts become:
 
 ```xl
-native pairs: Fn(Any) -> Array(Tuple([String, Any]));
-native from_pairs: Fn(Array(Tuple([String, Any]))) -> Any;
+native pairs: Fn(Any) -> Array(Tuple(String, Any));
+native from_pairs: Fn(Array(Tuple(String, Any))) -> Any;
 ```
 
 XL still lacks a homogeneous Dict instance type, so Dict inputs and outputs
 remain `Any`. The pair collection shape itself is exact and useful to Array
 callbacks.
+
+`Tuple(A, B)` in a contract is mechanically lowered to the existing metadata
+expression `Tuple([A, B])`, just as `Fn(A, B) -> C` is lowered to the existing
+`Fn([A, B], C)` metadata constructor call. This contract-only syntax accepts
+zero or more item contracts and does not change the ordinary tool-stage
+`Tuple` constructor's one-Array argument ABI.
 
 ## Static and runtime semantics
 
@@ -216,12 +223,14 @@ continuation or ABI change is introduced.
 1. register `core:option` as a source-only core module;
 2. add the four Option definitions and four Result definitions in core source;
 3. retain only `unwrap` as a native Result export;
-4. refine Array, debug, and Dict declarations without changing native code;
-5. verify rigid definition checking and exported scheme data;
-6. add execution and inferred-type tests for every combinator;
-7. test fresh imported member instantiation, monomorphic aliases, callback
+4. lower `Tuple(A, B)` contract syntax to the existing Array-backed metadata
+   constructor call;
+5. refine Array, debug, and Dict declarations without changing native code;
+6. verify rigid definition checking and exported scheme data;
+7. add execution and inferred-type tests for every combinator;
+8. test fresh imported member instantiation, monomorphic aliases, callback
    failures, dynamic unwrap compatibility, and refined native contracts;
-8. run workspace tests, strict Clippy, formatting, and whitespace checks.
+9. run workspace tests, strict Clippy, formatting, and whitespace checks.
 
 ## Acceptance criteria
 
@@ -235,11 +244,13 @@ continuation or ABI change is introduced.
 7. filter requires a Bool callback when its result is statically known;
 8. debug calls preserve exact input types;
 9. Dict pair callbacks observe `(String, Any)` item types;
-10. dynamic codec-to-unwrap pipelines retain their existing behavior;
-11. VM bytecode, native ABI, and runtime Option/Result representation remain
+10. `Tuple(A, B)` contracts round-trip losslessly and evaluate through the
+    existing Tuple metadata constructor;
+11. dynamic codec-to-unwrap pipelines retain their existing behavior;
+12. VM bytecode, native ABI, and runtime Option/Result representation remain
     unchanged;
-12. no interface, trait, or associated-type representation is introduced;
-13. workspace tests and strict static checks pass.
+13. no interface, trait, or associated-type representation is introduced;
+14. workspace tests and strict static checks pass.
 
 ## Deferred work
 
