@@ -72,3 +72,4 @@ semantics from an earlier RFC.
 51. TypeMetadata metatype.
 52. Unified bidirectional type checking.
 53. Generic core combinators.
+54. First-class tagged values.

@@ -1,7 +1,7 @@
 # RFC 0053: Generic core combinators
 
 - Status: Proposed
-- Depends on: RFC 0015, RFC 0016, RFC 0029, RFC 0048, RFC 0052
+- Depends on: RFC 0015, RFC 0016, RFC 0029, RFC 0048, RFC 0052, RFC 0054
 
 ## Summary
 
@@ -12,8 +12,8 @@ in ordinary XL, and sharpens several existing native contracts:
 import options from "core:option";
 import results from "core:result";
 
-options.map(('Some, 1), fn(value) { value + 1 })
-results.map(('Ok, 1), fn(value) { value + 1 })
+options.map('Some(1), fn(value) { value + 1 })
+results.map('Ok(1), fn(value) { value + 1 })
 ```
 
 `core:option` exports `map`, `flat_map`, `unwrap_or`, and `is_some`.
@@ -83,7 +83,7 @@ def map:
 = fn(option, function) {
     match option {
         'None => 'None,
-        ('Some, value) => ('Some, function(value)),
+        'Some(value) => 'Some(function(value)),
     }
 };
 
@@ -92,7 +92,7 @@ def flat_map:
 = fn(option, function) {
     match option {
         'None => 'None,
-        ('Some, value) => function(value),
+        'Some(value) => function(value),
     }
 };
 
@@ -101,7 +101,7 @@ def unwrap_or:
 = fn(option, fallback) {
     match option {
         'None => fallback,
-        ('Some, value) => value,
+        'Some(value) => value,
     }
 };
 
@@ -110,7 +110,7 @@ def is_some:
 = fn(option) {
     match option {
         'None => 'False,
-        ('Some, _) => 'True,
+        'Some(_) => 'True,
     }
 };
 ```
