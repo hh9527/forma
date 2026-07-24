@@ -56,3 +56,4 @@ semantics from an earlier RFC.
 36. Function-valued JSON skip predicates through reusable native
     continuations.
 37. Type-erased native continuation dispatch.
+38. Semantic tooling and LSP roadmap.
