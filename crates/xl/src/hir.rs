@@ -65,6 +65,7 @@ pub struct HirReference {
 pub struct HirExpression {
     pub id: HirExpressionId,
     pub location: Location,
+    pub parent: Option<HirExpressionId>,
     pub reference: Option<HirReferenceId>,
 }
 
@@ -80,6 +81,7 @@ impl HirProgram {
         let mut resolver = Resolver {
             hir: Self::default(),
             external_names: external_names.into_iter().collect(),
+            expression_stack: Vec::new(),
         };
         let mut scopes = Vec::new();
         resolver.index_block(&program.value.body, &mut scopes, true);
@@ -94,6 +96,7 @@ impl HirProgram {
         let mut resolver = Resolver {
             hir: Self::default(),
             external_names: external_names.into_iter().collect(),
+            expression_stack: Vec::new(),
         };
         resolver.index_expr(expression, &mut Vec::new());
         resolver.hir.normalize_order();
@@ -107,6 +110,7 @@ impl HirProgram {
         let mut resolver = Resolver {
             hir: Self::default(),
             external_names: external_names.into_iter().collect(),
+            expression_stack: Vec::new(),
         };
         resolver.index_block_parts(
             &program.bindings,
@@ -210,6 +214,9 @@ impl HirProgram {
         for definition in &mut self.definitions {
             definition.value = definition.value.map(|id| expressions[id.index()]);
         }
+        for expression in &mut self.expressions {
+            expression.parent = expression.parent.map(|id| expressions[id.index()]);
+        }
     }
 }
 
@@ -218,6 +225,7 @@ type Scope = HashMap<String, HirDefinitionId>;
 struct Resolver {
     hir: HirProgram,
     external_names: HashSet<String>,
+    expression_stack: Vec<HirExpressionId>,
 }
 
 impl Resolver {
@@ -341,8 +349,10 @@ impl Resolver {
         self.hir.expressions.push(HirExpression {
             id: expression_id,
             location: expression.location,
+            parent: self.expression_stack.last().copied(),
             reference: None,
         });
+        self.expression_stack.push(expression_id);
         let reference = match &expression.value {
             ExprKind::Variable(name) => {
                 let resolution = resolve_name(scopes, &name.value).map_or_else(
@@ -446,6 +456,7 @@ impl Resolver {
             | ExprKind::Bytes(_)
             | ExprKind::Atom(_) => None,
         };
+        self.expression_stack.pop();
         self.hir.expressions[expression_id.index()].reference = reference;
         expression_id
     }
@@ -523,5 +534,10 @@ mod tests {
             reference.name == "ext" && reference.resolution == HirResolution::External
         }));
         assert!(hir.expressions().len() > hir.references().len());
+        assert!(
+            hir.expressions()
+                .iter()
+                .any(|expression| expression.parent.is_some())
+        );
     }
 }

@@ -154,20 +154,20 @@ fn show_command(arguments: &[String]) -> Result<(), String> {
     };
     let source = fs::read_to_string(module_path)
         .map_err(|error| format!("cannot read {}: {error}", Path::new(module_path).display()))?;
-    let recovered = WorkspaceSnapshot::recover_source(module_path.clone(), source);
-    let loaded = if recovered.diagnostics().is_empty() {
-        Some(
-            engine()
-                .load_module(module_path, BTreeMap::new())
-                .map_err(|error| error.to_string())?,
-        )
-    } else {
-        None
-    };
-    let workspace = loaded
-        .as_ref()
-        .map_or(&recovered, |module| &module.workspace);
-    match &arguments[1..] {
+    match engine().load_module(module_path, BTreeMap::new()) {
+        Ok(module) => show_query(&module.workspace, &arguments[1..]),
+        Err(error) => {
+            let recovered = WorkspaceSnapshot::recover_source(module_path.clone(), source);
+            if recovered.diagnostics().is_empty() {
+                return Err(error.to_string());
+            }
+            show_query(&recovered, &arguments[1..])
+        }
+    }
+}
+
+fn show_query(workspace: &WorkspaceSnapshot, arguments: &[String]) -> Result<(), String> {
+    match arguments {
         [] => show_workspace(workspace),
         [mode, source_path, line, column] if mode == "at" => {
             let line = line
@@ -218,13 +218,16 @@ fn show_workspace(workspace: &WorkspaceSnapshot) -> Result<(), String> {
     println!("definitions:");
     for definition in workspace.definitions() {
         let location = show_location(workspace, definition.location);
-        let ty = definition.ty.value.map_or_else(String::new, |ty| {
-            format!(
-                " t{} = {}",
-                ty.index(),
-                workspace.types().display(ty).unwrap_or_else(|| "?".into())
-            )
-        });
+        let ty = definition.ty.value.map_or_else(
+            || format!(" {:?}", definition.ty.state),
+            |ty| {
+                format!(
+                    " t{} = {}",
+                    ty.index(),
+                    workspace.types().display(ty).unwrap_or_else(|| "?".into())
+                )
+            },
+        );
         let target = definition
             .import_target
             .map_or_else(String::new, |module| format!(" -> m{}", module.index()));

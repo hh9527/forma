@@ -1,5 +1,5 @@
 use crate::ast::Program;
-use crate::hir::{HirProgram, HirResolution};
+use crate::hir::{HirDefinitionId, HirResolution};
 use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
 use crate::types::{Analysis, TypeGraph, TypeId, TypeNode};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -25,8 +25,15 @@ compact_id!(WorkspaceExpressionId);
 compact_id!(WorkspaceTypeId);
 compact_id!(DiagnosticId);
 
+impl DiagnosticId {
+    pub(crate) const fn from_index(index: usize) -> Self {
+        Self(index as u32)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FactIdentity {
+    HirDefinition(HirDefinitionId),
     Definition(DefinitionId),
     Expression(WorkspaceExpressionId),
 }
@@ -313,11 +320,19 @@ pub struct WorkspaceSnapshot {
 impl WorkspaceSnapshot {
     pub fn recover_source(source_name: impl Into<String>, source: impl Into<String>) -> Self {
         let source_name = source_name.into();
+        let source_text = source.into();
+        let partial = crate::types::analyze_partial_types(
+            &source_name,
+            &source_text,
+            crate::vm::Quota::with_fuel(100_000),
+        );
         let mut sources = SourceDatabase::default();
-        let source = sources.add(source_name.clone(), source.into());
+        let source = sources.add(source_name.clone(), source_text);
         let parsed = crate::parser::parse_registered(&sources, source);
-        let hir = HirProgram::resolve_recovered(&parsed.recovered, Vec::new());
+        let hir = &partial.hir;
         let module = WorkspaceModuleId(0);
+        let mut types = WorkspaceTypeGraph::default();
+        let type_map = merge_type_graph(&source_name, &partial.types, &mut types);
         let mut definitions = hir
             .definitions()
             .iter()
@@ -328,11 +343,14 @@ impl WorkspaceSnapshot {
                 kind: definition.kind,
                 location: definition.location,
                 additional_locations: definition.additional_locations.clone(),
-                ty: SemanticFact::unknown(UnknownReason::InvalidSyntax),
+                ty: partial.definition_facts.get(&definition.id).map_or_else(
+                    || SemanticFact::unknown(UnknownReason::InvalidSyntax),
+                    |fact| map_partial_fact(fact, &type_map),
+                ),
                 import_target: None,
             })
             .collect::<Vec<_>>();
-        let mut diagnostics = parsed.diagnostics;
+        let mut diagnostics = partial.diagnostics;
         let mut slots = HashMap::<String, Vec<usize>>::new();
         for (index, definition) in definitions.iter().enumerate() {
             if definition.kind == DefinitionKind::DefinitionSlot {
@@ -358,12 +376,26 @@ impl WorkspaceSnapshot {
                 definitions[index].ty.diagnostics.push(diagnostic);
             }
         }
-        diagnostics.sort_by_key(|diagnostic| {
+        let mut indexed_diagnostics = diagnostics.into_iter().enumerate().collect::<Vec<_>>();
+        indexed_diagnostics.sort_by_key(|(_, diagnostic)| {
             diagnostic
                 .labels
                 .first()
                 .map_or(0, |label| label.location.start)
         });
+        let mut remapped = vec![DiagnosticId::from_index(0); indexed_diagnostics.len()];
+        for (new, (old, _)) in indexed_diagnostics.iter().enumerate() {
+            remapped[*old] = DiagnosticId::from_index(new);
+        }
+        for definition in &mut definitions {
+            for diagnostic in &mut definition.ty.diagnostics {
+                *diagnostic = remapped[diagnostic.index()];
+            }
+        }
+        let diagnostics = indexed_diagnostics
+            .into_iter()
+            .map(|(_, diagnostic)| diagnostic)
+            .collect();
         let references = hir
             .references()
             .iter()
@@ -423,7 +455,7 @@ impl WorkspaceSnapshot {
             definitions,
             references,
             expressions,
-            types: WorkspaceTypeGraph::default(),
+            types,
             diagnostics,
         }
     }
@@ -739,6 +771,31 @@ fn contains(range: Location, point: Location) -> bool {
     range.source == point.source
         && range.start <= point.start
         && (point.start < range.end || range.start == range.end && point.start == range.start)
+}
+
+fn map_partial_fact(
+    fact: &SemanticFact<TypeId>,
+    type_map: &[WorkspaceTypeId],
+) -> SemanticFact<WorkspaceTypeId> {
+    let map_identity = |identity| match identity {
+        FactIdentity::HirDefinition(id) => {
+            FactIdentity::Definition(DefinitionId(id.index() as u32))
+        }
+        other => other,
+    };
+    let state = match &fact.state {
+        FactState::Known => FactState::Known,
+        FactState::Unknown(UnknownReason::BlockedBy(identity)) => {
+            FactState::Unknown(UnknownReason::BlockedBy(map_identity(*identity)))
+        }
+        state => state.clone(),
+    };
+    SemanticFact {
+        value: fact.value.map(|ty| type_map[ty.index()]),
+        state,
+        causes: fact.causes.iter().copied().map(map_identity).collect(),
+        diagnostics: fact.diagnostics.clone(),
+    }
 }
 
 fn merge_type_graph(
@@ -1099,6 +1156,45 @@ mod tests {
                 .filter(|diagnostic| diagnostic.message.contains("duplicate definition slot"))
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn recovery_snapshot_projects_partial_type_evaluation_facts() {
+        let snapshot = WorkspaceSnapshot::recover_source(
+            "partial.xl",
+            "type A = broken(Int);\
+             type B = String;\
+             type C = Array(B);\
+             type D = Array(A);\
+             0",
+        );
+        let fact = |name: &str| {
+            &snapshot
+                .definitions()
+                .iter()
+                .find(|definition| definition.name == name)
+                .unwrap()
+                .ty
+        };
+        assert!(matches!(
+            fact("A").state,
+            FactState::Incomputable(IncomputableReason::UnsupportedOperation)
+        ));
+        assert_eq!(fact("B").state, FactState::Known);
+        assert_eq!(fact("C").state, FactState::Known);
+        assert_eq!(
+            snapshot.types().display(fact("C").value.unwrap()).unwrap(),
+            "Array<String>"
+        );
+        let a = snapshot
+            .definitions()
+            .iter()
+            .find(|definition| definition.name == "A")
+            .unwrap();
+        assert_eq!(
+            fact("D").state,
+            FactState::Unknown(UnknownReason::BlockedBy(FactIdentity::Definition(a.id)))
         );
     }
 }

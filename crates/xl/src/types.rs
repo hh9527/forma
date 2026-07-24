@@ -9,6 +9,10 @@ use crate::json::{Provenance, ValuePath, ValuePathSegment};
 use crate::lexer::{FrontendError, SourceLocation};
 use crate::lir::RegisterId;
 use crate::parser::parse_registered;
+use crate::semantic::{
+    Conflict, DiagnosticId, FactIdentity, FactState, IncomputableReason, SemanticFact,
+    UnknownReason,
+};
 use crate::source::{Diagnostic, SourceDatabase};
 use crate::value::{
     Atom, Closure, CoreBuiltinTypeFunction, CoreModelFunction, NativeError, NativeFunction, Value,
@@ -649,6 +653,26 @@ pub struct Analysis {
     pub(crate) dynamic_bindings: HashSet<String>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticDependencyNode {
+    pub definition: HirDefinitionId,
+    pub dependencies: Vec<HirDefinitionId>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct SemanticDependencyGraph {
+    pub nodes: Vec<SemanticDependencyNode>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PartialAnalysis {
+    pub hir: HirProgram,
+    pub dependencies: SemanticDependencyGraph,
+    pub definition_facts: BTreeMap<HirDefinitionId, SemanticFact<TypeId>>,
+    pub diagnostics: Vec<Diagnostic>,
+    pub types: TypeGraph,
+}
+
 impl Analysis {
     pub fn display(&self, id: TypeId) -> String {
         self.types.display(id)
@@ -722,6 +746,285 @@ pub fn analyze_source_with_quota(
         &sources,
         &BTreeMap::new(),
     )
+}
+
+pub fn analyze_partial_types(source_name: &str, source: &str, quota: Quota) -> PartialAnalysis {
+    analyze_partial_types_with_bindings(source_name, source, quota, &BTreeMap::new())
+}
+
+pub fn analyze_partial_types_with_bindings(
+    source_name: &str,
+    source: &str,
+    quota: Quota,
+    external_values: &BTreeMap<String, Value>,
+) -> PartialAnalysis {
+    let mut sources = SourceDatabase::default();
+    let source_id = sources.add(source_name, source);
+    let parsed = parse_registered(&sources, source_id);
+    let mut vm = Vm::new();
+    let prelude = core_prelude(&mut vm);
+    let hir = HirProgram::resolve_recovered(
+        &parsed.recovered,
+        prelude
+            .keys()
+            .chain(external_values.keys())
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    let mut bindings = BTreeMap::new();
+    for binding in &parsed.recovered.bindings {
+        if binding.value.kind != BindingKind::Type {
+            continue;
+        }
+        if let Some(definition) = hir.definitions().iter().find(|definition| {
+            definition.top_level
+                && definition.kind == HirDefinitionKind::Type
+                && definition.location == binding.value.name.location
+        }) {
+            bindings.insert(definition.id, binding);
+        }
+    }
+    let type_definitions = bindings.keys().copied().collect::<HashSet<_>>();
+    let mut nodes = bindings
+        .keys()
+        .map(|definition| {
+            let root = hir
+                .definition(*definition)
+                .and_then(|definition| definition.value)
+                .expect("retained type definition has a value expression");
+            let mut dependencies = hir
+                .expressions()
+                .iter()
+                .filter(|expression| expression_descends_from(&hir, expression.id, root))
+                .filter_map(|expression| expression.reference)
+                .filter_map(|reference| hir.reference(reference))
+                .filter_map(|reference| match reference.resolution {
+                    crate::hir::HirResolution::Definition(dependency)
+                        if type_definitions.contains(&dependency) =>
+                    {
+                        Some(dependency)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            dependencies.sort_unstable();
+            dependencies.dedup();
+            SemanticDependencyNode {
+                definition: *definition,
+                dependencies,
+            }
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_by_key(|node| node.definition);
+    let dependencies = SemanticDependencyGraph { nodes };
+
+    let mut diagnostics = parsed.diagnostics;
+    let mut facts: BTreeMap<HirDefinitionId, SemanticFact<TypeId>> = BTreeMap::new();
+    let mut types = TypeGraph::default();
+    let mut tool_values = prelude;
+    tool_values.extend(external_values.clone());
+    let any_metadata = tool_values
+        .get("Any")
+        .expect("core prelude defines Any")
+        .clone();
+    for binding in bindings.values() {
+        tool_values.insert(binding.value.name.value.clone(), any_metadata.clone());
+    }
+    let mut account = QuotaAccount::new(quota);
+    let debug_sink: Arc<dyn DebugSink> = Arc::new(DiscardDebugSink);
+
+    while facts.len() < bindings.len() {
+        let mut progressed = false;
+        for node in &dependencies.nodes {
+            if facts.contains_key(&node.definition) {
+                continue;
+            }
+            let blocked = node.dependencies.iter().find(|dependency| {
+                facts
+                    .get(*dependency)
+                    .is_some_and(|fact| fact.state != FactState::Known)
+            });
+            if let Some(dependency) = blocked {
+                let cause = FactIdentity::HirDefinition(*dependency);
+                let mut fact = SemanticFact::unknown(UnknownReason::BlockedBy(cause));
+                fact.causes.push(cause);
+                facts.insert(node.definition, fact);
+                progressed = true;
+                continue;
+            }
+            if node
+                .dependencies
+                .iter()
+                .any(|dependency| !facts.contains_key(dependency))
+            {
+                continue;
+            }
+
+            let binding = bindings[&node.definition];
+            let outcome = evaluate_tool_expression(
+                source_name,
+                &binding.value.value,
+                &tool_values,
+                &mut account,
+                &sources,
+                &debug_sink,
+            )
+            .and_then(|value| {
+                TypeDescriptor::from_value(&value)
+                    .map(|descriptor| (value, descriptor))
+                    .map_err(|message| {
+                        FrontendError::from_diagnostic(
+                            &sources,
+                            Diagnostic::error(
+                                format!(
+                                    "type {} produced invalid metadata: {message}",
+                                    binding.value.name.value
+                                ),
+                                binding.value.value.location,
+                            ),
+                        )
+                    })
+            });
+            match outcome {
+                Ok((value, descriptor)) => {
+                    let id = types.intern_descriptor(&descriptor);
+                    types.names.insert(binding.value.name.value.clone(), id);
+                    tool_values.insert(binding.value.name.value.clone(), value);
+                    facts.insert(node.definition, SemanticFact::known(id));
+                }
+                Err(error) => {
+                    let state = classify_partial_error(&error.message);
+                    let diagnostic = DiagnosticId::from_index(diagnostics.len());
+                    diagnostics.push(error.diagnostic.map_or_else(
+                        || Diagnostic::error(error.message, binding.value.value.location),
+                        |diagnostic| *diagnostic,
+                    ));
+                    let mut fact = match state {
+                        FactState::Conflicted(conflict) => SemanticFact::conflicted(None, conflict),
+                        FactState::Incomputable(reason) => SemanticFact::incomputable(None, reason),
+                        FactState::Unknown(reason) => SemanticFact::unknown(reason),
+                        FactState::Known => unreachable!("errors cannot produce known facts"),
+                    };
+                    fact.diagnostics.push(diagnostic);
+                    facts.insert(node.definition, fact);
+                }
+            }
+            progressed = true;
+        }
+        if progressed {
+            continue;
+        }
+
+        let cyclic = dependencies
+            .nodes
+            .iter()
+            .filter(|node| !facts.contains_key(&node.definition))
+            .filter(|node| dependency_reaches(&dependencies, node.definition, node.definition))
+            .map(|node| node.definition)
+            .collect::<Vec<_>>();
+        let had_cycle = !cyclic.is_empty();
+        for definition in cyclic {
+            let binding = bindings[&definition];
+            let diagnostic = DiagnosticId::from_index(diagnostics.len());
+            diagnostics.push(Diagnostic::error(
+                format!(
+                    "recursive type component containing {:?} cannot be partially evaluated",
+                    binding.value.name.value
+                ),
+                binding.value.name.location,
+            ));
+            let mut fact = SemanticFact::incomputable(None, IncomputableReason::CyclicEvaluation);
+            fact.diagnostics.push(diagnostic);
+            facts.insert(definition, fact);
+        }
+        if had_cycle {
+            continue;
+        }
+        break;
+    }
+    let mut indexed_diagnostics = diagnostics.into_iter().enumerate().collect::<Vec<_>>();
+    indexed_diagnostics.sort_by_key(|(_, diagnostic)| {
+        diagnostic
+            .labels
+            .first()
+            .map_or(0, |label| label.location.start)
+    });
+    let mut remapped_diagnostics = vec![DiagnosticId::from_index(0); indexed_diagnostics.len()];
+    for (new, (old, _)) in indexed_diagnostics.iter().enumerate() {
+        remapped_diagnostics[*old] = DiagnosticId::from_index(new);
+    }
+    for fact in facts.values_mut() {
+        for diagnostic in &mut fact.diagnostics {
+            *diagnostic = remapped_diagnostics[diagnostic.index()];
+        }
+    }
+    let diagnostics = indexed_diagnostics
+        .into_iter()
+        .map(|(_, diagnostic)| diagnostic)
+        .collect();
+    PartialAnalysis {
+        hir,
+        dependencies,
+        definition_facts: facts,
+        diagnostics,
+        types,
+    }
+}
+
+fn expression_descends_from(
+    hir: &HirProgram,
+    mut expression: HirExpressionId,
+    root: HirExpressionId,
+) -> bool {
+    loop {
+        if expression == root {
+            return true;
+        }
+        let Some(parent) = hir
+            .expression(expression)
+            .and_then(|expression| expression.parent)
+        else {
+            return false;
+        };
+        expression = parent;
+    }
+}
+
+fn dependency_reaches(
+    graph: &SemanticDependencyGraph,
+    current: HirDefinitionId,
+    target: HirDefinitionId,
+) -> bool {
+    fn visit(
+        graph: &SemanticDependencyGraph,
+        current: HirDefinitionId,
+        target: HirDefinitionId,
+        visited: &mut HashSet<HirDefinitionId>,
+    ) -> bool {
+        let Some(node) = graph.nodes.iter().find(|node| node.definition == current) else {
+            return false;
+        };
+        node.dependencies.iter().any(|dependency| {
+            *dependency == target
+                || visited.insert(*dependency) && visit(graph, *dependency, target, visited)
+        })
+    }
+    visit(graph, current, target, &mut HashSet::new())
+}
+
+fn classify_partial_error(message: &str) -> FactState {
+    if message.contains("not assignable") || message.contains("incompatible") {
+        FactState::Conflicted(Conflict::IncompatibleContract)
+    } else if message.contains("fuel exhausted")
+        || message.contains("quota")
+        || message.contains("stack limit")
+    {
+        FactState::Incomputable(IncomputableReason::QuotaExceeded)
+    } else if message.contains("native symbol") || message.contains("has not been resolved") {
+        FactState::Incomputable(IncomputableReason::RuntimeOnly)
+    } else {
+        FactState::Incomputable(IncomputableReason::UnsupportedOperation)
+    }
 }
 
 pub(crate) fn analyze_program_registered(
@@ -2493,6 +2796,126 @@ mod tests {
                 .values()
                 .any(|ty| matches!(analysis.types.node(*ty), TypeNode::Function { .. }))
         );
+    }
+
+    #[test]
+    fn partial_type_evaluation_continues_independent_and_transitive_work() {
+        let partial = analyze_partial_types(
+            "partial.xl",
+            "type A = broken(Int);\
+             type B = String;\
+             type C = Array(B);\
+             type D = Array(A);\
+             0",
+            Quota::with_fuel(100),
+        );
+        let definition = |name: &str| {
+            partial
+                .hir
+                .definitions()
+                .iter()
+                .find(|definition| definition.name == name)
+                .unwrap()
+                .id
+        };
+        let a = definition("A");
+        let b = definition("B");
+        let c = definition("C");
+        let d = definition("D");
+        assert!(matches!(
+            partial.definition_facts[&a].state,
+            FactState::Incomputable(IncomputableReason::UnsupportedOperation)
+        ));
+        assert_eq!(partial.definition_facts[&b].state, FactState::Known);
+        assert_eq!(partial.definition_facts[&c].state, FactState::Known);
+        assert_eq!(
+            partial
+                .types
+                .display(partial.definition_facts[&c].value.unwrap()),
+            "Array<String>"
+        );
+        assert_eq!(
+            partial.definition_facts[&d].state,
+            FactState::Unknown(UnknownReason::BlockedBy(FactIdentity::HirDefinition(a)))
+        );
+        assert!(partial.definition_facts[&d].diagnostics.is_empty());
+        assert_eq!(partial.diagnostics.len(), 1);
+        let c_node = partial
+            .dependencies
+            .nodes
+            .iter()
+            .find(|node| node.definition == c)
+            .unwrap();
+        assert_eq!(c_node.dependencies, vec![b]);
+    }
+
+    #[test]
+    fn partial_type_evaluation_shares_one_fuel_account() {
+        let partial = analyze_partial_types(
+            "fuel.xl",
+            "type A = Array(Int); type B = Array(Int); 0",
+            Quota::with_fuel(1),
+        );
+        let facts = partial
+            .hir
+            .definitions()
+            .iter()
+            .filter(|definition| definition.kind == HirDefinitionKind::Type)
+            .map(|definition| &partial.definition_facts[&definition.id])
+            .collect::<Vec<_>>();
+        assert_eq!(facts[0].state, FactState::Known);
+        assert_eq!(
+            facts[1].state,
+            FactState::Incomputable(IncomputableReason::QuotaExceeded)
+        );
+    }
+
+    #[test]
+    fn partial_type_evaluation_marks_recursive_components_explicitly() {
+        let partial = analyze_partial_types(
+            "recursive.xl",
+            "@struct type Node = {children: Array(Node)}; 0",
+            Quota::with_fuel(100),
+        );
+        let node = partial
+            .hir
+            .definitions()
+            .iter()
+            .find(|definition| definition.name == "Node")
+            .unwrap();
+        assert_eq!(
+            partial.definition_facts[&node.id].state,
+            FactState::Incomputable(IncomputableReason::CyclicEvaluation)
+        );
+        assert_eq!(partial.dependencies.nodes[0].dependencies, vec![node.id]);
+    }
+
+    #[test]
+    fn partial_type_evaluation_accepts_explicit_linked_capabilities() {
+        let mut vm = Vm::new();
+        let bindings = BTreeMap::from([(
+            "LinkedType".to_owned(),
+            TypeDescriptor::Int.to_value(&mut vm),
+        )]);
+        let partial = analyze_partial_types_with_bindings(
+            "linked.xl",
+            "type Linked = LinkedType; 0",
+            Quota::with_fuel(10),
+            &bindings,
+        );
+        let linked = partial
+            .hir
+            .definitions()
+            .iter()
+            .find(|definition| definition.name == "Linked")
+            .unwrap();
+        let fact = &partial.definition_facts[&linked.id];
+        assert_eq!(fact.state, FactState::Known);
+        assert_eq!(partial.types.node(fact.value.unwrap()), &TypeNode::Int);
+        assert!(partial.hir.references().iter().any(|reference| {
+            reference.name == "LinkedType"
+                && reference.resolution == crate::hir::HirResolution::External
+        }));
     }
 
     #[test]

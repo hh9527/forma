@@ -45,8 +45,9 @@ pub use source::{
     WithOrigin,
 };
 pub use types::{
-    Analysis, TypeGraph, TypeId, TypeNode, analyze_source, analyze_source_with_fuel,
-    analyze_source_with_quota,
+    Analysis, PartialAnalysis, SemanticDependencyGraph, SemanticDependencyNode, TypeGraph, TypeId,
+    TypeNode, analyze_partial_types, analyze_partial_types_with_bindings, analyze_source,
+    analyze_source_with_fuel, analyze_source_with_quota,
 };
 pub use value::{
     Atom, BuiltinAtom, Callable, Closure, Dict, NativeError, NativeFunction, Prototype, Shape,

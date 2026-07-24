@@ -1,6 +1,6 @@
 # RFC 0043: Dependency-scoped partial tool evaluation
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0035, RFC 0041, RFC 0042
 
 ## Summary
@@ -225,4 +225,60 @@ root diagnostics plus unavailable states and known independent facts.
 
 ## Implementation result
 
-Pending.
+Implemented for the top-level TypeMetadata scope defined by this RFC.
+
+HIR expressions now retain an optional parent expression ID. Parent identities
+are assigned during the shared RFC 0041 resolver walk and remapped during HIR
+normalization. A type definition's existing RHS expression ID therefore owns a
+precise expression subtree. Dependency extraction walks that identity
+relationship and reads resolved reference targets; it does not associate
+references with definitions through names or source-range containment.
+
+`SemanticDependencyGraph`, `SemanticDependencyNode`, and `PartialAnalysis` are
+public tooling records. `analyze_partial_types` parses recoverably, constructs
+HIR, selects retained top-level type definitions, normalizes and deduplicates
+their definition-ID edges, and schedules them in deterministic HIR order.
+`analyze_partial_types_with_bindings` additionally accepts explicitly linked
+tool values, so host/module integration can supply imported decorators or
+metadata capabilities without making the analyzer guess. Such names resolve as
+HIR externals.
+
+The scheduler uses one `QuotaAccount` and one successful-value environment for
+the complete partial analysis. Every ready RHS is compiled and evaluated by
+the existing atomic tool-expression path. A successful metadata value is
+decoded, interned in the partial `TypeGraph`, and made available to later
+dependents. A failed value is not inserted. Independent ready definitions
+continue; a dependent of any non-known fact is skipped and records
+`Unknown(BlockedBy(HirDefinitionId))` with a cause but no duplicate diagnostic.
+
+Tool failures are classified into conflict, quota, runtime-only, and
+unsupported states. Diagnostic IDs are assigned to root facts and remapped
+after deterministic source-order sorting. Quota is not reset between
+definitions. The initial partial evaluator deliberately does not attempt the
+strict analyzer's recursive up-link sealing protocol: every cyclic graph
+member records `Incomputable(CyclicEvaluation)`, after which acyclic downstream
+nodes become blocked. Strict recursive TypeMetadata evaluation and promotion
+remain unchanged.
+
+`WorkspaceSnapshot::recover_source` now projects partial type graphs and facts
+into workspace type and definition IDs, including remapping blocked causes.
+`xl show` first attempts normal strict module loading. Only after that fails
+does it construct the partial snapshot, which avoids evaluating successful
+programs twice. It displays independent known types, incomputable roots,
+blocked dependents, and source diagnostics. `check`, `run`, compilation,
+module initialization, and Main World publication still use only complete
+`Analysis` and retain fail-fast behavior.
+
+Tests cover an unsupported root with independent and transitive success,
+definition-ID dependency edges, blocked downstream facts without duplicate
+diagnostics, one shared fuel account, explicit external capability linking,
+recursive-cycle classification, workspace ID/cause projection, CLI display,
+and unchanged strict failure. No partial path creates bytecode for publication
+or persistent Main World roots.
+
+The remaining boundary is cross-module recovery orchestration. The evaluator
+can consume already linked external values, but `recover_source` is still the
+single-source constructor introduced by RFC 0042; it does not build a partial
+module graph when an imported source itself fails. Expression-granular retry,
+recursive component sealing in partial mode, ordinary-binding scheduling,
+parallelism, cancellation, and caching remain deferred.

@@ -251,3 +251,52 @@ fn show_recovers_semantics_from_damaged_source_while_check_remains_strict() {
     assert!(!check.status.success());
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn show_continues_independent_type_metadata_after_tool_failure() {
+    let directory = fixture_dir();
+    let main = directory.join("partial.xl");
+    fs::write(
+        &main,
+        "type A = broken(Int);\
+         type B = String;\
+         type C = Array(B);\
+         type D = Array(A);\
+         0",
+    )
+    .unwrap();
+
+    let show = xl()
+        .args(["show", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let output = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        output.contains("A") && output.contains("Incomputable"),
+        "{output}"
+    );
+    assert!(
+        output.contains("B") && output.contains(" = String"),
+        "{output}"
+    );
+    assert!(
+        output.contains("C") && output.contains(" = Array<String>"),
+        "{output}"
+    );
+    assert!(
+        output.contains("D") && output.contains("BlockedBy"),
+        "{output}"
+    );
+
+    let check = xl()
+        .args(["check", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!check.status.success());
+    fs::remove_dir_all(directory).unwrap();
+}
