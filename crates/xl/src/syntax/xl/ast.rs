@@ -253,16 +253,19 @@ impl<'tree> DeclBinding<'tree> {
 
 impl<'tree> NativeBinding<'tree> {
     pub fn type_parameters(self) -> Option<SyntaxNode<'tree>> {
-        child_node(self.syntax, Rule::TypeParameters)
+        child_node(self.syntax, Rule::TypeScheme)
+            .and_then(|scheme| child_node(scheme, Rule::TypeParameters))
     }
 
     pub fn contract(self) -> Option<SyntaxNode<'tree>> {
-        self.syntax.children().find(|child| {
-            matches!(
-                child.rule(),
-                Some(Rule::Contract | Rule::ContractExpr | Rule::FunctionContract)
-            )
-        })
+        child_node(self.syntax, Rule::TypeScheme)?
+            .children()
+            .find(|child| {
+                matches!(
+                    child.rule(),
+                    Some(Rule::Contract | Rule::ContractExpr | Rule::FunctionContract)
+                )
+            })
     }
 }
 

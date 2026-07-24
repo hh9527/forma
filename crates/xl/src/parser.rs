@@ -282,8 +282,12 @@ impl<'a> Lowerer<'a> {
                 ))
             }
             Rule::NativeBinding => {
-                let type_parameters = self
+                let scheme = self
                     .rule_children(node)
+                    .find(|child| self.rule(*child) == Some(Rule::TypeScheme))
+                    .ok_or_else(|| self.error(node, "native declaration has no type scheme"))?;
+                let type_parameters = self
+                    .rule_children(scheme)
                     .find(|child| self.rule(*child) == Some(Rule::TypeParameters))
                     .map(|parameters| {
                         self.token_children(parameters, Token::Identifier)
@@ -294,7 +298,7 @@ impl<'a> Lowerer<'a> {
                     })
                     .unwrap_or_default();
                 let contract_node = self
-                    .rule_children(node)
+                    .rule_children(scheme)
                     .find(|child| {
                         matches!(
                             self.rule(*child),
@@ -1631,7 +1635,7 @@ mod tests {
     fn lowers_located_native_bindings_with_contracts() {
         let program = parse(
             "native.xl",
-            "native map[A, B]: fn(Array(A), fn(A) -> B) -> Array(B); map",
+            "native map: for(A, B) fn(Array(A), fn(A) -> B) -> Array(B); map",
         )
         .unwrap();
         let binding = &program.value.body.value.bindings[0];
@@ -1646,9 +1650,9 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["A", "B"]
         );
-        assert_eq!(binding.value.type_parameters[0].location.range(), 11..12);
+        assert_eq!(binding.value.type_parameters[0].location.range(), 16..17);
         assert!(binding.value.annotation.is_some());
-        assert_eq!(binding.location.range(), 0..55);
+        assert_eq!(binding.location.range(), 0..59);
     }
 
     #[test]

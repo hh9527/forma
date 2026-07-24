@@ -3537,8 +3537,8 @@ mod tests {
     #[test]
     fn generic_native_calls_instantiate_fresh_types_and_check_callbacks() {
         let analysis = analyze_with_natives(
-            "native identity[A]: fn(A) -> A;\
-             native map[A, B]: fn(Array(A), fn(A) -> B) -> Array(B);\
+            "native identity: for(A) fn(A) -> A;\
+             native map: for(A, B) fn(Array(A), fn(A) -> B) -> Array(B);\
              (identity(1), identity(\"x\"), map([1, 2], fn(x) { x + 1 }))",
             &[("identity", 1), ("map", 2)],
         )
@@ -3574,7 +3574,7 @@ mod tests {
     #[test]
     fn generic_native_result_uses_expected_type_and_rejects_missing_or_conflicting_evidence() {
         let inferred = analyze_with_natives(
-            "native empty[A]: fn() -> Array(A);\
+            "native empty: for(A) fn() -> Array(A);\
              let values: Array(Int) = empty();\
              values",
             &[("empty", 0)],
@@ -3583,14 +3583,14 @@ mod tests {
         assert_eq!(inferred.display(inferred.result_type), "Array<Int>");
 
         let missing = analyze_with_natives(
-            "native empty[A]: fn() -> Array(A); empty()",
+            "native empty: for(A) fn() -> Array(A); empty()",
             &[("empty", 0)],
         )
         .unwrap_err();
         assert!(missing.message.contains("cannot infer generic result type"));
 
         let conflicting = analyze_with_natives(
-            "native choose[A]: fn(A, A) -> A; choose(1, \"x\")",
+            "native choose: for(A) fn(A, A) -> A; choose(1, \"x\")",
             &[("choose", 2)],
         )
         .unwrap_err();
@@ -3604,21 +3604,22 @@ mod tests {
     #[test]
     fn generic_native_parameters_must_be_unique() {
         let error = analyze_with_natives(
-            "native identity[A, A]: fn(A) -> A; identity(1)",
+            "native identity: for(A, A) fn(A) -> A; identity(1)",
             &[("identity", 1)],
         )
         .unwrap_err();
         assert!(error.message.contains("duplicate type parameter"));
 
-        let leaked = analyze_with_natives("native identity[A]: fn(A) -> A; A", &[("identity", 1)])
-            .unwrap_err();
+        let leaked =
+            analyze_with_natives("native identity: for(A) fn(A) -> A; A", &[("identity", 1)])
+                .unwrap_err();
         assert!(leaked.message.contains("unknown binding \"A\""));
     }
 
     #[test]
     fn generic_native_schemes_are_data_and_occurs_checks_reject_infinite_types() {
         let analysis = analyze_with_natives(
-            "native identity[A]: fn(A) -> A; {identity: identity}",
+            "native identity: for(A) fn(A) -> A; {identity: identity}",
             &[("identity", 1)],
         )
         .unwrap();

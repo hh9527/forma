@@ -237,7 +237,7 @@ an inference diagnostic. It does not become `Array(Any)`.
 Conflicting constraints are rejected at the call site:
 
 ```xl
-native choose[A]: fn(A, A) -> A;
+native choose: for(A) fn(A, A) -> A;
 choose(1, "x")
 ```
 
@@ -397,7 +397,7 @@ Tests cover syntax preservation, parameter identity and scope, duplicate
 parameters, fresh local and module instantiation, higher-order callback
 checking, result-driven inference, missing/conflicting evidence, occurs checks,
 module-interface data, local monomorphization, and unchanged native runtime
-behavior. The final workspace run passed 179 core tests with one manual
+behavior. The final workspace run passed 180 core tests with one manual
 benchmark ignored, 9 CLI tests, 19 LSP tests, strict Clippy, formatting, and
 whitespace validation.
 
@@ -412,7 +412,7 @@ parenthesized style without promising first-class polymorphic values.
 
 ### Put parameters after the binding name
 
-`native map[A, B]: ...` is compact and naturally limits polymorphism to
+`native map[A, B]: ...` would be compact and naturally limit polymorphism to
 declarations, but splits one `TypeScheme` between binding syntax on the left
 and type metadata on the right. Keeping `for(A, B) ...` entirely after `:`
 makes the source contract correspond directly to the semantic scheme data and

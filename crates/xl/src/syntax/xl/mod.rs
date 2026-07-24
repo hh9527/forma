@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn cst_preserves_native_declarations_losslessly() {
-        let source = "native map[A, B]: fn(Array(A), fn(A) -> B) -> Array(B); map";
+        let source = "native map: for(A, B) fn(Array(A), fn(A) -> B) -> Array(B); map";
         let mut sources = crate::source::SourceDatabase::default();
         let id = sources.add("native.xl", source);
         let parsed = parse(id, source);
@@ -96,6 +96,15 @@ mod tests {
             panic!("expected native binding");
         };
         assert!(native.type_parameters().is_some());
+    }
+
+    #[test]
+    fn native_type_schemes_reject_nested_for_binders() {
+        let source = "native use: fn(for(A) fn(A) -> A) -> Int; use";
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("nested-scheme.xl", source);
+        let parsed = parse(id, source);
+        assert!(parsed.has_errors());
     }
 
     #[test]

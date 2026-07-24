@@ -26,6 +26,7 @@ pub enum Token {
     Decl,
     Def,
     Native,
+    For,
     Type,
     Fn,
     If,
@@ -84,6 +85,8 @@ enum NormalToken {
     Def,
     #[token("native")]
     Native,
+    #[token("for")]
+    For,
     #[token("type")]
     Type,
     #[token("fn")]
@@ -418,6 +421,7 @@ impl From<NormalToken> for Token {
             NormalToken::Decl => Self::Decl,
             NormalToken::Def => Self::Def,
             NormalToken::Native => Self::Native,
+            NormalToken::For => Self::For,
             NormalToken::Type => Self::Type,
             NormalToken::Fn => Self::Fn,
             NormalToken::If => Self::If,

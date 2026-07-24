@@ -1,4 +1,4 @@
-token Let='let' Decl='decl' Def='def' Native='native' Type='type' Fn='fn' If='if' Else='else' Match='match';
+token Let='let' Decl='decl' Def='def' Native='native' For='for' Type='type' Fn='fn' If='if' Else='else' Match='match';
 token Import='import' From='from';
 token SectionLParen='\\(' LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
 token Comma=',' Colon=':' Semicolon=';' Dot='.' At='@';
@@ -20,8 +20,9 @@ binding^: let_binding | decl_binding | def_binding | native_binding | type_bindi
 let_binding: 'let' Identifier [':' expression] '=' expression ';';
 decl_binding: 'decl' Identifier ':' contract ';';
 def_binding: 'def' Identifier '=' expression ';';
-native_binding: 'native' Identifier [type_parameters] ':' contract ';';
-type_parameters: '[' Identifier (?1 ',' Identifier)* [','] ']';
+native_binding: 'native' Identifier ':' type_scheme ';';
+type_scheme: ['for' type_parameters] contract;
+type_parameters: '(' Identifier (?1 ',' Identifier)* [','] ')';
 type_binding: decorator* 'type' Identifier '=' expression ';';
 import_binding: 'import' Identifier 'from' string_literal ';';
 named_function: 'fn' Identifier annotated_parameters ['->' contract] block;
