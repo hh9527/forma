@@ -66,3 +66,5 @@ semantics from an earlier RFC.
 45. Asynchronous workspace revisions and document overlays.
 46. Asynchronous LSP adapter and cooperative request cancellation.
 47. Conservative semantic completion.
+48. Declaration-generic native capabilities.
+49. Explicit generic definition contracts.
