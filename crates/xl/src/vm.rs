@@ -699,13 +699,20 @@ struct ExecutionFrame {
 enum ReturnTarget {
     Root,
     Register(Register),
-    Native(Box<NativeContinuation>),
+    Native(Box<dyn NativeContinuation>),
 }
 
-#[derive(Debug)]
-enum NativeContinuation {
-    Array(ArrayContinuation),
-    JsonEncode(JsonEncodeContinuation),
+trait NativeContinuation: fmt::Debug {
+    fn return_target(&self) -> &ReturnTarget;
+    fn trace_frame(&self) -> &RuntimeFrame;
+
+    fn resume(
+        self: Box<Self>,
+        value: RichValue,
+        current: &mut Heap,
+        background: &Heap,
+        account: &mut QuotaAccount,
+    ) -> Result<VmAction, RuntimeError>;
 }
 
 #[derive(Debug)]
@@ -2109,36 +2116,23 @@ impl ReturnTarget {
     }
 }
 
-impl NativeContinuation {
+impl NativeContinuation for ArrayContinuation {
     fn return_target(&self) -> &ReturnTarget {
-        match self {
-            Self::Array(continuation) => &continuation.return_target,
-            Self::JsonEncode(continuation) => &continuation.return_target,
-        }
+        &self.return_target
     }
 
     fn trace_frame(&self) -> &RuntimeFrame {
-        match self {
-            Self::Array(continuation) => &continuation.trace_frame,
-            Self::JsonEncode(continuation) => &continuation.trace_frame,
-        }
+        &self.trace_frame
     }
 
     fn resume(
-        self,
+        self: Box<Self>,
         value: RichValue,
         current: &mut Heap,
         background: &Heap,
         account: &mut QuotaAccount,
     ) -> Result<VmAction, RuntimeError> {
-        match self {
-            Self::Array(continuation) => {
-                resume_array_continuation(continuation, value, current, background, account)
-            }
-            Self::JsonEncode(continuation) => {
-                resume_json_encode_continuation(continuation, value, current, background, account)
-            }
-        }
+        resume_array_continuation(*self, value, current, background, account)
     }
 }
 
@@ -2409,7 +2403,7 @@ fn next_array_action(
     Ok(VmAction::Call {
         callee,
         arguments,
-        return_target: ReturnTarget::Native(Box::new(NativeContinuation::Array(continuation))),
+        return_target: ReturnTarget::Native(Box::new(continuation)),
         call_function,
         call_pc,
     })
@@ -3436,6 +3430,26 @@ struct JsonEncodeContinuation {
     trace_frame: RuntimeFrame,
 }
 
+impl NativeContinuation for JsonEncodeContinuation {
+    fn return_target(&self) -> &ReturnTarget {
+        &self.return_target
+    }
+
+    fn trace_frame(&self) -> &RuntimeFrame {
+        &self.trace_frame
+    }
+
+    fn resume(
+        self: Box<Self>,
+        value: RichValue,
+        current: &mut Heap,
+        background: &Heap,
+        account: &mut QuotaAccount,
+    ) -> Result<VmAction, RuntimeError> {
+        resume_json_encode_continuation(*self, value, current, background, account)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_core_codec(
     operation: CoreCodecFunction,
@@ -3542,9 +3556,7 @@ fn continue_json_encode(
         return Ok(VmAction::Call {
             callee: request.callee,
             arguments: vec![request.value],
-            return_target: ReturnTarget::Native(Box::new(NativeContinuation::JsonEncode(
-                continuation,
-            ))),
+            return_target: ReturnTarget::Native(Box::new(continuation)),
             call_function,
             call_pc,
         });

@@ -1,6 +1,6 @@
 # RFC 0037: Type-erased native continuations
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0015, RFC 0036
 
 ## Summary
@@ -131,4 +131,13 @@ are internal runtime implementations.
 
 ## Implementation result
 
-Pending.
+`ReturnTarget::Native` now owns a `Box<dyn NativeContinuation>`. The previous
+closed continuation enum and its central dispatch matches have been removed.
+Array and JSON encode continuations implement the same crate-private,
+object-safe trait locally; resumption consumes `Box<Self>`, while call-depth
+and trace traversal use the trait's parent-target and frame accessors.
+
+The state machines, callback order, quota account, error propagation, and
+XL-visible behavior are unchanged. Verification completed with 146 unit tests
+passing (plus one ignored manual parsing baseline), all four CLI tests passing,
+strict workspace Clippy, formatting checks, and `git diff --check`.
