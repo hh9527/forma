@@ -1849,7 +1849,11 @@ let decorators = {
         assert!(matches!(chained, Value::Int(42)));
 
         let error = run("let add = fn(a, b) { a + b }; 40 |> add(2)").unwrap_err();
-        assert!(error.to_string().contains("expected 2 arguments, got 1"));
+        assert!(
+            error
+                .to_string()
+                .contains("call expects 2 arguments, found 1")
+        );
     }
 
     #[test]
@@ -1958,10 +1962,10 @@ let decorators = {
         assert_eq!(unknown.location.column, 1);
 
         let error = run("let f = fn(a) { a }; f(1, 2)").unwrap_err();
-        let ExecutionError::Runtime(error) = error else {
-            panic!("expected runtime error");
+        let ExecutionError::Frontend(error) = error else {
+            panic!("expected frontend error");
         };
-        assert!(error.message.contains("expected 1 arguments"));
+        assert!(error.message.contains("call expects 1 arguments, found 2"));
     }
 
     #[test]

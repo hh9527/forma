@@ -1,6 +1,6 @@
 # RFC 0052: Unified bidirectional type checking
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0042, RFC 0048, RFC 0049, RFC 0050, RFC 0051
 
 ## Summary
@@ -226,6 +226,34 @@ arm iteration so a superseded LSP query can stop cooperatively.
 - associated-type projections;
 - higher-rank and higher-kinded types;
 - richer static shapes for heterogeneous TypeMetadata constructors.
+
+## Implementation result
+
+The inference-variable checker now runs for every complete strict program,
+independently of whether the module contains a generic scheme or imported
+interface. Its resolved binding, result, and expression descriptors are the
+authoritative final types; conservative shape inference remains only for the
+existing tool-stage bootstrap.
+
+Expected types flow through closures, calls, collections, blocks,
+conditionals, and matches. Match arms use the same checker instead of falling
+back to shape inference, and tuple patterns propagate known scrutinee member
+types into their bindings. Nested binding annotations are evaluated as
+TypeMetadata and supplied to block checking. Annotated bindings retain their
+declared contract type rather than the narrower initializer type.
+
+Known function arity errors and known non-`Type` metadata-constructor arguments
+now fail during frontend checking in ordinary modules. Structural equality
+remains intentionally heterogeneous and does not unify its operands. Failed
+speculative branch unification restores inference substitutions before a union
+result is formed.
+
+Tests cover ordinary bidirectional checking without schemes, expected empty
+collections and branch results, tuple-pattern propagation, nested annotation
+failure, generic result inference, higher-order callbacks, monomorphic aliases,
+module interfaces, semantic facts, and cancellation. The final workspace run
+passed 191 core tests with one manual benchmark ignored, 9 CLI tests, and 19
+LSP tests. Strict Clippy, formatting, and whitespace validation also pass.
 
 ## Rejected alternatives
 

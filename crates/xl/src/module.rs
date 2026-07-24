@@ -2082,7 +2082,7 @@ mod tests {
         let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(
             module.analysis.display(module.analysis.result_type),
-            "'None"
+            "enum {None, Some(Int)}"
         );
         assert_eq!(module.execute(100_000).unwrap().to_string(), "'None");
         fs::remove_dir_all(directory).unwrap();
@@ -3150,11 +3150,8 @@ mod tests {
         let directory = fixture_dir();
         let invalid_path = directory.join("invalid.xl");
         fs::write(&invalid_path, "Option(1)").unwrap();
-        let invalid = load_module(&invalid_path, BTreeMap::new(), 100_000)
-            .unwrap()
-            .execute(100_000)
-            .unwrap_err();
-        assert!(invalid.message.contains("Type metadata"));
+        let invalid = load_module(&invalid_path, BTreeMap::new(), 100_000).unwrap_err();
+        assert!(invalid.message.contains("cannot unify Int with Type"));
 
         let quota_path = directory.join("quota.xl");
         fs::write(&quota_path, "Result(String, Int)").unwrap();

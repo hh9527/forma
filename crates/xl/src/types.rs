@@ -1572,68 +1572,86 @@ pub(crate) fn analyze_program_with_bindings_observed(
         &static_environment,
         sources,
     )?;
-    let mut result_type = infer_expr_recorded(
+    infer_expr_recorded(
         &program.value.body.value.result,
         &static_environment,
         &mut expression_descriptors,
     );
-    if !binding_schemes.is_empty() || !external_interfaces.is_empty() {
-        let mut inference = GenericInference::new(
-            &binding_schemes,
-            external_interfaces,
-            account.query_context(),
-        );
-        let mut generic_environment = static_environment.clone();
-        for binding in &program.value.body.value.bindings {
-            if matches!(
-                binding.value.kind,
-                BindingKind::Decl | BindingKind::Native | BindingKind::Import
-            ) {
-                continue;
-            }
-            let expected = if binding.value.kind == BindingKind::Type {
-                Some(&TypeDescriptor::Type)
-            } else {
-                binding
-                    .value
-                    .annotation
-                    .as_ref()
-                    .and_then(|_| binding_types.get(&binding.value.name.value))
-            };
-            let inferred = inference
-                .infer(&binding.value.value, &generic_environment, expected)
-                .map_err(|message| {
-                    FrontendError::from_diagnostic(
-                        sources,
-                        Diagnostic::error(message, binding.value.value.location),
-                    )
-                })?;
-            if binding.value.kind == BindingKind::Type {
-                continue;
-            }
-            if matches!(
-                binding.value.kind,
-                BindingKind::Let | BindingKind::Def | BindingKind::Import
-            ) {
-                generic_environment.insert(binding.value.name.value.clone(), inferred.clone());
-                binding_types.insert(binding.value.name.value.clone(), inferred);
-            }
+    let mut local_annotations = HashMap::new();
+    for binding in &program.value.body.value.bindings {
+        collect_nested_annotation_types(
+            source_name,
+            &binding.value.value,
+            &tool_values,
+            account,
+            sources,
+            debug_sink,
+            &mut local_annotations,
+        )?;
+    }
+    collect_nested_annotation_types(
+        source_name,
+        &program.value.body.value.result,
+        &tool_values,
+        account,
+        sources,
+        debug_sink,
+        &mut local_annotations,
+    )?;
+    let mut inference = GenericInference::new(
+        &binding_schemes,
+        external_interfaces,
+        &local_annotations,
+        account.query_context(),
+    );
+    let mut checked_environment = static_environment.clone();
+    for binding in &program.value.body.value.bindings {
+        if matches!(
+            binding.value.kind,
+            BindingKind::Decl | BindingKind::Native | BindingKind::Import
+        ) {
+            continue;
         }
-        result_type = inference
-            .infer(&program.value.body.value.result, &generic_environment, None)
+        let expected = if binding.value.kind == BindingKind::Type {
+            Some(&TypeDescriptor::Type)
+        } else {
+            binding
+                .value
+                .annotation
+                .as_ref()
+                .and_then(|_| binding_types.get(&binding.value.name.value))
+        };
+        let inferred = inference
+            .infer(&binding.value.value, &checked_environment, expected)
             .map_err(|message| {
                 FrontendError::from_diagnostic(
                     sources,
-                    Diagnostic::error(message, program.value.body.value.result.location),
+                    Diagnostic::error(message, binding.value.value.location),
                 )
             })?;
-        expression_descriptors.extend(
-            inference
-                .records
-                .iter()
-                .map(|(location, ty)| (*location, inference.resolve(ty))),
-        );
+        if binding.value.kind == BindingKind::Type {
+            continue;
+        }
+        if matches!(binding.value.kind, BindingKind::Let | BindingKind::Def) {
+            let checked = expected.cloned().unwrap_or(inferred);
+            checked_environment.insert(binding.value.name.value.clone(), checked.clone());
+            binding_types.insert(binding.value.name.value.clone(), checked);
+        }
     }
+    let result_type = inference
+        .infer(&program.value.body.value.result, &checked_environment, None)
+        .map_err(|message| {
+            FrontendError::from_diagnostic(
+                sources,
+                Diagnostic::error(message, program.value.body.value.result.location),
+            )
+        })?;
+    expression_descriptors.extend(
+        inference
+            .records
+            .iter()
+            .map(|(location, ty)| (*location, inference.resolve(ty))),
+    );
     let mut types = TypeGraph::default();
     let declared_types: BTreeMap<String, TypeId> = declared_types
         .into_iter()
@@ -1767,6 +1785,231 @@ fn evaluate_tool_expression(
                 ),
             )
         })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_nested_annotation_types(
+    source_name: &str,
+    expression: &Expr,
+    bindings: &BTreeMap<String, Value>,
+    account: &mut QuotaAccount,
+    sources: &SourceDatabase,
+    debug_sink: &Arc<dyn DebugSink>,
+    annotations: &mut HashMap<crate::Location, TypeDescriptor>,
+) -> Result<(), FrontendError> {
+    match &expression.value {
+        ExprKind::InterpolatedString(parts) => {
+            for part in parts {
+                if let StringPartKind::Expression(expression) = &part.value {
+                    collect_nested_annotation_types(
+                        source_name,
+                        expression,
+                        bindings,
+                        account,
+                        sources,
+                        debug_sink,
+                        annotations,
+                    )?;
+                }
+            }
+        }
+        ExprKind::Array(items) | ExprKind::Tuple(items) => {
+            for item in items {
+                collect_nested_annotation_types(
+                    source_name,
+                    item,
+                    bindings,
+                    account,
+                    sources,
+                    debug_sink,
+                    annotations,
+                )?;
+            }
+        }
+        ExprKind::Dict(fields) => {
+            for field in fields {
+                collect_nested_annotation_types(
+                    source_name,
+                    &field.value.value,
+                    bindings,
+                    account,
+                    sources,
+                    debug_sink,
+                    annotations,
+                )?;
+            }
+        }
+        ExprKind::Block(block) | ExprKind::Closure { body: block, .. } => {
+            collect_block_annotation_types(
+                source_name,
+                block,
+                bindings,
+                account,
+                sources,
+                debug_sink,
+                annotations,
+            )?;
+        }
+        ExprKind::Unary { operand, .. }
+        | ExprKind::Field {
+            receiver: operand, ..
+        } => {
+            collect_nested_annotation_types(
+                source_name,
+                operand,
+                bindings,
+                account,
+                sources,
+                debug_sink,
+                annotations,
+            )?;
+        }
+        ExprKind::Binary { left, right, .. } => {
+            for expression in [left.as_ref(), right.as_ref()] {
+                collect_nested_annotation_types(
+                    source_name,
+                    expression,
+                    bindings,
+                    account,
+                    sources,
+                    debug_sink,
+                    annotations,
+                )?;
+            }
+        }
+        ExprKind::Call { callee, arguments } => {
+            collect_nested_annotation_types(
+                source_name,
+                callee,
+                bindings,
+                account,
+                sources,
+                debug_sink,
+                annotations,
+            )?;
+            for argument in arguments {
+                collect_nested_annotation_types(
+                    source_name,
+                    argument,
+                    bindings,
+                    account,
+                    sources,
+                    debug_sink,
+                    annotations,
+                )?;
+            }
+        }
+        ExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            collect_nested_annotation_types(
+                source_name,
+                condition,
+                bindings,
+                account,
+                sources,
+                debug_sink,
+                annotations,
+            )?;
+            for block in [then_branch, else_branch] {
+                collect_block_annotation_types(
+                    source_name,
+                    block,
+                    bindings,
+                    account,
+                    sources,
+                    debug_sink,
+                    annotations,
+                )?;
+            }
+        }
+        ExprKind::Match { value, arms } => {
+            collect_nested_annotation_types(
+                source_name,
+                value,
+                bindings,
+                account,
+                sources,
+                debug_sink,
+                annotations,
+            )?;
+            for arm in arms {
+                collect_nested_annotation_types(
+                    source_name,
+                    &arm.value.value,
+                    bindings,
+                    account,
+                    sources,
+                    debug_sink,
+                    annotations,
+                )?;
+            }
+        }
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::String(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::Atom(_)
+        | ExprKind::Variable(_) => {}
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_block_annotation_types(
+    source_name: &str,
+    block: &Block,
+    bindings: &BTreeMap<String, Value>,
+    account: &mut QuotaAccount,
+    sources: &SourceDatabase,
+    debug_sink: &Arc<dyn DebugSink>,
+    annotations: &mut HashMap<crate::Location, TypeDescriptor>,
+) -> Result<(), FrontendError> {
+    for binding in &block.value.bindings {
+        if let Some(annotation) = &binding.value.annotation {
+            let metadata = evaluate_tool_expression(
+                source_name,
+                annotation,
+                bindings,
+                account,
+                sources,
+                debug_sink,
+            )?;
+            let descriptor = TypeDescriptor::from_value(&metadata).map_err(|message| {
+                FrontendError::from_diagnostic(
+                    sources,
+                    Diagnostic::error(
+                        format!(
+                            "annotation on {} is invalid: {message}",
+                            binding.value.name.value
+                        ),
+                        annotation.location,
+                    ),
+                )
+            })?;
+            annotations.insert(annotation.location, descriptor);
+        }
+        collect_nested_annotation_types(
+            source_name,
+            &binding.value.value,
+            bindings,
+            account,
+            sources,
+            debug_sink,
+            annotations,
+        )?;
+    }
+    collect_nested_annotation_types(
+        source_name,
+        &block.value.result,
+        bindings,
+        account,
+        sources,
+        debug_sink,
+        annotations,
+    )
 }
 
 fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
@@ -2519,6 +2762,7 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
 struct GenericInference<'a> {
     schemes: &'a HashMap<String, TypeScheme>,
     external_interfaces: &'a BTreeMap<String, ModuleInterface>,
+    local_annotations: &'a HashMap<crate::Location, TypeDescriptor>,
     query: Option<crate::query::QueryContext>,
     next_variable: u32,
     substitutions: HashMap<InferenceVariableId, TypeDescriptor>,
@@ -2529,11 +2773,13 @@ impl<'a> GenericInference<'a> {
     fn new(
         schemes: &'a HashMap<String, TypeScheme>,
         external_interfaces: &'a BTreeMap<String, ModuleInterface>,
+        local_annotations: &'a HashMap<crate::Location, TypeDescriptor>,
         query: Option<crate::query::QueryContext>,
     ) -> Self {
         Self {
             schemes,
             external_interfaces,
+            local_annotations,
             query,
             next_variable: 0,
             substitutions: HashMap::new(),
@@ -2744,6 +2990,16 @@ impl<'a> GenericInference<'a> {
         }
     }
 
+    fn try_unify(&mut self, left: &TypeDescriptor, right: &TypeDescriptor) -> bool {
+        let substitutions = self.substitutions.clone();
+        if self.unify(left, right).is_ok() {
+            true
+        } else {
+            self.substitutions = substitutions;
+            false
+        }
+    }
+
     fn infer(
         &mut self,
         expression: &Expr,
@@ -2851,16 +3107,27 @@ impl<'a> GenericInference<'a> {
                 right,
             } => {
                 let left = self.infer(left, environment, None)?;
-                let right = self.infer(right, environment, Some(&left))?;
-                self.unify(&left, &right)?;
                 match operator.value {
-                    BinaryOperator::LessThan | BinaryOperator::Equal => {
+                    BinaryOperator::Equal => {
+                        self.infer(right, environment, None)?;
                         TypeDescriptor::Union(vec![
                             TypeDescriptor::Atom(Atom::builtin(BuiltinAtom::True)),
                             TypeDescriptor::Atom(Atom::builtin(BuiltinAtom::False)),
                         ])
                     }
-                    _ => self.resolve(&left),
+                    BinaryOperator::LessThan => {
+                        let right = self.infer(right, environment, Some(&left))?;
+                        self.unify(&left, &right)?;
+                        TypeDescriptor::Union(vec![
+                            TypeDescriptor::Atom(Atom::builtin(BuiltinAtom::True)),
+                            TypeDescriptor::Atom(Atom::builtin(BuiltinAtom::False)),
+                        ])
+                    }
+                    _ => {
+                        let right = self.infer(right, environment, Some(&left))?;
+                        self.unify(&left, &right)?;
+                        self.resolve(&left)
+                    }
                 }
             }
             ExprKind::Field { receiver, field } => {
@@ -2954,13 +3221,43 @@ impl<'a> GenericInference<'a> {
                 self.infer(condition, environment, None)?;
                 let then_type = self.infer_block(then_branch, environment, expected)?;
                 let else_type = self.infer_block(else_branch, environment, expected)?;
-                if self.unify(&then_type, &else_type).is_ok() {
+                if self.try_unify(&then_type, &else_type) {
                     self.resolve(&then_type)
                 } else {
                     union_or_single(vec![then_type, else_type])
                 }
             }
-            ExprKind::Match { .. } => infer_expr(expression, environment),
+            ExprKind::Match { value, arms } => {
+                let value_type = self.infer(value, environment, None)?;
+                let mut arm_types = Vec::with_capacity(arms.len());
+                for arm in arms {
+                    if let Some(query) = &self.query {
+                        query.check().map_err(|error| error.to_string())?;
+                    }
+                    let mut arm_environment = environment.clone();
+                    bind_pattern_types_from(
+                        &arm.value.pattern,
+                        &self.resolve(&value_type),
+                        &mut arm_environment,
+                    );
+                    arm_types.push(self.infer(&arm.value.value, &arm_environment, expected)?);
+                }
+                if let Some(first) = arm_types.first().cloned() {
+                    let substitutions = self.substitutions.clone();
+                    let unified = arm_types
+                        .iter()
+                        .skip(1)
+                        .all(|arm| self.unify(&first, arm).is_ok());
+                    if unified {
+                        self.resolve(&first)
+                    } else {
+                        self.substitutions = substitutions;
+                        union_or_single(arm_types)
+                    }
+                } else {
+                    TypeDescriptor::Any
+                }
+            }
         };
         if let Some(expected) = expected {
             self.unify(&inferred, expected)?;
@@ -2978,12 +3275,20 @@ impl<'a> GenericInference<'a> {
     ) -> Result<TypeDescriptor, String> {
         let mut environment = environment.clone();
         for binding in &block.value.bindings {
-            let inferred = self.infer(&binding.value.value, &environment, None)?;
+            let expected = binding
+                .value
+                .annotation
+                .as_ref()
+                .and_then(|annotation| self.local_annotations.get(&annotation.location));
+            let inferred = self.infer(&binding.value.value, &environment, expected)?;
             if matches!(
                 binding.value.kind,
                 BindingKind::Let | BindingKind::Def | BindingKind::Import
             ) {
-                environment.insert(binding.value.name.value.clone(), inferred);
+                environment.insert(
+                    binding.value.name.value.clone(),
+                    expected.cloned().unwrap_or(inferred),
+                );
             }
         }
         self.infer(&block.value.result, &environment, expected)
@@ -3325,13 +3630,29 @@ fn infer_block_with(
 }
 
 fn bind_pattern_types(pattern: &Pattern, environment: &mut HashMap<String, TypeDescriptor>) {
+    bind_pattern_types_from(pattern, &TypeDescriptor::Any, environment);
+}
+
+fn bind_pattern_types_from(
+    pattern: &Pattern,
+    matched: &TypeDescriptor,
+    environment: &mut HashMap<String, TypeDescriptor>,
+) {
     match &pattern.value {
         PatternKind::Binding(name) => {
-            environment.insert(name.value.clone(), TypeDescriptor::Any);
+            environment.insert(name.value.clone(), matched.clone());
         }
         PatternKind::Tuple(items) => {
-            for item in items {
-                bind_pattern_types(item, environment);
+            if let TypeDescriptor::Tuple(matched_items) = matched
+                && matched_items.len() == items.len()
+            {
+                for (item, matched) in items.iter().zip(matched_items) {
+                    bind_pattern_types_from(item, matched, environment);
+                }
+            } else {
+                for item in items {
+                    bind_pattern_types_from(item, &TypeDescriptor::Any, environment);
+                }
             }
         }
         _ => {}
@@ -3756,6 +4077,30 @@ mod tests {
     }
 
     #[test]
+    fn ordinary_expressions_use_bidirectional_checking_without_schemes() {
+        let analysis = analyze_with_natives(
+            "let values: Array(Int) = if 'True { [] } else { [1] };\
+             let selected: Int = match (1, \"x\") { (number, _) => number };\
+             (values, selected)",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(analysis.display(analysis.result_type), "(Array<Int>, Int)");
+
+        let error = analyze_with_natives(
+            "def broken: Fn(Int) -> Int = fn(value) { value + \"x\" }; broken",
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.message.contains("cannot unify String with Int"));
+
+        let nested =
+            analyze_with_natives("let outer = { let value: Int = \"x\"; value }; outer", &[])
+                .unwrap_err();
+        assert!(nested.message.contains("cannot unify String with Int"));
+    }
+
+    #[test]
     fn generic_native_parameters_must_be_unique() {
         let error = analyze_with_natives(
             "native identity: for(A, A) Fn(A) -> A; identity(1)",
@@ -3788,7 +4133,8 @@ mod tests {
 
         let schemes = HashMap::new();
         let interfaces = BTreeMap::new();
-        let mut inference = GenericInference::new(&schemes, &interfaces, None);
+        let annotations = HashMap::new();
+        let mut inference = GenericInference::new(&schemes, &interfaces, &annotations, None);
         let variable = TypeDescriptor::Inference(InferenceVariableId(0));
         assert!(
             inference
