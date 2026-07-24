@@ -57,3 +57,4 @@ semantics from an earlier RFC.
     continuations.
 37. Type-erased native continuation dispatch.
 38. Semantic tooling and LSP roadmap.
+39. Workspace-wide semantic snapshots and read-only queries.
