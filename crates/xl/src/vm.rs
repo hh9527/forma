@@ -90,6 +90,10 @@ impl QuotaAccount {
         self.requested_allocation_bytes
     }
 
+    pub(crate) fn query_context(&self) -> Option<crate::query::QueryContext> {
+        self.query.clone()
+    }
+
     fn stack_limit(&self) -> usize {
         self.quota.stack_slots.min(MAX_STACK_SLOTS)
     }

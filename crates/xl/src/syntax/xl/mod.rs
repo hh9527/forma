@@ -83,7 +83,7 @@ mod tests {
 
     #[test]
     fn cst_preserves_native_declarations_losslessly() {
-        let source = "native map: fn(Array(Any), fn(Any) -> Any) -> Array(Any); map";
+        let source = "native map[A, B]: fn(Array(A), fn(A) -> B) -> Array(B); map";
         let mut sources = crate::source::SourceDatabase::default();
         let id = sources.add("native.xl", source);
         let parsed = parse(id, source);
@@ -92,10 +92,10 @@ mod tests {
         reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
         assert_eq!(reconstructed, source);
         let program = Program::cast(&parsed.syntax, NodeRef::ROOT).unwrap();
-        assert!(matches!(
-            program.body().unwrap().bindings().next(),
-            Some(Binding::Native(_))
-        ));
+        let Some(Binding::Native(native)) = program.body().unwrap().bindings().next() else {
+            panic!("expected native binding");
+        };
+        assert!(native.type_parameters().is_some());
     }
 
     #[test]

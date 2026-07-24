@@ -20,7 +20,8 @@ binding^: let_binding | decl_binding | def_binding | native_binding | type_bindi
 let_binding: 'let' Identifier [':' expression] '=' expression ';';
 decl_binding: 'decl' Identifier ':' contract ';';
 def_binding: 'def' Identifier '=' expression ';';
-native_binding: 'native' Identifier ':' contract ';';
+native_binding: 'native' Identifier [type_parameters] ':' contract ';';
+type_parameters: '[' Identifier (?1 ',' Identifier)* [','] ']';
 type_binding: decorator* 'type' Identifier '=' expression ';';
 import_binding: 'import' Identifier 'from' string_literal ';';
 named_function: 'fn' Identifier annotated_parameters ['->' contract] block;

@@ -137,6 +137,9 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
     fn predicate_parameters_1(&self) -> bool {
         self.peek(1) != Token::RParen
     }
+    fn predicate_type_parameters_1(&self) -> bool {
+        self.peek(1) != Token::RBracket
+    }
     fn predicate_annotated_parameters_1(&self) -> bool {
         self.peek(1) != Token::RParen
     }

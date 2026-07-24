@@ -43,12 +43,19 @@ pub enum HirResolution {
 }
 
 #[derive(Clone, Debug)]
+pub struct HirTypeParameter {
+    pub name: String,
+    pub location: Location,
+}
+
+#[derive(Clone, Debug)]
 pub struct HirDefinition {
     pub id: HirDefinitionId,
     pub name: String,
     pub kind: HirDefinitionKind,
     pub location: Location,
     pub additional_locations: Vec<Location>,
+    pub type_parameters: Vec<HirTypeParameter>,
     pub top_level: bool,
     pub value: Option<HirExpressionId>,
 }
@@ -239,7 +246,17 @@ impl Resolver {
             BindingKind::Import => HirDefinitionKind::Import,
             BindingKind::Native => HirDefinitionKind::Native,
         };
-        self.define_name(name, kind, binding.value.name.location, scope, top_level)
+        let id = self.define_name(name, kind, binding.value.name.location, scope, top_level);
+        self.hir.definitions[id.index()].type_parameters = binding
+            .value
+            .type_parameters
+            .iter()
+            .map(|parameter| HirTypeParameter {
+                name: parameter.value.clone(),
+                location: parameter.location,
+            })
+            .collect();
+        id
     }
 
     fn define_name(
@@ -257,6 +274,7 @@ impl Resolver {
             kind,
             location,
             additional_locations: Vec::new(),
+            type_parameters: Vec::new(),
             top_level,
             value: None,
         });
@@ -298,7 +316,7 @@ impl Resolver {
         }
         for binding in bindings {
             if let Some(annotation) = &binding.value.annotation {
-                self.index_expr(annotation, scopes);
+                self.index_binding_expr(binding, annotation, scopes);
             }
             match binding.value.kind {
                 BindingKind::Let | BindingKind::Import => {
@@ -331,7 +349,7 @@ impl Resolver {
                 | BindingKind::Native
                 | BindingKind::Type
                 | BindingKind::NamedFunction => {
-                    let value = self.index_expr(&binding.value.value, scopes);
+                    let value = self.index_binding_expr(binding, &binding.value.value, scopes);
                     let definition = resolve_name(scopes, &binding.value.name.value)
                         .expect("predeclared binding has a definition");
                     self.hir.definitions[definition.index()].value = Some(value);
@@ -342,6 +360,27 @@ impl Resolver {
             self.index_expr(result, scopes);
         }
         scopes.pop();
+    }
+
+    fn index_binding_expr(
+        &mut self,
+        binding: &Binding,
+        expression: &Expr,
+        scopes: &mut Vec<Scope>,
+    ) -> HirExpressionId {
+        let inserted = binding
+            .value
+            .type_parameters
+            .iter()
+            .map(|parameter| self.external_names.insert(parameter.value.clone()))
+            .collect::<Vec<_>>();
+        let expression = self.index_expr(expression, scopes);
+        for (parameter, inserted) in binding.value.type_parameters.iter().zip(inserted) {
+            if inserted {
+                self.external_names.remove(&parameter.value);
+            }
+        }
+        expression
     }
 
     fn index_expr(&mut self, expression: &Expr, scopes: &mut Vec<Scope>) -> HirExpressionId {

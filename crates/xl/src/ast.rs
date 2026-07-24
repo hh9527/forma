@@ -27,6 +27,7 @@ pub struct BindingData {
     pub decorators: Vec<Decorator>,
     pub kind: BindingKind,
     pub name: Identifier,
+    pub type_parameters: Vec<Identifier>,
     pub annotation: Option<Expr>,
     pub value: Expr,
 }

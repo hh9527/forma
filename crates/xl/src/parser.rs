@@ -251,6 +251,7 @@ impl<'a> Lowerer<'a> {
                         decorators: Vec::new(),
                         kind: BindingKind::Let,
                         name,
+                        type_parameters: Vec::new(),
                         annotation,
                         value,
                     },
@@ -273,6 +274,7 @@ impl<'a> Lowerer<'a> {
                         decorators: Vec::new(),
                         kind: BindingKind::Decl,
                         name,
+                        type_parameters: Vec::new(),
                         annotation: Some(contract.clone()),
                         value: contract,
                     },
@@ -280,6 +282,17 @@ impl<'a> Lowerer<'a> {
                 ))
             }
             Rule::NativeBinding => {
+                let type_parameters = self
+                    .rule_children(node)
+                    .find(|child| self.rule(*child) == Some(Rule::TypeParameters))
+                    .map(|parameters| {
+                        self.token_children(parameters, Token::Identifier)
+                            .map(|parameter| {
+                                located(self.text(parameter).into_owned(), self.location(parameter))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let contract_node = self
                     .rule_children(node)
                     .find(|child| {
@@ -295,6 +308,7 @@ impl<'a> Lowerer<'a> {
                         decorators: Vec::new(),
                         kind: BindingKind::Native,
                         name,
+                        type_parameters,
                         annotation: Some(contract.clone()),
                         value: contract,
                     },
@@ -315,6 +329,7 @@ impl<'a> Lowerer<'a> {
                         decorators: Vec::new(),
                         kind: BindingKind::Def,
                         name,
+                        type_parameters: Vec::new(),
                         annotation: None,
                         value: self.expression(value_node)?,
                     },
@@ -339,6 +354,7 @@ impl<'a> Lowerer<'a> {
                         decorators,
                         kind: BindingKind::Type,
                         name,
+                        type_parameters: Vec::new(),
                         annotation: None,
                         value,
                     },
@@ -355,6 +371,7 @@ impl<'a> Lowerer<'a> {
                         decorators: Vec::new(),
                         kind: BindingKind::Import,
                         name,
+                        type_parameters: Vec::new(),
                         annotation: None,
                         value: located(
                             ExprKind::String(self.plain_string(path, "import path")?),
@@ -402,6 +419,7 @@ impl<'a> Lowerer<'a> {
                         decorators: Vec::new(),
                         kind: BindingKind::NamedFunction,
                         name,
+                        type_parameters: Vec::new(),
                         annotation,
                         value: located(
                             ExprKind::Closure {
@@ -1613,14 +1631,24 @@ mod tests {
     fn lowers_located_native_bindings_with_contracts() {
         let program = parse(
             "native.xl",
-            "native map: fn(Array(Any), fn(Any) -> Any) -> Array(Any); map",
+            "native map[A, B]: fn(Array(A), fn(A) -> B) -> Array(B); map",
         )
         .unwrap();
         let binding = &program.value.body.value.bindings[0];
         assert_eq!(binding.value.kind, BindingKind::Native);
         assert_eq!(binding.value.name.value, "map");
+        assert_eq!(
+            binding
+                .value
+                .type_parameters
+                .iter()
+                .map(|parameter| parameter.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["A", "B"]
+        );
+        assert_eq!(binding.value.type_parameters[0].location.range(), 11..12);
         assert!(binding.value.annotation.is_some());
-        assert_eq!(binding.location.range(), 0..57);
+        assert_eq!(binding.location.range(), 0..55);
     }
 
     #[test]

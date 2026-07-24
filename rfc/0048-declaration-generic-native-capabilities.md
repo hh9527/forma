@@ -1,6 +1,6 @@
 # RFC 0048: Declaration-generic native capabilities
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0013, RFC 0024, RFC 0038, RFC 0041, RFC 0042
 
 ## Summary
@@ -360,6 +360,43 @@ the syntax addition is backward compatible.
 - richer bidirectional checking outside generic call sites;
 - explicit type application syntax;
 - reified runtime type arguments or specialization.
+
+## Implementation result
+
+Implemented with declaration syntax such as:
+
+```xl
+native map[A, B]: fn(Array(A), fn(A) -> B) -> Array(B);
+```
+
+The lossless CST, typed syntax view, AST, recovered HIR, and diagnostics retain
+located type parameters. Analysis lowers declarations into `TypeScheme` data
+with stable `TypeParameterId` references in the body. Fresh
+`InferenceVariableId` values exist only in the bidirectional solver; `Any`,
+bound parameters, and inference variables remain distinct.
+
+Module loading now carries a static `ModuleInterface` beside each runtime
+module value. Direct exports retain their schemes across imports, so separate
+`arrays.map` member accesses instantiate independently. Capturing the member in
+an ordinary local binding instantiates once and remains monomorphic. Runtime
+modules are still ordinary Dict values, while native parameters remain erased
+from bytecode, registry entries, closure arity, and VM calls.
+
+The initial solver propagates Array, Tuple, Struct, Function, callback, and
+expected-result constraints; follows existing concrete assignability for
+Enum/Union facts; rejects conflicting, underconstrained, and recursive
+inference solutions; records finalized expression monotypes; and checks the
+existing query cancellation context. `core:array` now declares `length`,
+`map`, `filter`, `flat_map`, and `fold` generically without changing their Rust
+implementations.
+
+Tests cover syntax preservation, parameter identity and scope, duplicate
+parameters, fresh local and module instantiation, higher-order callback
+checking, result-driven inference, missing/conflicting evidence, occurs checks,
+module-interface data, local monomorphization, and unchanged native runtime
+behavior. The final workspace run passed 179 core tests with one manual
+benchmark ignored, 9 CLI tests, 19 LSP tests, strict Clippy, formatting, and
+whitespace validation.
 
 ## Rejected alternatives
 

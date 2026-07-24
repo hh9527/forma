@@ -60,11 +60,11 @@ native strip: fn(Any) -> Any;
         CoreModuleSpec {
             name: ARRAY_MODULE,
             source: r#"
-native length: fn(Array(Any)) -> Int;
-native map: fn(Array(Any), fn(Any) -> Any) -> Array(Any);
-native filter: fn(Array(Any), fn(Any) -> Any) -> Array(Any);
-native flat_map: fn(Array(Any), fn(Any) -> Array(Any)) -> Array(Any);
-native fold: fn(Array(Any), Any, fn(Any, Any) -> Any) -> Any;
+native length[A]: fn(Array(A)) -> Int;
+native map[A, B]: fn(Array(A), fn(A) -> B) -> Array(B);
+native filter[A]: fn(Array(A), fn(A) -> Any) -> Array(A);
+native flat_map[A, B]: fn(Array(A), fn(A) -> Array(B)) -> Array(B);
+native fold[A, B]: fn(Array(A), B, fn(B, A) -> B) -> B;
 { length: length, map: map, filter: filter, flat_map: flat_map, fold: fold }
 "#,
             functions: vec![

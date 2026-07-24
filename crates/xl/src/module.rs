@@ -13,7 +13,7 @@ use crate::semantic::{
 };
 use crate::source::{Diagnostic, SourceDatabase};
 use crate::types::{
-    Analysis, PartialAnalysisControl, analyze_partial_types_recovered_with_query,
+    Analysis, ModuleInterface, PartialAnalysisControl, analyze_partial_types_recovered_with_query,
     analyze_program_with_bindings_observed,
 };
 use crate::{
@@ -88,7 +88,7 @@ fn install_core_modules(
     main: &mut MainWorld,
     sources: &mut SourceDatabase,
     debug_sink: &Arc<dyn DebugSink>,
-) -> Result<HashMap<&'static str, (Value, PersistentValue)>, ModuleError> {
+) -> Result<HashMap<&'static str, (Value, PersistentValue, ModuleInterface)>, ModuleError> {
     let mut modules = HashMap::new();
     for spec in module_specs() {
         let source_name = format!("<{}>", spec.name);
@@ -163,6 +163,7 @@ fn install_core_modules(
             &HashSet::new(),
             sources,
             &BTreeMap::new(),
+            &BTreeMap::new(),
             debug_sink,
         )
         .map_err(|error| {
@@ -183,7 +184,7 @@ fn install_core_modules(
         let root = arena
             .publish(&mut main.heap)
             .map_err(|error| ModuleError::new(error.to_string()))?;
-        modules.insert(spec.name, (value, root));
+        modules.insert(spec.name, (value, root, analysis.module_interface));
     }
     Ok(modules)
 }
@@ -296,7 +297,7 @@ impl Engine {
         let mut sources = SourceDatabase::default();
         let core_modules = install_core_modules(&mut main, &mut sources, &self.debug_sink)?
             .into_iter()
-            .map(|(name, (value, _))| (name.to_owned(), value))
+            .map(|(name, (value, _, interface))| (name.to_owned(), (value, interface)))
             .collect();
         let mut builder = RecoverableWorkspaceBuilder {
             engine: self,
@@ -306,6 +307,7 @@ impl Engine {
             core_modules,
             inputs: BTreeMap::new(),
             values: HashMap::new(),
+            interfaces: HashMap::new(),
             visiting: Vec::new(),
             cycle_members: HashSet::new(),
             cycle_reported: false,
@@ -336,7 +338,7 @@ impl Engine {
         let mut sources = SourceDatabase::default();
         let core_modules = install_core_modules(&mut main, &mut sources, &self.debug_sink)?
             .into_iter()
-            .map(|(name, (value, _))| (name.to_owned(), value))
+            .map(|(name, (value, _, interface))| (name.to_owned(), (value, interface)))
             .collect();
         let mut builder = RecoverableWorkspaceBuilder {
             engine: self,
@@ -346,6 +348,7 @@ impl Engine {
             core_modules,
             inputs: BTreeMap::new(),
             values: HashMap::new(),
+            interfaces: HashMap::new(),
             visiting: Vec::new(),
             cycle_members: HashSet::new(),
             cycle_reported: false,
@@ -367,9 +370,10 @@ struct RecoverableWorkspaceBuilder<'a> {
     overlays: &'a BTreeMap<PathBuf, crate::document::DocumentText>,
     query: Option<&'a crate::query::QueryContext>,
     sources: SourceDatabase,
-    core_modules: HashMap<String, Value>,
+    core_modules: HashMap<String, (Value, ModuleInterface)>,
     inputs: BTreeMap<String, SemanticModuleInput>,
     values: HashMap<PathBuf, Value>,
+    interfaces: HashMap<PathBuf, ModuleInterface>,
     visiting: Vec<PathBuf>,
     cycle_members: HashSet<PathBuf>,
     cycle_reported: bool,
@@ -434,6 +438,7 @@ impl RecoverableWorkspaceBuilder<'_> {
             self.visiting.push(path.to_owned());
             let mut semantic_imports = Vec::new();
             let mut external_values = BTreeMap::new();
+            let mut external_interfaces = BTreeMap::new();
             let mut unavailable_imports = HashSet::new();
             let mut diagnostics = Vec::new();
             for (name, location, target) in imports {
@@ -443,8 +448,9 @@ impl RecoverableWorkspaceBuilder<'_> {
                         location,
                         target: SemanticModuleTarget::Core(target.clone()),
                     });
-                    if let Some(value) = self.core_modules.get(&target) {
-                        external_values.insert(name, value.clone());
+                    if let Some((value, interface)) = self.core_modules.get(&target) {
+                        external_values.insert(name.clone(), value.clone());
+                        external_interfaces.insert(name, interface.clone());
                     } else {
                         unavailable_imports.insert(name);
                         diagnostics.push(Diagnostic::error(
@@ -498,6 +504,9 @@ impl RecoverableWorkspaceBuilder<'_> {
                     }
                 };
                 if let Some(value) = value {
+                    if let Some(interface) = self.interfaces.get(&target_path) {
+                        external_interfaces.insert(name.clone(), interface.clone());
+                    }
                     external_values.insert(name, value);
                 } else {
                     unavailable_imports.insert(name);
@@ -541,8 +550,13 @@ impl RecoverableWorkspaceBuilder<'_> {
                 None
             } else {
                 program.as_ref().and_then(|program| {
-                    self.analyze_and_evaluate(source_id, program, &external_values)
-                        .ok()
+                    self.analyze_and_evaluate(
+                        source_id,
+                        program,
+                        &external_values,
+                        &external_interfaces,
+                    )
+                    .ok()
                 })
             };
             let strict_value = strict.as_ref().map(|(_, value)| value);
@@ -558,7 +572,7 @@ impl RecoverableWorkspaceBuilder<'_> {
             self.inputs.insert(
                 key.clone(),
                 SemanticModuleInput {
-                    key,
+                    key: key.clone(),
                     path: Some(path.to_owned()),
                     kind: WorkspaceModuleKind::Xl,
                     source: Some(source_id),
@@ -571,6 +585,13 @@ impl RecoverableWorkspaceBuilder<'_> {
                 },
             );
             if let Some((_, value)) = strict {
+                let interface = self.inputs[&key]
+                    .analysis
+                    .as_ref()
+                    .expect("strict module has analysis")
+                    .module_interface
+                    .clone();
+                self.interfaces.insert(path.to_owned(), interface);
                 self.values.insert(path.to_owned(), value.clone());
                 Some(value)
             } else {
@@ -638,6 +659,7 @@ impl RecoverableWorkspaceBuilder<'_> {
         source_id: crate::SourceId,
         program: &Program,
         external_values: &BTreeMap<String, Value>,
+        external_interfaces: &BTreeMap<String, ModuleInterface>,
     ) -> Result<(crate::Analysis, Value), ModuleError> {
         let mut account = QuotaAccount::new(self.engine.config.module_quota);
         if let Some(query) = self.query {
@@ -652,6 +674,7 @@ impl RecoverableWorkspaceBuilder<'_> {
             &HashSet::new(),
             &self.sources,
             &BTreeMap::new(),
+            external_interfaces,
             &self.engine.debug_sink,
         )
         .map_err(|error| ModuleError::new(error.to_string()))?;
@@ -755,7 +778,7 @@ pub fn load_module_with_quota_and_debug_sink(
 
 struct ModuleLoader {
     cache: HashMap<PathBuf, ModuleState>,
-    core_modules: HashMap<&'static str, (Value, PersistentValue)>,
+    core_modules: HashMap<&'static str, (Value, PersistentValue, ModuleInterface)>,
     main: MainWorld,
     visiting: Vec<PathBuf>,
     dependencies: BTreeSet<PathBuf>,
@@ -771,6 +794,7 @@ enum ModuleState {
         root: PersistentValue,
         sourced: SourcedValue,
         opaque: bool,
+        interface: ModuleInterface,
     },
 }
 
@@ -808,7 +832,7 @@ impl ModuleLoader {
             return Ok(sourced.clone());
         }
         self.enter(&path)?;
-        let result: Result<(SourcedValue, PersistentValue, bool), ModuleError> =
+        let result: Result<(SourcedValue, PersistentValue, bool, ModuleInterface), ModuleError> =
             match path.extension().and_then(|extension| extension.to_str()) {
                 Some("json") => {
                     let source = read(&path)?;
@@ -848,13 +872,13 @@ impl ModuleLoader {
                                     diagnostics: Vec::new(),
                                 },
                             );
-                            Ok((sourced, root, false))
+                            Ok((sourced, root, false, ModuleInterface::default()))
                         })
                 }
                 Some("xl") => {
                     let mut account = QuotaAccount::new(self.module_quota);
                     self.compile_xl(&path, BTreeMap::new(), false, &mut account)
-                        .and_then(|(_, function, externals)| {
+                        .and_then(|(analysis, function, externals)| {
                             let arena = Vm::new()
                                 .with_debug_sink(Arc::clone(&self.debug_sink))
                                 .execute_in_work(
@@ -882,6 +906,7 @@ impl ModuleLoader {
                                 },
                                 root,
                                 opaque,
+                                analysis.module_interface,
                             ))
                         })
                 }
@@ -895,13 +920,14 @@ impl ModuleLoader {
                 ))),
             };
         self.leave(&path);
-        let (sourced, root, opaque) = result?;
+        let (sourced, root, opaque, interface) = result?;
         self.cache.insert(
             path,
             ModuleState::Ready {
                 root,
                 sourced: sourced.clone(),
                 opaque,
+                interface,
             },
         );
         Ok(sourced)
@@ -933,6 +959,7 @@ impl ModuleLoader {
         let mut external_roots = HashMap::new();
         let mut opaque_bindings = HashSet::new();
         let mut semantic_imports = Vec::new();
+        let mut external_interfaces = BTreeMap::new();
 
         for binding in &program.value.body.value.bindings {
             if binding.value.kind != BindingKind::Import {
@@ -948,13 +975,14 @@ impl ModuleLoader {
                 return Err(ModuleError::new("import path must be a string"));
             };
             if relative.starts_with("core:") {
-                let (value, root) = self.load_core_module(relative)?;
+                let (value, root, interface) = self.load_core_module(relative)?;
                 semantic_imports.push(SemanticImport {
                     name: binding.value.name.value.clone(),
                     location: binding.value.name.location,
                     target: SemanticModuleTarget::Core(relative.clone()),
                 });
                 external_roots.insert(binding.value.name.value.clone(), root);
+                external_interfaces.insert(binding.value.name.value.clone(), interface);
                 external_bindings.insert(binding.value.name.value.clone(), value);
                 continue;
             }
@@ -969,11 +997,17 @@ impl ModuleLoader {
                 location: binding.value.name.location,
                 target: SemanticModuleTarget::Path(imported.clone()),
             });
-            let ModuleState::Ready { root, opaque, .. } = self
+            let ModuleState::Ready {
+                root,
+                opaque,
+                interface,
+                ..
+            } = self
                 .cache
                 .get(&imported)
                 .expect("loaded module has a ready cache entry");
             external_roots.insert(binding.value.name.value.clone(), *root);
+            external_interfaces.insert(binding.value.name.value.clone(), interface.clone());
             if *opaque {
                 opaque_bindings.insert(binding.value.name.value.clone());
             }
@@ -1032,6 +1066,7 @@ impl ModuleLoader {
             &dynamic_bindings,
             &self.sources,
             &external_provenance,
+            &external_interfaces,
             &bootstrap_sink,
         )
         .map_err(|error| {
@@ -1106,10 +1141,13 @@ impl ModuleLoader {
         Ok((analysis, function, external_roots))
     }
 
-    fn load_core_module(&mut self, name: &str) -> Result<(Value, PersistentValue), ModuleError> {
+    fn load_core_module(
+        &mut self,
+        name: &str,
+    ) -> Result<(Value, PersistentValue, ModuleInterface), ModuleError> {
         self.core_modules
             .get(name)
-            .map(|(value, root)| (value.clone(), *root))
+            .map(|(value, root, interface)| (value.clone(), *root, interface.clone()))
             .ok_or_else(|| ModuleError::new(format!("unknown core module {name:?}")))
     }
 
@@ -1929,20 +1967,20 @@ mod tests {
             directory.join("main.xl"),
             r#"import arrays from "core:array";
                let values = [1, 2, 3];
+               let empty: Array(Int) = [];
                {
                    length: arrays.length(values),
                    mapped: arrays.map(values, fn(value) { value + 10 }),
                    filtered: arrays.filter(values, fn(value) { 1 < value }),
                    flattened: arrays.flat_map(values, fn(value) { [value, value] }),
                    folded: arrays.fold(values, 0, fn(total, value) { total + value }),
-                   empty_map: arrays.map([], fn(value) { value / 0 }),
-                   empty_filter: arrays.filter([], fn(value) { value }),
-                   empty_flat_map: arrays.flat_map([], fn(value) { value }),
-                   empty_fold: arrays.fold([], 42, fn(total, value) { total + value }),
+                   empty_map: arrays.map(empty, fn(value) { value / 0 }),
+                   empty_filter: arrays.filter(empty, fn(value) { value }),
+                   empty_flat_map: arrays.flat_map(empty, fn(value) { [value] }),
+                   empty_fold: arrays.fold(empty, 42, fn(total, value) { total + value }),
                    nested: arrays.map(values, fn(value) {
                        arrays.fold([value, value], 0, fn(total, item) { total + item })
                    }),
-                   native_callback: arrays.map([Int], Array),
                    pipelined: values |> arrays.map\(_, fn(value) { value + 20 }),
                }"#,
         )
@@ -1967,11 +2005,37 @@ mod tests {
         assert_eq!(result.get("empty_fold").unwrap().to_string(), "42");
         assert_eq!(result.get("nested").unwrap().to_string(), "[2, 4, 6]");
         assert_eq!(result.get("pipelined").unwrap().to_string(), "[21, 22, 23]");
-        let Value::Array(native) = result.get("native_callback").unwrap() else {
-            panic!("expected native callback Array")
-        };
-        assert_eq!(native.len(), 1);
-        assert!(matches!(native[0], Value::Dict(_)));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn generic_core_exports_instantiate_per_member_access_but_not_per_local_use() {
+        let directory = fixture_dir();
+        let main = directory.join("main.xl");
+        fs::write(
+            &main,
+            r#"import arrays from "core:array";
+               {
+                   ints: arrays.map([1, 2], fn(value) { value + 1 }),
+                   strings: arrays.map(["a"], fn(value) { value }),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(&main, BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            module.analysis.display(module.analysis.result_type),
+            "{ints: Array<Int>, strings: Array<String>}"
+        );
+
+        fs::write(
+            &main,
+            r#"import arrays from "core:array";
+               let map = arrays.map;
+               (map([1], fn(value) { value }), map(["a"], fn(value) { value }))"#,
+        )
+        .unwrap();
+        let error = load_module(&main, BTreeMap::new(), 100_000).unwrap_err();
+        assert!(error.to_string().contains("cannot unify String with Int"));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2058,6 +2122,15 @@ mod tests {
     #[test]
     fn core_array_reports_boundary_and_callback_result_errors() {
         let directory = fixture_dir();
+        let analysis_error = |name: &str, expression: &str| {
+            let path = directory.join(name);
+            fs::write(
+                &path,
+                format!("import arrays from \"core:array\"; {expression}"),
+            )
+            .unwrap();
+            load_module(path, BTreeMap::new(), 100_000).unwrap_err()
+        };
         let run_error = |name: &str, expression: &str| {
             let path = directory.join(name);
             fs::write(
@@ -2070,14 +2143,14 @@ mod tests {
         };
 
         assert!(
-            run_error("length.xl", "arrays.length(1)")
-                .message
-                .contains("Array")
+            analysis_error("length.xl", "arrays.length(1)")
+                .to_string()
+                .contains("cannot unify Int with Array")
         );
         assert!(
-            run_error("arity.xl", "arrays.map([1], fn(a, b) { a + b })")
-                .message
-                .contains("callback must accept 1")
+            analysis_error("arity.xl", "arrays.map([1], fn(a, b) { a + b })")
+                .to_string()
+                .contains("cannot unify")
         );
         assert!(
             run_error("filter.xl", "arrays.filter([1], fn(value) { value })")
@@ -2085,9 +2158,9 @@ mod tests {
                 .contains("must return 'True or 'False")
         );
         assert!(
-            run_error("flat-map.xl", "arrays.flat_map([1], fn(value) { value })")
-                .message
-                .contains("must return an Array")
+            analysis_error("flat-map.xl", "arrays.flat_map([1], fn(value) { value })")
+                .to_string()
+                .contains("cannot unify Int with Array")
         );
         let callback = run_error("callback.xl", "arrays.map([1], fn(value) { value / 0 })");
         assert!(callback.to_string().contains("callback.xl:1:"));

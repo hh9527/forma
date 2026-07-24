@@ -29,7 +29,7 @@ pub use document::{
 };
 pub use hir::{
     HirDefinition, HirDefinitionId, HirDefinitionKind, HirExpression, HirExpressionId, HirProgram,
-    HirReference, HirReferenceId, HirResolution,
+    HirReference, HirReferenceId, HirResolution, HirTypeParameter,
 };
 pub use json::{
     JsonError, JsonParse, Provenance, SourcedValue, ValuePath, ValuePathSegment, parse_json,
@@ -54,9 +54,10 @@ pub use source::{
     WithOrigin,
 };
 pub use types::{
-    Analysis, PartialAnalysis, SemanticDependencyGraph, SemanticDependencyNode, TypeGraph, TypeId,
-    TypeNode, analyze_partial_types, analyze_partial_types_with_bindings, analyze_source,
-    analyze_source_with_fuel, analyze_source_with_quota,
+    Analysis, ModuleInterface, PartialAnalysis, SemanticDependencyGraph, SemanticDependencyNode,
+    TypeGraph, TypeId, TypeNode, TypeParameter, TypeParameterId, TypeScheme, analyze_partial_types,
+    analyze_partial_types_with_bindings, analyze_source, analyze_source_with_fuel,
+    analyze_source_with_quota,
 };
 pub use value::{
     Atom, BuiltinAtom, Callable, Closure, Dict, NativeError, NativeFunction, Prototype, Shape,

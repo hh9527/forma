@@ -98,6 +98,7 @@ impl TypeGraph {
 
     fn intern_descriptor(&mut self, descriptor: &TypeDescriptor) -> TypeId {
         let node = match descriptor {
+            TypeDescriptor::Bound(_) | TypeDescriptor::Inference(_) => TypeNode::Any,
             TypeDescriptor::Any => TypeNode::Any,
             TypeDescriptor::Int => TypeNode::Int,
             TypeDescriptor::Float => TypeNode::Float,
@@ -480,8 +481,34 @@ impl TypeGraph {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TypeParameterId(u32);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct InferenceVariableId(u32);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeParameter {
+    pub id: TypeParameterId,
+    pub name: String,
+    pub location: crate::Location,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TypeScheme {
+    pub parameters: Vec<TypeParameter>,
+    pub body: TypeDescriptor,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ModuleInterface {
+    pub exports: BTreeMap<String, TypeScheme>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TypeDescriptor {
+    Bound(TypeParameterId),
+    Inference(InferenceVariableId),
     Any,
     Int,
     Float,
@@ -502,6 +529,11 @@ pub enum TypeDescriptor {
 impl TypeDescriptor {
     pub fn to_value(&self, vm: &mut Vm) -> Value {
         let entries = match self {
+            Self::Bound(parameter) => vec![
+                kind_entry("Bound"),
+                ("parameter".into(), Value::Int(i64::from(parameter.0))),
+            ],
+            Self::Inference(_) => panic!("inference variables are not runtime type metadata"),
             Self::Any => vec![kind_entry("Any")],
             Self::Int => vec![kind_entry("Int")],
             Self::Float => vec![kind_entry("Float")],
@@ -587,6 +619,8 @@ impl TypeDescriptor {
 
     pub fn display_name(&self) -> String {
         match self {
+            Self::Bound(parameter) => format!("T{}", parameter.0),
+            Self::Inference(variable) => format!("?{}", variable.0),
             Self::Any => "Any".into(),
             Self::Int => "Int".into(),
             Self::Float => "Float".into(),
@@ -648,6 +682,7 @@ pub struct Analysis {
     pub hir: HirProgram,
     pub definition_types: BTreeMap<HirDefinitionId, TypeId>,
     pub expression_types: BTreeMap<HirExpressionId, TypeId>,
+    pub module_interface: ModuleInterface,
     pub(crate) prelude: BTreeMap<String, Value>,
     pub(crate) external_values: BTreeMap<String, Value>,
     pub(crate) dynamic_bindings: HashSet<String>,
@@ -1159,6 +1194,7 @@ pub(crate) fn analyze_program_with_bindings(
         dynamic_bindings,
         sources,
         external_provenance,
+        &BTreeMap::new(),
         &debug_sink,
     )
 }
@@ -1172,6 +1208,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
     dynamic_bindings: &HashSet<String>,
     sources: &SourceDatabase,
     external_provenance: &BTreeMap<String, Provenance>,
+    external_interfaces: &BTreeMap<String, ModuleInterface>,
     debug_sink: &Arc<dyn DebugSink>,
 ) -> Result<Analysis, FrontendError> {
     let mut tool_vm = Vm::new();
@@ -1225,6 +1262,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
     }
 
     let mut definition_contracts = HashMap::new();
+    let mut generic_schemes = HashMap::new();
     let mut declaration_locations = HashMap::new();
     let mut definition_counts = HashMap::<String, usize>::new();
     for binding in &program.value.body.value.bindings {
@@ -1249,10 +1287,34 @@ pub(crate) fn analyze_program_with_bindings_observed(
             .annotation
             .as_ref()
             .expect("declaration has a lowered contract");
+        let mut contract_values = tool_values.clone();
+        let mut parameter_names = HashSet::new();
+        let mut scheme_parameters = Vec::new();
+        for (index, parameter) in binding.value.type_parameters.iter().enumerate() {
+            if !parameter_names.insert(parameter.value.clone()) {
+                return Err(FrontendError::from_diagnostic(
+                    sources,
+                    Diagnostic::error(
+                        format!("duplicate type parameter {:?}", parameter.value),
+                        parameter.location,
+                    ),
+                ));
+            }
+            let id = TypeParameterId(index as u32);
+            scheme_parameters.push(TypeParameter {
+                id,
+                name: parameter.value.clone(),
+                location: parameter.location,
+            });
+            contract_values.insert(
+                parameter.value.clone(),
+                TypeDescriptor::Bound(id).to_value(&mut tool_vm),
+            );
+        }
         let metadata = evaluate_tool_expression(
             source_name,
             contract,
-            &tool_values,
+            &contract_values,
             account,
             sources,
             debug_sink,
@@ -1263,8 +1325,18 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 format!("declaration {name} has invalid contract metadata: {message}"),
             )
         })?;
-        static_environment.insert(name.clone(), descriptor.clone());
-        binding_types.insert(name.clone(), descriptor.clone());
+        if !binding.value.type_parameters.is_empty() {
+            generic_schemes.insert(
+                name.clone(),
+                TypeScheme {
+                    parameters: scheme_parameters,
+                    body: descriptor.clone(),
+                },
+            );
+        }
+        let erased = erase_type_variables(&descriptor);
+        static_environment.insert(name.clone(), erased.clone());
+        binding_types.insert(name.clone(), erased);
         if binding.value.kind == BindingKind::Decl {
             definition_contracts.insert(name.clone(), descriptor);
             declaration_locations.insert(name.clone(), binding.location);
@@ -1525,11 +1597,67 @@ pub(crate) fn analyze_program_with_bindings_observed(
         &static_environment,
         sources,
     )?;
-    let result_type = infer_expr_recorded(
+    let mut result_type = infer_expr_recorded(
         &program.value.body.value.result,
         &static_environment,
         &mut expression_descriptors,
     );
+    if !generic_schemes.is_empty() || !external_interfaces.is_empty() {
+        let mut inference = GenericInference::new(
+            &generic_schemes,
+            external_interfaces,
+            account.query_context(),
+        );
+        let mut generic_environment = static_environment.clone();
+        for binding in &program.value.body.value.bindings {
+            if matches!(
+                binding.value.kind,
+                BindingKind::Decl | BindingKind::Native | BindingKind::Import
+            ) {
+                continue;
+            }
+            let expected = binding
+                .value
+                .annotation
+                .as_ref()
+                .and_then(|_| binding_types.get(&binding.value.name.value));
+            let inferred = inference
+                .infer(&binding.value.value, &generic_environment, expected)
+                .map_err(|message| {
+                    FrontendError::from_diagnostic(
+                        sources,
+                        Diagnostic::error(message, binding.value.value.location),
+                    )
+                })?;
+            if binding.value.kind == BindingKind::Type {
+                continue;
+            }
+            if matches!(
+                binding.value.kind,
+                BindingKind::Let
+                    | BindingKind::Def
+                    | BindingKind::NamedFunction
+                    | BindingKind::Import
+            ) {
+                generic_environment.insert(binding.value.name.value.clone(), inferred.clone());
+                binding_types.insert(binding.value.name.value.clone(), inferred);
+            }
+        }
+        result_type = inference
+            .infer(&program.value.body.value.result, &generic_environment, None)
+            .map_err(|message| {
+                FrontendError::from_diagnostic(
+                    sources,
+                    Diagnostic::error(message, program.value.body.value.result.location),
+                )
+            })?;
+        expression_descriptors.extend(
+            inference
+                .records
+                .iter()
+                .map(|(location, ty)| (*location, inference.resolve(ty))),
+        );
+    }
     let mut types = TypeGraph::default();
     let declared_types: BTreeMap<String, TypeId> = declared_types
         .into_iter()
@@ -1573,6 +1701,23 @@ pub(crate) fn analyze_program_with_bindings_observed(
             (definition.id, ty)
         })
         .collect();
+    let module_interface = ModuleInterface {
+        exports: match &program.value.body.value.result.value {
+            ExprKind::Dict(fields) => fields
+                .iter()
+                .filter_map(|field| {
+                    let ExprKind::Variable(binding) = &field.value.value.value else {
+                        return None;
+                    };
+                    generic_schemes
+                        .get(&binding.value)
+                        .cloned()
+                        .map(|scheme| (field.value.name.value.clone(), scheme))
+                })
+                .collect(),
+            _ => BTreeMap::new(),
+        },
+    };
     Ok(Analysis {
         types,
         declared_types,
@@ -1581,6 +1726,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
         hir,
         definition_types,
         expression_types,
+        module_interface,
         prelude,
         external_values: external_values.clone(),
         dynamic_bindings: dynamic_bindings.clone(),
@@ -1843,6 +1989,15 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
         }
     };
     Ok(match kind {
+        "Bound" | "'Bound" => {
+            require(&["kind", "parameter"])?;
+            let parameter = value
+                .dict_get("parameter")
+                .and_then(ValueRef::as_int)
+                .and_then(|parameter| u32::try_from(parameter).ok())
+                .ok_or_else(|| format!("{path}.parameter must be a non-negative Int"))?;
+            TypeDescriptor::Bound(TypeParameterId(parameter))
+        }
         "Any" => {
             require(&["kind"])?;
             TypeDescriptor::Any
@@ -2141,6 +2296,16 @@ fn decode_type(value: &Value, path: &str) -> Result<TypeDescriptor, String> {
         return decode_type(metadata.get("inner").expect("required field"), path);
     }
     let descriptor = match kind.name() {
+        "Bound" | "'Bound" => {
+            require_fields(metadata, path, &["kind", "parameter"])?;
+            let Some(Value::Int(parameter)) = metadata.get("parameter") else {
+                return Err(format!("{path}.parameter must be an Int"));
+            };
+            TypeDescriptor::Bound(TypeParameterId(
+                u32::try_from(*parameter)
+                    .map_err(|_| format!("{path}.parameter must be a non-negative Int"))?,
+            ))
+        }
         "Any" => {
             require_fields(metadata, path, &["kind"])?;
             TypeDescriptor::Any
@@ -2310,6 +2475,493 @@ fn require_fields(metadata: &crate::Dict, path: &str, fields: &[&str]) -> Result
 
 fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) -> TypeDescriptor {
     infer_expr_with(expression, environment, &mut |_, _| {})
+}
+
+struct GenericInference<'a> {
+    schemes: &'a HashMap<String, TypeScheme>,
+    external_interfaces: &'a BTreeMap<String, ModuleInterface>,
+    query: Option<crate::query::QueryContext>,
+    next_variable: u32,
+    substitutions: HashMap<InferenceVariableId, TypeDescriptor>,
+    records: HashMap<crate::Location, TypeDescriptor>,
+}
+
+impl<'a> GenericInference<'a> {
+    fn new(
+        schemes: &'a HashMap<String, TypeScheme>,
+        external_interfaces: &'a BTreeMap<String, ModuleInterface>,
+        query: Option<crate::query::QueryContext>,
+    ) -> Self {
+        Self {
+            schemes,
+            external_interfaces,
+            query,
+            next_variable: 0,
+            substitutions: HashMap::new(),
+            records: HashMap::new(),
+        }
+    }
+
+    fn instantiate(&mut self, scheme: &TypeScheme) -> TypeDescriptor {
+        let mut variables = HashMap::new();
+        self.instantiate_with(&scheme.body, &mut variables)
+    }
+
+    fn instantiate_with(
+        &mut self,
+        ty: &TypeDescriptor,
+        variables: &mut HashMap<TypeParameterId, InferenceVariableId>,
+    ) -> TypeDescriptor {
+        match ty {
+            TypeDescriptor::Bound(parameter) => {
+                let fresh = variables.entry(*parameter).or_insert_with(|| {
+                    let fresh = InferenceVariableId(self.next_variable);
+                    self.next_variable += 1;
+                    fresh
+                });
+                TypeDescriptor::Inference(*fresh)
+            }
+            TypeDescriptor::Array(item) => {
+                TypeDescriptor::Array(Box::new(self.instantiate_with(item, variables)))
+            }
+            TypeDescriptor::Tuple(items) => TypeDescriptor::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.instantiate_with(item, variables))
+                    .collect(),
+            ),
+            TypeDescriptor::Struct(fields) => TypeDescriptor::Struct(
+                fields
+                    .iter()
+                    .map(|(name, field)| (name.clone(), self.instantiate_with(field, variables)))
+                    .collect(),
+            ),
+            TypeDescriptor::Enum(variants) => TypeDescriptor::Enum(
+                variants
+                    .iter()
+                    .map(|(name, payload)| {
+                        (
+                            name.clone(),
+                            payload
+                                .as_ref()
+                                .map(|payload| Box::new(self.instantiate_with(payload, variables))),
+                        )
+                    })
+                    .collect(),
+            ),
+            TypeDescriptor::Union(variants) => TypeDescriptor::Union(
+                variants
+                    .iter()
+                    .map(|variant| self.instantiate_with(variant, variables))
+                    .collect(),
+            ),
+            TypeDescriptor::Function { parameters, result } => TypeDescriptor::Function {
+                parameters: parameters
+                    .iter()
+                    .map(|parameter| self.instantiate_with(parameter, variables))
+                    .collect(),
+                result: Box::new(self.instantiate_with(result, variables)),
+            },
+            ty => ty.clone(),
+        }
+    }
+
+    fn resolve(&self, ty: &TypeDescriptor) -> TypeDescriptor {
+        match ty {
+            TypeDescriptor::Inference(variable) => self
+                .substitutions
+                .get(variable)
+                .map_or_else(|| ty.clone(), |ty| self.resolve(ty)),
+            TypeDescriptor::Array(item) => TypeDescriptor::Array(Box::new(self.resolve(item))),
+            TypeDescriptor::Tuple(items) => {
+                TypeDescriptor::Tuple(items.iter().map(|item| self.resolve(item)).collect())
+            }
+            TypeDescriptor::Struct(fields) => TypeDescriptor::Struct(
+                fields
+                    .iter()
+                    .map(|(name, field)| (name.clone(), self.resolve(field)))
+                    .collect(),
+            ),
+            TypeDescriptor::Enum(variants) => TypeDescriptor::Enum(
+                variants
+                    .iter()
+                    .map(|(name, payload)| {
+                        (
+                            name.clone(),
+                            payload
+                                .as_ref()
+                                .map(|payload| Box::new(self.resolve(payload))),
+                        )
+                    })
+                    .collect(),
+            ),
+            TypeDescriptor::Union(variants) => TypeDescriptor::Union(
+                variants
+                    .iter()
+                    .map(|variant| self.resolve(variant))
+                    .collect(),
+            ),
+            TypeDescriptor::Function { parameters, result } => TypeDescriptor::Function {
+                parameters: parameters
+                    .iter()
+                    .map(|parameter| self.resolve(parameter))
+                    .collect(),
+                result: Box::new(self.resolve(result)),
+            },
+            ty => ty.clone(),
+        }
+    }
+
+    fn occurs(&self, variable: InferenceVariableId, ty: &TypeDescriptor) -> bool {
+        match self.resolve(ty) {
+            TypeDescriptor::Inference(candidate) => candidate == variable,
+            TypeDescriptor::Array(item) => self.occurs(variable, &item),
+            TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
+                items.iter().any(|item| self.occurs(variable, item))
+            }
+            TypeDescriptor::Struct(fields) => {
+                fields.values().any(|field| self.occurs(variable, field))
+            }
+            TypeDescriptor::Enum(variants) => variants
+                .values()
+                .flatten()
+                .any(|payload| self.occurs(variable, payload)),
+            TypeDescriptor::Function { parameters, result } => {
+                parameters
+                    .iter()
+                    .any(|parameter| self.occurs(variable, parameter))
+                    || self.occurs(variable, &result)
+            }
+            _ => false,
+        }
+    }
+
+    fn unify(&mut self, left: &TypeDescriptor, right: &TypeDescriptor) -> Result<(), String> {
+        if let Some(query) = &self.query {
+            query.check().map_err(|error| error.to_string())?;
+        }
+        let left = self.resolve(left);
+        let right = self.resolve(right);
+        if !contains_type_variable(&left)
+            && !contains_type_variable(&right)
+            && (assignable(&left, &right) || assignable(&right, &left))
+        {
+            return Ok(());
+        }
+        match (&left, &right) {
+            (TypeDescriptor::Inference(left), TypeDescriptor::Inference(right))
+                if left == right =>
+            {
+                Ok(())
+            }
+            (TypeDescriptor::Inference(variable), ty)
+            | (ty, TypeDescriptor::Inference(variable)) => {
+                if self.occurs(*variable, ty) {
+                    return Err(format!("infinite type for ?{}", variable.0));
+                }
+                self.substitutions.insert(*variable, ty.clone());
+                Ok(())
+            }
+            (TypeDescriptor::Any, _) | (_, TypeDescriptor::Any) => Ok(()),
+            (TypeDescriptor::Array(left), TypeDescriptor::Array(right)) => self.unify(left, right),
+            (TypeDescriptor::Tuple(left), TypeDescriptor::Tuple(right))
+            | (TypeDescriptor::Union(left), TypeDescriptor::Union(right))
+                if left.len() == right.len() =>
+            {
+                for (left, right) in left.iter().zip(right) {
+                    self.unify(left, right)?;
+                }
+                Ok(())
+            }
+            (TypeDescriptor::Struct(left), TypeDescriptor::Struct(right))
+                if left.keys().eq(right.keys()) =>
+            {
+                for (name, left) in left {
+                    self.unify(left, &right[name])?;
+                }
+                Ok(())
+            }
+            (
+                TypeDescriptor::Function {
+                    parameters: left_parameters,
+                    result: left_result,
+                },
+                TypeDescriptor::Function {
+                    parameters: right_parameters,
+                    result: right_result,
+                },
+            ) if left_parameters.len() == right_parameters.len() => {
+                for (left, right) in left_parameters.iter().zip(right_parameters) {
+                    self.unify(left, right)?;
+                }
+                self.unify(left_result, right_result)
+            }
+            _ if left == right => Ok(()),
+            _ => Err(format!(
+                "cannot unify {} with {}",
+                left.display_name(),
+                right.display_name()
+            )),
+        }
+    }
+
+    fn infer(
+        &mut self,
+        expression: &Expr,
+        environment: &HashMap<String, TypeDescriptor>,
+        expected: Option<&TypeDescriptor>,
+    ) -> Result<TypeDescriptor, String> {
+        if let Some(query) = &self.query {
+            query.check().map_err(|error| error.to_string())?;
+        }
+        let inferred = match &expression.value {
+            ExprKind::Variable(name) => self.schemes.get(&name.value).map_or_else(
+                || {
+                    environment
+                        .get(&name.value)
+                        .cloned()
+                        .unwrap_or(TypeDescriptor::Any)
+                },
+                |scheme| self.instantiate(scheme),
+            ),
+            ExprKind::Int(_) => TypeDescriptor::Int,
+            ExprKind::Float(_) => TypeDescriptor::Float,
+            ExprKind::String(_) => TypeDescriptor::String,
+            ExprKind::InterpolatedString(parts) => {
+                for part in parts {
+                    if let StringPartKind::Expression(expression) = &part.value {
+                        self.infer(expression, environment, None)?;
+                    }
+                }
+                TypeDescriptor::String
+            }
+            ExprKind::Bytes(_) => TypeDescriptor::Bytes,
+            ExprKind::Atom(name) => TypeDescriptor::Atom(atom_from_name(name)),
+            ExprKind::Array(items) => {
+                let item_expected = match expected.map(|ty| self.resolve(ty)) {
+                    Some(TypeDescriptor::Array(item)) => Some(*item),
+                    _ => None,
+                };
+                let mut item_types = Vec::new();
+                for item in items {
+                    item_types.push(self.infer(item, environment, item_expected.as_ref())?);
+                }
+                let item = if let Some(expected) = item_expected {
+                    expected
+                } else {
+                    common_type(item_types).unwrap_or(TypeDescriptor::Any)
+                };
+                TypeDescriptor::Array(Box::new(item))
+            }
+            ExprKind::Tuple(items) => {
+                let item_expected = match expected.map(|ty| self.resolve(ty)) {
+                    Some(TypeDescriptor::Tuple(expected_items))
+                        if expected_items.len() == items.len() =>
+                    {
+                        expected_items
+                    }
+                    _ => Vec::new(),
+                };
+                TypeDescriptor::Tuple(
+                    items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| {
+                            self.infer(item, environment, item_expected.get(index))
+                        })
+                        .collect::<Result<_, _>>()?,
+                )
+            }
+            ExprKind::Dict(fields) => {
+                let expected_fields = match expected.map(|ty| self.resolve(ty)) {
+                    Some(TypeDescriptor::Struct(fields)) => fields,
+                    _ => BTreeMap::new(),
+                };
+                TypeDescriptor::Struct(
+                    fields
+                        .iter()
+                        .map(|field| {
+                            let name = field.value.name.value.clone();
+                            Ok((
+                                name.clone(),
+                                self.infer(
+                                    &field.value.value,
+                                    environment,
+                                    expected_fields.get(&name),
+                                )
+                                .map_err(|message| format!("field {name}: {message}"))?,
+                            ))
+                        })
+                        .collect::<Result<_, String>>()?,
+                )
+            }
+            ExprKind::Unary { operand, .. } => self.infer(operand, environment, expected)?,
+            ExprKind::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                let left = self.infer(left, environment, None)?;
+                let right = self.infer(right, environment, Some(&left))?;
+                self.unify(&left, &right)?;
+                match operator.value {
+                    BinaryOperator::LessThan | BinaryOperator::Equal => {
+                        TypeDescriptor::Union(vec![
+                            TypeDescriptor::Atom(Atom::builtin(BuiltinAtom::True)),
+                            TypeDescriptor::Atom(Atom::builtin(BuiltinAtom::False)),
+                        ])
+                    }
+                    _ => self.resolve(&left),
+                }
+            }
+            ExprKind::Field { receiver, field } => {
+                if let ExprKind::Variable(module) = &receiver.value
+                    && let Some(scheme) = self
+                        .external_interfaces
+                        .get(&module.value)
+                        .and_then(|interface| interface.exports.get(&field.value))
+                        .cloned()
+                {
+                    self.infer(receiver, environment, None)?;
+                    self.instantiate(&scheme)
+                } else {
+                    let receiver = self.infer(receiver, environment, None)?;
+                    match self.resolve(&receiver) {
+                        TypeDescriptor::Struct(fields) => fields
+                            .get(&field.value)
+                            .cloned()
+                            .unwrap_or(TypeDescriptor::Any),
+                        _ => TypeDescriptor::Any,
+                    }
+                }
+            }
+            ExprKind::Call { callee, arguments } => {
+                let callee = self.infer(callee, environment, None)?;
+                match self.resolve(&callee) {
+                    TypeDescriptor::Function { parameters, result } => {
+                        if parameters.len() != arguments.len() {
+                            return Err(format!(
+                                "call expects {} arguments, found {}",
+                                parameters.len(),
+                                arguments.len()
+                            ));
+                        }
+                        for (argument, parameter) in arguments.iter().zip(&parameters) {
+                            let argument_type =
+                                self.infer(argument, environment, Some(parameter))?;
+                            self.unify(&argument_type, parameter)?;
+                        }
+                        if let Some(expected) = expected {
+                            self.unify(&result, expected)?;
+                        }
+                        let result = self.resolve(&result);
+                        if contains_type_variable(&result) {
+                            return Err(format!(
+                                "cannot infer generic result type {}",
+                                result.display_name()
+                            ));
+                        }
+                        result
+                    }
+                    _ => {
+                        for argument in arguments {
+                            self.infer(argument, environment, None)?;
+                        }
+                        TypeDescriptor::Any
+                    }
+                }
+            }
+            ExprKind::Closure { parameters, body } => {
+                let expected = match expected.map(|ty| self.resolve(ty)) {
+                    Some(TypeDescriptor::Function {
+                        parameters: expected_parameters,
+                        result,
+                    }) if expected_parameters.len() == parameters.len() => {
+                        Some((expected_parameters, result))
+                    }
+                    _ => None,
+                };
+                let mut closure_environment = environment.clone();
+                let parameter_types = expected
+                    .as_ref()
+                    .map(|(parameters, _)| parameters.clone())
+                    .unwrap_or_else(|| vec![TypeDescriptor::Any; parameters.len()]);
+                for (parameter, ty) in parameters.iter().zip(&parameter_types) {
+                    closure_environment.insert(parameter.value.clone(), ty.clone());
+                }
+                let result_expected = expected.as_ref().map(|(_, result)| result.as_ref());
+                let result = self.infer_block(body, &closure_environment, result_expected)?;
+                TypeDescriptor::Function {
+                    parameters: parameter_types,
+                    result: Box::new(result),
+                }
+            }
+            ExprKind::Block(block) => self.infer_block(block, environment, expected)?,
+            ExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.infer(condition, environment, None)?;
+                let then_type = self.infer_block(then_branch, environment, expected)?;
+                let else_type = self.infer_block(else_branch, environment, expected)?;
+                if self.unify(&then_type, &else_type).is_ok() {
+                    self.resolve(&then_type)
+                } else {
+                    union_or_single(vec![then_type, else_type])
+                }
+            }
+            ExprKind::Match { .. } => infer_expr(expression, environment),
+        };
+        if let Some(expected) = expected {
+            self.unify(&inferred, expected)?;
+        }
+        let inferred = self.resolve(&inferred);
+        self.records.insert(expression.location, inferred.clone());
+        Ok(inferred)
+    }
+
+    fn infer_block(
+        &mut self,
+        block: &Block,
+        environment: &HashMap<String, TypeDescriptor>,
+        expected: Option<&TypeDescriptor>,
+    ) -> Result<TypeDescriptor, String> {
+        let mut environment = environment.clone();
+        for binding in &block.value.bindings {
+            let inferred = self.infer(&binding.value.value, &environment, None)?;
+            if matches!(
+                binding.value.kind,
+                BindingKind::Let
+                    | BindingKind::Def
+                    | BindingKind::NamedFunction
+                    | BindingKind::Import
+            ) {
+                environment.insert(binding.value.name.value.clone(), inferred);
+            }
+        }
+        self.infer(&block.value.result, &environment, expected)
+    }
+}
+
+fn contains_type_variable(ty: &TypeDescriptor) -> bool {
+    match ty {
+        TypeDescriptor::Inference(_) => true,
+        TypeDescriptor::Bound(_) => false,
+        TypeDescriptor::Array(item) => contains_type_variable(item),
+        TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
+            items.iter().any(contains_type_variable)
+        }
+        TypeDescriptor::Struct(fields) => fields.values().any(contains_type_variable),
+        TypeDescriptor::Enum(variants) => variants
+            .values()
+            .flatten()
+            .any(|payload| contains_type_variable(payload)),
+        TypeDescriptor::Function { parameters, result } => {
+            parameters.iter().any(contains_type_variable) || contains_type_variable(result)
+        }
+        _ => false,
+    }
 }
 
 fn infer_expr_recorded(
@@ -2565,6 +3217,7 @@ fn check_block_interpolations(
 
 fn interpolation_type_supported(descriptor: &TypeDescriptor) -> bool {
     match descriptor {
+        TypeDescriptor::Bound(_) | TypeDescriptor::Inference(_) => false,
         TypeDescriptor::Any
         | TypeDescriptor::Int
         | TypeDescriptor::String
@@ -2628,6 +3281,43 @@ fn bind_pattern_types(pattern: &Pattern, environment: &mut HashMap<String, TypeD
 fn common_type(types: Vec<TypeDescriptor>) -> Option<TypeDescriptor> {
     let first = types.first()?.clone();
     types.iter().all(|item| item == &first).then_some(first)
+}
+
+fn erase_type_variables(descriptor: &TypeDescriptor) -> TypeDescriptor {
+    match descriptor {
+        TypeDescriptor::Bound(_) | TypeDescriptor::Inference(_) => TypeDescriptor::Any,
+        TypeDescriptor::Array(item) => TypeDescriptor::Array(Box::new(erase_type_variables(item))),
+        TypeDescriptor::Tuple(items) => {
+            TypeDescriptor::Tuple(items.iter().map(erase_type_variables).collect())
+        }
+        TypeDescriptor::Struct(fields) => TypeDescriptor::Struct(
+            fields
+                .iter()
+                .map(|(name, field)| (name.clone(), erase_type_variables(field)))
+                .collect(),
+        ),
+        TypeDescriptor::Enum(variants) => TypeDescriptor::Enum(
+            variants
+                .iter()
+                .map(|(name, payload)| {
+                    (
+                        name.clone(),
+                        payload
+                            .as_ref()
+                            .map(|payload| Box::new(erase_type_variables(payload))),
+                    )
+                })
+                .collect(),
+        ),
+        TypeDescriptor::Union(variants) => {
+            TypeDescriptor::Union(variants.iter().map(erase_type_variables).collect())
+        }
+        TypeDescriptor::Function { parameters, result } => TypeDescriptor::Function {
+            parameters: parameters.iter().map(erase_type_variables).collect(),
+            result: Box::new(erase_type_variables(result)),
+        },
+        descriptor => descriptor.clone(),
+    }
 }
 
 fn union_or_single(mut types: Vec<TypeDescriptor>) -> TypeDescriptor {
@@ -2812,6 +3502,150 @@ fn frontend_error(source_name: &str, message: impl Into<String>) -> FrontendErro
 mod tests {
     use super::*;
 
+    fn analyze_with_natives(
+        source: &str,
+        natives: &[(&'static str, usize)],
+    ) -> Result<Analysis, FrontendError> {
+        let mut sources = SourceDatabase::default();
+        let source_id = sources.add("generic-native.xl", source);
+        let parsed = parse_registered(&sources, source_id);
+        let program = parsed.program.expect("generic native source parses");
+        let external_values = natives
+            .iter()
+            .map(|(name, arity)| {
+                (
+                    (*name).to_owned(),
+                    Value::Func(Arc::new(Closure::native(NativeFunction::new(
+                        name,
+                        *arity,
+                        native_validate,
+                    )))),
+                )
+            })
+            .collect();
+        analyze_program_with_bindings(
+            "generic-native.xl",
+            &program,
+            &mut QuotaAccount::new(Quota::with_fuel(100_000)),
+            &external_values,
+            &HashSet::new(),
+            &sources,
+            &BTreeMap::new(),
+        )
+    }
+
+    #[test]
+    fn generic_native_calls_instantiate_fresh_types_and_check_callbacks() {
+        let analysis = analyze_with_natives(
+            "native identity[A]: fn(A) -> A;\
+             native map[A, B]: fn(Array(A), fn(A) -> B) -> Array(B);\
+             (identity(1), identity(\"x\"), map([1, 2], fn(x) { x + 1 }))",
+            &[("identity", 1), ("map", 2)],
+        )
+        .unwrap();
+        assert_eq!(
+            analysis.display(analysis.result_type),
+            "(Int, String, Array<Int>)"
+        );
+        let identity = analysis
+            .hir
+            .definitions()
+            .iter()
+            .find(|definition| definition.name == "identity")
+            .expect("identity definition");
+        assert_eq!(identity.type_parameters[0].name, "A");
+        let callback_parameter = analysis
+            .hir
+            .expressions()
+            .iter()
+            .find(|expression| {
+                expression
+                    .reference
+                    .and_then(|reference| analysis.hir.reference(reference))
+                    .is_some_and(|reference| reference.name == "x")
+            })
+            .expect("callback parameter expression");
+        assert_eq!(
+            analysis.display(analysis.expression_types[&callback_parameter.id]),
+            "Int"
+        );
+    }
+
+    #[test]
+    fn generic_native_result_uses_expected_type_and_rejects_missing_or_conflicting_evidence() {
+        let inferred = analyze_with_natives(
+            "native empty[A]: fn() -> Array(A);\
+             let values: Array(Int) = empty();\
+             values",
+            &[("empty", 0)],
+        )
+        .unwrap();
+        assert_eq!(inferred.display(inferred.result_type), "Array<Int>");
+
+        let missing = analyze_with_natives(
+            "native empty[A]: fn() -> Array(A); empty()",
+            &[("empty", 0)],
+        )
+        .unwrap_err();
+        assert!(missing.message.contains("cannot infer generic result type"));
+
+        let conflicting = analyze_with_natives(
+            "native choose[A]: fn(A, A) -> A; choose(1, \"x\")",
+            &[("choose", 2)],
+        )
+        .unwrap_err();
+        assert!(
+            conflicting.message.contains("cannot unify String with Int"),
+            "{}",
+            conflicting.message
+        );
+    }
+
+    #[test]
+    fn generic_native_parameters_must_be_unique() {
+        let error = analyze_with_natives(
+            "native identity[A, A]: fn(A) -> A; identity(1)",
+            &[("identity", 1)],
+        )
+        .unwrap_err();
+        assert!(error.message.contains("duplicate type parameter"));
+
+        let leaked = analyze_with_natives("native identity[A]: fn(A) -> A; A", &[("identity", 1)])
+            .unwrap_err();
+        assert!(leaked.message.contains("unknown binding \"A\""));
+    }
+
+    #[test]
+    fn generic_native_schemes_are_data_and_occurs_checks_reject_infinite_types() {
+        let analysis = analyze_with_natives(
+            "native identity[A]: fn(A) -> A; {identity: identity}",
+            &[("identity", 1)],
+        )
+        .unwrap();
+        let scheme = &analysis.module_interface.exports["identity"];
+        assert_eq!(scheme.parameters[0].name, "A");
+        assert!(matches!(
+            &scheme.body,
+            TypeDescriptor::Function { parameters, result }
+                if parameters == &[TypeDescriptor::Bound(TypeParameterId(0))]
+                    && **result == TypeDescriptor::Bound(TypeParameterId(0))
+        ));
+
+        let schemes = HashMap::new();
+        let interfaces = BTreeMap::new();
+        let mut inference = GenericInference::new(&schemes, &interfaces, None);
+        let variable = TypeDescriptor::Inference(InferenceVariableId(0));
+        assert!(
+            inference
+                .unify(
+                    &variable,
+                    &TypeDescriptor::Array(Box::new(variable.clone()))
+                )
+                .unwrap_err()
+                .contains("infinite type")
+        );
+    }
+
     #[test]
     fn metadata_round_trips() {
         let descriptor = TypeDescriptor::Function {
@@ -2826,6 +3660,10 @@ mod tests {
         };
         let value = descriptor.to_value(&mut Vm::new());
         assert_eq!(TypeDescriptor::from_value(&value).unwrap(), descriptor);
+
+        let bound = TypeDescriptor::Array(Box::new(TypeDescriptor::Bound(TypeParameterId(7))));
+        let value = bound.to_value(&mut Vm::new());
+        assert_eq!(TypeDescriptor::from_value(&value).unwrap(), bound);
     }
 
     #[test]
