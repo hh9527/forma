@@ -575,16 +575,17 @@ impl ModuleLoader {
         let source_file = self.sources.get(source_id);
         let mut promoted_types = HashSet::new();
         let mut promoted_type_roots = BTreeMap::new();
-        if let Some((metadata_function, type_names)) =
-            compile_metadata_initializer(source_file, &program, &analysis)
-                .map_err(|error| ModuleError::new(error.to_string()))?
+        let mut erased_metadata_bindings = HashSet::new();
+        if let Some(metadata) = compile_metadata_initializer(source_file, &program, &analysis)
+            .map_err(|error| ModuleError::new(error.to_string()))?
         {
+            erased_metadata_bindings = metadata.erased_bindings;
             let arena = Vm::new()
                 .with_debug_sink(Arc::clone(&self.debug_sink))
                 .execute_in_work(
                     &self.main.heap,
                     &external_roots,
-                    &metadata_function,
+                    &metadata.function,
                     &[],
                     account,
                 )
@@ -592,7 +593,7 @@ impl ModuleLoader {
             let metadata_root = arena
                 .publish(&mut self.main.heap)
                 .map_err(|error| ModuleError::new(error.to_string()))?;
-            for name in type_names {
+            for name in metadata.type_names {
                 let root = metadata_root
                     .dict_get(&self.main.heap, &name)
                     .map_err(|error| ModuleError::new(error.to_string()))?
@@ -610,7 +611,13 @@ impl ModuleLoader {
         let function = if promoted_types.is_empty() {
             compile_program_analyzed_in(source_file, &program, &analysis)
         } else {
-            compile_program_with_promoted_types(source_file, &program, &analysis, &promoted_types)
+            compile_program_with_promoted_types(
+                source_file,
+                &program,
+                &analysis,
+                &promoted_types,
+                &erased_metadata_bindings,
+            )
         }
         .map_err(|error| ModuleError::new(error.to_string()))?;
         Ok((analysis, function, external_roots))
@@ -921,6 +928,58 @@ mod tests {
                 .kind,
             crate::RuntimeErrorKind::FuelExhausted
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn metadata_only_helpers_are_erased_but_runtime_helpers_are_retained() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("erased.xl"),
+            r#"import debug from "core:debug";
+               fn observe(value) { debug.dbg_with("metadata", value) }
+               type Observed = observe(Int);
+               0"#,
+        )
+        .unwrap();
+        let sink = Arc::new(CapturingDebugSink::default());
+        let erased = load_module_with_quota_and_debug_sink(
+            directory.join("erased.xl"),
+            BTreeMap::new(),
+            Quota::with_fuel(100_000),
+            sink.clone(),
+        )
+        .unwrap();
+        assert_eq!(sink.events.lock().unwrap().len(), 1);
+        assert_eq!(
+            erased
+                .execute_with_quota(Quota::new(0, 1_000, 0))
+                .unwrap()
+                .to_string(),
+            "0"
+        );
+        assert_eq!(sink.events.lock().unwrap().len(), 1);
+
+        fs::write(
+            directory.join("retained.xl"),
+            r#"import debug from "core:debug";
+               fn observe(value) { debug.dbg_with("observed", value) }
+               type Observed = observe(Int);
+               observe(1)"#,
+        )
+        .unwrap();
+        let retained = load_module_with_quota_and_debug_sink(
+            directory.join("retained.xl"),
+            BTreeMap::new(),
+            Quota::with_fuel(100_000),
+            sink.clone(),
+        )
+        .unwrap();
+        assert_eq!(sink.events.lock().unwrap().len(), 2);
+        retained
+            .execute_with_quota_and_debug_sink(Quota::with_fuel(2), sink.clone())
+            .unwrap();
+        assert_eq!(sink.events.lock().unwrap().len(), 3);
         fs::remove_dir_all(directory).unwrap();
     }
 

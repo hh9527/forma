@@ -66,7 +66,13 @@ pub(crate) fn compile_program_analyzed_in(
     program: &Program,
     analysis: &Analysis,
 ) -> Result<BytecodeFunction, FrontendError> {
-    compile_program_with_promoted_types(source_file, program, analysis, &HashSet::new())
+    compile_program_with_promoted_types(
+        source_file,
+        program,
+        analysis,
+        &HashSet::new(),
+        &HashSet::new(),
+    )
 }
 
 pub(crate) fn compile_program_with_promoted_types(
@@ -74,11 +80,17 @@ pub(crate) fn compile_program_with_promoted_types(
     program: &Program,
     analysis: &Analysis,
     promoted_types: &HashSet<String>,
+    erased_bindings: &HashSet<String>,
 ) -> Result<BytecodeFunction, FrontendError> {
+    let mut program = program.clone();
+    program.value.body.value.bindings.retain(|binding| {
+        binding.value.kind == BindingKind::Type
+            || !erased_bindings.contains(&binding.value.name.value)
+    });
     Compiler::program_in(
         source_file.name.as_ref(),
         Some(source_file),
-        program,
+        &program,
         analysis,
         promoted_types.clone(),
     )
@@ -88,11 +100,17 @@ pub(crate) fn type_link_key(name: &str) -> String {
     format!("type:{name}")
 }
 
+pub(crate) struct MetadataInitializer {
+    pub(crate) function: BytecodeFunction,
+    pub(crate) type_names: Vec<String>,
+    pub(crate) erased_bindings: HashSet<String>,
+}
+
 pub(crate) fn compile_metadata_initializer(
     source_file: &SourceFile,
     program: &Program,
     analysis: &Analysis,
-) -> Result<Option<(BytecodeFunction, Vec<String>)>, FrontendError> {
+) -> Result<Option<MetadataInitializer>, FrontendError> {
     let mut type_names = program
         .value
         .body
@@ -123,6 +141,34 @@ pub(crate) fn compile_metadata_initializer(
             break;
         }
     }
+    let mut runtime_needed = HashSet::new();
+    collect_runtime_names(&program.value.body.value.result, &mut runtime_needed);
+    for binding in &program.value.body.value.bindings {
+        if !needed.contains(&binding.value.name.value)
+            && !matches!(binding.value.kind, BindingKind::Type | BindingKind::Decl)
+        {
+            collect_runtime_names(&binding.value.value, &mut runtime_needed);
+        }
+    }
+    loop {
+        let before = runtime_needed.len();
+        for binding in &program.value.body.value.bindings {
+            if needed.contains(&binding.value.name.value)
+                && runtime_needed.contains(&binding.value.name.value)
+            {
+                collect_runtime_names(&binding.value.value, &mut runtime_needed);
+            }
+        }
+        if runtime_needed.len() == before {
+            break;
+        }
+    }
+    let type_name_set = type_names.iter().cloned().collect::<HashSet<_>>();
+    let erased_bindings = needed
+        .iter()
+        .filter(|name| !type_name_set.contains(*name) && !runtime_needed.contains(*name))
+        .cloned()
+        .collect();
     let bindings = program
         .value
         .body
@@ -166,7 +212,11 @@ pub(crate) fn compile_metadata_initializer(
         program.location,
     );
     let function = compile_program_analyzed_in(source_file, &metadata_program, analysis)?;
-    Ok(Some((function, type_names)))
+    Ok(Some(MetadataInitializer {
+        function,
+        type_names,
+        erased_bindings,
+    }))
 }
 
 pub fn run_source(

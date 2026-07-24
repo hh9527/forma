@@ -55,9 +55,10 @@ text slicing. A metadata dependency may itself depend on another metadata
 dependency. Cycles are legal only through type-name up-links or function closure
 captures; eager value cycles retain RFC 0013 errors.
 
-Debug output and future external effects are forbidden in MetadataInit unless a
-later RFC explicitly marks an operation as tool-safe. This prevents phase
-splitting from duplicating observable work.
+XL currently has no user-visible effect capability. `core:debug` is a
+value-preserving evaluation observer and is permitted in MetadataInit. Its
+observation belongs to metadata construction and therefore occurs exactly once;
+phase splitting must not repeat it in final module or session execution.
 
 ## Root-set promotion
 
@@ -162,7 +163,6 @@ violated an invariant.
 - snapshot serialization of TypeGraph indices;
 - parallel MetadataInit after dependency scheduling;
 - user-configurable metadata-phase quota;
-- compile-time execution of effect capabilities explicitly marked tool-safe;
 - eliminating compatibility TypeDescriptor projections.
 
 ## Acceptance criteria
@@ -174,8 +174,8 @@ violated an invariant.
 4. final module/session execution does not reconstruct TypeMetadata.
 5. codec and schema consumers observe the same persistent root identities.
 6. assignability and type display terminate on recursive graphs.
-7. metadata dependency helpers execute only in MetadataInit and effectful debug
-   calls are rejected from the closure.
+7. metadata-only dependency helpers execute only in MetadataInit, while a
+   helper also reachable from ordinary module results remains in final code.
 8. metadata construction and final initialization share one module quota.
 9. a failed or Pending graph is absent from the module registry.
 
@@ -223,10 +223,13 @@ still consumes the shared module quota and may use `Any` internally while
 checking a forward edge, but that shadow is replaced by the persistent graph in
 the returned Analysis.
 
+The dependency closure is also compared with ordinary runtime reachability.
+Top-level helpers and imports reachable only from metadata roots are removed
+from the final AST before bytecode generation. A helper that is also reachable
+from the module result or another ordinary binding is retained. Because `dbg`
+is an observer rather than an effect, a metadata-only observation occurs once
+during MetadataInit, while a retained helper observes each ordinary execution.
+
 The following RFC 0035 items therefore remain open:
 
-- rejecting effectful metadata dependency closures structurally rather than
-  merely suppressing bootstrap debug observation;
 - eliminating duplicated bootstrap computation and its quota cost;
-- pruning metadata-only helper bindings from final bytecode when they have no
-  ordinary runtime use.
