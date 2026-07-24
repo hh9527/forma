@@ -35,7 +35,8 @@ pub use module::{
     load_module_with_quota_and_debug_sink,
 };
 pub use semantic::{
-    Definition, DefinitionId, DefinitionKind, Reference, ReferenceId, WorkspaceExport,
+    Conflict, Definition, DefinitionId, DefinitionKind, DiagnosticId, FactIdentity, FactState,
+    IncomputableReason, Reference, ReferenceId, SemanticFact, UnknownReason, WorkspaceExport,
     WorkspaceExpression, WorkspaceExpressionId, WorkspaceModule, WorkspaceModuleId,
     WorkspaceModuleKind, WorkspaceSnapshot, WorkspaceTypeGraph, WorkspaceTypeId, WorkspaceTypeNode,
 };

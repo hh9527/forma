@@ -104,7 +104,7 @@ fn types_command(arguments: &[String]) -> Result<(), String> {
         .definitions()
         .iter()
         .filter(|definition| definition.module == root.id)
-        .filter_map(|definition| definition.ty.map(|ty| (definition, ty)))
+        .filter_map(|definition| definition.ty.value.map(|ty| (definition, ty)))
         .collect::<Vec<_>>();
     definitions.sort_by(|(left, _), (right, _)| left.name.cmp(&right.name));
     for (definition, ty) in definitions
@@ -152,11 +152,23 @@ fn show_command(arguments: &[String]) -> Result<(), String> {
     let Some(module_path) = arguments.first() else {
         return Err(format!("show requires a module path\n{}", usage()));
     };
-    let module = engine()
-        .load_module(module_path, BTreeMap::new())
-        .map_err(|error| error.to_string())?;
+    let source = fs::read_to_string(module_path)
+        .map_err(|error| format!("cannot read {}: {error}", Path::new(module_path).display()))?;
+    let recovered = WorkspaceSnapshot::recover_source(module_path.clone(), source);
+    let loaded = if recovered.diagnostics().is_empty() {
+        Some(
+            engine()
+                .load_module(module_path, BTreeMap::new())
+                .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
+    let workspace = loaded
+        .as_ref()
+        .map_or(&recovered, |module| &module.workspace);
     match &arguments[1..] {
-        [] => show_workspace(&module.workspace),
+        [] => show_workspace(workspace),
         [mode, source_path, line, column] if mode == "at" => {
             let line = line
                 .parse::<usize>()
@@ -164,13 +176,20 @@ fn show_command(arguments: &[String]) -> Result<(), String> {
             let column = column
                 .parse::<usize>()
                 .map_err(|_| format!("invalid column {column:?}"))?;
-            show_at(&module.workspace, source_path, line, column)
+            show_at(workspace, source_path, line, column)
         }
         _ => Err(format!("invalid show arguments\n{}", usage())),
     }
 }
 
 fn show_workspace(workspace: &WorkspaceSnapshot) -> Result<(), String> {
+    println!("diagnostics:");
+    for diagnostic in workspace.diagnostics() {
+        println!(
+            "  {}",
+            workspace.sources().render(diagnostic).replace('\n', "\n  ")
+        );
+    }
     println!("modules:");
     for module in workspace.modules() {
         println!("  m{} {:?} {}", module.id.index(), module.kind, module.name);
@@ -199,7 +218,7 @@ fn show_workspace(workspace: &WorkspaceSnapshot) -> Result<(), String> {
     println!("definitions:");
     for definition in workspace.definitions() {
         let location = show_location(workspace, definition.location);
-        let ty = definition.ty.map_or_else(String::new, |ty| {
+        let ty = definition.ty.value.map_or_else(String::new, |ty| {
             format!(
                 " t{} = {}",
                 ty.index(),
@@ -241,8 +260,8 @@ fn show_workspace(workspace: &WorkspaceSnapshot) -> Result<(), String> {
     }
     println!("expressions:");
     for expression in workspace.expressions() {
-        let ty = expression.ty.map_or_else(
-            || "?".into(),
+        let ty = expression.ty.value.map_or_else(
+            || format!("{:?}", expression.ty.state),
             |ty| {
                 format!(
                     "t{} = {}",
@@ -316,8 +335,8 @@ fn show_at(
         println!(
             "expression: e{} {}",
             expression.id.index(),
-            expression.ty.map_or_else(
-                || "?".into(),
+            expression.ty.value.map_or_else(
+                || format!("{:?}", expression.ty.state),
                 |ty| format!(
                     "t{} = {}",
                     ty.index(),

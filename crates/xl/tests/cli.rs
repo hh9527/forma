@@ -218,3 +218,36 @@ fn types_projects_recursive_types_from_the_workspace_snapshot() {
     assert!(output.contains("result:"), "{output}");
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn show_recovers_semantics_from_damaged_source_while_check_remains_strict() {
+    let directory = fixture_dir();
+    let main = directory.join("main.xl");
+    fs::write(
+        &main,
+        "let before = 1; let broken = ; let after = missing; after",
+    )
+    .unwrap();
+
+    let show = xl()
+        .args(["show", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let output = String::from_utf8_lossy(&show.stdout);
+    assert!(output.contains("diagnostics:"), "{output}");
+    assert!(output.contains("before"), "{output}");
+    assert!(output.contains("after"), "{output}");
+    assert!(output.contains("Unknown(UnresolvedName)"), "{output}");
+
+    let check = xl()
+        .args(["check", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!check.status.success());
+    fs::remove_dir_all(directory).unwrap();
+}

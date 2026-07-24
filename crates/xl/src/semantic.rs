@@ -1,6 +1,6 @@
 use crate::ast::Program;
-use crate::hir::HirResolution;
-use crate::source::{Location, SourceDatabase, SourceId};
+use crate::hir::{HirProgram, HirResolution};
+use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
 use crate::types::{Analysis, TypeGraph, TypeId, TypeNode};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -23,6 +23,91 @@ compact_id!(DefinitionId);
 compact_id!(ReferenceId);
 compact_id!(WorkspaceExpressionId);
 compact_id!(WorkspaceTypeId);
+compact_id!(DiagnosticId);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FactIdentity {
+    Definition(DefinitionId),
+    Expression(WorkspaceExpressionId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UnknownReason {
+    MissingSyntax,
+    InvalidSyntax,
+    UnresolvedName,
+    BlockedBy(FactIdentity),
+    UnavailableDependency,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Conflict {
+    DuplicateDefinition,
+    IncompatibleContract,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum IncomputableReason {
+    QuotaExceeded,
+    RuntimeOnly,
+    UnsupportedOperation,
+    CyclicEvaluation,
+    Cancelled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FactState {
+    Known,
+    Unknown(UnknownReason),
+    Conflicted(Conflict),
+    Incomputable(IncomputableReason),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SemanticFact<T> {
+    pub value: Option<T>,
+    pub state: FactState,
+    pub causes: Vec<FactIdentity>,
+    pub diagnostics: Vec<DiagnosticId>,
+}
+
+impl<T> SemanticFact<T> {
+    pub fn known(value: T) -> Self {
+        Self {
+            value: Some(value),
+            state: FactState::Known,
+            causes: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    pub fn unknown(reason: UnknownReason) -> Self {
+        Self {
+            value: None,
+            state: FactState::Unknown(reason),
+            causes: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    pub fn conflicted(value: Option<T>, conflict: Conflict) -> Self {
+        Self {
+            value,
+            state: FactState::Conflicted(conflict),
+            causes: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    pub fn incomputable(value: Option<T>, reason: IncomputableReason) -> Self {
+        Self {
+            value,
+            state: FactState::Incomputable(reason),
+            causes: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceModuleKind {
@@ -60,7 +145,7 @@ pub struct Definition {
     pub kind: DefinitionKind,
     pub location: Location,
     pub additional_locations: Vec<Location>,
-    pub ty: Option<WorkspaceTypeId>,
+    pub ty: SemanticFact<WorkspaceTypeId>,
     pub import_target: Option<WorkspaceModuleId>,
 }
 
@@ -90,7 +175,7 @@ pub struct WorkspaceExpression {
     pub module: WorkspaceModuleId,
     pub location: Location,
     pub reference: Option<ReferenceId>,
-    pub ty: Option<WorkspaceTypeId>,
+    pub ty: SemanticFact<WorkspaceTypeId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -222,9 +307,127 @@ pub struct WorkspaceSnapshot {
     references: Vec<Reference>,
     expressions: Vec<WorkspaceExpression>,
     types: WorkspaceTypeGraph,
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl WorkspaceSnapshot {
+    pub fn recover_source(source_name: impl Into<String>, source: impl Into<String>) -> Self {
+        let source_name = source_name.into();
+        let mut sources = SourceDatabase::default();
+        let source = sources.add(source_name.clone(), source.into());
+        let parsed = crate::parser::parse_registered(&sources, source);
+        let hir = HirProgram::resolve_recovered(&parsed.recovered, Vec::new());
+        let module = WorkspaceModuleId(0);
+        let mut definitions = hir
+            .definitions()
+            .iter()
+            .map(|definition| Definition {
+                id: DefinitionId(definition.id.index() as u32),
+                module,
+                name: definition.name.clone(),
+                kind: definition.kind,
+                location: definition.location,
+                additional_locations: definition.additional_locations.clone(),
+                ty: SemanticFact::unknown(UnknownReason::InvalidSyntax),
+                import_target: None,
+            })
+            .collect::<Vec<_>>();
+        let mut diagnostics = parsed.diagnostics;
+        let mut slots = HashMap::<String, Vec<usize>>::new();
+        for (index, definition) in definitions.iter().enumerate() {
+            if definition.kind == DefinitionKind::DefinitionSlot {
+                slots
+                    .entry(definition.name.clone())
+                    .or_default()
+                    .push(index);
+            }
+        }
+        for (name, indices) in slots {
+            if indices.len() < 2 {
+                continue;
+            }
+            let location = definitions[indices[1]].location;
+            let diagnostic = DiagnosticId(diagnostics.len() as u32);
+            diagnostics.push(Diagnostic::error(
+                format!("duplicate definition slot {name:?}"),
+                location,
+            ));
+            for index in indices {
+                definitions[index].ty =
+                    SemanticFact::conflicted(None, Conflict::DuplicateDefinition);
+                definitions[index].ty.diagnostics.push(diagnostic);
+            }
+        }
+        diagnostics.sort_by_key(|diagnostic| {
+            diagnostic
+                .labels
+                .first()
+                .map_or(0, |label| label.location.start)
+        });
+        let references = hir
+            .references()
+            .iter()
+            .map(|reference| Reference {
+                id: ReferenceId(reference.id.index() as u32),
+                module,
+                name: reference.name.clone(),
+                location: reference.location,
+                definition: match reference.resolution {
+                    HirResolution::Definition(definition) => {
+                        Some(DefinitionId(definition.index() as u32))
+                    }
+                    HirResolution::External | HirResolution::Unresolved => None,
+                },
+                external: reference.resolution == HirResolution::External,
+            })
+            .collect::<Vec<_>>();
+        let expressions = hir
+            .expressions()
+            .iter()
+            .map(|expression| {
+                let unresolved = expression
+                    .reference
+                    .and_then(|reference| hir.reference(reference))
+                    .is_some_and(|reference| reference.resolution == HirResolution::Unresolved);
+                WorkspaceExpression {
+                    id: WorkspaceExpressionId(expression.id.index() as u32),
+                    module,
+                    location: expression.location,
+                    reference: expression
+                        .reference
+                        .map(|reference| ReferenceId(reference.index() as u32)),
+                    ty: SemanticFact::unknown(if unresolved {
+                        UnknownReason::UnresolvedName
+                    } else {
+                        UnknownReason::InvalidSyntax
+                    }),
+                }
+            })
+            .collect();
+        Self {
+            sources,
+            modules: vec![WorkspaceModule {
+                id: module,
+                name: source_name,
+                path: None,
+                kind: WorkspaceModuleKind::Xl,
+                source: Some(source),
+                imports: Vec::new(),
+                result_location: parsed
+                    .recovered
+                    .result
+                    .as_ref()
+                    .map(|result| result.location),
+                result_type: None,
+            }],
+            definitions,
+            references,
+            expressions,
+            types: WorkspaceTypeGraph::default(),
+            diagnostics,
+        }
+    }
+
     pub fn sources(&self) -> &SourceDatabase {
         &self.sources
     }
@@ -296,7 +499,19 @@ impl WorkspaceSnapshot {
     }
 
     pub fn type_of_expression(&self, id: WorkspaceExpressionId) -> Option<WorkspaceTypeId> {
-        self.expression(id).and_then(|expression| expression.ty)
+        self.expression(id)
+            .and_then(|expression| expression.ty.value)
+    }
+
+    pub fn fact_of_expression(
+        &self,
+        id: WorkspaceExpressionId,
+    ) -> Option<&SemanticFact<WorkspaceTypeId>> {
+        self.expression(id).map(|expression| &expression.ty)
+    }
+
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
     }
 
     pub fn type_at(&self, location: Location) -> Option<WorkspaceTypeId> {
@@ -304,17 +519,17 @@ impl WorkspaceSnapshot {
             && let Some(ty) = reference
                 .definition
                 .and_then(|id| self.definition(id))
-                .and_then(|definition| definition.ty)
+                .and_then(|definition| definition.ty.value)
         {
             return Some(ty);
         }
         if let Some(definition) = self.definition_at(location)
-            && let Some(ty) = definition.ty
+            && let Some(ty) = definition.ty.value
         {
             return Some(ty);
         }
         self.expression_at(location)
-            .and_then(|expression| expression.ty)
+            .and_then(|expression| expression.ty.value)
     }
 
     pub fn types(&self) -> &WorkspaceTypeGraph {
@@ -431,7 +646,10 @@ impl WorkspaceSnapshot {
                     kind: definition.kind,
                     location: definition.location,
                     additional_locations: definition.additional_locations.clone(),
-                    ty,
+                    ty: ty.map_or_else(
+                        || SemanticFact::unknown(UnknownReason::UnavailableDependency),
+                        SemanticFact::known,
+                    ),
                     import_target: (definition.kind == DefinitionKind::Import)
                         .then(|| import_targets.get(definition.name.as_str()).copied())
                         .flatten(),
@@ -487,7 +705,20 @@ impl WorkspaceSnapshot {
                     ty: analysis
                         .expression_types
                         .get(&expression.id)
-                        .map(|ty| type_maps[index][ty.index()]),
+                        .map(|ty| SemanticFact::known(type_maps[index][ty.index()]))
+                        .unwrap_or_else(|| {
+                            let unresolved = expression
+                                .reference
+                                .and_then(|id| analysis.hir.reference(id))
+                                .is_some_and(|reference| {
+                                    reference.resolution == HirResolution::Unresolved
+                                });
+                            SemanticFact::unknown(if unresolved {
+                                UnknownReason::UnresolvedName
+                            } else {
+                                UnknownReason::UnavailableDependency
+                            })
+                        }),
                 });
             }
         }
@@ -499,6 +730,7 @@ impl WorkspaceSnapshot {
             references,
             expressions,
             types,
+            diagnostics: Vec::new(),
         }
     }
 }
@@ -720,7 +952,7 @@ mod tests {
             .iter()
             .find(|definition| definition.name == "Node")
             .unwrap();
-        let node_type = node.ty.unwrap();
+        let node_type = node.ty.value.unwrap();
         let shown = snapshot.types().display(node_type).unwrap();
         assert!(shown.contains("children: Array<"), "{shown}");
         assert!(shown.contains("Node"), "{shown}");
@@ -755,7 +987,7 @@ mod tests {
                 .expressions()
                 .iter()
                 .filter(|expression| expression.module == main_module.id)
-                .all(|expression| expression.ty.is_some())
+                .all(|expression| expression.ty.value.is_some())
         );
         let main_source = snapshot.sources().get(main_module.source.unwrap());
         let literal = u32::try_from(main_source.text.find("1 + 2").unwrap()).unwrap();
@@ -763,10 +995,110 @@ mod tests {
             .expression_at(Location::new(main_source.id(), TextRange::at(literal)))
             .unwrap();
         assert_eq!(
-            snapshot.types().node(expression.ty.unwrap()),
+            snapshot.types().node(expression.ty.value.unwrap()),
             Some(&WorkspaceTypeNode::Int)
         );
 
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recovers_hir_and_unavailable_facts_around_damaged_source() {
+        let snapshot = WorkspaceSnapshot::recover_source(
+            "damaged.xl",
+            "let before = 1; let broken = ; let after = missing; after",
+        );
+        assert!(!snapshot.diagnostics().is_empty());
+        let names = snapshot
+            .definitions()
+            .iter()
+            .map(|definition| definition.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"before"), "{names:?}");
+        assert!(names.contains(&"after"), "{names:?}");
+        assert!(!names.contains(&"broken"), "{names:?}");
+        let missing = snapshot
+            .references()
+            .iter()
+            .find(|reference| reference.name == "missing")
+            .expect("complete sibling expression is retained");
+        let expression = snapshot
+            .expressions()
+            .iter()
+            .find(|expression| expression.reference == Some(missing.id))
+            .unwrap();
+        assert_eq!(
+            expression.ty.state,
+            FactState::Unknown(UnknownReason::UnresolvedName)
+        );
+    }
+
+    #[test]
+    fn known_any_is_distinct_from_unavailable_fact_states() {
+        let mut sources = SourceDatabase::default();
+        let source = sources.add("any.xl", "let id = fn(x) { x }; id");
+        let parsed = crate::parser::parse_registered(&sources, source);
+        let program = parsed.program.unwrap();
+        let analysis =
+            crate::types::analyze_program_registered("any.xl", &sources, &program, 1_000_000)
+                .unwrap();
+        let snapshot = WorkspaceSnapshot::build(
+            sources,
+            vec![SemanticModuleInput {
+                key: "any.xl".into(),
+                path: None,
+                kind: WorkspaceModuleKind::Xl,
+                source: Some(source),
+                program: Some(program),
+                analysis: Some(analysis),
+                imports: Vec::new(),
+            }],
+        );
+        let known = snapshot
+            .expressions()
+            .iter()
+            .find(|expression| {
+                expression.ty.state == FactState::Known
+                    && expression.ty.value.is_some_and(|ty| {
+                        snapshot.types().node(ty) == Some(&WorkspaceTypeNode::Any)
+                    })
+            })
+            .expect("parameter reference has a known Any type");
+        let unknown = SemanticFact::<WorkspaceTypeId>::unknown(UnknownReason::MissingSyntax);
+        let conflicted =
+            SemanticFact::<WorkspaceTypeId>::conflicted(None, Conflict::IncompatibleContract);
+        let incomputable =
+            SemanticFact::<WorkspaceTypeId>::incomputable(None, IncomputableReason::QuotaExceeded);
+        assert_eq!(known.ty.state, FactState::Known);
+        assert!(known.ty.value.is_some());
+        assert!(matches!(unknown.state, FactState::Unknown(_)));
+        assert!(matches!(conflicted.state, FactState::Conflicted(_)));
+        assert!(matches!(incomputable.state, FactState::Incomputable(_)));
+    }
+
+    #[test]
+    fn recovered_duplicate_slots_are_conflicted_with_one_diagnostic() {
+        let snapshot = WorkspaceSnapshot::recover_source(
+            "conflict.xl",
+            "decl item: Int; decl item: String; 0",
+        );
+        let slots = snapshot
+            .definitions()
+            .iter()
+            .filter(|definition| definition.name == "item")
+            .collect::<Vec<_>>();
+        assert_eq!(slots.len(), 2);
+        assert!(slots.iter().all(|definition| {
+            definition.ty.state == FactState::Conflicted(Conflict::DuplicateDefinition)
+                && definition.ty.diagnostics.len() == 1
+        }));
+        assert_eq!(
+            snapshot
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.message.contains("duplicate definition slot"))
+                .count(),
+            1
+        );
     }
 }

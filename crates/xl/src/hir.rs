@@ -2,6 +2,7 @@ use crate::ast::{
     Binding, BindingKind, Block, Expr, ExprKind, MatchArm, Pattern, PatternKind, Program,
     StringPartKind,
 };
+use crate::parser::RecoveredProgram;
 use crate::source::Location;
 use std::collections::{HashMap, HashSet};
 
@@ -95,6 +96,24 @@ impl HirProgram {
             external_names: external_names.into_iter().collect(),
         };
         resolver.index_expr(expression, &mut Vec::new());
+        resolver.hir.normalize_order();
+        resolver.hir
+    }
+
+    pub fn resolve_recovered(
+        program: &RecoveredProgram,
+        external_names: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let mut resolver = Resolver {
+            hir: Self::default(),
+            external_names: external_names.into_iter().collect(),
+        };
+        resolver.index_block_parts(
+            &program.bindings,
+            program.result.as_ref(),
+            &mut Vec::new(),
+            true,
+        );
         resolver.hir.normalize_order();
         resolver.hir
     }
@@ -238,8 +257,23 @@ impl Resolver {
     }
 
     fn index_block(&mut self, block: &Block, scopes: &mut Vec<Scope>, top_level: bool) {
+        self.index_block_parts(
+            &block.value.bindings,
+            Some(&block.value.result),
+            scopes,
+            top_level,
+        );
+    }
+
+    fn index_block_parts(
+        &mut self,
+        bindings: &[Binding],
+        result: Option<&Expr>,
+        scopes: &mut Vec<Scope>,
+        top_level: bool,
+    ) {
         scopes.push(Scope::new());
-        for binding in &block.value.bindings {
+        for binding in bindings {
             if matches!(
                 binding.value.kind,
                 BindingKind::Decl
@@ -254,7 +288,7 @@ impl Resolver {
                 );
             }
         }
-        for binding in &block.value.bindings {
+        for binding in bindings {
             if let Some(annotation) = &binding.value.annotation {
                 self.index_expr(annotation, scopes);
             }
@@ -296,7 +330,9 @@ impl Resolver {
                 }
             }
         }
-        self.index_expr(&block.value.result, scopes);
+        if let Some(result) = result {
+            self.index_expr(result, scopes);
+        }
         scopes.pop();
     }
 

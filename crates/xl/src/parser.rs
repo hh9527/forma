@@ -12,7 +12,15 @@ use crate::syntax::xl::parser::{CstData, Node, NodeRef, Rule};
 pub struct FrontendParse {
     pub cst: CstData,
     pub program: Option<Program>,
+    pub recovered: RecoveredProgram,
     pub diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RecoveredProgram {
+    pub location: Location,
+    pub bindings: Vec<Binding>,
+    pub result: Option<Expr>,
 }
 
 pub fn parse(source_name: &str, source: &str) -> Result<Program, FrontendError> {
@@ -33,8 +41,10 @@ pub fn parse_registered(sources: &SourceDatabase, source_id: SourceId) -> Fronte
     let source = sources.get(source_id);
     let parsed = crate::syntax::xl::parse(source_id, &source.text);
     let mut diagnostics = parsed.diagnostics;
+    let lowerer = Lowerer::new(source_id, &source.text, &parsed.syntax);
+    let recovered = lowerer.recover_program(&mut diagnostics);
     let program = if diagnostics.is_empty() {
-        match Lowerer::new(source_id, &source.text, &parsed.syntax).program() {
+        match lowerer.program() {
             Ok(program) => Some(program),
             Err(diagnostic) => {
                 diagnostics.push(diagnostic);
@@ -47,6 +57,7 @@ pub fn parse_registered(sources: &SourceDatabase, source_id: SourceId) -> Fronte
     FrontendParse {
         cst: parsed.syntax,
         program,
+        recovered,
         diagnostics,
     }
 }
@@ -114,6 +125,39 @@ impl<'a> Lowerer<'a> {
             },
             self.location(root),
         ))
+    }
+
+    fn recover_program(&self, diagnostics: &mut Vec<Diagnostic>) -> RecoveredProgram {
+        use crate::syntax::xl::ast::{AstNode, Program as SyntaxProgram};
+
+        let root = SyntaxProgram::root(self.cst);
+        let mut bindings = Vec::new();
+        let mut result = None;
+        if let Some(body) = root.body() {
+            for binding in body.bindings() {
+                match self.binding(binding.syntax().node_ref()) {
+                    Ok(binding) => bindings.push(binding),
+                    Err(diagnostic) => push_unique_diagnostic(diagnostics, diagnostic),
+                }
+            }
+            if let Some(expression) = body.result() {
+                match self.expression(expression.syntax().node_ref()) {
+                    Ok(expression) => result = Some(expression),
+                    Err(diagnostic) => push_unique_diagnostic(diagnostics, diagnostic),
+                }
+            }
+        }
+        diagnostics.sort_by_key(|diagnostic| {
+            diagnostic
+                .labels
+                .first()
+                .map_or(0, |label| label.location.start)
+        });
+        RecoveredProgram {
+            location: self.location(NodeRef::ROOT),
+            bindings,
+            result,
+        }
     }
 
     fn block_body(&self, node: NodeRef) -> Result<Block, Diagnostic> {
@@ -1230,6 +1274,17 @@ impl<'a> Lowerer<'a> {
     }
 }
 
+fn push_unique_diagnostic(diagnostics: &mut Vec<Diagnostic>, diagnostic: Diagnostic) {
+    let location = diagnostic.labels.first().map(|label| label.location);
+    if diagnostics.iter().any(|existing| {
+        existing.message == diagnostic.message
+            && existing.labels.first().map(|label| label.location) == location
+    }) {
+        return;
+    }
+    diagnostics.push(diagnostic);
+}
+
 fn elaborate_pipeline(location: Location, left: Expr, right: Expr) -> Expr {
     located(
         ExprKind::Call {
@@ -1477,6 +1532,26 @@ mod tests {
         let parsed = parse_registered(&sources, id);
         assert!(parsed.program.is_none());
         assert!(parsed.diagnostics.len() >= 2);
+    }
+
+    #[test]
+    fn recovers_complete_bindings_around_a_damaged_sibling() {
+        let mut sources = SourceDatabase::default();
+        let id = sources.add(
+            "recover.xl",
+            "let before = 1; let broken = ; let after = 2; after",
+        );
+        let parsed = parse_registered(&sources, id);
+        assert!(parsed.program.is_none());
+        assert!(!parsed.diagnostics.is_empty());
+        let names = parsed
+            .recovered
+            .bindings
+            .iter()
+            .map(|binding| binding.value.name.value.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["before", "after"]);
+        assert!(parsed.recovered.result.is_some());
     }
 
     #[test]

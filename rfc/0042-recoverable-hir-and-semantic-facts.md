@@ -1,6 +1,6 @@
 # RFC 0042: Recoverable HIR and semantic fact states
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0008, RFC 0038, RFC 0041
 
 ## Summary
@@ -260,4 +260,60 @@ facts.
 
 ## Implementation result
 
-Pending.
+Implemented with a deliberately conservative recovery surface.
+
+`FrontendParse` now always contains a `RecoveredProgram` beside its optional
+strict `Program`. The recoverable form is not an executable AST: it contains
+only bindings that the existing CST-to-AST lowerer could lower completely and
+an optional complete result expression. Each top-level binding is lowered
+independently through the same `Lowerer`, so a missing value removes that
+binding without removing complete siblings before or after it. Lowering
+diagnostics are deduplicated with parser diagnostics and sorted by source
+offset. The strict parser still returns `Program` only when the complete
+diagnostic set is empty.
+
+`HirProgram::resolve_recovered` runs the RFC 0041 resolver over retained
+bindings and an optional result. The resolver's block implementation is shared
+between complete and recovered inputs. It creates no identity for a missing
+binding and retains ordinary unresolved reference records for complete
+expressions.
+
+The workspace query model now exposes `SemanticFact<T>`, `FactState`,
+`UnknownReason`, `Conflict`, `IncomputableReason`, `FactIdentity`, and compact
+`DiagnosticId`. Definition and expression type observations are facts rather
+than bare optional IDs. Complete analysis produces `Known`, including a real
+`Known(Any)` for conservatively inferred parameter references. Recovery emits
+`Unknown(UnresolvedName)` for unresolved variables and conservative
+`Unknown(InvalidSyntax)` for other retained nodes until partial analysis runs.
+The four-state protocol and optional best value are public; incomputable
+production is intentionally left to the tool-evaluation RFC.
+
+`WorkspaceSnapshot::recover_source` builds a single-source recovery snapshot
+without invoking compilation, the VM, heap promotion, codecs, or schema
+generation. It exposes accumulated diagnostics, recovered HIR identities, and
+unavailable facts. Duplicate recovered definition slots are marked
+`Conflicted(DuplicateDefinition)` and share one diagnostic ID. This is the
+first concrete conflict producer; incompatible evaluated contracts remain on
+the strict analysis path until partial tool evaluation can retain a snapshot
+after that failure.
+
+`xl show` selects this recovery path when the root source has syntax
+diagnostics and prints diagnostics plus non-known fact states. A valid root
+continues through the normal closed-world module loader. `xl check`, `xl run`,
+and compilation remain strict.
+
+Tests cover sibling recovery around a missing binding, absence of a fabricated
+definition, recovered HIR name resolution, unresolved-name facts, an actual
+known `Any`, all four fact states, duplicate-slot conflict diagnostics, CLI
+recovery, and strict `check` behavior. The complete suite passes with 153 unit
+tests, one ignored manual parser baseline, and seven CLI tests. Formatting,
+strict Clippy, and diff checks pass.
+
+Two boundaries remain explicit. Recovery currently descends complete
+top-level siblings; it does not yet retain independently complete descendants
+inside a binding whose required outer shape failed. Also,
+`recover_source` is a single-source tooling constructor: a failed imported
+module is not yet projected into an otherwise complete workspace graph. Those
+extensions belong with dependency-scoped partial analysis and evaluation,
+where blocked facts can carry real cross-node causes rather than guessed
+relationships.
