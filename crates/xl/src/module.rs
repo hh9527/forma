@@ -2040,6 +2040,31 @@ mod tests {
     }
 
     #[test]
+    fn generic_definition_exports_instantiate_per_member_access() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("identity.xl"),
+            r#"decl identity: for(A) fn(A) -> A;
+               def identity = fn(value) { value };
+               {identity: identity}"#,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import generic from "./identity.xl";
+               (generic.identity(1), generic.identity("x"))"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            module.analysis.display(module.analysis.result_type),
+            "(Int, String)"
+        );
+        assert_eq!(module.execute(100_000).unwrap().to_string(), "(1, \"x\")");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn core_array_callbacks_share_fuel_allocation_and_tool_stage_execution() {
         let directory = fixture_dir();
         let item_count = 1_500usize;

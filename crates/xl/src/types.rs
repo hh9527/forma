@@ -3572,6 +3572,65 @@ mod tests {
     }
 
     #[test]
+    fn generic_definition_contracts_check_rigidly_and_instantiate_at_each_use() {
+        let analysis = analyze_with_natives(
+            "decl identity: for(A) fn(A) -> A;\
+             def identity = fn(value) { value };\
+             decl apply: for(A, B) fn(fn(A) -> B, A) -> B;\
+             def apply = fn(function, value) { function(value) };\
+             (identity(1), identity(\"x\"), apply(fn(value) { value + 1 }, 2))",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(analysis.display(analysis.result_type), "(Int, String, Int)");
+        assert!(analysis.module_interface.exports.is_empty());
+
+        let invalid = analyze_with_natives(
+            "decl identity: for(A) fn(A) -> A;\
+             def identity = fn(value) { 1 };\
+             identity",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            invalid
+                .message
+                .contains("is not assignable to fn(T0) -> T0"),
+            "{}",
+            invalid.message
+        );
+    }
+
+    #[test]
+    fn generic_definition_aliases_instantiate_once_and_exports_retain_schemes() {
+        let alias_error = analyze_with_natives(
+            "decl identity: for(A) fn(A) -> A;\
+             def identity = fn(value) { value };\
+             let local = identity;\
+             (local(1), local(\"x\"))",
+            &[],
+        )
+        .unwrap_err();
+        assert!(alias_error.message.contains("cannot unify String with Int"));
+
+        let exported = analyze_with_natives(
+            "decl identity: for(A) fn(A) -> A;\
+             def identity = fn(value) { value };\
+             {identity: identity}",
+            &[],
+        )
+        .unwrap();
+        let scheme = &exported.module_interface.exports["identity"];
+        assert_eq!(scheme.parameters[0].name, "A");
+        assert!(matches!(
+            &scheme.body,
+            TypeDescriptor::Function { parameters, result }
+                if parameters == &[TypeDescriptor::Bound(TypeParameterId(0))]
+                    && **result == TypeDescriptor::Bound(TypeParameterId(0))
+        ));
+    }
+
+    #[test]
     fn generic_native_result_uses_expected_type_and_rejects_missing_or_conflicting_evidence() {
         let inferred = analyze_with_natives(
             "native empty: for(A) fn() -> Array(A);\

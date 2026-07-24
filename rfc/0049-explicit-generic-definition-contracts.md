@@ -1,6 +1,6 @@
 # RFC 0049: Explicit generic definition contracts
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0013, RFC 0041, RFC 0048
 
 ## Summary
@@ -195,6 +195,22 @@ Diagnostics retain the existing RFC 0048 distinctions and locations:
 - richer bidirectional inference for unannotated function bodies;
 - higher-rank, constrained, and higher-kinded polymorphism;
 - explicit type application syntax.
+
+## Implementation result
+
+Implemented by making `decl_binding` consume the same root `type_scheme` node
+as `native_binding`. Typed CST views and AST lowering retain located declaration
+parameters; the existing HIR bound-parameter scope, `TypeScheme` construction,
+rigid expected-type flow, fresh reference instantiation, and static
+`ModuleInterface` propagation then apply without a second representation.
+
+Tests cover lossless syntax and locations, identity and higher-order
+definitions, rejection of a concretely specialized implementation, fresh
+direct uses, monomorphic aliases, exported scheme data, and independent
+cross-module member instantiation. Monomorphic declaration and generic native
+tests remain unchanged. The final workspace run passed 185 core tests with one
+manual benchmark ignored, 9 CLI tests, and 19 LSP tests. Strict Clippy,
+formatting, and whitespace validation also pass.
 
 ## Rejected alternatives
 

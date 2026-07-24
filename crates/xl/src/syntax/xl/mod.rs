@@ -99,6 +99,25 @@ mod tests {
     }
 
     #[test]
+    fn cst_preserves_generic_definition_declarations_losslessly() {
+        let source =
+            "decl identity: for(A) fn(A) -> A; def identity = fn(value) { value }; identity";
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("identity.xl", source);
+        let parsed = parse(id, source);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+        let program = Program::cast(&parsed.syntax, NodeRef::ROOT).unwrap();
+        let Some(Binding::Decl(declaration)) = program.body().unwrap().bindings().next() else {
+            panic!("expected declaration");
+        };
+        assert!(declaration.type_parameters().is_some());
+        assert!(declaration.contract().is_some());
+    }
+
+    #[test]
     fn native_type_schemes_reject_nested_for_binders() {
         let source = "native use: fn(for(A) fn(A) -> A) -> Int; use";
         let mut sources = crate::source::SourceDatabase::default();

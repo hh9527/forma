@@ -18,7 +18,7 @@ program: body;
 body: (?1 binding)* expression;
 binding^: let_binding | decl_binding | def_binding | native_binding | type_binding | import_binding | named_function;
 let_binding: 'let' Identifier [':' expression] '=' expression ';';
-decl_binding: 'decl' Identifier ':' contract ';';
+decl_binding: 'decl' Identifier ':' type_scheme ';';
 def_binding: 'def' Identifier '=' expression ';';
 native_binding: 'native' Identifier ':' type_scheme ';';
 type_scheme: ['for' type_parameters] contract;

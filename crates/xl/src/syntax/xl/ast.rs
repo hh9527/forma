@@ -241,13 +241,13 @@ impl<'tree> LetBinding<'tree> {
 }
 
 impl<'tree> DeclBinding<'tree> {
+    pub fn type_parameters(self) -> Option<SyntaxNode<'tree>> {
+        child_node(self.syntax, Rule::TypeScheme)
+            .and_then(|scheme| child_node(scheme, Rule::TypeParameters))
+    }
+
     pub fn contract(self) -> Option<SyntaxNode<'tree>> {
-        self.syntax.children().find(|child| {
-            matches!(
-                child.rule(),
-                Some(Rule::Contract | Rule::ContractExpr | Rule::FunctionContract)
-            )
-        })
+        contract_in_type_scheme(self.syntax)
     }
 }
 
@@ -258,15 +258,19 @@ impl<'tree> NativeBinding<'tree> {
     }
 
     pub fn contract(self) -> Option<SyntaxNode<'tree>> {
-        child_node(self.syntax, Rule::TypeScheme)?
-            .children()
-            .find(|child| {
-                matches!(
-                    child.rule(),
-                    Some(Rule::Contract | Rule::ContractExpr | Rule::FunctionContract)
-                )
-            })
+        contract_in_type_scheme(self.syntax)
     }
+}
+
+fn contract_in_type_scheme(binding: SyntaxNode<'_>) -> Option<SyntaxNode<'_>> {
+    child_node(binding, Rule::TypeScheme)?
+        .children()
+        .find(|child| {
+            matches!(
+                child.rule(),
+                Some(Rule::Contract | Rule::ContractExpr | Rule::FunctionContract)
+            )
+        })
 }
 
 impl<'tree> DefBinding<'tree> {

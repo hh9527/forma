@@ -259,8 +259,23 @@ impl<'a> Lowerer<'a> {
                 ))
             }
             Rule::DeclBinding => {
-                let contract_node = self
+                let scheme = self
                     .rule_children(node)
+                    .find(|child| self.rule(*child) == Some(Rule::TypeScheme))
+                    .ok_or_else(|| self.error(node, "declaration has no type scheme"))?;
+                let type_parameters = self
+                    .rule_children(scheme)
+                    .find(|child| self.rule(*child) == Some(Rule::TypeParameters))
+                    .map(|parameters| {
+                        self.token_children(parameters, Token::Identifier)
+                            .map(|parameter| {
+                                located(self.text(parameter).into_owned(), self.location(parameter))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let contract_node = self
+                    .rule_children(scheme)
                     .find(|child| {
                         matches!(
                             self.rule(*child),
@@ -274,7 +289,7 @@ impl<'a> Lowerer<'a> {
                         decorators: Vec::new(),
                         kind: BindingKind::Decl,
                         name,
-                        type_parameters: Vec::new(),
+                        type_parameters,
                         annotation: Some(contract.clone()),
                         value: contract,
                     },
@@ -1629,6 +1644,24 @@ mod tests {
                 .map(|annotation| &annotation.value),
             Some(ExprKind::Call { .. })
         ));
+    }
+
+    #[test]
+    fn lowers_generic_definition_declarations_with_located_parameters() {
+        let program = parse(
+            "identity.xl",
+            "decl identity: for(A) fn(A) -> A; def identity = fn(value) { value }; identity",
+        )
+        .unwrap();
+        let declaration = &program.value.body.value.bindings[0];
+        assert_eq!(declaration.value.kind, BindingKind::Decl);
+        assert_eq!(declaration.value.type_parameters.len(), 1);
+        assert_eq!(declaration.value.type_parameters[0].value, "A");
+        assert_eq!(
+            declaration.value.type_parameters[0].location.range(),
+            19..20
+        );
+        assert!(declaration.value.annotation.is_some());
     }
 
     #[test]
