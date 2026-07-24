@@ -53,3 +53,5 @@ semantics from an earlier RFC.
 33. JSON Schema generation from the shared codec metadata plan.
 34. Recursive TypeMetadata graphs through hidden up-links.
 35. Once-only authoritative TypeMetadata promotion and graph analysis.
+36. Function-valued JSON skip predicates through reusable native
+    continuations.

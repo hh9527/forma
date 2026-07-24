@@ -28,7 +28,7 @@ native rename: fn(String) -> fn(Any, Any) -> Any;
 native rename_all: fn(Atom) -> fn(Any, Any) -> Any;
 native flatten: fn(Any, Any) -> Any;
 native default: fn(Any) -> fn(Any, Any) -> Any;
-native skip_serializing_if: fn(Atom) -> fn(Any, Any) -> Any;
+native skip_serializing_if: fn(Any) -> fn(Any, Any) -> Any;
 ```
 
 Configured functions return ordinary two-argument decorator closures. The two
@@ -45,7 +45,7 @@ The canonical keys are:
 | `core:json.rename_all` | Atom | Struct or Enum root |
 | `core:json.flatten` | `'True` | Struct field |
 | `core:json.default` | arbitrary XL value | Struct field |
-| `core:json.skip_serializing_if` | Atom policy | Struct field |
+| `core:json.skip_serializing_if` | Atom policy or unary Func | Struct field |
 
 RFC 0030 accepts only `'CamelCase` for `rename_all`. Later naming policies can
 extend the Atom vocabulary without changing the key.
@@ -56,10 +56,9 @@ extend the Atom vocabulary without changing the key.
 - `'False`: skip the Atom `'False`;
 - `'Empty`: skip empty String, Array, or Dict values.
 
-The payload is a policy Atom rather than a Func in this RFC. Calling arbitrary
-XL predicates from inside the current VM-managed codec requires a resumable
-native continuation; standard policies establish the user-facing behavior
-without hiding an unmetered callback path. Function predicates are deferred.
+RFC 0036 extends the payload with unary Func predicates through the VM's
+resumable native continuation boundary. The Atom policies remain synchronous
+fast paths and retain this RFC's behavior.
 
 `default(value)` stores the supplied rich XL value directly. Deserialization in
 the next RFC copies that value into a missing field without invoking code.
@@ -89,7 +88,8 @@ produces one wrapper containing both keys.
 
 ## Validation boundary
 
-Decorator calls validate their immediate configuration types and policy atoms.
+Decorator calls validate their immediate configuration types, policy atoms,
+and predicate arity.
 They do not validate target placement. A field-only attribute may be attached
 to another value as ordinary metadata; attribute-aware codec planning reports
 misplaced or conflicting attributes with the attribute payload as the rule
@@ -107,7 +107,7 @@ locations. Applying a decorator preserves the RHS inner location.
 
 ## Deferred work
 
-- function-valued defaults and skip predicates;
+- function-valued defaults;
 - additional rename_all cases;
 - deserialize-only and serialize-only rename values;
 - Enum tagging attributes;

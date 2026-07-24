@@ -2821,6 +2821,149 @@ mod tests {
     }
 
     #[test]
+    fn json_skip_serializing_if_calls_promoted_bytecode_and_native_predicates() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import codec from "core:codec";
+               import debug from "core:debug";
+               import json from "core:json";
+               let zero = 0;
+               fn is_zero(value) { value == zero }
+               @struct type Model = {
+                   @json.skip_serializing_if(is_zero) omitted: Int,
+                   @json.skip_serializing_if(is_zero) retained: Int,
+                   @json.skip_serializing_if(debug.dbg) native_omitted: Bool,
+               };
+               codec.encode(Model, {
+                   omitted: 0,
+                   retained: 7,
+                   native_omitted: 'True,
+               })"#,
+        )
+        .unwrap();
+        let sink = Arc::new(CapturingDebugSink::default());
+        let module = load_module_with_quota_and_debug_sink(
+            directory.join("main.xl"),
+            BTreeMap::new(),
+            Quota::with_fuel(100_000),
+            sink.clone(),
+        )
+        .unwrap();
+        let failure = module
+            .execute_with_quota_and_debug_sink(Quota::with_fuel(3), sink.clone())
+            .unwrap_err();
+        assert_eq!(failure.kind, crate::RuntimeErrorKind::FuelExhausted);
+        sink.events.lock().unwrap().clear();
+        let value = module
+            .execute_with_quota_and_debug_sink(Quota::with_fuel(4), sink.clone())
+            .unwrap();
+        assert_eq!(value.to_string(), "('Ok, {retained: 7})");
+        assert_eq!(sink.events.lock().unwrap().len(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn json_skip_serializing_if_rejects_invalid_function_contracts() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("arity.xl"),
+            r#"import json from "core:json";
+               fn wrong(left, right) { 'False }
+               @struct type Model = {
+                   @json.skip_serializing_if(wrong) value: Int,
+               };
+               0"#,
+        )
+        .unwrap();
+        let arity = load_module(directory.join("arity.xl"), BTreeMap::new(), 100_000).unwrap_err();
+        assert!(arity.message().contains("unary Func"), "{arity}");
+
+        fs::write(
+            directory.join("result.xl"),
+            r#"import codec from "core:codec";
+               import json from "core:json";
+               fn identity(value) { value }
+               @struct type Model = {
+                   @json.skip_serializing_if(identity) value: Int,
+               };
+               codec.encode(Model, {value: 1})"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("result.xl"), BTreeMap::new(), 100_000).unwrap();
+        let result = module.execute(100_000).unwrap_err();
+        assert_eq!(result.kind, crate::RuntimeErrorKind::TypeMismatch);
+        assert!(result.message.contains("must return 'True or 'False"));
+        assert!(
+            result
+                .trace
+                .iter()
+                .any(|frame| frame.function == "core:codec.encode")
+        );
+
+        fs::write(
+            directory.join("callback.xl"),
+            r#"import codec from "core:codec";
+               import json from "core:json";
+               fn fails(value) { 1 / 0 }
+               @struct type Model = {
+                   @json.skip_serializing_if(fails) value: Int,
+               };
+               codec.encode(Model, {value: 1})"#,
+        )
+        .unwrap();
+        let callback =
+            load_module(directory.join("callback.xl"), BTreeMap::new(), 100_000).unwrap();
+        let failure = callback.execute(100_000).unwrap_err();
+        assert_eq!(failure.kind, crate::RuntimeErrorKind::DivisionByZero);
+        assert!(
+            failure
+                .trace
+                .iter()
+                .any(|frame| frame.function.contains("closure"))
+        );
+        assert!(
+            failure
+                .trace
+                .iter()
+                .any(|frame| frame.function == "core:codec.encode")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn json_skip_predicates_resume_at_nested_paths_and_before_flattening() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import codec from "core:codec";
+               import json from "core:json";
+               fn is_zero(value) { value == 0 }
+               fn always(value) { 'True }
+               @struct type Item = {
+                   @json.skip_serializing_if(is_zero) value: Int,
+               };
+               @struct type Nested = {required: String};
+               @struct type Model = {
+                   items: Array(Item),
+                   @json.skip_serializing_if(always)
+                   @json.flatten nested: Nested,
+               };
+               codec.encode(Model, {
+                   items: [{value: 0}, {value: 2}],
+                   nested: 42,
+               })"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            module.execute(100_000).unwrap().to_string(),
+            "('Ok, {items: [{}, {value: 2}]})"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn struct_json_codecs_reject_attribute_conflicts_and_invalid_defaults() {
         let directory = fixture_dir();
         let cases = [

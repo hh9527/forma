@@ -1,6 +1,6 @@
 # RFC 0036: Function-valued JSON skip predicates
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0015, RFC 0024, RFC 0030, RFC 0031
 
 ## Summary
@@ -83,10 +83,16 @@ Every native continuation exposes its parent return target and trace frame for
 logical-depth accounting and error traces. The VM dispatcher resumes the
 matching state machine when a callback returns.
 
-`JsonEncodeContinuation` owns the remaining Struct encode work, already
-emitted fields, the predicate result destination, the original codec call
-origin, and its parent return target. It contains only XL runtime values and
-owned planning data; it borrows neither Work nor Main heap across suspension.
+`JsonEncodeContinuation` owns the root schema, input, completed predicate
+decisions, pending predicate path, original codec call origin, and parent return
+target. It contains only XL runtime values and owned planning data; it borrows
+neither Work nor Main heap across suspension.
+
+The initial implementation resumes by recording the decision and replaying the
+pure transform from the root. Previously completed paths read their recorded
+decisions and never call a predicate twice. This keeps the continuation small
+and avoids retaining a recursive Rust stack. A future performance pass may
+replace replay with an explicit codec frame stack without changing semantics.
 
 Built-in Atom policies retain the synchronous fast path. A function predicate
 creates one ordinary VM call per visited configured field. A skipped field does
@@ -142,4 +148,23 @@ order, including when earlier predicates omit fields. A callback can use
 
 ## Implementation result
 
-Pending.
+Implemented. `ReturnTarget::Native` now contains a `NativeContinuation` enum;
+Array and JSON encode continuations share depth accounting, callback dispatch,
+resume handling, and trace propagation. Existing Array behavior is unchanged.
+
+`skip_serializing_if` accepts the three RFC 0030 Atoms or a unary Func and
+stores the original rich value in flat attributes. Struct planning retains
+bytecode and native predicate closures after TypeMetadata promotion. Encode
+suspends at the first unresolved field path, calls the predicate through the
+ordinary VM boundary, records a strict Boolean result, and replays until the
+transform completes. Predicate requests propagate through Array, Tuple,
+Struct, Union, and tagged or untagged Enum traversal.
+
+Atom policies keep their synchronous fast path. Function predicates run before
+child encoding and flattening; skipped invalid children are therefore not
+visited. Decode and JSON Schema default validation treat predicates as
+non-skipping validation metadata and never invoke them.
+
+Tests cover captured promoted bytecode closures, a native `core:debug`
+predicate, multiple and nested paths, flattening, shared fuel, invalid arity,
+non-Boolean results, callback failures, and continuation trace frames.

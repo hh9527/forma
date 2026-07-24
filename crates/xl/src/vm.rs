@@ -699,7 +699,13 @@ struct ExecutionFrame {
 enum ReturnTarget {
     Root,
     Register(Register),
-    Native(Box<ArrayContinuation>),
+    Native(Box<NativeContinuation>),
+}
+
+#[derive(Debug)]
+enum NativeContinuation {
+    Array(ArrayContinuation),
+    JsonEncode(JsonEncodeContinuation),
 }
 
 #[derive(Debug)]
@@ -1841,8 +1847,9 @@ fn drive_vm_action(
                     return Ok(DriveOutcome::Pending);
                 }
                 ReturnTarget::Native(continuation) => {
-                    let trace_frame = continuation.trace_frame.clone();
-                    resume_array_continuation(*continuation, value, current, background, account)
+                    let trace_frame = continuation.trace_frame().clone();
+                    continuation
+                        .resume(value, current, background, account)
                         .map_err(|mut runtime_error| {
                             runtime_error.trace.push(trace_frame);
                             runtime_error
@@ -2090,14 +2097,47 @@ impl ReturnTarget {
     fn native_depth(&self) -> usize {
         match self {
             Self::Root | Self::Register(_) => 0,
-            Self::Native(continuation) => 1 + continuation.return_target.native_depth(),
+            Self::Native(continuation) => 1 + continuation.return_target().native_depth(),
         }
     }
 
     fn append_native_trace(&self, trace: &mut Vec<RuntimeFrame>) {
         if let Self::Native(continuation) = self {
-            trace.push(continuation.trace_frame.clone());
-            continuation.return_target.append_native_trace(trace);
+            trace.push(continuation.trace_frame().clone());
+            continuation.return_target().append_native_trace(trace);
+        }
+    }
+}
+
+impl NativeContinuation {
+    fn return_target(&self) -> &ReturnTarget {
+        match self {
+            Self::Array(continuation) => &continuation.return_target,
+            Self::JsonEncode(continuation) => &continuation.return_target,
+        }
+    }
+
+    fn trace_frame(&self) -> &RuntimeFrame {
+        match self {
+            Self::Array(continuation) => &continuation.trace_frame,
+            Self::JsonEncode(continuation) => &continuation.trace_frame,
+        }
+    }
+
+    fn resume(
+        self,
+        value: RichValue,
+        current: &mut Heap,
+        background: &Heap,
+        account: &mut QuotaAccount,
+    ) -> Result<VmAction, RuntimeError> {
+        match self {
+            Self::Array(continuation) => {
+                resume_array_continuation(continuation, value, current, background, account)
+            }
+            Self::JsonEncode(continuation) => {
+                resume_json_encode_continuation(continuation, value, current, background, account)
+            }
         }
     }
 }
@@ -2369,7 +2409,7 @@ fn next_array_action(
     Ok(VmAction::Call {
         callee,
         arguments,
-        return_target: ReturnTarget::Native(Box::new(continuation)),
+        return_target: ReturnTarget::Native(Box::new(NativeContinuation::Array(continuation))),
         call_function,
         call_pc,
     })
@@ -3349,6 +3389,7 @@ struct CodecFailure {
     message: String,
     data: RichValue,
     rule: RichValue,
+    predicate: Option<Box<PredicateRequest>>,
 }
 
 impl CodecFailure {
@@ -3357,8 +3398,42 @@ impl CodecFailure {
             message: message.into(),
             data,
             rule,
+            predicate: None,
         }
     }
+
+    fn predicate(path: String, callee: RichValue, value: RichValue, rule: RichValue) -> Self {
+        Self {
+            message: "JSON skip predicate requires evaluation".into(),
+            data: value,
+            rule,
+            predicate: Some(Box::new(PredicateRequest {
+                path,
+                callee,
+                value,
+            })),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PredicateRequest {
+    path: String,
+    callee: RichValue,
+    value: RichValue,
+}
+
+#[derive(Debug)]
+struct JsonEncodeContinuation {
+    schema: CodecType,
+    input: RichValue,
+    decisions: BTreeMap<String, bool>,
+    pending_path: String,
+    pending_rule: RichValue,
+    return_target: ReturnTarget,
+    call_function: Arc<BytecodeFunction>,
+    call_pc: usize,
+    trace_frame: RuntimeFrame,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3391,7 +3466,149 @@ fn run_core_codec(
         CoreCodecFunction::Decode => CodecDirection::Decode,
         CoreCodecFunction::Encode => CodecDirection::Encode,
     };
-    let result = transform_codec(&schema, arguments[1], direction, "$", current, background);
+    if matches!(direction, CodecDirection::Encode) {
+        return continue_json_encode(
+            schema,
+            arguments[1],
+            BTreeMap::new(),
+            return_target,
+            Arc::new(function.clone()),
+            pc,
+            current,
+            background,
+            account,
+        );
+    }
+    let result = transform_codec(
+        &schema,
+        arguments[1],
+        direction,
+        "$",
+        &BTreeMap::new(),
+        current,
+        background,
+    );
+    finish_codec_result(
+        result,
+        arguments[1],
+        return_target,
+        function,
+        pc,
+        current,
+        background,
+        account,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn continue_json_encode(
+    schema: CodecType,
+    input: RichValue,
+    decisions: BTreeMap<String, bool>,
+    return_target: ReturnTarget,
+    call_function: Arc<BytecodeFunction>,
+    call_pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let result = transform_codec(
+        &schema,
+        input,
+        CodecDirection::Encode,
+        "$",
+        &decisions,
+        current,
+        background,
+    );
+    if let Err(failure) = &result
+        && let Some(request) = &failure.predicate
+    {
+        let continuation = JsonEncodeContinuation {
+            schema,
+            input,
+            decisions,
+            pending_path: request.path.clone(),
+            pending_rule: failure.rule,
+            return_target,
+            trace_frame: RuntimeFrame {
+                function: "core:codec.encode".into(),
+                instruction: 0,
+                origin: call_function.origin_at(call_pc),
+            },
+            call_function: Arc::clone(&call_function),
+            call_pc,
+        };
+        return Ok(VmAction::Call {
+            callee: request.callee,
+            arguments: vec![request.value],
+            return_target: ReturnTarget::Native(Box::new(NativeContinuation::JsonEncode(
+                continuation,
+            ))),
+            call_function,
+            call_pc,
+        });
+    }
+    finish_codec_result(
+        result,
+        input,
+        return_target,
+        &call_function,
+        call_pc,
+        current,
+        background,
+        account,
+    )
+}
+
+fn resume_json_encode_continuation(
+    mut continuation: JsonEncodeContinuation,
+    value: RichValue,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let decision = match value.value {
+        RuntimeValue::BuiltinAtom(BuiltinAtom::True) => true,
+        RuntimeValue::BuiltinAtom(BuiltinAtom::False) => false,
+        _ => {
+            let mut runtime = error(
+                RuntimeErrorKind::TypeMismatch,
+                "core:json.skip_serializing_if predicate must return 'True or 'False",
+                &continuation.call_function,
+                continuation.call_pc,
+            );
+            runtime.set_locations(value.loc, continuation.pending_rule.loc);
+            return Err(runtime);
+        }
+    };
+    continuation
+        .decisions
+        .insert(continuation.pending_path.clone(), decision);
+    continue_json_encode(
+        continuation.schema,
+        continuation.input,
+        continuation.decisions,
+        continuation.return_target,
+        continuation.call_function,
+        continuation.call_pc,
+        current,
+        background,
+        account,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_codec_result(
+    result: Result<CodecNode, CodecFailure>,
+    input: RichValue,
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
     let (tag, payload) = match result {
         Ok(node) => (BuiltinAtom::Ok, node),
         Err(failure) => {
@@ -3422,13 +3639,13 @@ fn run_core_codec(
         RuntimeValue::Tuple(
             current.allocate(Object::Tuple(
                 vec![
-                    RichValue::new(RuntimeValue::BuiltinAtom(tag), arguments[1].loc),
+                    RichValue::new(RuntimeValue::BuiltinAtom(tag), input.loc),
                     payload,
                 ]
                 .into(),
             )),
         ),
-        arguments[1].loc,
+        input.loc,
     );
     Ok(VmAction::Return {
         value,
@@ -3803,11 +4020,20 @@ fn transform_codec(
     value: RichValue,
     direction: CodecDirection,
     path: &str,
+    predicate_decisions: &BTreeMap<String, bool>,
     current: &Heap,
     background: &Heap,
 ) -> Result<CodecNode, CodecFailure> {
     if option_item(schema).is_some() {
-        return transform_codec_field(schema, value, direction, path, current, background);
+        return transform_codec_field(
+            schema,
+            value,
+            direction,
+            path,
+            predicate_decisions,
+            current,
+            background,
+        );
     }
     let view = HeapView {
         current,
@@ -3823,7 +4049,15 @@ fn transform_codec(
                 })?;
             let resolved = decode_runtime_type(resolved, current, background)
                 .map_err(|message| CodecFailure::new(message, value, schema.rule))?;
-            transform_codec(&resolved, value, direction, path, current, background)
+            transform_codec(
+                &resolved,
+                value,
+                direction,
+                path,
+                predicate_decisions,
+                current,
+                background,
+            )
         }
         CodecKind::Any => Ok(CodecNode::Existing(value)),
         CodecKind::Int if matches!(value.value, RuntimeValue::Int(_)) => {
@@ -3875,6 +4109,7 @@ fn transform_codec(
                         value,
                         direction,
                         &format!("{path}[{index}]"),
+                        predicate_decisions,
                         current,
                         background,
                     )
@@ -3922,6 +4157,7 @@ fn transform_codec(
                         value,
                         direction,
                         &format!("{path}[{index}]"),
+                        predicate_decisions,
                         current,
                         background,
                     )
@@ -3932,14 +4168,30 @@ fn transform_codec(
                 CodecDirection::Encode => CodecNode::Array(nodes, value.loc),
             })
         }
-        CodecKind::Struct(fields) => {
-            transform_codec_struct(schema, fields, value, direction, path, current, background)
-        }
+        CodecKind::Struct(fields) => transform_codec_struct(
+            schema,
+            fields,
+            value,
+            direction,
+            path,
+            predicate_decisions,
+            current,
+            background,
+        ),
         CodecKind::Union(variants) => {
             let mut errors = Vec::new();
             for variant in variants {
-                match transform_codec(variant, value, direction, path, current, background) {
+                match transform_codec(
+                    variant,
+                    value,
+                    direction,
+                    path,
+                    predicate_decisions,
+                    current,
+                    background,
+                ) {
                     Ok(node) => return Ok(node),
+                    Err(failure) if failure.predicate.is_some() => return Err(failure),
                     Err(failure) => errors.push(failure.message),
                 }
             }
@@ -3967,7 +4219,14 @@ fn transform_codec(
             }
         }
         CodecKind::Enum(variants) => transform_codec_enum(
-            schema, variants, value, direction, path, current, background,
+            schema,
+            variants,
+            value,
+            direction,
+            path,
+            predicate_decisions,
+            current,
+            background,
         ),
         CodecKind::Bytes => Err(CodecFailure::new(
             format!("{path}: Bytes has no JSON codec"),
@@ -3987,12 +4246,43 @@ fn transform_codec(
     }
 }
 
+fn validate_codec_value_without_skipping(
+    schema: &CodecType,
+    value: RichValue,
+    path: &str,
+    current: &Heap,
+    background: &Heap,
+) -> Result<CodecNode, CodecFailure> {
+    let mut decisions = BTreeMap::new();
+    loop {
+        match transform_codec(
+            schema,
+            value,
+            CodecDirection::Encode,
+            path,
+            &decisions,
+            current,
+            background,
+        ) {
+            Ok(node) => return Ok(node),
+            Err(failure) => {
+                let Some(request) = &failure.predicate else {
+                    return Err(failure);
+                };
+                decisions.insert(request.path.clone(), false);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn transform_codec_struct(
     schema: &CodecType,
     fields: &BTreeMap<String, CodecType>,
     value: RichValue,
     direction: CodecDirection,
     path: &str,
+    predicate_decisions: &BTreeMap<String, bool>,
     current: &Heap,
     background: &Heap,
 ) -> Result<CodecNode, CodecFailure> {
@@ -4026,6 +4316,7 @@ fn transform_codec_struct(
                 &mut consumed,
                 value,
                 path,
+                predicate_decisions,
                 current,
                 background,
             )?;
@@ -4046,6 +4337,7 @@ fn transform_codec_struct(
                 &mut emitted,
                 value,
                 path,
+                predicate_decisions,
                 current,
                 background,
             )?;
@@ -4059,6 +4351,7 @@ enum SkipPolicy {
     None,
     False,
     Empty,
+    Function(RichValue),
 }
 
 #[derive(Clone, Debug)]
@@ -4163,11 +4456,26 @@ fn plan_struct(
                     Some("None") => Ok(SkipPolicy::None),
                     Some("False") => Ok(SkipPolicy::False),
                     Some("Empty") => Ok(SkipPolicy::Empty),
-                    _ => Err(CodecFailure::new(
-                        format!("{path}.{internal_name}: invalid skip_serializing_if policy"),
-                        data,
-                        rule,
-                    )),
+                    _ => {
+                        let RuntimeValue::Func(handle) = rule.value else {
+                            return Err(CodecFailure::new(
+                                format!("{path}.{internal_name}: invalid skip_serializing_if policy"),
+                                data,
+                                rule,
+                            ));
+                        };
+                        let arity = view.function_arity(handle).map_err(|error| {
+                            CodecFailure::new(error.to_string(), data, rule)
+                        })?;
+                        if arity != 1 {
+                            return Err(CodecFailure::new(
+                                format!("{path}.{internal_name}: skip_serializing_if predicate must accept one argument, got {arity}"),
+                                data,
+                                rule,
+                            ));
+                        }
+                        Ok(SkipPolicy::Function(rule))
+                    }
                 }
             })
             .transpose()?;
@@ -4407,12 +4715,14 @@ fn plan_enum(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn transform_codec_enum(
     schema: &CodecType,
     variants: &BTreeMap<String, CodecEnumVariant>,
     value: RichValue,
     direction: CodecDirection,
     path: &str,
+    predicate_decisions: &BTreeMap<String, bool>,
     current: &Heap,
     background: &Heap,
 ) -> Result<CodecNode, CodecFailure> {
@@ -4422,7 +4732,15 @@ fn transform_codec_enum(
     };
     let plan = plan_enum(schema, variants, value, path, &view)?;
     if plan.untagged {
-        return transform_untagged_enum(&plan, value, direction, path, current, background);
+        return transform_untagged_enum(
+            &plan,
+            value,
+            direction,
+            path,
+            predicate_decisions,
+            current,
+            background,
+        );
     }
     match direction {
         CodecDirection::Decode => {
@@ -4499,6 +4817,7 @@ fn transform_codec_enum(
                         values[0],
                         direction,
                         &format!("{path}.{tag}"),
+                        predicate_decisions,
                         current,
                         background,
                     )?,
@@ -4584,6 +4903,7 @@ fn transform_codec_enum(
                         tuple[1],
                         direction,
                         &format!("{path}.{tag}"),
+                        predicate_decisions,
                         current,
                         background,
                     )?,
@@ -4599,6 +4919,7 @@ fn transform_untagged_enum(
     value: RichValue,
     direction: CodecDirection,
     path: &str,
+    predicate_decisions: &BTreeMap<String, bool>,
     current: &Heap,
     background: &Heap,
 ) -> Result<CodecNode, CodecFailure> {
@@ -4608,8 +4929,17 @@ fn transform_untagged_enum(
             let mut errors = Vec::new();
             for variant in &plan.variants {
                 let payload = variant.payload.as_ref().expect("planned untagged payload");
-                match transform_codec(payload, value, direction, path, current, background) {
+                match transform_codec(
+                    payload,
+                    value,
+                    direction,
+                    path,
+                    predicate_decisions,
+                    current,
+                    background,
+                ) {
                     Ok(node) => matches.push((variant, node)),
+                    Err(failure) if failure.predicate.is_some() => return Err(failure),
                     Err(failure) => errors.push(failure.message),
                 }
             }
@@ -4686,6 +5016,7 @@ fn transform_untagged_enum(
                 tuple[1],
                 direction,
                 path,
+                predicate_decisions,
                 current,
                 background,
             )
@@ -4700,6 +5031,7 @@ fn decode_struct_fields(
     consumed: &mut HashSet<String>,
     container: RichValue,
     path: &str,
+    predicate_decisions: &BTreeMap<String, bool>,
     current: &Heap,
     background: &Heap,
 ) -> Result<Vec<(String, CodecNode)>, CodecFailure> {
@@ -4714,6 +5046,7 @@ fn decode_struct_fields(
                     consumed,
                     container,
                     &internal_path,
+                    predicate_decisions,
                     current,
                     background,
                 )?,
@@ -4735,16 +5068,16 @@ fn decode_struct_fields(
                     value,
                     CodecDirection::Decode,
                     &external_path,
+                    predicate_decisions,
                     current,
                     background,
                 )?
             } else if let Some(default) = field.default {
                 // A default is already canonical XL data. Validate it through the
                 // encode direction before retaining the original rich value.
-                transform_codec_field(
+                validate_codec_value_without_skipping(
                     &field.schema,
                     default,
-                    CodecDirection::Encode,
                     &internal_path,
                     current,
                     background,
@@ -4773,6 +5106,7 @@ fn encode_struct_fields(
     emitted: &mut BTreeMap<String, CodecNode>,
     container: RichValue,
     path: &str,
+    predicate_decisions: &BTreeMap<String, bool>,
     current: &Heap,
     background: &Heap,
 ) -> Result<(), CodecFailure> {
@@ -4800,11 +5134,24 @@ fn encode_struct_fields(
                 field.schema.rule,
             ));
         };
-        if field
-            .skip
-            .is_some_and(|policy| codec_should_skip(policy, value, current, background))
-        {
-            continue;
+        if let Some(policy) = field.skip {
+            let skip = match policy {
+                SkipPolicy::Function(callee) => {
+                    let Some(skip) = predicate_decisions.get(&field_path) else {
+                        return Err(CodecFailure::predicate(
+                            field_path.clone(),
+                            callee,
+                            value,
+                            callee,
+                        ));
+                    };
+                    *skip
+                }
+                policy => codec_should_skip(policy, value, current, background),
+            };
+            if skip {
+                continue;
+            }
         }
         if let Some(nested) = &field.flattened {
             let RuntimeValue::Dict(handle) = value.value else {
@@ -4833,6 +5180,7 @@ fn encode_struct_fields(
                 emitted,
                 value,
                 &field_path,
+                predicate_decisions,
                 current,
                 background,
             )?;
@@ -4843,6 +5191,7 @@ fn encode_struct_fields(
                 value,
                 CodecDirection::Encode,
                 &field_path,
+                predicate_decisions,
                 current,
                 background,
             )?;
@@ -4863,11 +5212,20 @@ fn transform_codec_field(
     value: RichValue,
     direction: CodecDirection,
     path: &str,
+    predicate_decisions: &BTreeMap<String, bool>,
     current: &Heap,
     background: &Heap,
 ) -> Result<CodecNode, CodecFailure> {
     let Some(item) = option_item(schema) else {
-        return transform_codec(schema, value, direction, path, current, background);
+        return transform_codec(
+            schema,
+            value,
+            direction,
+            path,
+            predicate_decisions,
+            current,
+            background,
+        );
     };
     if value.value == RuntimeValue::BuiltinAtom(BuiltinAtom::None) {
         return Ok(CodecNode::Atom(BuiltinAtom::None, value.loc));
@@ -4876,7 +5234,15 @@ fn transform_codec_field(
         CodecDirection::Decode => Ok(CodecNode::Tuple(
             vec![
                 CodecNode::Atom(BuiltinAtom::Some, value.loc),
-                transform_codec(item, value, direction, path, current, background)?,
+                transform_codec(
+                    item,
+                    value,
+                    direction,
+                    path,
+                    predicate_decisions,
+                    current,
+                    background,
+                )?,
             ],
             value.loc,
         )),
@@ -4907,7 +5273,15 @@ fn transform_codec_field(
                     schema.rule,
                 ));
             }
-            transform_codec(item, tuple[1], direction, path, current, background)
+            transform_codec(
+                item,
+                tuple[1],
+                direction,
+                path,
+                predicate_decisions,
+                current,
+                background,
+            )
         }
     }
 }
@@ -4939,6 +5313,7 @@ fn codec_should_skip(
                 _ => false,
             }
         }
+        SkipPolicy::Function(_) => unreachable!("function skip predicates suspend the codec"),
     }
 }
 
@@ -5283,10 +5658,9 @@ fn generate_struct_schema_fields(
             definitions,
         )?;
         if let Some(default) = field.default {
-            let encoded = transform_codec_field(
+            let encoded = validate_codec_value_without_skipping(
                 &field.schema,
                 default,
-                CodecDirection::Encode,
                 &format!("$.{}", field.internal_name),
                 current,
                 background,
@@ -5818,11 +6192,13 @@ fn validate_json_attribute_configuration(
                 == Some("CamelCase")
         }
         CoreJsonFunction::Default => true,
-        CoreJsonFunction::SkipSerializingIf => matches!(
-            view.atom_text(payload)
-                .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?,
-            Some("None" | "False" | "Empty")
-        ),
+        CoreJsonFunction::SkipSerializingIf => {
+            matches!(
+                view.atom_text(payload)
+                    .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?,
+                Some("None" | "False" | "Empty")
+            ) || matches!(payload.value, RuntimeValue::Func(handle) if view.function_arity(handle).is_ok_and(|arity| arity == 1))
+        }
         _ => unreachable!(),
     };
     if valid {
@@ -5832,7 +6208,7 @@ fn validate_json_attribute_configuration(
         CoreJsonFunction::Rename => "core:json.rename expects a String",
         CoreJsonFunction::RenameAll => "core:json.rename_all currently expects 'CamelCase",
         CoreJsonFunction::SkipSerializingIf => {
-            "core:json.skip_serializing_if expects 'None, 'False, or 'Empty"
+            "core:json.skip_serializing_if expects 'None, 'False, 'Empty, or a unary Func"
         }
         _ => unreachable!(),
     };
