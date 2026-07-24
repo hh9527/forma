@@ -760,11 +760,42 @@ pub fn analyze_partial_types_with_bindings(
 ) -> PartialAnalysis {
     let mut sources = SourceDatabase::default();
     let source_id = sources.add(source_name, source);
-    let parsed = parse_registered(&sources, source_id);
+    analyze_partial_types_registered(&sources, source_id, quota, external_values, &HashSet::new())
+}
+
+pub(crate) fn analyze_partial_types_registered(
+    sources: &SourceDatabase,
+    source_id: crate::SourceId,
+    quota: Quota,
+    external_values: &BTreeMap<String, Value>,
+    unavailable_imports: &HashSet<String>,
+) -> PartialAnalysis {
+    let parsed = parse_registered(sources, source_id);
+    analyze_partial_types_recovered(
+        sources,
+        source_id,
+        &parsed.recovered,
+        parsed.diagnostics,
+        quota,
+        external_values,
+        unavailable_imports,
+    )
+}
+
+pub(crate) fn analyze_partial_types_recovered(
+    sources: &SourceDatabase,
+    source_id: crate::SourceId,
+    recovered: &crate::parser::RecoveredProgram,
+    initial_diagnostics: Vec<Diagnostic>,
+    quota: Quota,
+    external_values: &BTreeMap<String, Value>,
+    unavailable_imports: &HashSet<String>,
+) -> PartialAnalysis {
+    let source_name = sources.get(source_id).name.to_string();
     let mut vm = Vm::new();
     let prelude = core_prelude(&mut vm);
     let hir = HirProgram::resolve_recovered(
-        &parsed.recovered,
+        recovered,
         prelude
             .keys()
             .chain(external_values.keys())
@@ -772,7 +803,7 @@ pub fn analyze_partial_types_with_bindings(
             .collect::<Vec<_>>(),
     );
     let mut bindings = BTreeMap::new();
-    for binding in &parsed.recovered.bindings {
+    for binding in &recovered.bindings {
         if binding.value.kind != BindingKind::Type {
             continue;
         }
@@ -785,6 +816,17 @@ pub fn analyze_partial_types_with_bindings(
         }
     }
     let type_definitions = bindings.keys().copied().collect::<HashSet<_>>();
+    let import_definitions = hir
+        .definitions()
+        .iter()
+        .filter(|definition| {
+            definition.top_level
+                && definition.kind == HirDefinitionKind::Import
+                && unavailable_imports.contains(&definition.name)
+        })
+        .map(|definition| definition.id)
+        .collect::<HashSet<_>>();
+    let mut unavailable_dependencies = BTreeMap::new();
     let mut nodes = bindings
         .keys()
         .map(|definition| {
@@ -792,12 +834,29 @@ pub fn analyze_partial_types_with_bindings(
                 .definition(*definition)
                 .and_then(|definition| definition.value)
                 .expect("retained type definition has a value expression");
-            let mut dependencies = hir
+            let references = hir
                 .expressions()
                 .iter()
                 .filter(|expression| expression_descends_from(&hir, expression.id, root))
                 .filter_map(|expression| expression.reference)
                 .filter_map(|reference| hir.reference(reference))
+                .collect::<Vec<_>>();
+            if let Some(import) =
+                references
+                    .iter()
+                    .find_map(|reference| match reference.resolution {
+                        crate::hir::HirResolution::Definition(dependency)
+                            if import_definitions.contains(&dependency) =>
+                        {
+                            Some(dependency)
+                        }
+                        _ => None,
+                    })
+            {
+                unavailable_dependencies.insert(*definition, import);
+            }
+            let mut dependencies = references
+                .iter()
                 .filter_map(|reference| match reference.resolution {
                     crate::hir::HirResolution::Definition(dependency)
                         if type_definitions.contains(&dependency) =>
@@ -818,8 +877,14 @@ pub fn analyze_partial_types_with_bindings(
     nodes.sort_by_key(|node| node.definition);
     let dependencies = SemanticDependencyGraph { nodes };
 
-    let mut diagnostics = parsed.diagnostics;
+    let mut diagnostics = initial_diagnostics;
     let mut facts: BTreeMap<HirDefinitionId, SemanticFact<TypeId>> = BTreeMap::new();
+    for (definition, import) in unavailable_dependencies {
+        let cause = FactIdentity::HirDefinition(import);
+        let mut fact = SemanticFact::unknown(UnknownReason::BlockedBy(cause));
+        fact.causes.push(cause);
+        facts.insert(definition, fact);
+    }
     let mut types = TypeGraph::default();
     let mut tool_values = prelude;
     tool_values.extend(external_values.clone());
@@ -862,11 +927,11 @@ pub fn analyze_partial_types_with_bindings(
 
             let binding = bindings[&node.definition];
             let outcome = evaluate_tool_expression(
-                source_name,
+                &source_name,
                 &binding.value.value,
                 &tool_values,
                 &mut account,
-                &sources,
+                sources,
                 &debug_sink,
             )
             .and_then(|value| {
@@ -874,7 +939,7 @@ pub fn analyze_partial_types_with_bindings(
                     .map(|descriptor| (value, descriptor))
                     .map_err(|message| {
                         FrontendError::from_diagnostic(
-                            &sources,
+                            sources,
                             Diagnostic::error(
                                 format!(
                                     "type {} produced invalid metadata: {message}",

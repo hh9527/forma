@@ -1,6 +1,6 @@
 # RFC 0044: Recoverable workspace module graph
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0039, RFC 0042, RFC 0043
 
 ## Summary
@@ -252,4 +252,69 @@ deferred until this protocol-independent workspace boundary is validated.
 
 ## Implementation result
 
-Pending.
+Implemented without adding a third-party dependency.
+
+`Engine::recover_workspace` is now the unified tooling entry point. It first
+attempts ordinary strict loading and returns that authoritative workspace on
+success. After strict failure it creates one recovery builder with one
+`SourceDatabase`, registers the core declarations once, recursively follows
+retained literal imports, and projects all discovered nodes into one snapshot.
+`xl show` calls this entry point directly, so a successful program is not
+evaluated twice and a failed program receives one strict attempt before
+recovery.
+
+`WorkspaceModuleState` records `Known`, `Partial`, or `Unavailable` on every
+workspace module. Canonical XL and JSON paths and stable core names form the
+module identity table. Missing targets are retained as unavailable nodes;
+readable XL nodes retain recovered HIR and partial facts. Module cycles are
+detected against the active canonical path stack, retain both import edges,
+mark their XL nodes unavailable for linking, and emit one deterministic cycle
+diagnostic.
+
+Partial analysis now has a registered form over shared sources and a lower
+entry point accepting the already parsed `RecoveredProgram` plus diagnostics.
+The recovery builder uses the latter, so each readable XL source is parsed once
+inside a recovery build. JSON is likewise registered and parsed once. Every
+snapshot location and diagnostic therefore resolves through the same source
+database rather than relying on coincidentally equal source IDs.
+
+Dependencies are processed before their importer. Valid JSON data and core
+module values are supplied directly. An XL dependency is strict-loaded and
+executed in its ordinary isolated engine worlds; when that succeeds, its
+self-contained exported `Value` is supplied through RFC 0043's explicit
+bindings API. No value is manufactured after failure. Strict probes use their
+normal quotas and their worlds are not the recovery snapshot or the runtime
+Main World.
+
+The RFC 0043 scheduler now also accepts a set of unavailable import names. It
+resolves those names to retained HIR import-definition IDs, identifies their
+references through HIR expression ancestry, and marks an affected type
+`Unknown(BlockedBy(import_definition))` before invoking the VM. Local
+dependents then block through ordinary type-definition edges, while independent
+local facts continue. The root module failure owns the diagnostic; blocked
+facts carry causes without duplicating it.
+
+`WorkspaceSnapshot::build` accepts complete and partial module inputs. It
+merges per-module type graphs, HIR identities, imports, expressions, and facts
+into global IDs. HIR definition causes are relocated with each module's global
+definition base. Partial diagnostic IDs are also remapped after global
+source-order sorting, so facts from different modules cannot collide at local
+diagnostic zero. Complete `Analysis` remains preferred whenever it is present;
+when the entire strict graph succeeds, recovery returns the original complete
+workspace directly. Within a failed graph, a dependency that is strictly
+usable supplies its real value and has `Known` module state, while its tooling
+records remain the registered partial projection for source-ID consistency.
+
+Tests cover failed XL dependencies with independent facts on both sides,
+transitive blocked local types, successful XL export linking, JSON-driven type
+computation, core native capability linking, one shared source identity space,
+cross-module diagnostic-ID relocation, deterministic module cycles, complete
+workspace preference, CLI cross-file observation, and unchanged strict
+`check`. The complete suite passes with 162 unit tests, one ignored manual
+parser baseline, and nine CLI tests. Strict Clippy, formatting, and diff checks
+also pass.
+
+Open-document overlays, revisions, cancellation, imported partial export sets,
+incremental reuse, and LSP transport remain deferred. Those lifecycle and
+protocol requirements are the point at which dependency-crate selection will
+be evaluated; RFC 0044 itself required none.

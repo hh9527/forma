@@ -152,18 +152,11 @@ fn show_command(arguments: &[String]) -> Result<(), String> {
     let Some(module_path) = arguments.first() else {
         return Err(format!("show requires a module path\n{}", usage()));
     };
-    let source = fs::read_to_string(module_path)
-        .map_err(|error| format!("cannot read {}: {error}", Path::new(module_path).display()))?;
-    match engine().load_module(module_path, BTreeMap::new()) {
-        Ok(module) => show_query(&module.workspace, &arguments[1..]),
-        Err(error) => {
-            let recovered = WorkspaceSnapshot::recover_source(module_path.clone(), source);
-            if recovered.diagnostics().is_empty() {
-                return Err(error.to_string());
-            }
-            show_query(&recovered, &arguments[1..])
-        }
-    }
+    let engine = engine();
+    let workspace = engine
+        .recover_workspace(module_path)
+        .map_err(|error| error.to_string())?;
+    show_query(&workspace, &arguments[1..])
 }
 
 fn show_query(workspace: &WorkspaceSnapshot, arguments: &[String]) -> Result<(), String> {
@@ -192,7 +185,13 @@ fn show_workspace(workspace: &WorkspaceSnapshot) -> Result<(), String> {
     }
     println!("modules:");
     for module in workspace.modules() {
-        println!("  m{} {:?} {}", module.id.index(), module.kind, module.name);
+        println!(
+            "  m{} {:?} {:?} {}",
+            module.id.index(),
+            module.kind,
+            module.state,
+            module.name
+        );
         for import in &module.imports {
             println!("    import {} -> m{}", import.name, import.target.index());
         }

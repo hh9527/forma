@@ -300,3 +300,56 @@ fn show_continues_independent_type_metadata_after_tool_failure() {
     assert!(!check.status.success());
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn show_recovers_types_and_causes_across_failed_modules() {
+    let directory = fixture_dir();
+    let model = directory.join("model.xl");
+    let main = directory.join("main.xl");
+    fs::write(
+        &model,
+        "type Broken = missing(Int); type Good = String; {Good: Good}",
+    )
+    .unwrap();
+    fs::write(
+        &main,
+        "import model from \"./model.xl\";\
+         type Local = String;\
+         type Uses = model.Good;\
+         type Down = Array(Uses);\
+         0",
+    )
+    .unwrap();
+
+    let show = xl()
+        .args(["show", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let output = String::from_utf8_lossy(&show.stdout);
+    assert!(output.contains("Partial"), "{output}");
+    assert!(output.contains("model.xl"), "{output}");
+    assert!(
+        output.contains("Local") && output.contains(" = String"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Uses") && output.contains("BlockedBy"),
+        "{output}"
+    );
+    assert!(
+        output.contains("Good") && output.contains(" = String"),
+        "{output}"
+    );
+
+    let check = xl()
+        .args(["check", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!check.status.success());
+    fs::remove_dir_all(directory).unwrap();
+}

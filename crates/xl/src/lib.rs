@@ -38,7 +38,8 @@ pub use semantic::{
     Conflict, Definition, DefinitionId, DefinitionKind, DiagnosticId, FactIdentity, FactState,
     IncomputableReason, Reference, ReferenceId, SemanticFact, UnknownReason, WorkspaceExport,
     WorkspaceExpression, WorkspaceExpressionId, WorkspaceModule, WorkspaceModuleId,
-    WorkspaceModuleKind, WorkspaceSnapshot, WorkspaceTypeGraph, WorkspaceTypeId, WorkspaceTypeNode,
+    WorkspaceModuleKind, WorkspaceModuleState, WorkspaceSnapshot, WorkspaceTypeGraph,
+    WorkspaceTypeId, WorkspaceTypeNode,
 };
 pub use source::{
     Diagnostic, Label, Loc, Located, Location, Origin, SourceDatabase, SourceId, TextRange,

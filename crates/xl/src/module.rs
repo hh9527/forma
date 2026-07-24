@@ -9,10 +9,12 @@ use crate::json::{Provenance, SourcedValue, parse_json_registered};
 use crate::parser::parse_registered;
 use crate::semantic::{
     SemanticImport, SemanticModuleInput, SemanticModuleTarget, WorkspaceModuleKind,
-    WorkspaceSnapshot,
+    WorkspaceModuleState, WorkspaceSnapshot,
 };
-use crate::source::SourceDatabase;
-use crate::types::{Analysis, analyze_program_with_bindings_observed};
+use crate::source::{Diagnostic, SourceDatabase};
+use crate::types::{
+    Analysis, analyze_partial_types_recovered, analyze_program_with_bindings_observed,
+};
 use crate::{
     BytecodeFunction, Closure, DebugSink, DiscardDebugSink, Quota, QuotaAccount, Value, Vm,
 };
@@ -280,6 +282,287 @@ impl Engine {
             Arc::clone(&self.debug_sink),
         )
     }
+
+    pub fn recover_workspace(
+        &self,
+        path: impl AsRef<Path>,
+    ) -> Result<WorkspaceSnapshot, ModuleError> {
+        let root = canonicalize(path.as_ref())?;
+        if let Ok(module) = self.load_module(&root, BTreeMap::new()) {
+            return Ok(module.workspace);
+        }
+        let mut main = MainWorld::building();
+        let mut sources = SourceDatabase::default();
+        let core_modules = install_core_modules(&mut main, &mut sources, &self.debug_sink)?
+            .into_iter()
+            .map(|(name, (value, _))| (name.to_owned(), value))
+            .collect();
+        let mut builder = RecoverableWorkspaceBuilder {
+            engine: self,
+            sources,
+            core_modules,
+            inputs: BTreeMap::new(),
+            values: HashMap::new(),
+            visiting: Vec::new(),
+            cycle_members: HashSet::new(),
+            cycle_reported: false,
+        };
+        builder.load_xl(&root);
+        Ok(WorkspaceSnapshot::build(
+            builder.sources,
+            builder.inputs.into_values().collect(),
+        ))
+    }
+}
+
+struct RecoverableWorkspaceBuilder<'a> {
+    engine: &'a Engine,
+    sources: SourceDatabase,
+    core_modules: HashMap<String, Value>,
+    inputs: BTreeMap<String, SemanticModuleInput>,
+    values: HashMap<PathBuf, Value>,
+    visiting: Vec<PathBuf>,
+    cycle_members: HashSet<PathBuf>,
+    cycle_reported: bool,
+}
+
+impl RecoverableWorkspaceBuilder<'_> {
+    fn load_xl(&mut self, path: &Path) -> Option<Value> {
+        if let Some(value) = self.values.get(path) {
+            return Some(value.clone());
+        }
+        let key = path.to_string_lossy().into_owned();
+        if self.inputs.contains_key(&key) {
+            return None;
+        }
+        if let Some(index) = self.visiting.iter().position(|candidate| candidate == path) {
+            self.cycle_members
+                .extend(self.visiting[index..].iter().cloned());
+            self.cycle_members.insert(path.to_owned());
+            return None;
+        }
+        let source = match fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(error) => {
+                self.inputs.insert(
+                    key.clone(),
+                    unavailable_input(key, path.to_owned(), WorkspaceModuleKind::Xl),
+                );
+                let _ = error;
+                return None;
+            }
+        };
+        let source_id = self.sources.add(key.clone(), source);
+        let parsed = parse_registered(&self.sources, source_id);
+        let program = parsed.program.clone();
+        let imports = parsed
+            .recovered
+            .bindings
+            .iter()
+            .filter(|binding| binding.value.kind == BindingKind::Import)
+            .filter_map(|binding| match &binding.value.value.value {
+                ExprKind::String(target) => Some((
+                    binding.value.name.value.clone(),
+                    binding.value.name.location,
+                    target.clone(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        self.visiting.push(path.to_owned());
+        let mut semantic_imports = Vec::new();
+        let mut external_values = BTreeMap::new();
+        let mut unavailable_imports = HashSet::new();
+        let mut diagnostics = Vec::new();
+        for (name, location, target) in imports {
+            if target.starts_with("core:") {
+                semantic_imports.push(SemanticImport {
+                    name: name.clone(),
+                    location,
+                    target: SemanticModuleTarget::Core(target.clone()),
+                });
+                if let Some(value) = self.core_modules.get(&target) {
+                    external_values.insert(name, value.clone());
+                } else {
+                    unavailable_imports.insert(name);
+                    diagnostics.push(Diagnostic::error(
+                        format!("unknown core module {target:?}"),
+                        location,
+                    ));
+                    self.inputs
+                        .entry(target.clone())
+                        .or_insert_with(|| SemanticModuleInput {
+                            key: target.clone(),
+                            path: None,
+                            kind: WorkspaceModuleKind::Core,
+                            source: None,
+                            program: None,
+                            analysis: None,
+                            partial: None,
+                            state: WorkspaceModuleState::Unavailable,
+                            imports: Vec::new(),
+                            diagnostics: Vec::new(),
+                        });
+                }
+                continue;
+            }
+
+            let joined = path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(&target);
+            let target_path = fs::canonicalize(&joined).unwrap_or(joined);
+            semantic_imports.push(SemanticImport {
+                name: name.clone(),
+                location,
+                target: SemanticModuleTarget::Path(target_path.clone()),
+            });
+            let value = match target_path
+                .extension()
+                .and_then(|extension| extension.to_str())
+            {
+                Some("xl") => self.load_xl(&target_path),
+                Some("json") => self.load_json(&target_path),
+                _ => {
+                    let target_key = target_path.to_string_lossy().into_owned();
+                    self.inputs.entry(target_key.clone()).or_insert_with(|| {
+                        unavailable_input(target_key, target_path.clone(), WorkspaceModuleKind::Xl)
+                    });
+                    None
+                }
+            };
+            if let Some(value) = value {
+                external_values.insert(name, value);
+            } else {
+                unavailable_imports.insert(name);
+                if self.cycle_members.contains(&target_path) {
+                    if !self.cycle_reported {
+                        diagnostics.push(Diagnostic::error(
+                            format!("module cycle reaches {}", target_path.display()),
+                            location,
+                        ));
+                        self.cycle_reported = true;
+                    }
+                } else {
+                    diagnostics.push(Diagnostic::error(
+                        format!("module {} is unavailable", target_path.display()),
+                        location,
+                    ));
+                }
+            }
+        }
+        self.visiting.pop();
+
+        let partial = analyze_partial_types_recovered(
+            &self.sources,
+            source_id,
+            &parsed.recovered,
+            parsed.diagnostics,
+            self.engine.config.module_quota,
+            &external_values,
+            &unavailable_imports,
+        );
+        let strict_value = if self.cycle_members.contains(path) {
+            None
+        } else {
+            self.engine
+                .load_module(path, BTreeMap::new())
+                .ok()
+                .and_then(|module| self.engine.execute(&module).ok())
+        };
+        let state = if strict_value.is_some() {
+            WorkspaceModuleState::Known
+        } else if self.cycle_members.contains(path)
+            || partial.hir.definitions().is_empty() && partial.hir.expressions().is_empty()
+        {
+            WorkspaceModuleState::Unavailable
+        } else {
+            WorkspaceModuleState::Partial
+        };
+        self.inputs.insert(
+            key.clone(),
+            SemanticModuleInput {
+                key,
+                path: Some(path.to_owned()),
+                kind: WorkspaceModuleKind::Xl,
+                source: Some(source_id),
+                program,
+                analysis: None,
+                partial: Some(partial),
+                state,
+                imports: semantic_imports,
+                diagnostics,
+            },
+        );
+        if let Some(value) = strict_value {
+            self.values.insert(path.to_owned(), value.clone());
+            Some(value)
+        } else {
+            None
+        }
+    }
+
+    fn load_json(&mut self, path: &Path) -> Option<Value> {
+        if let Some(value) = self.values.get(path) {
+            return Some(value.clone());
+        }
+        let key = path.to_string_lossy().into_owned();
+        if self.inputs.contains_key(&key) {
+            return None;
+        }
+        let source = match fs::read_to_string(path) {
+            Ok(source) => source,
+            Err(_) => {
+                self.inputs.insert(
+                    key.clone(),
+                    unavailable_input(key, path.to_owned(), WorkspaceModuleKind::Json),
+                );
+                return None;
+            }
+        };
+        let source_id = self.sources.add(key.clone(), source);
+        let parsed = parse_json_registered(&self.sources, source_id);
+        let value = parsed.value.map(|sourced| sourced.value);
+        self.inputs.insert(
+            key.clone(),
+            SemanticModuleInput {
+                key,
+                path: Some(path.to_owned()),
+                kind: WorkspaceModuleKind::Json,
+                source: Some(source_id),
+                program: None,
+                analysis: None,
+                partial: None,
+                state: if value.is_some() {
+                    WorkspaceModuleState::Known
+                } else {
+                    WorkspaceModuleState::Unavailable
+                },
+                imports: Vec::new(),
+                diagnostics: parsed.diagnostics,
+            },
+        );
+        if let Some(value) = &value {
+            self.values.insert(path.to_owned(), value.clone());
+        }
+        value
+    }
+}
+
+fn unavailable_input(key: String, path: PathBuf, kind: WorkspaceModuleKind) -> SemanticModuleInput {
+    SemanticModuleInput {
+        key,
+        path: Some(path),
+        kind,
+        source: None,
+        program: None,
+        analysis: None,
+        partial: None,
+        state: WorkspaceModuleState::Unavailable,
+        imports: Vec::new(),
+        diagnostics: Vec::new(),
+    }
 }
 
 pub fn load_module(
@@ -419,7 +702,10 @@ impl ModuleLoader {
                                     source: Some(source_id),
                                     program: None,
                                     analysis: None,
+                                    partial: None,
+                                    state: crate::semantic::WorkspaceModuleState::Known,
                                     imports: Vec::new(),
+                                    diagnostics: Vec::new(),
                                 },
                             );
                             Ok((sourced, root, false))
@@ -671,7 +957,10 @@ impl ModuleLoader {
                 source: Some(source_id),
                 program: Some(program),
                 analysis: Some(analysis.clone()),
+                partial: None,
+                state: crate::semantic::WorkspaceModuleState::Known,
                 imports: semantic_imports,
+                diagnostics: Vec::new(),
             },
         );
         Ok((analysis, function, external_roots))
@@ -830,6 +1119,13 @@ mod tests {
         let path = std::env::temp_dir().join(format!("xl-module-test-{unique}"));
         fs::create_dir(&path).unwrap();
         path
+    }
+
+    fn recovery_engine() -> Engine {
+        Engine::new(EngineConfig {
+            module_quota: Quota::with_fuel(1_000_000),
+            session_quota: Quota::with_fuel(1_000_000),
+        })
     }
 
     #[derive(Default)]
@@ -3194,6 +3490,175 @@ mod tests {
         assert_eq!(root(&a), root(&c));
         assert_eq!(root(&b), root(&c));
         assert_eq!(counts_after_a, loader.main.heap.counts());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recoverable_workspace_blocks_failed_imports_and_keeps_independent_facts() {
+        let directory = fixture_dir();
+        let model = directory.join("model.xl");
+        let main = directory.join("main.xl");
+        fs::write(
+            &model,
+            "type Broken = missing(Int); type Good = String; {Good: Good}",
+        )
+        .unwrap();
+        fs::write(
+            &main,
+            "import model from \"./model.xl\";\
+             type Local = String;\
+             type Uses = model.Good;\
+             type Down = Array(Uses);\
+             0",
+        )
+        .unwrap();
+        let snapshot = recovery_engine().recover_workspace(&main).unwrap();
+        let main = snapshot
+            .module_by_path(&canonicalize(&main).unwrap())
+            .unwrap();
+        let model = snapshot
+            .module_by_path(&canonicalize(&model).unwrap())
+            .unwrap();
+        assert_eq!(main.state, WorkspaceModuleState::Partial);
+        assert_eq!(model.state, WorkspaceModuleState::Partial);
+        let fact = |module, name: &str| {
+            &snapshot
+                .definitions()
+                .iter()
+                .find(|definition| definition.module == module && definition.name == name)
+                .unwrap()
+                .ty
+        };
+        assert_eq!(fact(main.id, "Local").state, crate::FactState::Known);
+        assert!(matches!(
+            fact(main.id, "Uses").state,
+            crate::FactState::Unknown(crate::UnknownReason::BlockedBy(_))
+        ));
+        assert!(matches!(
+            fact(main.id, "Down").state,
+            crate::FactState::Unknown(crate::UnknownReason::BlockedBy(_))
+        ));
+        assert_eq!(fact(model.id, "Good").state, crate::FactState::Known);
+        let broken = fact(model.id, "Broken");
+        let diagnostic = broken.diagnostics[0];
+        assert!(
+            snapshot.diagnostics()[diagnostic.index()]
+                .message
+                .contains("unknown binding")
+        );
+        assert!(main.imports.iter().any(|import| import.target == model.id));
+        assert_ne!(main.source, model.source);
+        assert_eq!(
+            snapshot.sources().get(model.source.unwrap()).name.as_ref(),
+            model.name
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recoverable_workspace_prefers_complete_analysis() {
+        let directory = fixture_dir();
+        let main = directory.join("main.xl");
+        fs::write(&main, "type Item = String; {Item: Item}").unwrap();
+        let snapshot = recovery_engine().recover_workspace(&main).unwrap();
+        let root = snapshot
+            .module_by_path(&canonicalize(&main).unwrap())
+            .unwrap();
+        assert_eq!(root.state, WorkspaceModuleState::Known);
+        let item = snapshot
+            .definitions()
+            .iter()
+            .find(|definition| definition.module == root.id && definition.name == "Item")
+            .unwrap();
+        assert_eq!(item.ty.state, crate::FactState::Known);
+        assert!(snapshot.diagnostics().is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recoverable_workspace_links_json_and_core_values() {
+        let directory = fixture_dir();
+        let data = directory.join("data.json");
+        let model = directory.join("model.xl");
+        let main = directory.join("main.xl");
+        fs::write(&data, r#"{"kind":"int"}"#).unwrap();
+        fs::write(&model, "type Shared = String; {Shared: Shared}").unwrap();
+        fs::write(
+            &main,
+            "import data from \"./data.json\";\
+             import model from \"./model.xl\";\
+             import attributes from \"core:attributes\";\
+             type FromData = if data.kind == \"int\" { Int } else { String };\
+             type FromXl = model.Shared;\
+             type FromCore = attributes.strip(String);\
+             type Broken = missing(Int);\
+             0",
+        )
+        .unwrap();
+        let snapshot = recovery_engine().recover_workspace(&main).unwrap();
+        let root = snapshot
+            .module_by_path(&canonicalize(&main).unwrap())
+            .unwrap();
+        let fact = |name: &str| {
+            &snapshot
+                .definitions()
+                .iter()
+                .find(|definition| definition.module == root.id && definition.name == name)
+                .unwrap()
+                .ty
+        };
+        for (name, expected) in [
+            ("FromData", "Int"),
+            ("FromXl", "String"),
+            ("FromCore", "String"),
+        ] {
+            assert_eq!(fact(name).state, crate::FactState::Known, "{name}");
+            assert_eq!(
+                snapshot.types().display(fact(name).value.unwrap()).unwrap(),
+                expected
+            );
+        }
+        assert!(snapshot.modules().iter().any(|module| {
+            module.kind == WorkspaceModuleKind::Json && module.state == WorkspaceModuleState::Known
+        }));
+        assert!(snapshot.modules().iter().any(|module| {
+            module.kind == WorkspaceModuleKind::Core && module.state == WorkspaceModuleState::Known
+        }));
+        assert_eq!(
+            snapshot
+                .module_by_path(&canonicalize(&model).unwrap())
+                .unwrap()
+                .state,
+            WorkspaceModuleState::Known
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recoverable_workspace_retains_module_cycles_once() {
+        let directory = fixture_dir();
+        let a = directory.join("a.xl");
+        let b = directory.join("b.xl");
+        fs::write(&a, "import b from \"./b.xl\"; type A = String; 0").unwrap();
+        fs::write(&b, "import a from \"./a.xl\"; type B = String; 0").unwrap();
+        let snapshot = recovery_engine().recover_workspace(&a).unwrap();
+        assert_eq!(
+            snapshot
+                .modules()
+                .iter()
+                .filter(|module| module.kind == WorkspaceModuleKind::Xl)
+                .filter(|module| module.state == WorkspaceModuleState::Unavailable)
+                .count(),
+            2
+        );
+        assert_eq!(
+            snapshot
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.message.contains("module cycle"))
+                .count(),
+            1
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -1,7 +1,7 @@
 use crate::ast::Program;
-use crate::hir::{HirDefinitionId, HirResolution};
+use crate::hir::{HirDefinitionId, HirProgram, HirResolution};
 use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
-use crate::types::{Analysis, TypeGraph, TypeId, TypeNode};
+use crate::types::{Analysis, PartialAnalysis, TypeGraph, TypeId, TypeNode};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -123,6 +123,13 @@ pub enum WorkspaceModuleKind {
     Core,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceModuleState {
+    Known,
+    Partial,
+    Unavailable,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkspaceImport {
     pub name: String,
@@ -136,6 +143,7 @@ pub struct WorkspaceModule {
     pub name: String,
     pub path: Option<PathBuf>,
     pub kind: WorkspaceModuleKind,
+    pub state: WorkspaceModuleState,
     pub source: Option<SourceId>,
     pub imports: Vec<WorkspaceImport>,
     pub result_location: Option<Location>,
@@ -443,6 +451,7 @@ impl WorkspaceSnapshot {
                 name: source_name,
                 path: None,
                 kind: WorkspaceModuleKind::Xl,
+                state: WorkspaceModuleState::Partial,
                 source: Some(source),
                 imports: Vec::new(),
                 result_location: parsed
@@ -594,6 +603,9 @@ impl WorkspaceSnapshot {
             })
             .collect::<HashSet<_>>();
         for name in core_names.drain() {
+            if inputs.iter().any(|input| input.key == name) {
+                continue;
+            }
             inputs.push(SemanticModuleInput {
                 key: name.clone(),
                 path: None,
@@ -601,7 +613,10 @@ impl WorkspaceSnapshot {
                 source: None,
                 program: None,
                 analysis: None,
+                partial: None,
+                state: WorkspaceModuleState::Known,
                 imports: Vec::new(),
+                diagnostics: Vec::new(),
             });
         }
         inputs.sort_by(|left, right| left.key.cmp(&right.key));
@@ -614,9 +629,14 @@ impl WorkspaceSnapshot {
         let mut types = WorkspaceTypeGraph::default();
         let mut type_maps = Vec::with_capacity(inputs.len());
         for input in &inputs {
-            let map = input.analysis.as_ref().map_or_else(Vec::new, |analysis| {
-                merge_type_graph(&input.key, &analysis.types, &mut types)
-            });
+            let map = input
+                .analysis
+                .as_ref()
+                .map(|analysis| &analysis.types)
+                .or_else(|| input.partial.as_ref().map(|partial| &partial.types))
+                .map_or_else(Vec::new, |graph| {
+                    merge_type_graph(&input.key, graph, &mut types)
+                });
             type_maps.push(map);
         }
 
@@ -641,6 +661,7 @@ impl WorkspaceSnapshot {
                 name: input.key.clone(),
                 path: input.path.clone(),
                 kind: input.kind,
+                state: input.state,
                 source: input.source,
                 imports,
                 result_location: input
@@ -651,10 +672,57 @@ impl WorkspaceSnapshot {
             });
         }
 
+        let mut diagnostic_records = Vec::new();
+        for (input_index, input) in inputs.iter().enumerate() {
+            diagnostic_records.extend(
+                input
+                    .diagnostics
+                    .iter()
+                    .cloned()
+                    .map(|diagnostic| (input_index, None, diagnostic)),
+            );
+            if let Some(partial) = &input.partial {
+                diagnostic_records.extend(
+                    partial
+                        .diagnostics
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .map(|(local, diagnostic)| (input_index, Some(local), diagnostic)),
+                );
+            }
+        }
+        diagnostic_records.sort_by_key(|(_, _, diagnostic)| {
+            diagnostic.labels.first().map_or((0, 0), |label| {
+                (label.location.source.get(), label.location.start)
+            })
+        });
+        let mut diagnostic_maps = inputs
+            .iter()
+            .map(|input| {
+                vec![
+                    DiagnosticId::from_index(0);
+                    input
+                        .partial
+                        .as_ref()
+                        .map_or(0, |partial| partial.diagnostics.len())
+                ]
+            })
+            .collect::<Vec<_>>();
+        for (global, (input, local, _)) in diagnostic_records.iter().enumerate() {
+            if let Some(local) = local {
+                diagnostic_maps[*input][*local] = DiagnosticId::from_index(global);
+            }
+        }
+        let diagnostics = diagnostic_records
+            .into_iter()
+            .map(|(_, _, diagnostic)| diagnostic)
+            .collect::<Vec<_>>();
+
         let mut definitions = Vec::new();
         let mut definition_maps = Vec::with_capacity(inputs.len());
         for (index, input) in inputs.iter().enumerate() {
-            let Some(analysis) = &input.analysis else {
+            let Some(hir) = input_hir(input) else {
                 definition_maps.push(Vec::new());
                 continue;
             };
@@ -664,13 +732,38 @@ impl WorkspaceSnapshot {
                 .map(|import| (import.name.as_str(), ids[&import.target.key()]))
                 .collect::<HashMap<_, _>>();
             let module = WorkspaceModuleId(index as u32);
-            let mut map = Vec::with_capacity(analysis.hir.definitions().len());
-            for definition in analysis.hir.definitions() {
+            let mut map = Vec::with_capacity(hir.definitions().len());
+            let definition_base = definitions.len();
+            for definition in hir.definitions() {
                 let id = DefinitionId(definitions.len() as u32);
-                let ty = analysis
-                    .definition_types
-                    .get(&definition.id)
-                    .map(|local| type_maps[index][local.index()]);
+                let ty = input.analysis.as_ref().map_or_else(
+                    || {
+                        input
+                            .partial
+                            .as_ref()
+                            .and_then(|partial| partial.definition_facts.get(&definition.id))
+                            .map_or_else(
+                                || SemanticFact::unknown(UnknownReason::UnavailableDependency),
+                                |fact| {
+                                    map_partial_fact_with_base(
+                                        fact,
+                                        &type_maps[index],
+                                        definition_base,
+                                        Some(&diagnostic_maps[index]),
+                                    )
+                                },
+                            )
+                    },
+                    |analysis| {
+                        analysis
+                            .definition_types
+                            .get(&definition.id)
+                            .map(|local| SemanticFact::known(type_maps[index][local.index()]))
+                            .unwrap_or_else(|| {
+                                SemanticFact::unknown(UnknownReason::UnavailableDependency)
+                            })
+                    },
+                );
                 definitions.push(Definition {
                     id,
                     module,
@@ -678,10 +771,7 @@ impl WorkspaceSnapshot {
                     kind: definition.kind,
                     location: definition.location,
                     additional_locations: definition.additional_locations.clone(),
-                    ty: ty.map_or_else(
-                        || SemanticFact::unknown(UnknownReason::UnavailableDependency),
-                        SemanticFact::known,
-                    ),
+                    ty,
                     import_target: (definition.kind == DefinitionKind::Import)
                         .then(|| import_targets.get(definition.name.as_str()).copied())
                         .flatten(),
@@ -694,13 +784,13 @@ impl WorkspaceSnapshot {
         let mut references = Vec::new();
         let mut reference_maps = Vec::with_capacity(inputs.len());
         for (index, input) in inputs.iter().enumerate() {
-            let Some(analysis) = &input.analysis else {
+            let Some(hir) = input_hir(input) else {
                 reference_maps.push(Vec::new());
                 continue;
             };
             let module = WorkspaceModuleId(index as u32);
-            let mut map = Vec::with_capacity(analysis.hir.references().len());
-            for reference in analysis.hir.references() {
+            let mut map = Vec::with_capacity(hir.references().len());
+            for reference in hir.references() {
                 let id = ReferenceId(references.len() as u32);
                 references.push(Reference {
                     id,
@@ -722,11 +812,11 @@ impl WorkspaceSnapshot {
 
         let mut expressions = Vec::new();
         for (index, input) in inputs.iter().enumerate() {
-            let Some(analysis) = &input.analysis else {
+            let Some(hir) = input_hir(input) else {
                 continue;
             };
             let module = WorkspaceModuleId(index as u32);
-            for expression in analysis.hir.expressions() {
+            for expression in hir.expressions() {
                 expressions.push(WorkspaceExpression {
                     id: WorkspaceExpressionId(expressions.len() as u32),
                     module,
@@ -734,23 +824,42 @@ impl WorkspaceSnapshot {
                     reference: expression
                         .reference
                         .map(|reference| reference_maps[index][reference.index()]),
-                    ty: analysis
-                        .expression_types
-                        .get(&expression.id)
-                        .map(|ty| SemanticFact::known(type_maps[index][ty.index()]))
-                        .unwrap_or_else(|| {
-                            let unresolved = expression
-                                .reference
-                                .and_then(|id| analysis.hir.reference(id))
-                                .is_some_and(|reference| {
-                                    reference.resolution == HirResolution::Unresolved
-                                });
-                            SemanticFact::unknown(if unresolved {
-                                UnknownReason::UnresolvedName
-                            } else {
-                                UnknownReason::UnavailableDependency
-                            })
-                        }),
+                    ty: input.analysis.as_ref().map_or_else(
+                        || {
+                            SemanticFact::unknown(
+                                if expression
+                                    .reference
+                                    .and_then(|id| hir.reference(id))
+                                    .is_some_and(|reference| {
+                                        reference.resolution == HirResolution::Unresolved
+                                    })
+                                {
+                                    UnknownReason::UnresolvedName
+                                } else {
+                                    UnknownReason::UnavailableDependency
+                                },
+                            )
+                        },
+                        |analysis| {
+                            analysis
+                                .expression_types
+                                .get(&expression.id)
+                                .map(|ty| SemanticFact::known(type_maps[index][ty.index()]))
+                                .unwrap_or_else(|| {
+                                    let unresolved = expression
+                                        .reference
+                                        .and_then(|id| hir.reference(id))
+                                        .is_some_and(|reference| {
+                                            reference.resolution == HirResolution::Unresolved
+                                        });
+                                    SemanticFact::unknown(if unresolved {
+                                        UnknownReason::UnresolvedName
+                                    } else {
+                                        UnknownReason::UnavailableDependency
+                                    })
+                                })
+                        },
+                    ),
                 });
             }
         }
@@ -762,7 +871,7 @@ impl WorkspaceSnapshot {
             references,
             expressions,
             types,
-            diagnostics: Vec::new(),
+            diagnostics,
         }
     }
 }
@@ -777,9 +886,18 @@ fn map_partial_fact(
     fact: &SemanticFact<TypeId>,
     type_map: &[WorkspaceTypeId],
 ) -> SemanticFact<WorkspaceTypeId> {
+    map_partial_fact_with_base(fact, type_map, 0, None)
+}
+
+fn map_partial_fact_with_base(
+    fact: &SemanticFact<TypeId>,
+    type_map: &[WorkspaceTypeId],
+    definition_base: usize,
+    diagnostic_map: Option<&[DiagnosticId]>,
+) -> SemanticFact<WorkspaceTypeId> {
     let map_identity = |identity| match identity {
         FactIdentity::HirDefinition(id) => {
-            FactIdentity::Definition(DefinitionId(id.index() as u32))
+            FactIdentity::Definition(DefinitionId((definition_base + id.index()) as u32))
         }
         other => other,
     };
@@ -794,8 +912,20 @@ fn map_partial_fact(
         value: fact.value.map(|ty| type_map[ty.index()]),
         state,
         causes: fact.causes.iter().copied().map(map_identity).collect(),
-        diagnostics: fact.diagnostics.clone(),
+        diagnostics: fact
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic_map.map_or(*diagnostic, |map| map[diagnostic.index()]))
+            .collect(),
     }
+}
+
+fn input_hir(input: &SemanticModuleInput) -> Option<&HirProgram> {
+    input
+        .analysis
+        .as_ref()
+        .map(|analysis| &analysis.hir)
+        .or_else(|| input.partial.as_ref().map(|partial| &partial.hir))
 }
 
 fn merge_type_graph(
@@ -910,7 +1040,10 @@ pub(crate) struct SemanticModuleInput {
     pub source: Option<SourceId>,
     pub program: Option<Program>,
     pub analysis: Option<Analysis>,
+    pub partial: Option<PartialAnalysis>,
+    pub state: WorkspaceModuleState,
     pub imports: Vec<SemanticImport>,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 #[cfg(test)]
@@ -1108,7 +1241,10 @@ mod tests {
                 source: Some(source),
                 program: Some(program),
                 analysis: Some(analysis),
+                partial: None,
+                state: WorkspaceModuleState::Known,
                 imports: Vec::new(),
+                diagnostics: Vec::new(),
             }],
         );
         let known = snapshot
