@@ -46,6 +46,7 @@ pub(crate) enum RuntimeValue {
     Bytes(Handle),
     Array(Handle),
     Tuple(Handle),
+    Tagged(Handle),
     Dict(Handle),
     Func(Handle),
     UpLink(Handle),
@@ -125,6 +126,10 @@ pub(crate) enum Object {
     Bytes(Box<[u8]>),
     Array(Box<[RichValue]>),
     Tuple(Box<[RichValue]>),
+    Tagged {
+        tag: RichValue,
+        payload: RichValue,
+    },
     Dict {
         shape: ShapeId,
         values: Box<[RichValue]>,
@@ -400,6 +405,19 @@ impl Heap {
             }
             Value::Atom(Atom::Builtin(atom)) => RuntimeValue::BuiltinAtom(*atom),
             Value::Atom(Atom::Named(name)) => self.atom(background, name),
+            Value::Tagged { tag, payload } => {
+                let tag = match tag {
+                    Atom::Builtin(atom) => RuntimeValue::BuiltinAtom(*atom),
+                    Atom::Named(name) => self.atom(background, name),
+                };
+                path.push(ValuePathSegment::Index(0));
+                let payload = self.import_sourced_at(background, payload, provenance, path)?;
+                path.pop();
+                RuntimeValue::Tagged(self.allocate(Object::Tagged {
+                    tag: RichValue::new(tag, loc),
+                    payload,
+                }))
+            }
             Value::Array(values) => {
                 let mut imported = Vec::with_capacity(values.len());
                 for (index, value) in values.iter().enumerate() {
@@ -460,6 +478,17 @@ impl Heap {
             }
             Value::Atom(Atom::Builtin(atom)) => RuntimeValue::BuiltinAtom(*atom),
             Value::Atom(Atom::Named(name)) => self.atom(background, name),
+            Value::Tagged { tag, payload } => {
+                let tag = match tag {
+                    Atom::Builtin(atom) => RuntimeValue::BuiltinAtom(*atom),
+                    Atom::Named(name) => self.atom(background, name),
+                };
+                let payload = self.import_value_with(background, payload, externals, prototypes)?;
+                RuntimeValue::Tagged(self.allocate(Object::Tagged {
+                    tag: RichValue::unknown(tag),
+                    payload,
+                }))
+            }
             Value::Array(values) => {
                 let values = values
                     .iter()
@@ -682,6 +711,13 @@ impl<'a> HeapView<'a> {
         }
     }
 
+    pub(crate) fn tagged(&self, handle: Handle) -> Result<(RichValue, RichValue), HeapError> {
+        let Object::Tagged { tag, payload } = self.object(handle)? else {
+            return Err(HeapError("handle is not a Tagged value"));
+        };
+        Ok((*tag, *payload))
+    }
+
     pub(crate) fn dict_get(
         &self,
         handle: Handle,
@@ -832,6 +868,21 @@ impl<'a> HeapView<'a> {
             | (RuntimeValue::Tuple(left), RuntimeValue::Tuple(right)) => {
                 self.sequence_handles_equal(left, right, visited)
             }
+            (RuntimeValue::Tagged(left), RuntimeValue::Tagged(right)) => {
+                if left == right || !visited.insert((left, right)) {
+                    return Ok(true);
+                }
+                let (left_tag, left_payload) = self.tagged(left)?;
+                let (right_tag, right_payload) = self.tagged(right)?;
+                Ok(
+                    self.values_equal_with(left_tag.value, right_tag.value, visited)?
+                        && self.values_equal_with(
+                            left_payload.value,
+                            right_payload.value,
+                            visited,
+                        )?,
+                )
+            }
             (RuntimeValue::Dict(left), RuntimeValue::Dict(right)) => {
                 self.dict_handles_equal(left, right, visited)
             }
@@ -967,6 +1018,18 @@ impl<'a> HeapView<'a> {
                 } else {
                     Value::Array(values.into())
                 }
+            }
+            RuntimeValue::Tagged(handle) => {
+                let Object::Tagged { tag, payload } = self.enter_object(handle, visiting)? else {
+                    return Err(HeapError("Tagged handle refers to another object kind"));
+                };
+                let tag = match self.export_value_with(tag.value, visiting)? {
+                    Value::Atom(tag) => tag,
+                    _ => return Err(HeapError("Tagged tag is not an Atom")),
+                };
+                let payload = self.export_value_with(payload.value, visiting)?;
+                visiting.remove(&handle);
+                Value::tagged(tag, payload)
             }
             RuntimeValue::Dict(handle) => {
                 let Object::Dict { shape, values } = self.enter_object(handle, visiting)? else {
@@ -1194,6 +1257,9 @@ impl PendingCopy {
             RuntimeValue::Tuple(handle) => {
                 RuntimeValue::Tuple(self.copy_object(target, source, handle)?)
             }
+            RuntimeValue::Tagged(handle) => {
+                RuntimeValue::Tagged(self.copy_object(target, source, handle)?)
+            }
             RuntimeValue::Dict(handle) => {
                 RuntimeValue::Dict(self.copy_object(target, source, handle)?)
             }
@@ -1253,6 +1319,10 @@ impl PendingCopy {
             Object::Bytes(value) => Object::Bytes(value.clone()),
             Object::Array(values) => Object::Array(copy_values(self, values)?),
             Object::Tuple(values) => Object::Tuple(copy_values(self, values)?),
+            Object::Tagged { tag, payload } => Object::Tagged {
+                tag: self.copy_value(target, source, *tag)?,
+                payload: self.copy_value(target, source, *payload)?,
+            },
             Object::Dict { shape, values } => Object::Dict {
                 shape: self.copy_shape(target, source, *shape)?,
                 values: copy_values(self, values)?,
@@ -1410,6 +1480,7 @@ fn value_contains_foreign(value: RuntimeValue, target: Storage) -> bool {
         | RuntimeValue::Bytes(handle)
         | RuntimeValue::Array(handle)
         | RuntimeValue::Tuple(handle)
+        | RuntimeValue::Tagged(handle)
         | RuntimeValue::Dict(handle)
         | RuntimeValue::Func(handle)
         | RuntimeValue::UpLink(handle) => handle.storage != target,
@@ -1427,6 +1498,10 @@ fn object_contains_foreign(object: &Object, target: Storage) -> bool {
         Object::Array(values) | Object::Tuple(values) => values
             .iter()
             .any(|value| rich_value_contains_foreign(*value, target)),
+        Object::Tagged { tag, payload } => {
+            rich_value_contains_foreign(*tag, target)
+                || rich_value_contains_foreign(*payload, target)
+        }
         Object::Dict { shape, values } => {
             shape.storage != target
                 || values

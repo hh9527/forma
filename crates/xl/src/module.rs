@@ -1615,11 +1615,11 @@ mod tests {
             .unwrap()
             .execute(100_000)
             .unwrap();
-        let Value::Tuple(result) = inspected else {
+        let Value::Tagged { tag, payload } = inspected else {
             panic!("codec must return a tagged Result")
         };
-        assert_eq!(result[0].to_string(), "'Err");
-        let Value::Dict(payload) = &result[1] else {
+        assert_eq!(tag.name(), "Err");
+        let Value::Dict(payload) = payload.as_ref() else {
             panic!("codec failure must be an ordinary diagnostic Dict")
         };
         assert!(payload.get("message").is_some());
@@ -1651,7 +1651,7 @@ mod tests {
 
         fs::write(
             directory.join("legacy.xl"),
-            r#"import result from "core:result"; result.unwrap(('Err, "legacy"))"#,
+            r#"import result from "core:result"; result.unwrap('Err("legacy"))"#,
         )
         .unwrap();
         let legacy = load_module(directory.join("legacy.xl"), BTreeMap::new(), 100_000)
@@ -2400,7 +2400,7 @@ mod tests {
         );
         assert_eq!(
             result.get("shared").unwrap().to_string(),
-            "('Some, \"addition\")"
+            "'Some(\"addition\")"
         );
         assert_eq!(result.get("missing").unwrap().to_string(), "'None");
         assert_eq!(result.get("has").unwrap().to_string(), "'True");
@@ -2461,14 +2461,14 @@ mod tests {
                 .get("checked")
                 .unwrap()
                 .to_string()
-                .starts_with("('Ok,")
+                .starts_with("'Ok(")
         );
         assert!(
             result
                 .get("decoded")
                 .unwrap()
                 .to_string()
-                .starts_with("('Ok,")
+                .starts_with("'Ok(")
         );
 
         let Value::Dict(metadata) = result.get("metadata").unwrap() else {
@@ -2542,7 +2542,7 @@ mod tests {
                let explicit = struct('None, { value: Int });
                let explicit_union = union('None, [Int, String]);
                let unit: Choice = 'None;
-               let payload: Choice = ('User, { name: "Ada", role: "admin" });
+               let payload: Choice = 'User({ name: "Ada", role: "admin" });
                let scalar_value: Scalar = 42;
                {
                    user: User,
@@ -2561,13 +2561,13 @@ mod tests {
         let Value::Dict(result) = module.execute(100_000).unwrap() else {
             panic!("expected model result")
         };
-        assert!(result.get("unit").unwrap().to_string().starts_with("('Ok,"));
+        assert!(result.get("unit").unwrap().to_string().starts_with("'Ok("));
         assert!(
             result
                 .get("payload")
                 .unwrap()
                 .to_string()
-                .starts_with("('Ok,")
+                .starts_with("'Ok(")
         );
 
         fn assert_wrapper(value: &Value) -> &crate::Dict {
@@ -2666,8 +2666,8 @@ mod tests {
                {
                    unknown: validate(Choice, 'Other),
                    missing: validate(Choice, 'Number),
-                   unexpected: validate(Choice, ('None, 1)),
-                   wrong: validate(Choice, ('Number, "one")),
+                   unexpected: validate(Choice, 'None(1)),
+                   wrong: validate(Choice, 'Number("one")),
                    codec: codec.decode(Choice, "None"),
                }"#,
         )
@@ -2677,9 +2677,9 @@ mod tests {
             panic!("expected validation results")
         };
         for field in ["unknown", "missing", "unexpected", "wrong"] {
-            assert!(result.get(field).unwrap().to_string().starts_with("('Err,"));
+            assert!(result.get(field).unwrap().to_string().starts_with("'Err("));
         }
-        assert_eq!(result.get("codec").unwrap().to_string(), "('Ok, 'None)");
+        assert_eq!(result.get("codec").unwrap().to_string(), "'Ok('None)");
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2704,10 +2704,10 @@ mod tests {
                {
                    idle: codec.decode(Event, "idle") |> result.unwrap,
                    joined: codec.decode(Event, {userJoined: {name: "Ada"}}) |> result.unwrap,
-                   fatal: codec.encode(Event, ('FatalError, "boom")) |> result.unwrap,
-                   nested: codec.encode(Envelope, {event: ('UserJoined, {name: "Lin"})}) |> result.unwrap,
+                   fatal: codec.encode(Event, 'FatalError("boom")) |> result.unwrap,
+                   nested: codec.encode(Envelope, {event: 'UserJoined({name: "Lin"})}) |> result.unwrap,
                    text: codec.decode(Scalar, "hello") |> result.unwrap,
-                   count: codec.encode(Scalar, ('Count, 3)) |> result.unwrap,
+                   count: codec.encode(Scalar, 'Count(3)) |> result.unwrap,
                }"#,
         )
         .unwrap();
@@ -2718,7 +2718,7 @@ mod tests {
         assert_eq!(output.get("idle").unwrap().to_string(), "'Idle");
         assert_eq!(
             output.get("joined").unwrap().to_string(),
-            "('UserJoined, {name: \"Ada\"})"
+            "'UserJoined({name: \"Ada\"})"
         );
         assert_eq!(
             output.get("fatal").unwrap().to_string(),
@@ -2728,10 +2728,7 @@ mod tests {
             output.get("nested").unwrap().to_string(),
             "{event: {userJoined: {name: \"Lin\"}}}"
         );
-        assert_eq!(
-            output.get("text").unwrap().to_string(),
-            "('Text, \"hello\")"
-        );
+        assert_eq!(output.get("text").unwrap().to_string(), "'Text(\"hello\")");
         assert_eq!(output.get("count").unwrap().to_string(), "3");
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2924,7 +2921,7 @@ mod tests {
                    boolean: codec.decode(Bool, 'True) |> result.unwrap,
                    none: codec.decode(Option(Int), 'None) |> result.unwrap,
                    some: codec.decode(Option(Int), 3) |> result.unwrap,
-                   encoded: codec.encode(Option(Int), ('Some, 4)) |> result.unwrap,
+                   encoded: codec.encode(Option(Int), 'Some(4)) |> result.unwrap,
                    bool_schema: json.schema(Bool),
                    option_schema: json.schema(Option(Int)),
                }"#,
@@ -2934,7 +2931,7 @@ mod tests {
         let output = module.execute(100_000).unwrap().to_string();
         assert!(output.contains("boolean: 'True"), "{output}");
         assert!(output.contains("none: 'None"), "{output}");
-        assert!(output.contains("some: ('Some, 3)"), "{output}");
+        assert!(output.contains("some: 'Some(3)"), "{output}");
         assert!(output.contains("encoded: 4"), "{output}");
         assert!(output.contains("type: \"boolean\""), "{output}");
         assert!(output.contains("type: \"null\""), "{output}");
@@ -3005,7 +3002,7 @@ mod tests {
             "{output}"
         );
         assert!(
-            output.contains("pair: {right: ('Some, {left: 'None})}"),
+            output.contains("pair: {right: 'Some({left: 'None})}"),
             "{output}"
         );
         assert!(output.contains("$defs"), "{output}");
@@ -3064,7 +3061,7 @@ mod tests {
         let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(
             module.execute(100_000).unwrap().to_string(),
-            "('Ok, {next: 1})"
+            "'Ok({next: 1})"
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3079,9 +3076,9 @@ mod tests {
                type Outcome = Result(String, Int);
                let compared: Bool = 1 < 2;
                let none: Maybe = 'None;
-               let some: Maybe = ('Some, 42);
-               let ok: Outcome = ('Ok, "done");
-               let err: Outcome = ('Err, 7);
+               let some: Maybe = 'Some(42);
+               let ok: Outcome = 'Ok("done");
+               let err: Outcome = 'Err(7);
                {
                    bool: Bool,
                    maybe: Maybe,
@@ -3092,7 +3089,7 @@ mod tests {
                    ok: validate(Outcome, ok),
                    err: validate(Outcome, err),
                    wrong_bool: validate(Bool, 'Other),
-                   wrong_some: validate(Maybe, ('Some, "forty-two")),
+                   wrong_some: validate(Maybe, 'Some("forty-two")),
                }"#,
         )
         .unwrap();
@@ -3101,10 +3098,10 @@ mod tests {
             panic!("expected built-in type results")
         };
         for field in ["compared", "none", "some", "ok", "err"] {
-            assert!(result.get(field).unwrap().to_string().starts_with("('Ok,"));
+            assert!(result.get(field).unwrap().to_string().starts_with("'Ok("));
         }
         for field in ["wrong_bool", "wrong_some"] {
-            assert!(result.get(field).unwrap().to_string().starts_with("('Err,"));
+            assert!(result.get(field).unwrap().to_string().starts_with("'Err("));
         }
 
         fn wrapper(value: &Value) -> &crate::Dict {
@@ -3462,7 +3459,7 @@ mod tests {
         let value = module
             .execute_with_quota_and_debug_sink(Quota::with_fuel(4), sink.clone())
             .unwrap();
-        assert_eq!(value.to_string(), "('Ok, {retained: 7})");
+        assert_eq!(value.to_string(), "'Ok({retained: 7})");
         assert_eq!(sink.events.lock().unwrap().len(), 1);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3562,7 +3559,7 @@ mod tests {
         let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(
             module.execute(100_000).unwrap().to_string(),
-            "('Ok, {items: [{}, {value: 2}]})"
+            "'Ok({items: [{}, {value: 2}]})"
         );
         fs::remove_dir_all(directory).unwrap();
     }

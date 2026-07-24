@@ -143,6 +143,9 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
     fn predicate_arguments_1(&self) -> bool {
         self.peek(1) != Token::RParen
     }
+    fn predicate_pattern_2(&self) -> bool {
+        self.peek(1) == Token::LParen
+    }
     fn predicate_section_arguments_1(&self) -> bool {
         self.peek(1) != Token::RParen
     }

@@ -602,6 +602,7 @@ pub enum Value {
     Dict(Dict),
     Array(Arc<[Value]>),
     Atom(Atom),
+    Tagged { tag: Atom, payload: Box<Value> },
     Tuple(Arc<[Value]>),
     Func(Arc<Closure>),
 }
@@ -627,6 +628,13 @@ impl Value {
         Self::Atom(Atom::named(name))
     }
 
+    pub fn tagged(tag: Atom, payload: Value) -> Self {
+        Self::Tagged {
+            tag,
+            payload: Box::new(payload),
+        }
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Int(_) => "Int",
@@ -636,6 +644,7 @@ impl Value {
             Self::Dict(_) => "Dict",
             Self::Array(_) => "Array",
             Self::Atom(_) => "Atom",
+            Self::Tagged { .. } => "Tagged",
             Self::Tuple(_) => "Tuple",
             Self::Func(_) => "Func",
         }
@@ -675,6 +684,7 @@ impl fmt::Display for Value {
             }
             Self::Array(values) => format_sequence(formatter, "[", "]", values),
             Self::Atom(atom) => write!(formatter, "'{}", atom.name()),
+            Self::Tagged { tag, payload } => write!(formatter, "'{}({payload})", tag.name()),
             Self::Tuple(values) => format_sequence(formatter, "(", ")", values),
             Self::Func(closure) => match closure.prototype() {
                 Prototype::Bytecode(function) => {

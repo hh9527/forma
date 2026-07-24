@@ -1223,6 +1223,36 @@ impl<'a> Compiler<'a> {
                 let expected = self.load_constant(atom_value(item), pattern.location);
                 self.emit_pattern_equality(value, expected, failures, pattern.location);
             }
+            PatternKind::Tagged { tag, payload } => {
+                let expected = self.load_constant(atom_value(tag), pattern.location);
+                let condition = self.allocate();
+                self.emit(
+                    Operation::TaggedTagEquals {
+                        dst: condition,
+                        value,
+                        tag: expected,
+                    },
+                    pattern.location,
+                );
+                let failure = self.new_label();
+                self.emit(
+                    Operation::JumpIfFalse {
+                        condition,
+                        target: failure,
+                    },
+                    pattern.location,
+                );
+                failures.push(failure);
+                let payload_value = self.allocate();
+                self.emit(
+                    Operation::GetTaggedPayload {
+                        dst: payload_value,
+                        value,
+                    },
+                    pattern.location,
+                );
+                self.compile_pattern(payload, payload_value, failures, bindings)?;
+            }
             PatternKind::Tuple(items) => {
                 let condition = self.allocate();
                 self.emit(
@@ -1488,6 +1518,7 @@ fn bind_pattern(pattern: &Pattern, bound: &mut HashSet<String>) {
                 bind_pattern(item, bound);
             }
         }
+        PatternKind::Tagged { payload, .. } => bind_pattern(payload, bound),
         PatternKind::Wildcard
         | PatternKind::Int(_)
         | PatternKind::Float(_)
@@ -1942,6 +1973,13 @@ let decorators = {
     #[test]
     fn match_destructures_tagged_tuples() {
         let value = run("match ('Ok, 42) { ('Err, _) => 0, ('Ok, value) => value }").unwrap();
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn atom_call_constructs_tagged_value_and_pattern_destructures_it() {
+        let value =
+            run("let Some = 'Some; match Some(42) { 'None => 0, 'Some(value) => value }").unwrap();
         assert!(matches!(value, Value::Int(42)));
     }
 

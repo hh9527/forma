@@ -106,6 +106,15 @@ pub enum Instruction {
         tuple: Register,
         index: usize,
     },
+    TaggedTagEquals {
+        dst: Register,
+        value: Register,
+        tag: Register,
+    },
+    GetTaggedPayload {
+        dst: Register,
+        value: Register,
+    },
     MakeClosure {
         dst: Register,
         function: Arc<BytecodeFunction>,
@@ -226,6 +235,15 @@ pub enum Opcode {
         dst: Register,
         tuple: Register,
         index: usize,
+    },
+    TaggedTagEquals {
+        dst: Register,
+        value: Register,
+        tag: Register,
+    },
+    GetTaggedPayload {
+        dst: Register,
+        value: Register,
     },
     MakeClosure {
         dst: Register,
@@ -535,6 +553,10 @@ fn link_instruction(instruction: Instruction, links: &mut LinkingTable) -> Opcod
             Opcode::TupleLengthEquals { dst, value, length }
         }
         Instruction::GetTuple { dst, tuple, index } => Opcode::GetTuple { dst, tuple, index },
+        Instruction::TaggedTagEquals { dst, value, tag } => {
+            Opcode::TaggedTagEquals { dst, value, tag }
+        }
+        Instruction::GetTaggedPayload { dst, value } => Opcode::GetTaggedPayload { dst, value },
         Instruction::MakeClosure {
             dst,
             function,

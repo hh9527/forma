@@ -136,6 +136,7 @@ pub enum PatternKind {
     Float(f64),
     String(String),
     Atom(String),
+    Tagged { tag: String, payload: Box<Pattern> },
     Tuple(Vec<Pattern>),
 }
 

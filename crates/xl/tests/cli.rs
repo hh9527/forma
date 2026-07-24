@@ -57,7 +57,7 @@ fn check_run_and_types_cover_the_closed_world_loop() {
         "{}",
         String::from_utf8_lossy(&run.stderr)
     );
-    assert!(String::from_utf8_lossy(&run.stdout).contains("('Ok,"));
+    assert!(String::from_utf8_lossy(&run.stdout).contains("'Ok("));
     fs::remove_dir_all(directory).unwrap();
 }
 

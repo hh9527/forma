@@ -106,6 +106,15 @@ pub enum Operation {
         tuple: RegisterId,
         index: usize,
     },
+    TaggedTagEquals {
+        dst: RegisterId,
+        value: RegisterId,
+        tag: RegisterId,
+    },
+    GetTaggedPayload {
+        dst: RegisterId,
+        value: RegisterId,
+    },
     MakeClosure {
         dst: RegisterId,
         function: Box<Function>,
@@ -349,6 +358,15 @@ fn lower_operation(
             dst: register(dst)?,
             tuple: register(tuple)?,
             index,
+        },
+        Operation::TaggedTagEquals { dst, value, tag } => Instruction::TaggedTagEquals {
+            dst: register(dst)?,
+            value: register(value)?,
+            tag: register(tag)?,
+        },
+        Operation::GetTaggedPayload { dst, value } => Instruction::GetTaggedPayload {
+            dst: register(dst)?,
+            value: register(value)?,
         },
         Operation::MakeClosure {
             dst,

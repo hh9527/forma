@@ -120,6 +120,7 @@ pub enum ValueKind {
     Dict,
     Array,
     Atom,
+    Tagged,
     Tuple,
     Func,
 }
@@ -153,6 +154,7 @@ impl<'a> ValueRef<'a> {
             RuntimeValue::String(handle)
             | RuntimeValue::Bytes(handle)
             | RuntimeValue::Array(handle)
+            | RuntimeValue::Tagged(handle)
             | RuntimeValue::Tuple(handle)
             | RuntimeValue::Dict(handle)
             | RuntimeValue::Func(handle) => Some(handle),
@@ -188,6 +190,7 @@ impl<'a> ValueRef<'a> {
             RuntimeValue::Dict(_) => ValueKind::Dict,
             RuntimeValue::Array(_) => ValueKind::Array,
             RuntimeValue::BuiltinAtom(_) | RuntimeValue::Atom(_) => ValueKind::Atom,
+            RuntimeValue::Tagged(_) => ValueKind::Tagged,
             RuntimeValue::Tuple(_) => ValueKind::Tuple,
             RuntimeValue::Func(_) => ValueKind::Func,
             RuntimeValue::UpLink(_) => {
@@ -240,6 +243,23 @@ impl<'a> ValueRef<'a> {
             value,
             view: self.view,
         })
+    }
+
+    pub fn tagged_parts(self) -> Option<(ValueRef<'a>, ValueRef<'a>)> {
+        let RuntimeValue::Tagged(handle) = self.value.value else {
+            return None;
+        };
+        let (tag, payload) = self.view.tagged(handle).ok()?;
+        Some((
+            ValueRef {
+                value: tag,
+                view: self.view,
+            },
+            ValueRef {
+                value: payload,
+                view: self.view,
+            },
+        ))
     }
 
     pub fn dict_fields(self) -> Option<Vec<&'a str>> {
@@ -450,6 +470,21 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
         self.charge_sequence(values.len())?;
         let value = RichValue::unknown(RuntimeValue::Tuple(
             self.current.allocate(Object::Tuple(values.into())),
+        ));
+        self.set(destination, value)
+    }
+
+    pub fn make_tagged(
+        &mut self,
+        destination: RegisterId,
+        tag: RegisterId,
+        payload: RegisterId,
+    ) -> Result<(), NativeError> {
+        let tag = self.owned(tag)?;
+        let payload = self.owned(payload)?;
+        self.charge_sequence(2)?;
+        let value = RichValue::unknown(RuntimeValue::Tagged(
+            self.current.allocate(Object::Tagged { tag, payload }),
         ));
         self.set(destination, value)
     }
@@ -1567,6 +1602,46 @@ impl Vm {
                             })?;
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
+                    Opcode::TaggedTagEquals { dst, value, tag } => {
+                        let value = read_register(&registers, *value, function, pc)?;
+                        let expected = read_register(&registers, *tag, function, pc)?;
+                        let matches = if let RuntimeValue::Tagged(handle) = value.value {
+                            let (actual, _) = view.tagged(handle).map_err(|heap_error| {
+                                error(
+                                    RuntimeErrorKind::InvalidBytecode,
+                                    heap_error.to_string(),
+                                    function,
+                                    pc,
+                                )
+                            })?;
+                            view.values_equal(actual, *expected).map_err(|heap_error| {
+                                error(
+                                    RuntimeErrorKind::InvalidBytecode,
+                                    heap_error.to_string(),
+                                    function,
+                                    pc,
+                                )
+                            })?
+                        } else {
+                            false
+                        };
+                        write_register(&mut registers, *dst, runtime_bool(matches), function, pc)?;
+                    }
+                    Opcode::GetTaggedPayload { dst, value } => {
+                        let tagged = read_register(&registers, *value, function, pc)?;
+                        let RuntimeValue::Tagged(handle) = tagged.value else {
+                            return Err(runtime_type_error("Tagged", tagged, &view, function, pc));
+                        };
+                        let (_, payload) = view.tagged(handle).map_err(|heap_error| {
+                            error(
+                                RuntimeErrorKind::InvalidBytecode,
+                                heap_error.to_string(),
+                                function,
+                                pc,
+                            )
+                        })?;
+                        write_register(&mut registers, *dst, payload, function, pc)?;
+                    }
                     Opcode::MakeClosure {
                         dst,
                         prototype,
@@ -1900,62 +1975,58 @@ fn drive_vm_action(
                         call_pc,
                     ));
                 }
-                let RuntimeValue::Func(closure_handle) = callee.value else {
+                if matches!(
+                    callee.value,
+                    RuntimeValue::BuiltinAtom(_) | RuntimeValue::Atom(_)
+                ) {
+                    if arguments.len() != 1 {
+                        return Err(error(
+                            RuntimeErrorKind::TypeMismatch,
+                            format!(
+                                "tag constructor expects 1 argument, got {}",
+                                arguments.len()
+                            ),
+                            &call_function,
+                            call_pc,
+                        ));
+                    }
+                    charge_allocation(
+                        account,
+                        (std::mem::size_of::<RichValue>() * 2) as u64,
+                        &call_function,
+                        call_pc,
+                    )?;
+                    let value = RichValue::new(
+                        RuntimeValue::Tagged(current.allocate(Object::Tagged {
+                            tag: callee,
+                            payload: arguments[0],
+                        })),
+                        callee.loc,
+                    );
+                    VmAction::Return {
+                        value,
+                        return_target,
+                    }
+                } else {
+                    let RuntimeValue::Func(closure_handle) = callee.value else {
+                        let view = HeapView {
+                            current,
+                            background: Some(background),
+                        };
+                        return Err(runtime_type_error(
+                            "Func",
+                            &callee,
+                            &view,
+                            &call_function,
+                            call_pc,
+                        ));
+                    };
                     let view = HeapView {
                         current,
                         background: Some(background),
                     };
-                    return Err(runtime_type_error(
-                        "Func",
-                        &callee,
-                        &view,
-                        &call_function,
-                        call_pc,
-                    ));
-                };
-                let view = HeapView {
-                    current,
-                    background: Some(background),
-                };
-                let (runtime_prototype, upvalues) =
-                    view.closure(closure_handle).map_err(|heap_error| {
-                        error(
-                            RuntimeErrorKind::InvalidBytecode,
-                            heap_error.to_string(),
-                            &call_function,
-                            call_pc,
-                        )
-                    })?;
-                let upvalues = upvalues.to_vec();
-                let expected_arity = match runtime_prototype {
-                    crate::heap::RuntimePrototype::Bytecode(prototype) => view
-                        .bytecode(prototype)
-                        .map_err(|heap_error| {
-                            error(
-                                RuntimeErrorKind::InvalidBytecode,
-                                heap_error.to_string(),
-                                &call_function,
-                                call_pc,
-                            )
-                        })?
-                        .0
-                        .parameter_count(),
-                    crate::heap::RuntimePrototype::Native(native) => native.arity(),
-                };
-                if arguments.len() != expected_arity {
-                    return Err(error(
-                        RuntimeErrorKind::TypeMismatch,
-                        format!(
-                            "expected {expected_arity} arguments, got {}",
-                            arguments.len()
-                        ),
-                        &call_function,
-                        call_pc,
-                    ));
-                }
-                match runtime_prototype {
-                    crate::heap::RuntimePrototype::Bytecode(prototype) => {
-                        let (code, _, _, _) = view.bytecode(prototype).map_err(|heap_error| {
+                    let (runtime_prototype, upvalues) =
+                        view.closure(closure_handle).map_err(|heap_error| {
                             error(
                                 RuntimeErrorKind::InvalidBytecode,
                                 heap_error.to_string(),
@@ -1963,149 +2034,198 @@ fn drive_vm_action(
                                 call_pc,
                             )
                         })?;
-                        let callee_function =
-                            Arc::new(BytecodeFunction::from_linked_code(Arc::clone(code)));
-                        let next = make_execution_frame(
-                            callee_function,
-                            prototype,
-                            &arguments,
-                            &upvalues,
-                            return_target,
-                            stack,
-                            account.stack_limit(),
-                        )
-                        .map_err(|runtime_error| {
-                            error(
-                                runtime_error.kind,
-                                runtime_error.message,
-                                &call_function,
-                                call_pc,
-                            )
-                        })?;
-                        frames.push(next);
-                        return Ok(DriveOutcome::Pending);
-                    }
-                    crate::heap::RuntimePrototype::Native(native) => match native.kind() {
-                        NativeKind::Synchronous => {
-                            let mut context = CallContext::new(
-                                current,
-                                Some(background),
-                                stack,
-                                account,
-                                arguments,
-                                &upvalues,
-                            )
-                            .map_err(|native_error| {
-                                native_runtime_error(native, native_error, &call_function, call_pc)
-                            })?;
-                            (native.callback())(&mut context).map_err(|native_error| {
-                                native_runtime_error(native, native_error, &call_function, call_pc)
-                            })?;
-                            let value = context.take_result().map_err(|native_error| {
+                    let upvalues = upvalues.to_vec();
+                    let expected_arity = match runtime_prototype {
+                        crate::heap::RuntimePrototype::Bytecode(prototype) => view
+                            .bytecode(prototype)
+                            .map_err(|heap_error| {
                                 error(
                                     RuntimeErrorKind::InvalidBytecode,
-                                    format!("{}: {}", native.name(), native_error.message),
+                                    heap_error.to_string(),
+                                    &call_function,
+                                    call_pc,
+                                )
+                            })?
+                            .0
+                            .parameter_count(),
+                        crate::heap::RuntimePrototype::Native(native) => native.arity(),
+                    };
+                    if arguments.len() != expected_arity {
+                        return Err(error(
+                            RuntimeErrorKind::TypeMismatch,
+                            format!(
+                                "expected {expected_arity} arguments, got {}",
+                                arguments.len()
+                            ),
+                            &call_function,
+                            call_pc,
+                        ));
+                    }
+                    match runtime_prototype {
+                        crate::heap::RuntimePrototype::Bytecode(prototype) => {
+                            let (code, _, _, _) =
+                                view.bytecode(prototype).map_err(|heap_error| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        heap_error.to_string(),
+                                        &call_function,
+                                        call_pc,
+                                    )
+                                })?;
+                            let callee_function =
+                                Arc::new(BytecodeFunction::from_linked_code(Arc::clone(code)));
+                            let next = make_execution_frame(
+                                callee_function,
+                                prototype,
+                                &arguments,
+                                &upvalues,
+                                return_target,
+                                stack,
+                                account.stack_limit(),
+                            )
+                            .map_err(|runtime_error| {
+                                error(
+                                    runtime_error.kind,
+                                    runtime_error.message,
                                     &call_function,
                                     call_pc,
                                 )
                             })?;
-                            VmAction::Return {
-                                value: value.with_loc(
-                                    value.loc.or(instruction_location(&call_function, call_pc)),
-                                ),
-                                return_target,
-                            }
+                            frames.push(next);
+                            return Ok(DriveOutcome::Pending);
                         }
-                        NativeKind::CoreArray(function) => start_array_continuation(
-                            function,
-                            arguments,
-                            return_target,
-                            call_function,
-                            call_pc,
-                            current,
-                            background,
-                        )?,
-                        NativeKind::CoreAttributes(function) => run_core_attributes(
-                            function,
-                            &arguments,
-                            return_target,
-                            &call_function,
-                            call_pc,
-                            current,
-                            background,
-                            account,
-                        )?,
-                        NativeKind::CoreModel(function) => run_core_model(
-                            function,
-                            &arguments,
-                            return_target,
-                            &call_function,
-                            call_pc,
-                            current,
-                            background,
-                            account,
-                        )?,
-                        NativeKind::CoreBuiltinType(function) => run_core_builtin_type(
-                            function,
-                            &arguments,
-                            return_target,
-                            &call_function,
-                            call_pc,
-                            current,
-                            background,
-                            account,
-                        )?,
-                        NativeKind::CoreDict(function) => run_core_dict(
-                            function,
-                            &arguments,
-                            return_target,
-                            &call_function,
-                            call_pc,
-                            current,
-                            background,
-                            account,
-                        )?,
-                        NativeKind::CoreDebug(function) => run_core_debug(
-                            function,
-                            &arguments,
-                            return_target,
-                            &call_function,
-                            call_pc,
-                            current,
-                            background,
-                            debug_sink,
-                        )?,
-                        NativeKind::CoreCodec(operation) => run_core_codec(
-                            operation,
-                            &arguments,
-                            return_target,
-                            &call_function,
-                            call_pc,
-                            current,
-                            background,
-                            account,
-                        )?,
-                        NativeKind::CoreResult(operation) => run_core_result(
-                            operation,
-                            &arguments,
-                            return_target,
-                            &call_function,
-                            call_pc,
-                            current,
-                            background,
-                        )?,
-                        NativeKind::CoreJson(operation) => run_core_json(
-                            operation,
-                            &arguments,
-                            &upvalues,
-                            return_target,
-                            &call_function,
-                            call_pc,
-                            current,
-                            background,
-                            account,
-                        )?,
-                    },
+                        crate::heap::RuntimePrototype::Native(native) => match native.kind() {
+                            NativeKind::Synchronous => {
+                                let mut context = CallContext::new(
+                                    current,
+                                    Some(background),
+                                    stack,
+                                    account,
+                                    arguments,
+                                    &upvalues,
+                                )
+                                .map_err(|native_error| {
+                                    native_runtime_error(
+                                        native,
+                                        native_error,
+                                        &call_function,
+                                        call_pc,
+                                    )
+                                })?;
+                                (native.callback())(&mut context).map_err(|native_error| {
+                                    native_runtime_error(
+                                        native,
+                                        native_error,
+                                        &call_function,
+                                        call_pc,
+                                    )
+                                })?;
+                                let value = context.take_result().map_err(|native_error| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        format!("{}: {}", native.name(), native_error.message),
+                                        &call_function,
+                                        call_pc,
+                                    )
+                                })?;
+                                VmAction::Return {
+                                    value: value.with_loc(
+                                        value.loc.or(instruction_location(&call_function, call_pc)),
+                                    ),
+                                    return_target,
+                                }
+                            }
+                            NativeKind::CoreArray(function) => start_array_continuation(
+                                function,
+                                arguments,
+                                return_target,
+                                call_function,
+                                call_pc,
+                                current,
+                                background,
+                            )?,
+                            NativeKind::CoreAttributes(function) => run_core_attributes(
+                                function,
+                                &arguments,
+                                return_target,
+                                &call_function,
+                                call_pc,
+                                current,
+                                background,
+                                account,
+                            )?,
+                            NativeKind::CoreModel(function) => run_core_model(
+                                function,
+                                &arguments,
+                                return_target,
+                                &call_function,
+                                call_pc,
+                                current,
+                                background,
+                                account,
+                            )?,
+                            NativeKind::CoreBuiltinType(function) => run_core_builtin_type(
+                                function,
+                                &arguments,
+                                return_target,
+                                &call_function,
+                                call_pc,
+                                current,
+                                background,
+                                account,
+                            )?,
+                            NativeKind::CoreDict(function) => run_core_dict(
+                                function,
+                                &arguments,
+                                return_target,
+                                &call_function,
+                                call_pc,
+                                current,
+                                background,
+                                account,
+                            )?,
+                            NativeKind::CoreDebug(function) => run_core_debug(
+                                function,
+                                &arguments,
+                                return_target,
+                                &call_function,
+                                call_pc,
+                                current,
+                                background,
+                                debug_sink,
+                            )?,
+                            NativeKind::CoreCodec(operation) => run_core_codec(
+                                operation,
+                                &arguments,
+                                return_target,
+                                &call_function,
+                                call_pc,
+                                current,
+                                background,
+                                account,
+                            )?,
+                            NativeKind::CoreResult(operation) => run_core_result(
+                                operation,
+                                &arguments,
+                                return_target,
+                                &call_function,
+                                call_pc,
+                                current,
+                                background,
+                            )?,
+                            NativeKind::CoreJson(operation) => run_core_json(
+                                operation,
+                                &arguments,
+                                &upvalues,
+                                return_target,
+                                &call_function,
+                                call_pc,
+                                current,
+                                background,
+                                account,
+                            )?,
+                        },
+                    }
                 }
             }
         };
@@ -2826,18 +2946,10 @@ fn run_core_attributes(
                     pc,
                 )?;
                 RichValue::new(
-                    RuntimeValue::Tuple(
-                        current.allocate(Object::Tuple(
-                            vec![
-                                RichValue::new(
-                                    RuntimeValue::BuiltinAtom(BuiltinAtom::Some),
-                                    call_loc,
-                                ),
-                                payload,
-                            ]
-                            .into(),
-                        )),
-                    ),
+                    RuntimeValue::Tagged(current.allocate(Object::Tagged {
+                        tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Some), call_loc),
+                        payload,
+                    })),
                     call_loc,
                 )
             } else {
@@ -3359,6 +3471,10 @@ enum CodecKind {
     Bytes,
     Atom(String),
     Array(Box<CodecType>),
+    Tagged {
+        tag: String,
+        payload: Box<CodecType>,
+    },
     Tuple(Vec<CodecType>),
     Struct(BTreeMap<String, CodecType>),
     Enum(BTreeMap<String, CodecEnumVariant>),
@@ -3380,6 +3496,11 @@ enum CodecNode {
     NamedAtom(String, Option<crate::Loc>),
     Array(Vec<Self>, Option<crate::Loc>),
     Tuple(Vec<Self>, Option<crate::Loc>),
+    Tagged {
+        tag: Box<Self>,
+        payload: Box<Self>,
+        loc: Option<crate::Loc>,
+    },
     Dict(Vec<(String, Self)>, Option<crate::Loc>),
     String(String, Option<crate::Loc>),
 }
@@ -3660,15 +3781,10 @@ fn finish_codec_result(
     charge_allocation(account, bytes, function, pc)?;
     let payload = materialize_codec_node(payload, current, background);
     let value = RichValue::new(
-        RuntimeValue::Tuple(
-            current.allocate(Object::Tuple(
-                vec![
-                    RichValue::new(RuntimeValue::BuiltinAtom(tag), input.loc),
-                    payload,
-                ]
-                .into(),
-            )),
-        ),
+        RuntimeValue::Tagged(current.allocate(Object::Tagged {
+            tag: RichValue::new(RuntimeValue::BuiltinAtom(tag), input.loc),
+            payload,
+        })),
         input.loc,
     );
     Ok(VmAction::Return {
@@ -3720,6 +3836,7 @@ fn assert_codec_graph_ready(
                 visit(&resolved, current, background, visited)
             }
             CodecKind::Array(item) => visit(item, current, background, visited),
+            CodecKind::Tagged { payload, .. } => visit(payload, current, background, visited),
             CodecKind::Tuple(items) | CodecKind::Union(items) => items
                 .iter()
                 .try_for_each(|item| visit(item, current, background, visited)),
@@ -3830,6 +3947,26 @@ fn decode_runtime_type_at(
                 current,
                 background,
             )?))
+        }
+        "Tagged" => {
+            let tag = view
+                .dict_get_text(handle, "tag")
+                .map_err(|error| error.to_string())?
+                .and_then(|tag| view.atom_text(tag).ok().flatten())
+                .ok_or_else(|| format!("{path}.tag must be an Atom"))?;
+            let payload = view
+                .dict_get_text(handle, "payload")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("{path}.payload is missing"))?;
+            CodecKind::Tagged {
+                tag: tag.to_owned(),
+                payload: Box::new(decode_runtime_type_at(
+                    payload,
+                    &format!("{path}.payload"),
+                    current,
+                    background,
+                )?),
+            }
         }
         "Tuple" | "Union" => {
             let field = if kind == "Tuple" { "items" } else { "variants" };
@@ -4016,15 +4153,10 @@ fn option_item(schema: &CodecType) -> Option<&CodecType> {
         .iter()
         .any(|variant| matches!(&variant.kind, CodecKind::Atom(tag) if tag == "None"));
     let some = variants.iter().find_map(|variant| {
-        let CodecKind::Tuple(items) = &variant.kind else {
+        let CodecKind::Tagged { tag, payload } = &variant.kind else {
             return None;
         };
-        match items.as_slice() {
-            [tag, item] if matches!(&tag.kind, CodecKind::Atom(name) if name == "Some") => {
-                Some(item)
-            }
-            _ => None,
-        }
+        (tag == "Some").then_some(payload.as_ref())
     });
     none.then_some(some).flatten()
 }
@@ -4140,6 +4272,42 @@ fn transform_codec(
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map(|items| CodecNode::Array(items, value.loc))
+        }
+        CodecKind::Tagged { tag, payload } => {
+            let RuntimeValue::Tagged(handle) = value.value else {
+                return Err(CodecFailure::new(
+                    format!("{path}: expected '{tag}(payload)"),
+                    value,
+                    schema.rule,
+                ));
+            };
+            let (actual_tag, actual_payload) = view
+                .tagged(handle)
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?;
+            if view
+                .atom_text(actual_tag)
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?
+                != Some(tag)
+            {
+                return Err(CodecFailure::new(
+                    format!("{path}: expected tag '{tag}"),
+                    value,
+                    schema.rule,
+                ));
+            }
+            Ok(CodecNode::Tagged {
+                tag: Box::new(CodecNode::NamedAtom(tag.clone(), value.loc)),
+                payload: Box::new(transform_codec(
+                    payload,
+                    actual_payload,
+                    direction,
+                    path,
+                    predicate_decisions,
+                    current,
+                    background,
+                )?),
+                loc: value.loc,
+            })
         }
         CodecKind::Tuple(items) => {
             let (handle, input_is_tuple) = match (direction, value.value) {
@@ -4833,21 +5001,22 @@ fn transform_codec_enum(
                     variant.rule,
                 ));
             };
-            Ok(CodecNode::Tuple(
-                vec![
-                    CodecNode::NamedAtom(variant.internal_name.clone(), value.loc),
-                    transform_codec(
-                        payload,
-                        values[0],
-                        direction,
-                        &format!("{path}.{tag}"),
-                        predicate_decisions,
-                        current,
-                        background,
-                    )?,
-                ],
-                value.loc,
-            ))
+            Ok(CodecNode::Tagged {
+                tag: Box::new(CodecNode::NamedAtom(
+                    variant.internal_name.clone(),
+                    value.loc,
+                )),
+                payload: Box::new(transform_codec(
+                    payload,
+                    values[0],
+                    direction,
+                    &format!("{path}.{tag}"),
+                    predicate_decisions,
+                    current,
+                    background,
+                )?),
+                loc: value.loc,
+            })
         }
         CodecDirection::Encode => {
             if let Some(tag) = view
@@ -4874,25 +5043,18 @@ fn transform_codec_enum(
                 }
                 return Ok(CodecNode::String(variant.external_name.clone(), value.loc));
             }
-            let RuntimeValue::Tuple(handle) = value.value else {
+            let RuntimeValue::Tagged(handle) = value.value else {
                 return Err(CodecFailure::new(
                     format!("{path}: expected canonical Enum value"),
                     value,
                     schema.rule,
                 ));
             };
-            let tuple = view
-                .sequence(handle, true)
+            let (tag_value, payload_value) = view
+                .tagged(handle)
                 .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?;
-            if tuple.len() != 2 {
-                return Err(CodecFailure::new(
-                    format!("{path}: expected ('Variant, payload)"),
-                    value,
-                    schema.rule,
-                ));
-            }
             let tag = view
-                .atom_text(tuple[0])
+                .atom_text(tag_value)
                 .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?
                 .ok_or_else(|| {
                     CodecFailure::new(
@@ -4924,7 +5086,7 @@ fn transform_codec_enum(
                     variant.external_name.clone(),
                     transform_codec(
                         payload,
-                        tuple[1],
+                        payload_value,
                         direction,
                         &format!("{path}.{tag}"),
                         predicate_decisions,
@@ -4968,13 +5130,14 @@ fn transform_untagged_enum(
                 }
             }
             match matches.as_slice() {
-                [(variant, node)] => Ok(CodecNode::Tuple(
-                    vec![
-                        CodecNode::NamedAtom(variant.internal_name.clone(), value.loc),
-                        node.clone(),
-                    ],
-                    value.loc,
-                )),
+                [(variant, node)] => Ok(CodecNode::Tagged {
+                    tag: Box::new(CodecNode::NamedAtom(
+                        variant.internal_name.clone(),
+                        value.loc,
+                    )),
+                    payload: Box::new(node.clone()),
+                    loc: value.loc,
+                }),
                 [] => Err(CodecFailure::new(
                     format!(
                         "{path}: value matches no untagged Enum variant ({})",
@@ -4998,7 +5161,7 @@ fn transform_untagged_enum(
                 current,
                 background: Some(background),
             };
-            let RuntimeValue::Tuple(handle) = value.value else {
+            let RuntimeValue::Tagged(handle) = value.value else {
                 return Err(CodecFailure::new(
                     format!("{path}: expected ('Variant, payload)"),
                     value,
@@ -5008,18 +5171,11 @@ fn transform_untagged_enum(
                         .unwrap_or(value),
                 ));
             };
-            let tuple = view
-                .sequence(handle, true)
+            let (tag_value, payload_value) = view
+                .tagged(handle)
                 .map_err(|error| CodecFailure::new(error.to_string(), value, value))?;
-            if tuple.len() != 2 {
-                return Err(CodecFailure::new(
-                    format!("{path}: expected ('Variant, payload)"),
-                    value,
-                    value,
-                ));
-            }
             let tag = view
-                .atom_text(tuple[0])
+                .atom_text(tag_value)
                 .map_err(|error| CodecFailure::new(error.to_string(), value, value))?
                 .ok_or_else(|| {
                     CodecFailure::new(
@@ -5037,7 +5193,7 @@ fn transform_untagged_enum(
                 })?;
             transform_codec(
                 variant.payload.as_ref().expect("planned untagged payload"),
-                tuple[1],
+                payload_value,
                 direction,
                 path,
                 predicate_decisions,
@@ -5255,23 +5411,21 @@ fn transform_codec_field(
         return Ok(CodecNode::Atom(BuiltinAtom::None, value.loc));
     }
     match direction {
-        CodecDirection::Decode => Ok(CodecNode::Tuple(
-            vec![
-                CodecNode::Atom(BuiltinAtom::Some, value.loc),
-                transform_codec(
-                    item,
-                    value,
-                    direction,
-                    path,
-                    predicate_decisions,
-                    current,
-                    background,
-                )?,
-            ],
-            value.loc,
-        )),
+        CodecDirection::Decode => Ok(CodecNode::Tagged {
+            tag: Box::new(CodecNode::Atom(BuiltinAtom::Some, value.loc)),
+            payload: Box::new(transform_codec(
+                item,
+                value,
+                direction,
+                path,
+                predicate_decisions,
+                current,
+                background,
+            )?),
+            loc: value.loc,
+        }),
         CodecDirection::Encode => {
-            let RuntimeValue::Tuple(handle) = value.value else {
+            let RuntimeValue::Tagged(handle) = value.value else {
                 return Err(CodecFailure::new(
                     format!("{path}: expected Option"),
                     value,
@@ -5282,14 +5436,13 @@ fn transform_codec_field(
                 current,
                 background: Some(background),
             };
-            let tuple = view
-                .sequence(handle, true)
+            let (tag, payload) = view
+                .tagged(handle)
                 .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?;
-            if tuple.len() != 2
-                || view
-                    .atom_text(tuple[0])
-                    .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?
-                    != Some("Some")
+            if view
+                .atom_text(tag)
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?
+                != Some("Some")
             {
                 return Err(CodecFailure::new(
                     format!("{path}: expected Option"),
@@ -5299,7 +5452,7 @@ fn transform_codec_field(
             }
             transform_codec(
                 item,
-                tuple[1],
+                payload,
                 direction,
                 path,
                 predicate_decisions,
@@ -5480,6 +5633,9 @@ fn generate_json_schema_node(
             ],
             loc,
         )),
+        CodecKind::Tagged { payload, .. } => {
+            generate_json_schema_node(payload, data, current, background, links, definitions)
+        }
         CodecKind::Tuple(items) => {
             let schemas = items
                 .iter()
@@ -5712,6 +5868,7 @@ fn codec_type_name(schema: &CodecType) -> &'static str {
         CodecKind::Bytes => "Bytes",
         CodecKind::Atom(_) => "Atom",
         CodecKind::Array(_) => "Array",
+        CodecKind::Tagged { .. } => "Tagged",
         CodecKind::Tuple(_) => "Tuple",
         CodecKind::Struct(_) => "Struct",
         CodecKind::Enum(variants) => {
@@ -5735,6 +5892,10 @@ fn codec_node_bytes(node: &CodecNode) -> Result<u64, NativeError> {
                     .ok_or_else(|| NativeError::allocation_limit("codec output size overflowed"))
             })
         }
+        CodecNode::Tagged { tag, payload, .. } => logical_value_bytes(2)?
+            .checked_add(codec_node_bytes(tag)?)
+            .and_then(|total| total.checked_add(codec_node_bytes(payload).ok()?))
+            .ok_or_else(|| NativeError::allocation_limit("codec output size overflowed")),
         CodecNode::Dict(fields, _) => {
             let own = logical_value_bytes(fields.len())?;
             fields.iter().try_fold(own, |total, (name, value)| {
@@ -5778,6 +5939,14 @@ fn materialize_codec_node(node: CodecNode, current: &mut Heap, background: &Heap
                 loc,
             )
         }
+        CodecNode::Tagged { tag, payload, loc } => {
+            let tag = materialize_codec_node(*tag, current, background);
+            let payload = materialize_codec_node(*payload, current, background);
+            RichValue::new(
+                RuntimeValue::Tagged(current.allocate(Object::Tagged { tag, payload })),
+                loc,
+            )
+        }
         CodecNode::Dict(fields, loc) => {
             let mut fields = fields;
             fields.sort_by(|left, right| left.0.cmp(&right.0));
@@ -5815,26 +5984,18 @@ fn run_core_result(
         current,
         background: Some(background),
     };
-    let RuntimeValue::Tuple(handle) = arguments[0].value else {
+    let RuntimeValue::Tagged(handle) = arguments[0].value else {
         return Err(error(
             RuntimeErrorKind::TypeMismatch,
-            "core:result.unwrap expects ('Ok, value) or ('Err, message)",
+            "core:result.unwrap expects 'Ok(value) or 'Err(message)",
             function,
             pc,
         ));
     };
-    let tuple = view
-        .sequence(handle, true)
+    let (tag, payload) = view
+        .tagged(handle)
         .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?;
-    if tuple.len() != 2 {
-        return Err(error(
-            RuntimeErrorKind::TypeMismatch,
-            "core:result.unwrap expects a two-element Result",
-            function,
-            pc,
-        ));
-    }
-    match view.atom_text(tuple[0]).map_err(|heap_error| {
+    match view.atom_text(tag).map_err(|heap_error| {
         error(
             RuntimeErrorKind::InvalidBytecode,
             heap_error.to_string(),
@@ -5843,12 +6004,12 @@ fn run_core_result(
         )
     })? {
         Some("Ok") => Ok(VmAction::Return {
-            value: tuple[1],
+            value: payload,
             return_target,
         }),
         Some("Err") => {
             let (message, data_location, rule_location) = if let Some(message) =
-                view.string_text(tuple[1]).map_err(|heap_error| {
+                view.string_text(payload).map_err(|heap_error| {
                     error(
                         RuntimeErrorKind::InvalidBytecode,
                         heap_error.to_string(),
@@ -5856,8 +6017,8 @@ fn run_core_result(
                         pc,
                     )
                 })? {
-                (message.to_owned(), tuple[1].loc, None)
-            } else if let RuntimeValue::Dict(handle) = tuple[1].value {
+                (message.to_owned(), payload.loc, None)
+            } else if let RuntimeValue::Dict(handle) = payload.value {
                 let message = view
                     .dict_get_text(handle, "message")
                     .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
@@ -5908,7 +6069,7 @@ fn run_core_result(
         }
         _ => Err(error(
             RuntimeErrorKind::TypeMismatch,
-            "core:result.unwrap expects ('Ok, value) or ('Err, message)",
+            "core:result.unwrap expects 'Ok(value) or 'Err(message)",
             function,
             pc,
         )),
@@ -6290,6 +6451,9 @@ impl<'a> JsonWriter<'a> {
             RuntimeValue::Tuple(_) => {
                 return Err("JSON cannot encode Tuple; use a codec first".into());
             }
+            RuntimeValue::Tagged(_) => {
+                return Err("JSON cannot encode Tagged; use a codec first".into());
+            }
             RuntimeValue::Func(_) => return Err("JSON cannot encode Func".into()),
             RuntimeValue::UpLink(_) => return Err("JSON cannot encode an internal up-link".into()),
         }
@@ -6525,6 +6689,22 @@ impl<'a> DebugValueFormatter<'a> {
             },
             RuntimeValue::Array(handle) => self.sequence(handle, false, depth, "[", "]")?,
             RuntimeValue::Tuple(handle) => self.sequence(handle, true, depth, "(", ")")?,
+            RuntimeValue::Tagged(handle) => {
+                if !self.enter(handle, depth) {
+                    return Ok(());
+                }
+                let (tag, payload) = self.view.tagged(handle)?;
+                self.push("'");
+                self.push(
+                    self.view
+                        .atom_text(tag)?
+                        .ok_or_else(|| crate::heap::HeapError::new("Tagged tag is not an Atom"))?,
+                );
+                self.push("(");
+                self.value(payload, depth + 1)?;
+                self.push(")");
+                self.active.remove(&handle);
+            }
             RuntimeValue::Dict(handle) => self.dict(handle, depth)?,
             RuntimeValue::Func(handle) => {
                 let (prototype, _) = self.view.closure(handle)?;
@@ -6886,6 +7066,7 @@ fn runtime_shallow_type_error(
         RuntimeValue::Bytes(_) => "Bytes",
         RuntimeValue::Array(_) => "Array",
         RuntimeValue::Tuple(_) => "Tuple",
+        RuntimeValue::Tagged(_) => "Tagged",
         RuntimeValue::Dict(_) => "Dict",
         RuntimeValue::Func(_) => "Func",
         RuntimeValue::UpLink(_) => "internal up-link",

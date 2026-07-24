@@ -77,7 +77,8 @@ pattern:
 | Int @int_pattern
 | Float @float_pattern
 | string_literal @string_pattern
-| Atom @atom_pattern
+| ?2 Atom '(' pattern ')' @tagged_pattern
+| ?t Atom @atom_pattern
 | '(' [pattern (?1 ',' pattern)* [',']] ')' @tuple_pattern
 ;
 string_literal: DoubleQuote string_part* DoubleQuote;

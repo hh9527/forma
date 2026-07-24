@@ -806,6 +806,22 @@ impl<'a> Lowerer<'a> {
                     .trim_start_matches('\'')
                     .to_owned(),
             ),
+            Rule::TaggedPattern => PatternKind::Tagged {
+                tag: self
+                    .text(self.first_token(node, Token::Atom)?)
+                    .trim_start_matches('\'')
+                    .to_owned(),
+                payload: Box::new(
+                    self.pattern(
+                        self.children(node)
+                            .filter(|child| {
+                                !matches!(self.cst.get(*child), Node::Token(Token::Atom, _))
+                            })
+                            .find(|child| self.is_pattern(*child))
+                            .ok_or_else(|| self.error(node, "tagged pattern has no payload"))?,
+                    )?,
+                ),
+            },
             Rule::TuplePattern => PatternKind::Tuple(
                 self.children(node)
                     .filter(|child| self.is_pattern(*child))
@@ -1097,6 +1113,7 @@ impl<'a> Lowerer<'a> {
                     | Rule::IdentifierPattern
                     | Rule::IntPattern
                     | Rule::StringPattern
+                    | Rule::TaggedPattern
                     | Rule::TuplePattern
             )
         )
@@ -1454,6 +1471,23 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn lowers_tagged_patterns() {
+        let program = parse("test.xl", "match 'Some(1) { 'Some(value) => value }").unwrap();
+        let ExprKind::Match { arms, .. } = &program.value.body.value.result.value else {
+            panic!("expected match");
+        };
+        assert!(
+            matches!(
+                &arms[0].value.pattern.value,
+                PatternKind::Tagged { payload, .. }
+                    if matches!(payload.value, PatternKind::Binding(_))
+            ),
+            "{:?}",
+            arms[0].value.pattern.value
+        );
     }
 
     #[test]

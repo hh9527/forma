@@ -1,6 +1,6 @@
 # RFC 0054: First-class tagged values
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0001, RFC 0002, RFC 0029, RFC 0052
 
 ## Summary

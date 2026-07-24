@@ -237,6 +237,10 @@ pub enum WorkspaceTypeNode {
     Bytes,
     Atom(String),
     Array(WorkspaceTypeId),
+    Tagged {
+        tag: String,
+        payload: WorkspaceTypeId,
+    },
     Tuple(Vec<WorkspaceTypeId>),
     Struct(BTreeMap<String, WorkspaceTypeId>),
     Enum(BTreeMap<String, Option<WorkspaceTypeId>>),
@@ -317,6 +321,9 @@ impl WorkspaceTypeGraph {
             WorkspaceTypeNode::Atom(atom) => format!("'{atom}"),
             WorkspaceTypeNode::Array(item) => {
                 format!("Array<{}>", self.display_with(*item, active))
+            }
+            WorkspaceTypeNode::Tagged { tag, payload } => {
+                format!("'{tag}({})", self.display_with(*payload, active))
             }
             WorkspaceTypeNode::Tuple(items) => format!(
                 "({})",
@@ -1259,6 +1266,10 @@ fn merge_type_node(
         TypeNode::Bytes => WorkspaceTypeNode::Bytes,
         TypeNode::Atom(atom) => WorkspaceTypeNode::Atom(atom.name().into()),
         TypeNode::Array(child) => WorkspaceTypeNode::Array(map(*child, target, mapped)),
+        TypeNode::Tagged { tag, payload } => WorkspaceTypeNode::Tagged {
+            tag: tag.name().into(),
+            payload: map(*payload, target, mapped),
+        },
         TypeNode::Tuple(children) => WorkspaceTypeNode::Tuple(
             children
                 .iter()

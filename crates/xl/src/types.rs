@@ -47,6 +47,10 @@ pub enum TypeNode {
     Bytes,
     Atom(Atom),
     Array(TypeId),
+    Tagged {
+        tag: Atom,
+        payload: TypeId,
+    },
     Tuple(Vec<TypeId>),
     Struct(BTreeMap<String, TypeId>),
     Enum(BTreeMap<String, Option<TypeId>>),
@@ -108,6 +112,10 @@ impl TypeGraph {
             TypeDescriptor::Bytes => TypeNode::Bytes,
             TypeDescriptor::Atom(atom) => TypeNode::Atom(atom.clone()),
             TypeDescriptor::Array(item) => TypeNode::Array(self.intern_descriptor(item)),
+            TypeDescriptor::Tagged { tag, payload } => TypeNode::Tagged {
+                tag: tag.clone(),
+                payload: self.intern_descriptor(payload),
+            },
             TypeDescriptor::Tuple(items) => TypeNode::Tuple(
                 items
                     .iter()
@@ -265,6 +273,22 @@ impl TypeGraph {
                 )?;
                 TypeNode::Array(item)
             }
+            "Tagged" => {
+                require(&["kind", "payload", "tag"])?;
+                let tag = value
+                    .dict_get("tag")
+                    .and_then(ValueRef::as_atom)
+                    .ok_or_else(|| format!("{path}.tag must be an Atom"))?;
+                let payload = self.decode_persistent(
+                    value.dict_get("payload").expect("field exists"),
+                    &format!("{path}.payload"),
+                    links,
+                )?;
+                TypeNode::Tagged {
+                    tag: atom_from_name(tag),
+                    payload,
+                }
+            }
             "Tuple" | "Union" => {
                 let field = if kind == "Tuple" { "items" } else { "variants" };
                 require(if kind == "Tuple" {
@@ -379,6 +403,9 @@ impl TypeGraph {
             TypeNode::Bytes => "Bytes".into(),
             TypeNode::Atom(atom) => format!("'{}", atom.name()),
             TypeNode::Array(item) => format!("Array<{}>", self.display_with(*item, active)),
+            TypeNode::Tagged { tag, payload } => {
+                format!("'{}({})", tag.name(), self.display_with(*payload, active))
+            }
             TypeNode::Tuple(items) => format!(
                 "({})",
                 items
@@ -439,6 +466,16 @@ impl TypeGraph {
             (_, TypeNode::Ref(expected)) => self.assignable_with(actual, *expected, visited),
             (TypeNode::Any, _) | (_, TypeNode::Any) => true,
             (TypeNode::Array(a), TypeNode::Array(e)) => self.assignable_with(*a, *e, visited),
+            (
+                TypeNode::Tagged {
+                    tag: a_tag,
+                    payload: a,
+                },
+                TypeNode::Tagged {
+                    tag: e_tag,
+                    payload: e,
+                },
+            ) => a_tag == e_tag && self.assignable_with(*a, *e, visited),
             (TypeNode::Tuple(a), TypeNode::Tuple(e)) => {
                 a.len() == e.len()
                     && a.iter()
@@ -524,6 +561,10 @@ pub enum TypeDescriptor {
     Bytes,
     Atom(Atom),
     Array(Box<TypeDescriptor>),
+    Tagged {
+        tag: Atom,
+        payload: Box<TypeDescriptor>,
+    },
     Tuple(Vec<TypeDescriptor>),
     Struct(BTreeMap<String, TypeDescriptor>),
     Enum(BTreeMap<String, Option<Box<TypeDescriptor>>>),
@@ -550,6 +591,11 @@ impl TypeDescriptor {
             Self::Bytes => vec![kind_entry("Bytes")],
             Self::Atom(tag) => vec![kind_entry("Atom"), ("tag".into(), Value::Atom(tag.clone()))],
             Self::Array(item) => vec![kind_entry("Array"), ("item".into(), item.to_value(vm))],
+            Self::Tagged { tag, payload } => vec![
+                kind_entry("Tagged"),
+                ("tag".into(), Value::Atom(tag.clone())),
+                ("payload".into(), payload.to_value(vm)),
+            ],
             Self::Tuple(items) => vec![
                 kind_entry("Tuple"),
                 (
@@ -638,6 +684,9 @@ impl TypeDescriptor {
             Self::Bytes => "Bytes".into(),
             Self::Atom(atom) => format!("'{}", atom.name()),
             Self::Array(item) => format!("Array<{}>", item.display_name()),
+            Self::Tagged { tag, payload } => {
+                format!("'{}({})", tag.name(), payload.display_name())
+            }
             Self::Tuple(items) => format!(
                 "({})",
                 items
@@ -1735,6 +1784,10 @@ pub(crate) fn infer_value(value: &Value) -> TypeDescriptor {
                 common_type(items.iter().map(infer_value).collect()).unwrap_or(TypeDescriptor::Any);
             TypeDescriptor::Array(Box::new(item))
         }
+        Value::Tagged { tag, payload } => TypeDescriptor::Tagged {
+            tag: tag.clone(),
+            payload: Box::new(infer_value(payload)),
+        },
         Value::Tuple(items) => TypeDescriptor::Tuple(items.iter().map(infer_value).collect()),
         Value::Dict(fields) => TypeDescriptor::Struct(
             fields
@@ -2033,6 +2086,7 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
         NativeFunction::core_builtin_type(CoreBuiltinTypeFunction::Result),
         NativeFunction::new("Atom", 1, native_atom_type),
         NativeFunction::new("Array", 1, native_array_type),
+        NativeFunction::new("Tagged", 2, native_tagged_type),
         NativeFunction::new("Tuple", 1, native_tuple_type),
         NativeFunction::new("Fn", 2, native_function_type),
         NativeFunction::new("validate", 2, native_validate),
@@ -2063,6 +2117,13 @@ fn core_static_prelude() -> HashMap<String, TypeDescriptor> {
     prelude.insert(
         "Array".into(),
         function(vec![metadata.clone()], metadata.clone()),
+    );
+    prelude.insert(
+        "Tagged".into(),
+        function(
+            vec![TypeDescriptor::Any, metadata.clone()],
+            metadata.clone(),
+        ),
     );
     prelude.insert(
         "Tuple".into(),
@@ -2149,6 +2210,19 @@ fn native_array_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeErro
     write_native_type_record(context, "Array", &[("item", item)])
 }
 
+fn native_tagged_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+    let tag = context.argument(0)?;
+    if context.value(tag)?.as_atom().is_none() {
+        return Err(NativeError::new("Tagged expects an Atom tag"));
+    }
+    let payload = context.argument(1)?;
+    let value = context.value(payload)?;
+    if !value.is_hidden_up_link() {
+        decode_native_type(value)?;
+    }
+    write_native_type_record(context, "Tagged", &[("tag", tag), ("payload", payload)])
+}
+
 fn native_tuple_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
     let value = context.value(context.argument(0)?)?;
     if value.kind() != ValueKind::Array {
@@ -2221,7 +2295,7 @@ fn native_validate(context: &mut CallContext<'_, '_>) -> Result<(), NativeError>
             context.set_string(payload, message)?;
         }
     }
-    context.make_tuple(context.result(), &[tag, payload])
+    context.make_tagged(context.result(), tag, payload)
 }
 
 fn decode_native_type(value: ValueRef<'_>) -> Result<TypeDescriptor, NativeError> {
@@ -2309,6 +2383,20 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
                 .dict_get("item")
                 .ok_or_else(|| format!("{path}.item is missing"))?;
             TypeDescriptor::Array(Box::new(decode_type_ref(item, &format!("{path}.item"))?))
+        }
+        "Tagged" => {
+            require(&["kind", "payload", "tag"])?;
+            let tag = value
+                .dict_get("tag")
+                .and_then(ValueRef::as_atom)
+                .ok_or_else(|| format!("{path}.tag must be an Atom"))?;
+            let payload = value
+                .dict_get("payload")
+                .ok_or_else(|| format!("{path}.payload is missing"))?;
+            TypeDescriptor::Tagged {
+                tag: atom_from_name(tag),
+                payload: Box::new(decode_type_ref(payload, &format!("{path}.payload"))?),
+            }
         }
         "Tuple" | "Union" => {
             let field = if kind == "Tuple" { "items" } else { "variants" };
@@ -2467,6 +2555,15 @@ fn validate_value_ref(
             }
             Ok(())
         }
+        TypeDescriptor::Tagged { tag, payload } => {
+            let Some((actual_tag, actual_payload)) = value.tagged_parts() else {
+                return Err(format!("{path} must be a Tagged value"));
+            };
+            if actual_tag.as_atom() != Some(tag.name()) {
+                return Err(format!("{path} must have tag '{}", tag.name()));
+            }
+            validate_value_ref(payload, actual_payload, &format!("{path}.payload"))
+        }
         TypeDescriptor::Tuple(items) => {
             if value.kind() != ValueKind::Tuple {
                 return Err(format!("{path} must be a Tuple"));
@@ -2507,21 +2604,16 @@ fn validate_value_ref(
                     None => Err(format!("{path} has unknown Enum variant '{tag}")),
                 };
             }
-            if value.kind() != ValueKind::Tuple || value.sequence_len() != Some(2) {
-                return Err(format!(
-                    "{path} must be a unit Atom or a two-element tagged Tuple"
-                ));
-            }
-            let tag = value
-                .sequence_get(0)
-                .and_then(ValueRef::as_atom)
-                .ok_or_else(|| format!("{path}.0 must be an Atom tag"))?;
+            let Some((tag_value, payload_value)) = value.tagged_parts() else {
+                return Err(format!("{path} must be a unit Atom or a Tagged value"));
+            };
+            let tag = tag_value
+                .as_atom()
+                .ok_or_else(|| format!("{path} Tagged tag must be an Atom"))?;
             match variants.get(tag) {
-                Some(Some(payload)) => validate_value_ref(
-                    payload,
-                    value.sequence_get(1).expect("two-element Tuple"),
-                    &format!("{path}.{tag}"),
-                ),
+                Some(Some(payload)) => {
+                    validate_value_ref(payload, payload_value, &format!("{path}.{tag}"))
+                }
                 Some(None) => Err(format!("{path} variant '{tag} does not accept a payload")),
                 None => Err(format!("{path} has unknown Enum variant '{tag}")),
             }
@@ -2621,6 +2713,19 @@ fn decode_type(value: &Value, path: &str) -> Result<TypeDescriptor, String> {
                 metadata.get("item").expect("required field"),
                 &format!("{path}.item"),
             )?))
+        }
+        "Tagged" => {
+            require_fields(metadata, path, &["kind", "payload", "tag"])?;
+            let Value::Atom(tag) = metadata.get("tag").expect("required field") else {
+                return Err(format!("{path}.tag must be an Atom"));
+            };
+            TypeDescriptor::Tagged {
+                tag: tag.clone(),
+                payload: Box::new(decode_type(
+                    metadata.get("payload").expect("required field"),
+                    &format!("{path}.payload"),
+                )?),
+            }
         }
         "Tuple" => {
             require_fields(metadata, path, &["items", "kind"])?;
@@ -2809,6 +2914,10 @@ impl<'a> GenericInference<'a> {
             TypeDescriptor::Array(item) => {
                 TypeDescriptor::Array(Box::new(self.instantiate_with(item, variables)))
             }
+            TypeDescriptor::Tagged { tag, payload } => TypeDescriptor::Tagged {
+                tag: tag.clone(),
+                payload: Box::new(self.instantiate_with(payload, variables)),
+            },
             TypeDescriptor::Tuple(items) => TypeDescriptor::Tuple(
                 items
                     .iter()
@@ -2858,6 +2967,10 @@ impl<'a> GenericInference<'a> {
                 .get(variable)
                 .map_or_else(|| ty.clone(), |ty| self.resolve(ty)),
             TypeDescriptor::Array(item) => TypeDescriptor::Array(Box::new(self.resolve(item))),
+            TypeDescriptor::Tagged { tag, payload } => TypeDescriptor::Tagged {
+                tag: tag.clone(),
+                payload: Box::new(self.resolve(payload)),
+            },
             TypeDescriptor::Tuple(items) => {
                 TypeDescriptor::Tuple(items.iter().map(|item| self.resolve(item)).collect())
             }
@@ -2901,6 +3014,7 @@ impl<'a> GenericInference<'a> {
         match self.resolve(ty) {
             TypeDescriptor::Inference(candidate) => candidate == variable,
             TypeDescriptor::Array(item) => self.occurs(variable, &item),
+            TypeDescriptor::Tagged { payload, .. } => self.occurs(variable, &payload),
             TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
                 items.iter().any(|item| self.occurs(variable, item))
             }
@@ -2949,6 +3063,28 @@ impl<'a> GenericInference<'a> {
             }
             (TypeDescriptor::Any, _) | (_, TypeDescriptor::Any) => Ok(()),
             (TypeDescriptor::Array(left), TypeDescriptor::Array(right)) => self.unify(left, right),
+            (
+                TypeDescriptor::Tagged {
+                    tag: left_tag,
+                    payload: left,
+                },
+                TypeDescriptor::Tagged {
+                    tag: right_tag,
+                    payload: right,
+                },
+            ) if left_tag == right_tag => self.unify(left, right),
+            (TypeDescriptor::Atom(tag), TypeDescriptor::Function { parameters, result })
+            | (TypeDescriptor::Function { parameters, result }, TypeDescriptor::Atom(tag))
+                if parameters.len() == 1 =>
+            {
+                self.unify(
+                    &TypeDescriptor::Tagged {
+                        tag: tag.clone(),
+                        payload: Box::new(parameters[0].clone()),
+                    },
+                    result,
+                )
+            }
             (TypeDescriptor::Tuple(left), TypeDescriptor::Tuple(right))
             | (TypeDescriptor::Union(left), TypeDescriptor::Union(right))
                 if left.len() == right.len() =>
@@ -3154,6 +3290,23 @@ impl<'a> GenericInference<'a> {
             ExprKind::Call { callee, arguments } => {
                 let callee = self.infer(callee, environment, None)?;
                 match self.resolve(&callee) {
+                    TypeDescriptor::Atom(tag) => {
+                        if arguments.len() != 1 {
+                            return Err(format!(
+                                "tag constructor expects 1 argument, found {}",
+                                arguments.len()
+                            ));
+                        }
+                        let payload = self.infer(&arguments[0], environment, None)?;
+                        let result = TypeDescriptor::Tagged {
+                            tag,
+                            payload: Box::new(payload),
+                        };
+                        if let Some(expected) = expected {
+                            self.unify(&result, expected)?;
+                        }
+                        self.resolve(&result)
+                    }
                     TypeDescriptor::Function { parameters, result } => {
                         if parameters.len() != arguments.len() {
                             return Err(format!(
@@ -3300,6 +3453,7 @@ fn contains_type_variable(ty: &TypeDescriptor) -> bool {
         TypeDescriptor::Inference(_) => true,
         TypeDescriptor::Bound(_) => false,
         TypeDescriptor::Array(item) => contains_type_variable(item),
+        TypeDescriptor::Tagged { payload, .. } => contains_type_variable(payload),
         TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
             items.iter().any(contains_type_variable)
         }
@@ -3319,6 +3473,7 @@ fn contains_metatype(ty: &TypeDescriptor) -> bool {
     match ty {
         TypeDescriptor::Type => true,
         TypeDescriptor::Array(item) => contains_metatype(item),
+        TypeDescriptor::Tagged { payload, .. } => contains_metatype(payload),
         TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
             items.iter().any(contains_metatype)
         }
@@ -3424,11 +3579,16 @@ fn infer_expr_with(
         }
         ExprKind::Call { callee, arguments } => {
             let callee = infer_expr_with(callee, environment, record);
-            for argument in arguments {
-                infer_expr_with(argument, environment, record);
-            }
+            let argument_types = arguments
+                .iter()
+                .map(|argument| infer_expr_with(argument, environment, record))
+                .collect::<Vec<_>>();
             match callee {
                 TypeDescriptor::Function { result, .. } => *result,
+                TypeDescriptor::Atom(tag) if argument_types.len() == 1 => TypeDescriptor::Tagged {
+                    tag,
+                    payload: Box::new(argument_types.into_iter().next().expect("one argument")),
+                },
                 _ => TypeDescriptor::Any,
             }
         }
@@ -3597,6 +3757,7 @@ fn interpolation_type_supported(descriptor: &TypeDescriptor) -> bool {
         | TypeDescriptor::Type
         | TypeDescriptor::Bytes
         | TypeDescriptor::Array(_)
+        | TypeDescriptor::Tagged { .. }
         | TypeDescriptor::Tuple(_)
         | TypeDescriptor::Struct(_)
         | TypeDescriptor::Function { .. } => false,
@@ -3655,6 +3816,20 @@ fn bind_pattern_types_from(
                 }
             }
         }
+        PatternKind::Tagged { tag, payload } => {
+            let payload_type = match matched {
+                TypeDescriptor::Tagged {
+                    tag: matched_tag,
+                    payload,
+                } if matched_tag.name() == tag => payload.as_ref(),
+                TypeDescriptor::Enum(variants) => variants
+                    .get(tag)
+                    .and_then(Option::as_deref)
+                    .unwrap_or(&TypeDescriptor::Any),
+                _ => &TypeDescriptor::Any,
+            };
+            bind_pattern_types_from(payload, payload_type, environment);
+        }
         _ => {}
     }
 }
@@ -3668,6 +3843,10 @@ fn erase_type_variables(descriptor: &TypeDescriptor) -> TypeDescriptor {
     match descriptor {
         TypeDescriptor::Bound(_) | TypeDescriptor::Inference(_) => TypeDescriptor::Any,
         TypeDescriptor::Array(item) => TypeDescriptor::Array(Box::new(erase_type_variables(item))),
+        TypeDescriptor::Tagged { tag, payload } => TypeDescriptor::Tagged {
+            tag: tag.clone(),
+            payload: Box::new(erase_type_variables(payload)),
+        },
         TypeDescriptor::Tuple(items) => {
             TypeDescriptor::Tuple(items.iter().map(erase_type_variables).collect())
         }
@@ -3749,6 +3928,16 @@ fn assignable(actual: &TypeDescriptor, expected: &TypeDescriptor) -> bool {
         (TypeDescriptor::Array(actual), TypeDescriptor::Array(expected)) => {
             assignable(actual, expected)
         }
+        (
+            TypeDescriptor::Tagged {
+                tag: actual_tag,
+                payload: actual,
+            },
+            TypeDescriptor::Tagged {
+                tag: expected_tag,
+                payload: expected,
+            },
+        ) => actual_tag == expected_tag && assignable(actual, expected),
         (TypeDescriptor::Tuple(actual), TypeDescriptor::Tuple(expected)) => {
             actual.len() == expected.len()
                 && actual
@@ -3787,8 +3976,9 @@ fn assignable(actual: &TypeDescriptor, expected: &TypeDescriptor) -> bool {
 
 fn enum_variant_type(name: &str, payload: Option<&TypeDescriptor>) -> TypeDescriptor {
     let tag = TypeDescriptor::Atom(atom_from_name(name));
-    payload.map_or(tag.clone(), |payload| {
-        TypeDescriptor::Tuple(vec![tag, payload.clone()])
+    payload.map_or(tag, |payload| TypeDescriptor::Tagged {
+        tag: atom_from_name(name),
+        payload: Box::new(payload.clone()),
     })
 }
 
@@ -3848,6 +4038,16 @@ fn incompatibility_path(actual: &TypeDescriptor, expected: &TypeDescriptor) -> O
             (TypeDescriptor::Array(actual), TypeDescriptor::Array(expected)) => {
                 visit(actual, expected, path)
             }
+            (
+                TypeDescriptor::Tagged {
+                    tag: actual_tag,
+                    payload: actual,
+                },
+                TypeDescriptor::Tagged {
+                    tag: expected_tag,
+                    payload: expected,
+                },
+            ) => actual_tag != expected_tag || visit(actual, expected, path),
             _ => !assignable(actual, expected),
         }
     }
@@ -4226,14 +4426,14 @@ mod tests {
                 .execute(&valid, 100_000)
                 .unwrap()
                 .to_string()
-                .starts_with("('Ok,")
+                .starts_with("'Ok(")
         );
 
         let invalid =
             crate::compile_source("invalid-type.xl", "validate(Type, {kind: 'Array, item: 1})")
                 .unwrap();
         let output = Vm::new().execute(&invalid, 100_000).unwrap().to_string();
-        assert!(output.starts_with("('Err,"), "{output}");
+        assert!(output.starts_with("'Err("), "{output}");
         assert!(output.contains("value.item must be a Dict"), "{output}");
     }
 
@@ -4241,9 +4441,9 @@ mod tests {
     fn ordinary_closure_computes_type_metadata() {
         let analysis = analyze_source(
             "test",
-            "def Optional = fn(item) { union('None, [Atom('None), Tuple([Atom('Some), item])]) };\
+            "def Optional = fn(item) { union('None, [Atom('None), Tagged('Some, item)]) };\
              type MaybeInt = Optional(Int);\
-             let value: MaybeInt = ('Some, 42);\
+             let value: MaybeInt = 'Some(42);\
              value",
         )
         .unwrap();
@@ -4480,8 +4680,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             accepted,
-            Value::Tuple(values)
-                if matches!(&values[0], Value::Atom(atom) if atom.name() == "Ok")
+            Value::Tagged { tag, .. } if tag.name() == "Ok"
         ));
 
         let rejected = crate::run_source(
@@ -4493,8 +4692,7 @@ mod tests {
         .unwrap();
         assert!(matches!(
             rejected,
-            Value::Tuple(values)
-                if matches!(&values[0], Value::Atom(atom) if atom.name() == "Err")
+            Value::Tagged { tag, .. } if tag.name() == "Err"
         ));
     }
 

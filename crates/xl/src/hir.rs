@@ -525,6 +525,7 @@ impl Resolver {
                     self.index_pattern(item, scope);
                 }
             }
+            PatternKind::Tagged { payload, .. } => self.index_pattern(payload, scope),
             _ => {}
         }
     }
