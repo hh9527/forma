@@ -1,6 +1,6 @@
 # RFC 0046: Asynchronous LSP adapter
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0038, RFC 0045
 
 ## Summary
@@ -335,3 +335,39 @@ so the adapter negotiates them rather than narrowing the core model.
 Transport, versioning, diagnostics, navigation, and cancellation already form
 a complete architectural test. Completion has additional context and ranking
 semantics and remains the next tooling RFC.
+
+## Implementation result
+
+Implemented as the separate `xl-lsp` crate and binary using `async-lsp 0.2.4`
+and a Tokio current-thread runtime. The binary selects its workspace root from
+the first workspace folder, `rootUri`, legacy `rootPath`, or finally its launch
+directory. LSP and runtime dependencies remain outside the `xl` crate.
+
+The adapter implements its own `Service<AnyRequest>` dispatch boundary so the
+wire request ID remains available when it creates an XL `CancellationToken`.
+Active IDs map directly to tokens; `$/cancelRequest`, shutdown, exit, and
+transport termination cancel those tokens. Query cancellation and stale
+revisions map to `RequestCancelled` and `ContentModified` respectively. The
+adapter does not use `async-lsp::Concurrency` and semantic handlers contain no
+spawn policy.
+
+Initialization negotiates UTF-8, UTF-16, or UTF-32 and defaults to UTF-16. The
+server advertises incremental open/change/close synchronization plus hover,
+definition, and references. Ordered changes are converted against the text
+produced by preceding edits and committed through the transactional RFC 0045
+workspace API. Unsupported URIs and malformed positions do not fabricate
+paths or clamp offsets.
+
+Successful document notifications schedule cooperative workspace rebuilds on
+the adapter runtime. Revision checks prevent stale snapshot publication and a
+final check precedes push diagnostics. Diagnostics are published only for open
+documents with their current version, empty sets clear previous results, and
+secondary source labels become related information. Hover, definition, and
+references resolve through immutable snapshot queries and convert all ranges
+through the negotiated document encoding.
+
+Adapter tests cover encoding selection, initialization capabilities and root
+selection, ordered UTF-16 edits, exact request-ID token cancellation, and a
+framed in-memory initialize/initialized/shutdown/exit exchange through the
+real asynchronous main loop. Workspace tests, strict Clippy, formatting, and
+diff checks pass with the implementation.
