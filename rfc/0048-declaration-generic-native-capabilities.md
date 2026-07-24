@@ -62,7 +62,9 @@ polymorphism.
 7. erase type parameters before bytecode generation and preserve the existing
    native symbol, arity, closure, quota, and calling conventions;
 8. expose instantiated expression facts through the existing semantic
-   snapshot and asynchronous query layers.
+   snapshot and asynchronous query layers;
+9. preserve schemes in a module's static export interface without turning
+   ordinary Dict fields or local bindings into first-class polymorphic values.
 
 ## Non-goals
 
@@ -116,11 +118,13 @@ the relevant facts.
 
 ## Static model
 
-The semantic type layer distinguishes monotypes from binding schemes:
+The semantic type layer distinguishes declaration schemes, bound parameters,
+monotypes, and inference variables:
 
 ```text
-TypeScheme = parameters + body
-Type        = concrete node | inference variable
+TypeScheme   = parameters + body containing BoundParameter identities
+Type         = concrete node | BoundParameter
+InferenceType = concrete node | InferenceVariable
 ```
 
 Conceptually, the declaration:
@@ -129,27 +133,73 @@ Conceptually, the declaration:
 native map[A, B]: fn(Array(A), fn(A) -> B) -> Array(B);
 ```
 
-creates the scheme:
+creates immutable semantic data equivalent to:
 
 ```text
-map : [A, B] fn(Array(A), fn(A) -> B) -> Array(B)
+TypeScheme {
+    parameters: [#0 "A", #1 "B"],
+    body: fn(Array(Bound(#0)), fn(Bound(#0)) -> Bound(#1))
+          -> Array(Bound(#1)),
+}
 ```
 
-The named parameters are rigid while checking the declaration. On every value
-reference to `map`, analysis replaces them with distinct fresh inference
-variables. Two references in the same expression therefore do not share an
-instantiation.
+Names and source ranges belong to parameter declarations and diagnostics;
+semantic references use stable `TypeParameterId` values rather than strings.
+The parameters are rigid while checking the declaration. On every eligible
+reference to `map`, analysis replaces them with distinct fresh
+`InferenceVariableId` values. Two references in the same expression therefore
+do not share an instantiation.
 
-Schemes belong to bindings. `TypeGraph` and workspace expression facts remain
-monomorphic: after successful solving, each reference, call, and containing
-expression records its instantiated type. A polymorphic binding definition may
-retain a scheme identity for tooling, but no unresolved inference variable is
-published as an authoritative `WorkspaceTypeId`.
+Every typed binding is represented uniformly by a `TypeScheme`; a monomorphic
+binding has an empty parameter list. `TypeGraph` and workspace expression facts
+remain monomorphic: after successful solving, each reference, call, and
+containing expression records its instantiated type. No unresolved inference
+variable is published as an authoritative `WorkspaceTypeId`.
+
+`TypeScheme`, bound parameters, and inference variables are semantic data, not
+runtime XL values. In particular, analysis does not encode a bound parameter
+as `Any`, a magic Atom, a stringly named `TypeDescriptor`, or a hidden VM
+argument.
 
 `Any` remains an explicit dynamic type and is not an inference variable. An
 unknown semantic fact remains unavailable evidence and is not unified as a
 wildcard. Generic inference must not silently convert either condition into
 the other.
+
+## Module interfaces
+
+An XL module executes to an ordinary runtime value, currently commonly a Dict,
+but its static interface is separate data. An interface export retains the
+scheme of a directly exported declaration:
+
+```text
+ModuleInterface {
+    exports: {
+        "map": TypeScheme([A, B], fn(Array(A), fn(A) -> B) -> Array(B)),
+    },
+}
+```
+
+When analysis resolves `array.map` through an imported module namespace, it
+uses this export scheme and instantiates it freshly. It does not rediscover the
+type from the runtime native closure or require an ordinary Struct field to
+carry polymorphism.
+
+This RFC does not make arbitrary values polymorphic. If a module member is
+captured in a local binding:
+
+```xl
+let f = array.map;
+```
+
+the member scheme is instantiated at that expression and `f` receives the
+resulting monotype. Local `let` does not implicitly generalize it. Direct later
+uses of `array.map` receive independent instantiations.
+
+Only exports that resolve directly to a declared scheme retain polymorphism in
+this RFC. Computed Dict fields, functions returned from calls, closure captures,
+and other ordinary values remain monomorphic. This keeps the feature rank-1
+without introducing first-class or higher-rank polymorphism.
 
 ## Bidirectional call inference
 
@@ -246,7 +296,8 @@ native length: fn(Array(Any)) -> Int;
 
 The runtime ABI and registry format do not change. Standard-library modules may
 migrate individual contracts from `Any` to explicit parameters without
-requiring changes to their native implementations.
+requiring changes to their native implementations. Their static module
+interfaces preserve those schemes independently of the runtime export Dict.
 
 Because `[` immediately after a native binding name was not previously valid,
 the syntax addition is backward compatible.
@@ -268,28 +319,36 @@ the syntax addition is backward compatible.
    diagnosed and never degrade to `Any`;
 8. instantiated types are recorded for references, calls, and enclosing
    expressions and appear in semantic queries;
-9. existing monomorphic native declarations behave unchanged;
-10. generic parameters are erased and the native registry, linker arity check,
+9. a directly exported native scheme survives the module boundary and separate
+   member references instantiate independently;
+10. assigning a generic module member to an ordinary local binding
+    instantiates once and does not implicitly generalize that binding;
+11. existing monomorphic native declarations behave unchanged;
+12. generic parameters are erased and the native registry, linker arity check,
     bytecode call path, VM, quotas, and continuation behavior remain unchanged;
-11. generic native analysis honors cancellation and stale workspace revisions;
-12. core, CLI, semantic, recovery, and LSP test suites remain green under
+13. generic native analysis honors cancellation and stale workspace revisions;
+14. core, CLI, semantic, recovery, and LSP test suites remain green under
     strict Clippy and formatting checks.
 
 ## Implementation plan
 
 1. extend native CST and AST bindings with located declaration parameters;
 2. resolve parameter names in native contract type expressions;
-3. introduce internal type schemes and fresh inference variables without
-   publishing unresolved variables in `TypeGraph`;
-4. instantiate schemes at references and add equality constraints at calls;
-5. propagate expected function types into closures and expected result types
+3. introduce data-backed `TypeScheme`, stable bound-parameter identities, and
+   separate fresh inference variables without publishing unresolved variables
+   in `TypeGraph`;
+4. retain directly exported schemes in module static interfaces independently
+   of runtime Dict values;
+5. instantiate local and module-export schemes at references and add equality
+   constraints at calls;
+6. propagate expected function types into closures and expected result types
    into calls and annotated bindings;
-6. solve substitutions with occurs checks and deterministic diagnostics;
-7. record finalized monotypes in existing analysis and workspace facts;
-8. migrate representative Array natives such as `map`, `filter`, and `fold` to
+7. solve substitutions with occurs checks and deterministic diagnostics;
+8. record finalized monotypes in existing analysis and workspace facts;
+9. migrate representative Array natives such as `map`, `filter`, and `fold` to
    generic declarations without changing their Rust implementations;
-9. verify recovery, cancellation, CLI output, semantic queries, and LSP hover;
-10. run workspace tests, strict Clippy, formatting, and diff checks.
+10. verify recovery, cancellation, CLI output, semantic queries, and LSP hover;
+11. run workspace tests, strict Clippy, formatting, and diff checks.
 
 ## Deferred work
 
