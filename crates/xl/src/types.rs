@@ -4,6 +4,7 @@ use crate::ast::{
 };
 use crate::compiler::compile_expression_with_bindings;
 use crate::heap::{Handle, Heap, PersistentValue};
+use crate::hir::{HirDefinitionId, HirDefinitionKind, HirExpressionId, HirProgram};
 use crate::json::{Provenance, ValuePath, ValuePathSegment};
 use crate::lexer::{FrontendError, SourceLocation};
 use crate::lir::RegisterId;
@@ -640,6 +641,9 @@ pub struct Analysis {
     pub declared_types: BTreeMap<String, TypeId>,
     pub binding_types: BTreeMap<String, TypeId>,
     pub result_type: TypeId,
+    pub hir: HirProgram,
+    pub definition_types: BTreeMap<HirDefinitionId, TypeId>,
+    pub expression_types: BTreeMap<HirExpressionId, TypeId>,
     pub(crate) prelude: BTreeMap<String, Value>,
     pub(crate) external_values: BTreeMap<String, Value>,
     pub(crate) dynamic_bindings: HashSet<String>,
@@ -665,6 +669,14 @@ impl Analysis {
             self.types.names.insert(name.clone(), id);
             self.declared_types.insert(name.clone(), id);
             self.binding_types.insert(name.clone(), id);
+            for definition in self.hir.definitions() {
+                if definition.top_level
+                    && definition.kind == HirDefinitionKind::Type
+                    && definition.name == *name
+                {
+                    self.definition_types.insert(definition.id, id);
+                }
+            }
         }
         Ok(())
     }
@@ -765,11 +777,29 @@ pub(crate) fn analyze_program_with_bindings_observed(
 ) -> Result<Analysis, FrontendError> {
     let mut tool_vm = Vm::new();
     let prelude = core_prelude(&mut tool_vm);
+    let hir = HirProgram::resolve(
+        program,
+        prelude
+            .keys()
+            .chain(external_values.keys())
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    if let Some(reference) = hir.unresolved().next() {
+        return Err(FrontendError::from_diagnostic(
+            sources,
+            Diagnostic::error(
+                format!("unknown binding {:?}", reference.name),
+                reference.location,
+            ),
+        ));
+    }
     let mut tool_values = prelude.clone();
     let mut static_environment = HashMap::new();
     let mut declared_types = BTreeMap::new();
     let mut binding_types = BTreeMap::new();
     let mut declared_type_spans = HashMap::new();
+    let mut expression_descriptors = HashMap::new();
 
     // Tool-stage descriptors are currently trees. Predeclare type names with
     // conservative metadata so self and forward references can be evaluated;
@@ -895,8 +925,14 @@ pub(crate) fn analyze_program_with_bindings_observed(
 
     for binding in &program.value.body.value.bindings {
         check_interpolations(&binding.value.value, &static_environment, sources)?;
+        let inferred_expression = infer_expr_recorded(
+            &binding.value.value,
+            &static_environment,
+            &mut expression_descriptors,
+        );
         if let Some(annotation) = &binding.value.annotation {
             check_interpolations(annotation, &static_environment, sources)?;
+            infer_expr_recorded(annotation, &static_environment, &mut expression_descriptors);
         }
         match binding.value.kind {
             BindingKind::Decl => continue,
@@ -944,7 +980,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 tool_values.insert(binding.value.name.value.clone(), value);
             }
             BindingKind::Let => {
-                let inferred = infer_expr(&binding.value.value, &static_environment);
+                let inferred = inferred_expression;
                 let checked = if let Some(annotation) = &binding.value.annotation {
                     let metadata = evaluate_tool_expression(
                         source_name,
@@ -1018,7 +1054,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
             }
             BindingKind::Def | BindingKind::NamedFunction => {
                 let name = &binding.value.name.value;
-                let inferred = infer_expr(&binding.value.value, &static_environment);
+                let inferred = inferred_expression;
                 let checked = if let Some(expected) = definition_contracts.get(name) {
                     if !assignable(&inferred, expected) {
                         let declaration = declaration_locations
@@ -1090,9 +1126,13 @@ pub(crate) fn analyze_program_with_bindings_observed(
         &static_environment,
         sources,
     )?;
-    let result_type = infer_expr(&program.value.body.value.result, &static_environment);
+    let result_type = infer_expr_recorded(
+        &program.value.body.value.result,
+        &static_environment,
+        &mut expression_descriptors,
+    );
     let mut types = TypeGraph::default();
-    let declared_types = declared_types
+    let declared_types: BTreeMap<String, TypeId> = declared_types
         .into_iter()
         .map(|(name, descriptor)| {
             let id = types.intern_descriptor(&descriptor);
@@ -1100,16 +1140,48 @@ pub(crate) fn analyze_program_with_bindings_observed(
             (name, id)
         })
         .collect();
-    let binding_types = binding_types
+    let binding_types: BTreeMap<String, TypeId> = binding_types
         .into_iter()
         .map(|(name, descriptor)| (name, types.intern_descriptor(&descriptor)))
         .collect();
     let result_type = types.intern_descriptor(&result_type);
+    let expression_types: BTreeMap<HirExpressionId, TypeId> = hir
+        .expressions()
+        .iter()
+        .filter_map(|expression| {
+            expression_descriptors
+                .get(&expression.location)
+                .map(|descriptor| (expression.id, types.intern_descriptor(descriptor)))
+        })
+        .collect();
+    let any_type = types.intern_descriptor(&TypeDescriptor::Any);
+    let definition_types = hir
+        .definitions()
+        .iter()
+        .map(|definition| {
+            let ty = if definition.top_level {
+                if definition.kind == HirDefinitionKind::Type {
+                    declared_types.get(&definition.name).copied()
+                } else {
+                    binding_types.get(&definition.name).copied()
+                }
+            } else {
+                definition
+                    .value
+                    .and_then(|value| expression_types.get(&value).copied())
+            }
+            .unwrap_or(any_type);
+            (definition.id, ty)
+        })
+        .collect();
     Ok(Analysis {
         types,
         declared_types,
         binding_types,
         result_type,
+        hir,
+        definition_types,
+        expression_types,
         prelude,
         external_values: external_values.clone(),
         dynamic_bindings: dynamic_bindings.clone(),
@@ -1838,11 +1910,36 @@ fn require_fields(metadata: &crate::Dict, path: &str, fields: &[&str]) -> Result
 }
 
 fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) -> TypeDescriptor {
-    match &expression.value {
+    infer_expr_with(expression, environment, &mut |_, _| {})
+}
+
+fn infer_expr_recorded(
+    expression: &Expr,
+    environment: &HashMap<String, TypeDescriptor>,
+    facts: &mut HashMap<crate::Location, TypeDescriptor>,
+) -> TypeDescriptor {
+    infer_expr_with(expression, environment, &mut |location, descriptor| {
+        facts.insert(location, descriptor.clone());
+    })
+}
+
+fn infer_expr_with(
+    expression: &Expr,
+    environment: &HashMap<String, TypeDescriptor>,
+    record: &mut impl FnMut(crate::Location, &TypeDescriptor),
+) -> TypeDescriptor {
+    let inferred = match &expression.value {
         ExprKind::Int(_) => TypeDescriptor::Int,
         ExprKind::Float(_) => TypeDescriptor::Float,
         ExprKind::String(_) => TypeDescriptor::String,
-        ExprKind::InterpolatedString(_) => TypeDescriptor::String,
+        ExprKind::InterpolatedString(parts) => {
+            for part in parts {
+                if let StringPartKind::Expression(expression) = &part.value {
+                    infer_expr_with(expression, environment, record);
+                }
+            }
+            TypeDescriptor::String
+        }
         ExprKind::Bytes(_) => TypeDescriptor::Bytes,
         ExprKind::Atom(name) => TypeDescriptor::Atom(atom_from_name(name)),
         ExprKind::Variable(name) => environment
@@ -1852,7 +1949,7 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
         ExprKind::Array(items) => {
             let item_types = items
                 .iter()
-                .map(|item| infer_expr(item, environment))
+                .map(|item| infer_expr_with(item, environment, record))
                 .collect::<Vec<_>>();
             let item = common_type(item_types).unwrap_or(TypeDescriptor::Any);
             TypeDescriptor::Array(Box::new(item))
@@ -1860,7 +1957,7 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
         ExprKind::Tuple(items) => TypeDescriptor::Tuple(
             items
                 .iter()
-                .map(|item| infer_expr(item, environment))
+                .map(|item| infer_expr_with(item, environment, record))
                 .collect(),
         ),
         ExprKind::Dict(fields) => TypeDescriptor::Struct(
@@ -1869,13 +1966,13 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
                 .map(|field| {
                     (
                         field.value.name.value.clone(),
-                        infer_expr(&field.value.value, environment),
+                        infer_expr_with(&field.value.value, environment, record),
                     )
                 })
                 .collect(),
         ),
-        ExprKind::Block(block) => infer_block(block, environment),
-        ExprKind::Unary { operand, .. } => infer_expr(operand, environment),
+        ExprKind::Block(block) => infer_block_with(block, environment, record),
+        ExprKind::Unary { operand, .. } => infer_expr_with(operand, environment, record),
         ExprKind::Binary {
             operator,
             left,
@@ -1886,8 +1983,8 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
                 TypeDescriptor::Atom(Atom::builtin(BuiltinAtom::False)),
             ]),
             _ => {
-                let left = infer_expr(left, environment);
-                let right = infer_expr(right, environment);
+                let left = infer_expr_with(left, environment, record);
+                let right = infer_expr_with(right, environment, record);
                 if left == right {
                     left
                 } else {
@@ -1895,17 +1992,25 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
                 }
             }
         },
-        ExprKind::Field { receiver, field } => match infer_expr(receiver, environment) {
-            TypeDescriptor::Struct(fields) => fields
-                .get(&field.value)
-                .cloned()
-                .unwrap_or(TypeDescriptor::Any),
-            _ => TypeDescriptor::Any,
-        },
-        ExprKind::Call { callee, .. } => match infer_expr(callee, environment) {
-            TypeDescriptor::Function { result, .. } => *result,
-            _ => TypeDescriptor::Any,
-        },
+        ExprKind::Field { receiver, field } => {
+            match infer_expr_with(receiver, environment, record) {
+                TypeDescriptor::Struct(fields) => fields
+                    .get(&field.value)
+                    .cloned()
+                    .unwrap_or(TypeDescriptor::Any),
+                _ => TypeDescriptor::Any,
+            }
+        }
+        ExprKind::Call { callee, arguments } => {
+            let callee = infer_expr_with(callee, environment, record);
+            for argument in arguments {
+                infer_expr_with(argument, environment, record);
+            }
+            match callee {
+                TypeDescriptor::Function { result, .. } => *result,
+                _ => TypeDescriptor::Any,
+            }
+        }
         ExprKind::Closure { parameters, body } => {
             let mut closure_environment = environment.clone();
             for parameter in parameters {
@@ -1913,27 +2018,35 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
             }
             TypeDescriptor::Function {
                 parameters: vec![TypeDescriptor::Any; parameters.len()],
-                result: Box::new(infer_block(body, &closure_environment)),
+                result: Box::new(infer_block_with(body, &closure_environment, record)),
             }
         }
         ExprKind::If {
+            condition,
             then_branch,
             else_branch,
-            ..
-        } => union_or_single(vec![
-            infer_block(then_branch, environment),
-            infer_block(else_branch, environment),
-        ]),
-        ExprKind::Match { arms, .. } => union_or_single(
-            arms.iter()
-                .map(|arm| {
-                    let mut arm_environment = environment.clone();
-                    bind_pattern_types(&arm.value.pattern, &mut arm_environment);
-                    infer_expr(&arm.value.value, &arm_environment)
-                })
-                .collect(),
-        ),
-    }
+        } => {
+            infer_expr_with(condition, environment, record);
+            union_or_single(vec![
+                infer_block_with(then_branch, environment, record),
+                infer_block_with(else_branch, environment, record),
+            ])
+        }
+        ExprKind::Match { value, arms } => {
+            infer_expr_with(value, environment, record);
+            union_or_single(
+                arms.iter()
+                    .map(|arm| {
+                        let mut arm_environment = environment.clone();
+                        bind_pattern_types(&arm.value.pattern, &mut arm_environment);
+                        infer_expr_with(&arm.value.value, &arm_environment, record)
+                    })
+                    .collect(),
+            )
+        }
+    };
+    record(expression.location, &inferred);
+    inferred
 }
 
 fn check_interpolations(
@@ -2070,7 +2183,11 @@ fn interpolation_type_supported(descriptor: &TypeDescriptor) -> bool {
     }
 }
 
-fn infer_block(block: &Block, environment: &HashMap<String, TypeDescriptor>) -> TypeDescriptor {
+fn infer_block_with(
+    block: &Block,
+    environment: &HashMap<String, TypeDescriptor>,
+    record: &mut impl FnMut(crate::Location, &TypeDescriptor),
+) -> TypeDescriptor {
     let mut environment = environment.clone();
     for binding in &block.value.bindings {
         if matches!(
@@ -2081,15 +2198,18 @@ fn infer_block(block: &Block, environment: &HashMap<String, TypeDescriptor>) -> 
         }
     }
     for binding in &block.value.bindings {
+        if let Some(annotation) = &binding.value.annotation {
+            infer_expr_with(annotation, &environment, record);
+        }
+        let inferred = infer_expr_with(&binding.value.value, &environment, record);
         if matches!(
             binding.value.kind,
             BindingKind::Let | BindingKind::Def | BindingKind::NamedFunction | BindingKind::Import
         ) {
-            let inferred = infer_expr(&binding.value.value, &environment);
             environment.insert(binding.value.name.value.clone(), inferred);
         }
     }
-    infer_expr(&block.value.result, &environment)
+    infer_expr_with(&block.value.result, &environment, record)
 }
 
 fn bind_pattern_types(pattern: &Pattern, environment: &mut HashMap<String, TypeDescriptor>) {
@@ -2342,6 +2462,37 @@ mod tests {
         let error = analyze_source("test", r#"let outer = { let x: "\{[1]}" = "x"; x }; outer"#)
             .unwrap_err();
         assert!(error.message.contains("does not support Array<Int>"));
+    }
+
+    #[test]
+    fn records_a_type_fact_for_every_resolved_hir_expression() {
+        let analysis = analyze_source(
+            "facts.xl",
+            "let values = [1, 2]; let first = fn(x) { let y = x; y }; first(values)",
+        )
+        .unwrap();
+        assert_eq!(
+            analysis.expression_types.len(),
+            analysis.hir.expressions().len()
+        );
+        assert!(
+            analysis
+                .expression_types
+                .values()
+                .any(|ty| matches!(analysis.types.node(*ty), TypeNode::Int))
+        );
+        assert!(
+            analysis
+                .expression_types
+                .values()
+                .any(|ty| matches!(analysis.types.node(*ty), TypeNode::Array(_)))
+        );
+        assert!(
+            analysis
+                .expression_types
+                .values()
+                .any(|ty| matches!(analysis.types.node(*ty), TypeNode::Function { .. }))
+        );
     }
 
     #[test]

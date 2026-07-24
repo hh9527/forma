@@ -1,7 +1,5 @@
-use crate::ast::{
-    Binding, BindingKind, Block, Expr, ExprKind, MatchArm, Pattern, PatternKind, Program,
-    StringPartKind,
-};
+use crate::ast::Program;
+use crate::hir::HirResolution;
 use crate::source::{Location, SourceDatabase, SourceId};
 use crate::types::{Analysis, TypeGraph, TypeId, TypeNode};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -23,6 +21,7 @@ macro_rules! compact_id {
 compact_id!(WorkspaceModuleId);
 compact_id!(DefinitionId);
 compact_id!(ReferenceId);
+compact_id!(WorkspaceExpressionId);
 compact_id!(WorkspaceTypeId);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -51,17 +50,7 @@ pub struct WorkspaceModule {
     pub result_type: Option<WorkspaceTypeId>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum DefinitionKind {
-    Let,
-    DefinitionSlot,
-    NamedFunction,
-    Type,
-    Import,
-    Native,
-    Parameter,
-    Pattern,
-}
+pub use crate::hir::HirDefinitionKind as DefinitionKind;
 
 #[derive(Clone, Debug)]
 pub struct Definition {
@@ -93,6 +82,15 @@ pub struct Reference {
     pub location: Location,
     pub definition: Option<DefinitionId>,
     pub external: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct WorkspaceExpression {
+    pub id: WorkspaceExpressionId,
+    pub module: WorkspaceModuleId,
+    pub location: Location,
+    pub reference: Option<ReferenceId>,
+    pub ty: Option<WorkspaceTypeId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -222,6 +220,7 @@ pub struct WorkspaceSnapshot {
     modules: Vec<WorkspaceModule>,
     definitions: Vec<Definition>,
     references: Vec<Reference>,
+    expressions: Vec<WorkspaceExpression>,
     types: WorkspaceTypeGraph,
 }
 
@@ -281,24 +280,41 @@ impl WorkspaceSnapshot {
             .collect()
     }
 
+    pub fn expressions(&self) -> &[WorkspaceExpression] {
+        &self.expressions
+    }
+
+    pub fn expression(&self, id: WorkspaceExpressionId) -> Option<&WorkspaceExpression> {
+        self.expressions.get(id.index())
+    }
+
+    pub fn expression_at(&self, location: Location) -> Option<&WorkspaceExpression> {
+        self.expressions
+            .iter()
+            .filter(|expression| contains(expression.location, location))
+            .min_by_key(|expression| expression.location.end - expression.location.start)
+    }
+
+    pub fn type_of_expression(&self, id: WorkspaceExpressionId) -> Option<WorkspaceTypeId> {
+        self.expression(id).and_then(|expression| expression.ty)
+    }
+
     pub fn type_at(&self, location: Location) -> Option<WorkspaceTypeId> {
-        if let Some(reference) = self.reference_at(location) {
-            return reference
+        if let Some(reference) = self.reference_at(location)
+            && let Some(ty) = reference
                 .definition
                 .and_then(|id| self.definition(id))
-                .and_then(|definition| definition.ty);
+                .and_then(|definition| definition.ty)
+        {
+            return Some(ty);
         }
-        if let Some(definition) = self.definition_at(location) {
-            return definition.ty;
+        if let Some(definition) = self.definition_at(location)
+            && let Some(ty) = definition.ty
+        {
+            return Some(ty);
         }
-        self.modules
-            .iter()
-            .find(|module| {
-                module
-                    .result_location
-                    .is_some_and(|range| contains(range, location))
-            })
-            .and_then(|module| module.result_type)
+        self.expression_at(location)
+            .and_then(|expression| expression.ty)
     }
 
     pub fn types(&self) -> &WorkspaceTypeGraph {
@@ -388,14 +404,11 @@ impl WorkspaceSnapshot {
             });
         }
 
-        let mut indexer = SemanticIndexer {
-            definitions: Vec::new(),
-            references: Vec::new(),
-            external_names: HashSet::new(),
-            current_module: None,
-        };
+        let mut definitions = Vec::new();
+        let mut definition_maps = Vec::with_capacity(inputs.len());
         for (index, input) in inputs.iter().enumerate() {
-            let (Some(program), Some(analysis)) = (&input.program, &input.analysis) else {
+            let Some(analysis) = &input.analysis else {
+                definition_maps.push(Vec::new());
                 continue;
             };
             let import_targets = input
@@ -403,21 +416,88 @@ impl WorkspaceSnapshot {
                 .iter()
                 .map(|import| (import.name.as_str(), ids[&import.target.key()]))
                 .collect::<HashMap<_, _>>();
-            indexer.index_module(
-                WorkspaceModuleId(index as u32),
-                program,
-                analysis,
-                &type_maps[index],
-                &import_targets,
-            );
+            let module = WorkspaceModuleId(index as u32);
+            let mut map = Vec::with_capacity(analysis.hir.definitions().len());
+            for definition in analysis.hir.definitions() {
+                let id = DefinitionId(definitions.len() as u32);
+                let ty = analysis
+                    .definition_types
+                    .get(&definition.id)
+                    .map(|local| type_maps[index][local.index()]);
+                definitions.push(Definition {
+                    id,
+                    module,
+                    name: definition.name.clone(),
+                    kind: definition.kind,
+                    location: definition.location,
+                    additional_locations: definition.additional_locations.clone(),
+                    ty,
+                    import_target: (definition.kind == DefinitionKind::Import)
+                        .then(|| import_targets.get(definition.name.as_str()).copied())
+                        .flatten(),
+                });
+                map.push(id);
+            }
+            definition_maps.push(map);
         }
-        indexer.normalize_order();
+
+        let mut references = Vec::new();
+        let mut reference_maps = Vec::with_capacity(inputs.len());
+        for (index, input) in inputs.iter().enumerate() {
+            let Some(analysis) = &input.analysis else {
+                reference_maps.push(Vec::new());
+                continue;
+            };
+            let module = WorkspaceModuleId(index as u32);
+            let mut map = Vec::with_capacity(analysis.hir.references().len());
+            for reference in analysis.hir.references() {
+                let id = ReferenceId(references.len() as u32);
+                references.push(Reference {
+                    id,
+                    module,
+                    name: reference.name.clone(),
+                    location: reference.location,
+                    definition: match reference.resolution {
+                        HirResolution::Definition(definition) => {
+                            Some(definition_maps[index][definition.index()])
+                        }
+                        HirResolution::External | HirResolution::Unresolved => None,
+                    },
+                    external: reference.resolution == HirResolution::External,
+                });
+                map.push(id);
+            }
+            reference_maps.push(map);
+        }
+
+        let mut expressions = Vec::new();
+        for (index, input) in inputs.iter().enumerate() {
+            let Some(analysis) = &input.analysis else {
+                continue;
+            };
+            let module = WorkspaceModuleId(index as u32);
+            for expression in analysis.hir.expressions() {
+                expressions.push(WorkspaceExpression {
+                    id: WorkspaceExpressionId(expressions.len() as u32),
+                    module,
+                    location: expression.location,
+                    reference: expression
+                        .reference
+                        .map(|reference| reference_maps[index][reference.index()]),
+                    ty: analysis
+                        .expression_types
+                        .get(&expression.id)
+                        .map(|ty| type_maps[index][ty.index()]),
+                });
+            }
+        }
 
         Self {
             sources,
             modules,
-            definitions: indexer.definitions,
-            references: indexer.references,
+            definitions,
+            references,
+            expressions,
             types,
         }
     }
@@ -544,319 +624,6 @@ pub(crate) struct SemanticModuleInput {
     pub imports: Vec<SemanticImport>,
 }
 
-struct SemanticIndexer {
-    definitions: Vec<Definition>,
-    references: Vec<Reference>,
-    external_names: HashSet<String>,
-    current_module: Option<WorkspaceModuleId>,
-}
-
-type Scope = HashMap<String, DefinitionId>;
-
-impl SemanticIndexer {
-    fn normalize_order(&mut self) {
-        self.definitions.sort_by_key(|definition| {
-            (
-                definition.module,
-                definition.location.source,
-                definition.location.start,
-                definition.location.end,
-            )
-        });
-        let mut remapped = vec![DefinitionId(0); self.definitions.len()];
-        for (new, definition) in self.definitions.iter_mut().enumerate() {
-            let old = definition.id;
-            let new = DefinitionId(new as u32);
-            definition.id = new;
-            remapped[old.index()] = new;
-        }
-        for reference in &mut self.references {
-            reference.definition = reference.definition.map(|id| remapped[id.index()]);
-        }
-        self.references.sort_by_key(|reference| {
-            (
-                reference.module,
-                reference.location.source,
-                reference.location.start,
-                reference.location.end,
-            )
-        });
-        for (index, reference) in self.references.iter_mut().enumerate() {
-            reference.id = ReferenceId(index as u32);
-        }
-    }
-
-    fn index_module(
-        &mut self,
-        module: WorkspaceModuleId,
-        program: &Program,
-        analysis: &Analysis,
-        type_map: &[WorkspaceTypeId],
-        import_targets: &HashMap<&str, WorkspaceModuleId>,
-    ) {
-        self.current_module = Some(module);
-        self.external_names = analysis
-            .prelude
-            .keys()
-            .chain(analysis.external_values.keys())
-            .cloned()
-            .collect();
-        let mut scopes = vec![Scope::new()];
-        self.index_block(
-            module,
-            &program.value.body,
-            &mut scopes,
-            Some((analysis, type_map, import_targets)),
-        );
-    }
-
-    fn define(
-        &mut self,
-        name: &str,
-        kind: DefinitionKind,
-        location: Location,
-        ty: Option<WorkspaceTypeId>,
-        import_target: Option<WorkspaceModuleId>,
-        scope: &mut Scope,
-    ) -> DefinitionId {
-        let id = DefinitionId(self.definitions.len() as u32);
-        self.definitions.push(Definition {
-            id,
-            module: self.current_module.expect("indexer has an active module"),
-            name: name.into(),
-            kind,
-            location,
-            additional_locations: Vec::new(),
-            ty,
-            import_target,
-        });
-        scope.insert(name.into(), id);
-        id
-    }
-
-    fn reference(
-        &mut self,
-        module: WorkspaceModuleId,
-        name: &str,
-        location: Location,
-        scopes: &[Scope],
-    ) {
-        let definition = scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).copied());
-        let id = ReferenceId(self.references.len() as u32);
-        self.references.push(Reference {
-            id,
-            module,
-            name: name.into(),
-            location,
-            definition,
-            external: definition.is_none() && self.external_names.contains(name),
-        });
-    }
-
-    fn index_block(
-        &mut self,
-        module: WorkspaceModuleId,
-        block: &Block,
-        scopes: &mut Vec<Scope>,
-        top: Option<(
-            &Analysis,
-            &[WorkspaceTypeId],
-            &HashMap<&str, WorkspaceModuleId>,
-        )>,
-    ) {
-        scopes.push(Scope::new());
-        for binding in &block.value.bindings {
-            if matches!(
-                binding.value.kind,
-                BindingKind::Decl
-                    | BindingKind::Native
-                    | BindingKind::NamedFunction
-                    | BindingKind::Type
-            ) {
-                self.define_binding(binding, scopes, top);
-            }
-        }
-        for binding in &block.value.bindings {
-            if let Some(annotation) = &binding.value.annotation {
-                self.index_expr(module, annotation, scopes);
-            }
-            match binding.value.kind {
-                BindingKind::Let | BindingKind::Import => {
-                    self.index_expr(module, &binding.value.value, scopes);
-                    self.define_binding(binding, scopes, top);
-                }
-                BindingKind::Def => {
-                    if let Some(id) = scopes
-                        .iter()
-                        .rev()
-                        .find_map(|scope| scope.get(&binding.value.name.value).copied())
-                    {
-                        self.definitions[id.index()]
-                            .additional_locations
-                            .push(binding.value.name.location);
-                    } else {
-                        self.define_binding(binding, scopes, top);
-                    }
-                    self.index_expr(module, &binding.value.value, scopes);
-                }
-                BindingKind::Decl | BindingKind::Native | BindingKind::Type => {
-                    self.index_expr(module, &binding.value.value, scopes);
-                }
-                BindingKind::NamedFunction => {
-                    self.index_expr(module, &binding.value.value, scopes);
-                }
-            }
-        }
-        self.index_expr(module, &block.value.result, scopes);
-        scopes.pop();
-    }
-
-    fn define_binding(
-        &mut self,
-        binding: &Binding,
-        scopes: &mut [Scope],
-        top: Option<(
-            &Analysis,
-            &[WorkspaceTypeId],
-            &HashMap<&str, WorkspaceModuleId>,
-        )>,
-    ) {
-        let name = binding.value.name.value.as_str();
-        let kind = match binding.value.kind {
-            BindingKind::Let => DefinitionKind::Let,
-            BindingKind::Decl | BindingKind::Def => DefinitionKind::DefinitionSlot,
-            BindingKind::NamedFunction => DefinitionKind::NamedFunction,
-            BindingKind::Type => DefinitionKind::Type,
-            BindingKind::Import => DefinitionKind::Import,
-            BindingKind::Native => DefinitionKind::Native,
-        };
-        let ty = top.and_then(|(analysis, map, _)| {
-            let id = if binding.value.kind == BindingKind::Type {
-                analysis.declared_types.get(name)
-            } else {
-                analysis.binding_types.get(name)
-            }?;
-            Some(map[id.index()])
-        });
-        let import_target = top.and_then(|(_, _, imports)| imports.get(name).copied());
-        self.define(
-            name,
-            kind,
-            binding.value.name.location,
-            ty,
-            import_target,
-            scopes.last_mut().expect("block has a scope"),
-        );
-    }
-
-    fn index_expr(
-        &mut self,
-        module: WorkspaceModuleId,
-        expression: &Expr,
-        scopes: &mut Vec<Scope>,
-    ) {
-        match &expression.value {
-            ExprKind::Variable(name) => self.reference(module, &name.value, name.location, scopes),
-            ExprKind::InterpolatedString(parts) => {
-                for part in parts {
-                    if let StringPartKind::Expression(expression) = &part.value {
-                        self.index_expr(module, expression, scopes);
-                    }
-                }
-            }
-            ExprKind::Array(items) | ExprKind::Tuple(items) => {
-                for item in items {
-                    self.index_expr(module, item, scopes);
-                }
-            }
-            ExprKind::Dict(fields) => {
-                for field in fields {
-                    self.index_expr(module, &field.value.value, scopes);
-                }
-            }
-            ExprKind::Block(block) => self.index_block(module, block, scopes, None),
-            ExprKind::Unary { operand, .. } => self.index_expr(module, operand, scopes),
-            ExprKind::Binary { left, right, .. } => {
-                self.index_expr(module, left, scopes);
-                self.index_expr(module, right, scopes);
-            }
-            ExprKind::Field { receiver, .. } => self.index_expr(module, receiver, scopes),
-            ExprKind::Call { callee, arguments } => {
-                self.index_expr(module, callee, scopes);
-                for argument in arguments {
-                    self.index_expr(module, argument, scopes);
-                }
-            }
-            ExprKind::Closure { parameters, body } => {
-                scopes.push(Scope::new());
-                for parameter in parameters {
-                    self.define(
-                        &parameter.value,
-                        DefinitionKind::Parameter,
-                        parameter.location,
-                        None,
-                        None,
-                        scopes.last_mut().expect("closure has a scope"),
-                    );
-                }
-                self.index_block(module, body, scopes, None);
-                scopes.pop();
-            }
-            ExprKind::If {
-                condition,
-                then_branch,
-                else_branch,
-            } => {
-                self.index_expr(module, condition, scopes);
-                self.index_block(module, then_branch, scopes, None);
-                self.index_block(module, else_branch, scopes, None);
-            }
-            ExprKind::Match { value, arms } => {
-                self.index_expr(module, value, scopes);
-                for arm in arms {
-                    self.index_arm(module, arm, scopes);
-                }
-            }
-            ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::String(_)
-            | ExprKind::Bytes(_)
-            | ExprKind::Atom(_) => {}
-        }
-    }
-
-    fn index_arm(&mut self, module: WorkspaceModuleId, arm: &MatchArm, scopes: &mut Vec<Scope>) {
-        scopes.push(Scope::new());
-        self.index_pattern(&arm.value.pattern, scopes.last_mut().unwrap());
-        self.index_expr(module, &arm.value.value, scopes);
-        scopes.pop();
-    }
-
-    fn index_pattern(&mut self, pattern: &Pattern, scope: &mut Scope) {
-        match &pattern.value {
-            PatternKind::Binding(name) => {
-                self.define(
-                    &name.value,
-                    DefinitionKind::Pattern,
-                    name.location,
-                    None,
-                    None,
-                    scope,
-                );
-            }
-            PatternKind::Tuple(items) => {
-                for item in items {
-                    self.index_pattern(item, scope);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -898,7 +665,8 @@ mod tests {
             "import model from \"./model.xl\";\n\
              import data from \"./data.json\";\n\
              let f = fn(x) { let y = x; y };\n\
-             {model: model, data: data, f: f}",
+             let count = 1 + 2;\n\
+             {model: model, data: data, f: f, count: count}",
         )
         .unwrap();
 
@@ -963,11 +731,40 @@ mod tests {
             )),
             Some(node_type)
         );
+        let node_reference = snapshot
+            .references()
+            .iter()
+            .find(|reference| reference.definition == Some(node.id))
+            .unwrap();
+        assert_eq!(
+            snapshot.type_at(Location::new(
+                node_reference.location.source,
+                TextRange::at(node_reference.location.start),
+            )),
+            Some(node_type),
+            "resolved type references must prefer the promoted definition root"
+        );
         assert!(
             snapshot
                 .exports_of(main_module.id)
                 .iter()
                 .any(|item| item.name == "f")
+        );
+        assert!(
+            snapshot
+                .expressions()
+                .iter()
+                .filter(|expression| expression.module == main_module.id)
+                .all(|expression| expression.ty.is_some())
+        );
+        let main_source = snapshot.sources().get(main_module.source.unwrap());
+        let literal = u32::try_from(main_source.text.find("1 + 2").unwrap()).unwrap();
+        let expression = snapshot
+            .expression_at(Location::new(main_source.id(), TextRange::at(literal)))
+            .unwrap();
+        assert_eq!(
+            snapshot.types().node(expression.ty.unwrap()),
+            Some(&WorkspaceTypeNode::Int)
         );
 
         fs::remove_dir_all(directory).unwrap();

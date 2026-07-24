@@ -4,6 +4,7 @@ use crate::ast::{
     UnaryOperator, located,
 };
 use crate::bytecode::BytecodeFunction;
+use crate::hir::HirProgram;
 use crate::lexer::{FrontendError, SourceLocation};
 use crate::lir::{self, ConstantId, Item, LabelId, Operation, RegisterId};
 use crate::parser::parse_registered;
@@ -82,6 +83,7 @@ pub(crate) fn compile_program_with_promoted_types(
     promoted_types: &HashSet<String>,
     erased_bindings: &HashSet<String>,
 ) -> Result<BytecodeFunction, FrontendError> {
+    validate_hir(source_file, &analysis.hir)?;
     let mut program = program.clone();
     program.value.body.value.bindings.retain(|binding| {
         binding.value.kind == BindingKind::Type
@@ -211,6 +213,16 @@ pub(crate) fn compile_metadata_initializer(
         },
         program.location,
     );
+    let metadata_hir = HirProgram::resolve(
+        &metadata_program,
+        analysis
+            .prelude
+            .keys()
+            .chain(analysis.external_values.keys())
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    validate_hir(source_file, &metadata_hir)?;
     let function = compile_program_analyzed_in(source_file, &metadata_program, analysis)?;
     Ok(Some(MetadataInitializer {
         function,
@@ -239,6 +251,8 @@ pub(crate) fn compile_expression_with_bindings(
     bindings: &BTreeMap<String, Value>,
     source_file: &SourceFile,
 ) -> Result<BytecodeFunction, FrontendError> {
+    let hir = HirProgram::resolve_expression(expression, bindings.keys().cloned());
+    validate_hir(source_file, &hir)?;
     let mut compiler = Compiler {
         source_name,
         function_name: function_name.to_owned(),
@@ -266,6 +280,24 @@ pub(crate) fn compile_expression_with_bindings(
     }
     compiler.compile_tail_expr(expression)?;
     compiler.finish()
+}
+
+fn validate_hir(source_file: &SourceFile, hir: &HirProgram) -> Result<(), FrontendError> {
+    let Some(reference) = hir.unresolved().next() else {
+        return Ok(());
+    };
+    let position = source_file.position(reference.location.start);
+    let message = format!("unknown binding {:?}", reference.name);
+    Err(FrontendError {
+        source_name: source_file.name.to_string(),
+        location: SourceLocation {
+            offset: reference.location.start as usize,
+            line: position.line,
+            column: position.column,
+        },
+        message: message.clone(),
+        diagnostic: Some(Box::new(Diagnostic::error(message, reference.location))),
+    })
 }
 
 struct Compiler<'a> {

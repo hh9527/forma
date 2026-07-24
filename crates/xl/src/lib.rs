@@ -3,6 +3,7 @@ pub mod bytecode;
 pub mod compiler;
 mod core;
 mod heap;
+pub mod hir;
 pub mod json;
 pub mod lexer;
 pub mod lir;
@@ -20,6 +21,10 @@ pub use bytecode::{
     ProtoLinkId, Register, TextLinkId, ValueLinkId,
 };
 pub use compiler::{ExecutionError, compile_source, run_source};
+pub use hir::{
+    HirDefinition, HirDefinitionId, HirDefinitionKind, HirExpression, HirExpressionId, HirProgram,
+    HirReference, HirReferenceId, HirResolution,
+};
 pub use json::{
     JsonError, JsonParse, Provenance, SourcedValue, ValuePath, ValuePathSegment, parse_json,
     parse_json_registered, parse_json_with_provenance,
@@ -31,8 +36,8 @@ pub use module::{
 };
 pub use semantic::{
     Definition, DefinitionId, DefinitionKind, Reference, ReferenceId, WorkspaceExport,
-    WorkspaceModule, WorkspaceModuleId, WorkspaceModuleKind, WorkspaceSnapshot, WorkspaceTypeGraph,
-    WorkspaceTypeId, WorkspaceTypeNode,
+    WorkspaceExpression, WorkspaceExpressionId, WorkspaceModule, WorkspaceModuleId,
+    WorkspaceModuleKind, WorkspaceSnapshot, WorkspaceTypeGraph, WorkspaceTypeId, WorkspaceTypeNode,
 };
 pub use source::{
     Diagnostic, Label, Loc, Located, Location, Origin, SourceDatabase, SourceId, TextRange,

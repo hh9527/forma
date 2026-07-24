@@ -1,6 +1,6 @@
 # RFC 0041: Resolved HIR and expression facts
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0039, RFC 0040
 
 ## Summary
@@ -221,4 +221,41 @@ The output is diagnostic tooling, not a stable serialization format.
 
 ## Implementation result
 
-Pending.
+Implemented as specified.
+
+`hir.rs` now owns the source-shaped identity layer and the shared lexical
+resolver. It assigns deterministic local IDs to definitions, references, and
+expressions; represents external and unresolved names explicitly; gives
+`decl`/`def` one definition identity; and covers parameters, patterns,
+shadowing, recursion, and nested expressions. Normal analysis retains this
+`HirProgram`, while metadata initialization and isolated tool expressions run
+the same resolver over their synthetic AST. Compiler register and capture maps
+remain name-keyed local implementation details as permitted by this RFC.
+
+Analysis now records both definition and expression `TypeId` facts. The
+existing descriptor inference walk was made observable rather than replaced:
+it records literals, operands, callees, arguments, conditions, match inputs,
+interpolation expressions, annotations, and nested block expressions without
+performing additional XL evaluation. Promoted type roots replace conservative
+bootstrap facts for recursive and forward type definitions.
+
+`WorkspaceSnapshot` projects the retained HIR into workspace definition,
+reference, and expression identities. The former `SemanticIndexer` and its
+independent scope implementation were removed. The query surface now includes
+`expressions`, `expression`, `expression_at`, and `type_of_expression`;
+`type_at` prefers resolved definition facts before the narrowest expression
+fact. `xl show` lists expression facts, and its position form reports the
+narrowest expression and type alongside definition and reference information.
+
+Tests cover shared resolution for declarations and definitions, recursion,
+shadowing, parameters, patterns, and externals; fact completeness for every HIR
+expression; mixed XL/JSON workspace projection; recursive promoted type roots;
+position queries; and CLI observation. The complete workspace suite passes
+with 149 unit tests, one ignored manual parser baseline, and six CLI tests.
+Strict formatting, Clippy with warnings denied, and diff checks also pass.
+
+Type descriptors are currently interned while each expression fact is
+materialized. Structurally equal composite descriptors may therefore occupy
+distinct graph nodes and make diagnostic `show` output larger than necessary.
+Structural graph interning is deferred as a performance and presentation
+improvement; it does not change fact identity or query semantics.

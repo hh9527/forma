@@ -239,6 +239,25 @@ fn show_workspace(workspace: &WorkspaceSnapshot) -> Result<(), String> {
             target
         );
     }
+    println!("expressions:");
+    for expression in workspace.expressions() {
+        let ty = expression.ty.map_or_else(
+            || "?".into(),
+            |ty| {
+                format!(
+                    "t{} = {}",
+                    ty.index(),
+                    workspace.types().display(ty).unwrap_or_else(|| "?".into())
+                )
+            },
+        );
+        println!(
+            "  e{} {} {}",
+            expression.id.index(),
+            show_location(workspace, expression.location),
+            ty
+        );
+    }
     println!("types:");
     for (id, node) in workspace.types().nodes() {
         println!("  t{} {node:?}", id.index());
@@ -290,6 +309,20 @@ fn show_at(
                     }
                 },
                 |id| format!("d{}", id.index()),
+            )
+        );
+    }
+    if let Some(expression) = workspace.expression_at(location) {
+        println!(
+            "expression: e{} {}",
+            expression.id.index(),
+            expression.ty.map_or_else(
+                || "?".into(),
+                |ty| format!(
+                    "t{} = {}",
+                    ty.index(),
+                    workspace.types().display(ty).unwrap_or_else(|| "?".into())
+                )
             )
         );
     }

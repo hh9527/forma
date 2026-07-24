@@ -163,6 +163,7 @@ fn show_observes_deterministic_workspace_and_position_queries() {
     assert!(report.contains("definitions:"));
     assert!(report.contains("Let answer"));
     assert!(report.contains("references:"));
+    assert!(report.contains("expressions:"));
     assert!(report.contains("answer"));
     assert!(report.contains(" = Int"));
 
@@ -184,6 +185,7 @@ fn show_observes_deterministic_workspace_and_position_queries() {
     );
     let output = String::from_utf8_lossy(&at.stdout);
     assert!(output.contains("reference:"), "{output}");
+    assert!(output.contains("expression:"), "{output}");
     assert!(output.contains("type:"), "{output}");
     assert!(output.contains(" = Int"), "{output}");
     fs::remove_dir_all(directory).unwrap();
