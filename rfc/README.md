@@ -65,3 +65,4 @@ semantics from an earlier RFC.
 44. Recoverable workspace module graphs and cross-module fact blocking.
 45. Asynchronous workspace revisions and document overlays.
 46. Asynchronous LSP adapter and cooperative request cancellation.
+47. Conservative semantic completion.
