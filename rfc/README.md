@@ -61,3 +61,4 @@ semantics from an earlier RFC.
 40. Unified CLI type observation through the workspace snapshot.
 41. Resolved HIR identities and expression semantic facts.
 42. Recoverable HIR and explicit semantic fact states.
+43. Dependency-scoped partial tool evaluation for TypeMetadata.
