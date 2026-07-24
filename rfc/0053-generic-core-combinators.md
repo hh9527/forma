@@ -124,21 +124,25 @@ ordinary eagerly evaluated values. This RFC does not add a lazy fallback.
 
 ```xl
 def map:
-    for(E, A, B) Fn(Result(E, A), Fn(A) -> B) -> Result(E, B);
+    for(A, E, B) Fn(Result(A, E), Fn(A) -> B) -> Result(B, E);
 
 def map_err:
-    for(E, F, A) Fn(Result(E, A), Fn(E) -> F) -> Result(F, A);
+    for(A, E, F) Fn(Result(A, E), Fn(E) -> F) -> Result(A, F);
 
 def unwrap_or:
-    for(E, A) Fn(Result(E, A), A) -> A;
+    for(A, E) Fn(Result(A, E), A) -> A;
 
 def is_ok:
-    for(E, A) Fn(Result(E, A)) -> Bool;
+    for(A, E) Fn(Result(A, E)) -> Bool;
 ```
 
 Their implementations are ordinary matches. `map` calls its callback only for
 `Ok`; `map_err` calls its callback only for `Err`; `unwrap_or` returns the Ok
 payload or its strict fallback; and `is_ok` returns Bool.
+
+The parameter order follows XL's existing normalized metadata constructor:
+`Result(Ok, Err)`. It is intentionally not reversed to mirror another
+language's library spelling.
 
 The native declaration remains:
 
