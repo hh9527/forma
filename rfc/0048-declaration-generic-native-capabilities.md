@@ -5,10 +5,10 @@
 
 ## Summary
 
-XL adds explicit declaration-level type parameters to native bindings:
+XL adds explicit prenex type schemes to native binding contracts:
 
 ```xl
-native map[A, B]: fn(Array(A), fn(A) -> B) -> Array(B);
+native map: for(A, B) fn(Array(A), fn(A) -> B) -> Array(B);
 ```
 
 The declaration is the sole static contract exposed by a library. Each use of
@@ -51,7 +51,7 @@ polymorphism.
 
 ## Goals
 
-1. parse and retain type parameters on top-level native declarations;
+1. parse and retain a root `for(...)` binder in native contracts;
 2. make the declaration the only authoritative static native contract;
 3. represent quantified binding schemes separately from monomorphic types;
 4. instantiate a fresh monotype at every reference to a generic native;
@@ -69,7 +69,8 @@ polymorphism.
 ## Non-goals
 
 - implicit type parameters or implicit generalization of `let` bindings;
-- generic `def`, `decl`, named-function, type, or import syntax in this RFC;
+- polymorphic `def`, `decl`, named-function, type, or import contracts in this
+  RFC;
 - higher-rank types, first-class polymorphic values, or `forall` inside type
   expressions;
 - bounded parameters, traits, type classes, interfaces, associated types, or
@@ -87,24 +88,26 @@ polymorphism.
 The native grammar becomes conceptually:
 
 ```text
-native_binding := "native" Identifier type_parameters? ":" contract ";"
-type_parameters := "[" Identifier ("," Identifier)* "]"
+native_binding := "native" Identifier ":" type_scheme ";"
+type_scheme := ("for" "(" Identifier ("," Identifier)* ")")? contract
 ```
 
 Examples:
 
 ```xl
-native identity[A]: fn(A) -> A;
-native empty[A]: fn() -> Array(A);
-native map[A, B]: fn(Array(A), fn(A) -> B) -> Array(B);
-native fold[A, B]: fn(Array(A), B, fn(B, A) -> B) -> B;
+native identity: for(A) fn(A) -> A;
+native empty: for(A) fn() -> Array(A);
+native map: for(A, B) fn(Array(A), fn(A) -> B) -> Array(B);
+native fold: for(A, B) fn(Array(A), B, fn(B, A) -> B) -> B;
 ```
 
-The brackets are part of the binding declaration, not an application operator
-and not a general type expression. The quantified scope begins after `:` and
-ends with the declaration contract. A parameter may appear any number of times
-or not at all; an unused parameter is accepted syntactically but makes an
-unconstrained call impossible unless an expected type determines it.
+The `for(...)` binder is part of the complete type metadata to the right of
+`:`. Its scope is the immediately following contract. The initial grammar
+accepts it only at the root of a declaration contract; it is not an ordinary
+call and does not permit nested or higher-rank schemes. A parameter may appear
+any number of times or not at all; an unused parameter is accepted
+syntactically but makes an unconstrained call impossible unless an expected
+type determines it.
 
 Parameter names must be unique within the list. They occupy the type namespace
 inside the contract and shadow type declarations with the same spelling.
@@ -130,7 +133,7 @@ InferenceType = concrete node | InferenceVariable
 Conceptually, the declaration:
 
 ```xl
-native map[A, B]: fn(Array(A), fn(A) -> B) -> Array(B);
+native map: for(A, B) fn(Array(A), fn(A) -> B) -> Array(B);
 ```
 
 creates immutable semantic data equivalent to:
@@ -287,7 +290,7 @@ constraint generation, substitution traversal, and graph publication.
 
 ## Compatibility
 
-Existing declarations without brackets are monomorphic and retain their
+Existing declarations without a `for(...)` binder are monomorphic and retain their
 current behavior:
 
 ```xl
@@ -366,7 +369,7 @@ the syntax addition is backward compatible.
 Implemented with declaration syntax such as:
 
 ```xl
-native map[A, B]: fn(Array(A), fn(A) -> B) -> Array(B);
+native map: for(A, B) fn(Array(A), fn(A) -> B) -> Array(B);
 ```
 
 The lossless CST, typed syntax view, AST, recovered HIR, and diagnostics retain
@@ -402,16 +405,18 @@ whitespace validation.
 
 ### Put `forall` in the type expression
 
-`native map: forall[A, B] ...` makes polymorphism a general type-expression
-feature and raises higher-rank representation questions immediately. Binding
-parameters express the required prenex scheme without promising first-class
-polymorphic values.
+`native map: forall[A, B] ...` carries the right semantics but introduces a
+second bracket convention and a longer theory-facing keyword. Root-only
+`for(A, B) ...` expresses the same prenex scheme in XL's existing
+parenthesized style without promising first-class polymorphic values.
 
-### Use `for(A, B)` in the type expression
+### Put parameters after the binding name
 
-This is compact but has the same semantic expansion as `forall` and overloads
-a likely value-level control-flow word. `map[A, B]` keeps quantification visibly
-attached to the declaration that owns the scheme.
+`native map[A, B]: ...` is compact and naturally limits polymorphism to
+declarations, but splits one `TypeScheme` between binding syntax on the left
+and type metadata on the right. Keeping `for(A, B) ...` entirely after `:`
+makes the source contract correspond directly to the semantic scheme data and
+lets future declaration forms reuse the same root scheme grammar.
 
 ### Obtain generic signatures from the host registry
 
