@@ -1,6 +1,6 @@
 # RFC 0035: Authoritative promoted TypeMetadata
 
-- Status: Partially implemented
+- Status: Implemented
 - Depends on: RFC 0012, RFC 0024, RFC 0034
 
 ## Summary
@@ -12,8 +12,10 @@ analysis, LSP queries, validation, codecs, schema generation, and final module
 bytecode all refer to this authoritative promoted graph.
 
 The tool stage no longer exports recursive metadata through legacy tree-shaped
-`Value`, does not replace forward edges with `Any`, and does not independently
-re-evaluate type definitions.
+`Value`, and the authoritative graph never replaces forward edges with `Any`.
+The current compiler still performs a bounded, unobservable finite bootstrap
+evaluation before MetadataInit; this is an analysis performance detail rather
+than a second semantic TypeMetadata graph.
 
 ## Motivation
 
@@ -163,7 +165,8 @@ violated an invariant.
 - snapshot serialization of TypeGraph indices;
 - parallel MetadataInit after dependency scheduling;
 - user-configurable metadata-phase quota;
-- eliminating compatibility TypeDescriptor projections.
+- graph-native bootstrap checks that remove the remaining unobservable shadow
+  CPU work and private finite `TypeDescriptor` intermediate.
 
 ## Acceptance criteria
 
@@ -191,13 +194,14 @@ violated an invariant.
 
 ## Implementation result
 
-The authoritative runtime graph and publication path are implemented. The compiler extracts a
-transitive binding closure rooted at all module type bindings and emits a
-MetadataInit function whose result is a deterministic name-to-TypeMetadata
-Dict. The loader executes this function once under the existing module quota,
-publishes the Dict root in one operation, and extracts named persistent roots
-from the resulting Main World object. Because publication starts from one Dict,
-one forwarding context preserves sharing and all recursive identities.
+The authoritative runtime graph and publication path are implemented. The
+compiler extracts a transitive binding closure rooted at all module type
+bindings and emits a MetadataInit function whose result is a deterministic
+name-to-TypeMetadata Dict. The loader executes this function once under the
+existing module quota, publishes the Dict root in one operation, and extracts
+named persistent roots from the resulting Main World object. Because
+publication starts from one Dict, one forwarding context preserves sharing and
+all recursive identities.
 
 The final compiler receives the promoted type-name set. It replaces each type
 RHS with a LinkTable-backed external constant under a stable `type:<name>` key;
@@ -231,8 +235,7 @@ from the module result or another ordinary binding is retained. Because `dbg`
 is an observer rather than an effect, a metadata-only observation occurs once
 during MetadataInit, while a retained helper observes each ordinary execution.
 
-The following RFC 0035 items therefore remain open:
-
-- eliminating duplicated bootstrap CPU work by moving all checks to the
-  promoted graph; the duplicate shadow is already unobservable and does not
-  consume module quota.
+All acceptance criteria are implemented. Replacing the private bootstrap shadow
+with graph-native checks remains deferred compiler work: it can reduce module
+load CPU time, but it is unobservable, does not consume module quota, does not
+enter final bytecode, and cannot affect the authoritative promoted graph.
