@@ -120,6 +120,35 @@ pub struct ValueRef<'a> {
 }
 
 impl<'a> ValueRef<'a> {
+    pub(crate) fn persistent(value: PersistentValue, heap: &'a Heap) -> Self {
+        Self {
+            value: value.runtime(),
+            view: HeapView {
+                current: heap,
+                background: None,
+            },
+        }
+    }
+
+    pub(crate) fn hidden_up_link_handle(self) -> Option<Handle> {
+        let RuntimeValue::UpLink(handle) = self.value.value else {
+            return None;
+        };
+        Some(handle)
+    }
+
+    pub(crate) fn object_handle(self) -> Option<Handle> {
+        match self.value.value {
+            RuntimeValue::String(handle)
+            | RuntimeValue::Bytes(handle)
+            | RuntimeValue::Array(handle)
+            | RuntimeValue::Tuple(handle)
+            | RuntimeValue::Dict(handle)
+            | RuntimeValue::Func(handle) => Some(handle),
+            _ => None,
+        }
+    }
+
     pub(crate) fn is_hidden_up_link(self) -> bool {
         matches!(self.value.value, RuntimeValue::UpLink(_))
     }

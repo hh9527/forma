@@ -556,7 +556,7 @@ impl ModuleLoader {
         } else {
             Arc::clone(&self.debug_sink)
         };
-        let analysis = analyze_program_with_bindings_observed(
+        let mut analysis = analyze_program_with_bindings_observed(
             &source_name,
             &program,
             account,
@@ -574,6 +574,7 @@ impl ModuleLoader {
         })?;
         let source_file = self.sources.get(source_id);
         let mut promoted_types = HashSet::new();
+        let mut promoted_type_roots = BTreeMap::new();
         if let Some((metadata_function, type_names)) =
             compile_metadata_initializer(source_file, &program, &analysis)
                 .map_err(|error| ModuleError::new(error.to_string()))?
@@ -599,8 +600,12 @@ impl ModuleLoader {
                         ModuleError::new(format!("metadata initializer omitted type root {name:?}"))
                     })?;
                 external_roots.insert(type_link_key(&name), root);
+                promoted_type_roots.insert(name.clone(), root);
                 promoted_types.insert(name);
             }
+            analysis
+                .install_promoted_types(&self.main.heap, &promoted_type_roots)
+                .map_err(ModuleError::new)?;
         }
         let function = if promoted_types.is_empty() {
             compile_program_analyzed_in(source_file, &program, &analysis)
@@ -1199,8 +1204,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            module.analysis.binding_types["input"],
-            crate::TypeDescriptor::Any
+            module
+                .analysis
+                .types
+                .node(module.analysis.binding_types["input"]),
+            &crate::TypeNode::Any
         );
         assert_eq!(module.execute(100_000).unwrap().to_string(), "{value: 42}");
         fs::remove_dir_all(directory).unwrap();
@@ -2249,6 +2257,26 @@ mod tests {
                {Node: Node, Left: Left, Right: Right}"#,
         )
         .unwrap();
+        let types_module =
+            load_module(directory.join("Types.xl"), BTreeMap::new(), 100_000).unwrap();
+        let node = types_module.analysis.declared_types["Node"];
+        let crate::TypeNode::Struct(fields) = types_module.analysis.types.node(node) else {
+            panic!("Node must be a Struct in the authoritative type graph");
+        };
+        let crate::TypeNode::Array(children) = types_module.analysis.types.node(fields["children"])
+        else {
+            panic!("Node.children must be an Array");
+        };
+        assert_eq!(
+            *children, node,
+            "the recursive edge must retain TypeId identity"
+        );
+        assert_eq!(
+            types_module.analysis.display(node),
+            "{children: Array<Node>, value: Int}"
+        );
+        assert!(types_module.analysis.types.is_assignable(node, node));
+
         fs::write(
             directory.join("main.xl"),
             r#"import Types from "./Types.xl";

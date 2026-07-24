@@ -124,9 +124,9 @@ interned structurally later but are not required to be. Assignability tracks
 visited `(expected, actual)` TypeId pairs. Display and LSP traversal track active
 nodes and print a declared name or a recursion marker on a back edge.
 
-The existing owned `TypeDescriptor` remains available as a finite compatibility
-projection. Projecting a recursive back edge produces a named reference rather
-than `Any`; clients requiring full precision use `TypeGraph`.
+The existing owned `TypeDescriptor` is only a private, finite intermediate used
+while bootstrapping analysis. Public Analysis results use `TypeGraph` and
+`TypeId` directly; XL does not maintain a second public tree-shaped type API.
 
 ## Module lifecycle
 
@@ -191,7 +191,7 @@ violated an invariant.
 
 ## Implementation result
 
-The authoritative runtime half is implemented. The compiler extracts a
+The authoritative runtime graph and publication path are implemented. The compiler extracts a
 transitive binding closure rooted at all module type bindings and emits a
 MetadataInit function whose result is a deterministic name-to-TypeMetadata
 Dict. The loader executes this function once under the existing module quota,
@@ -208,17 +208,23 @@ the complete graph before final bytecode can run. The debug integration test
 executes two sessions and confirms that the type RHS is observed once at module
 load while ordinary session debug work repeats.
 
+After publication, Analysis derives an immutable `TypeGraph` directly from the
+persistent roots. Persistent object and up-link handles share one identity memo,
+so a named root and an edge that links back to it receive the same `TypeId`.
+Public declared and binding type maps and the result type contain `TypeId`s;
+display and assignability traverse the graph with active-node and visited-pair
+sets. Recursive display uses the declared name on a back edge. The old
+`TypeDescriptor` is no longer part of the public API.
+
 Bootstrap analysis remains necessary to compile MetadataInit. For modules with
 type bindings its debug sink is intentionally discarded so this conservative
 pass is not observably mistaken for authoritative construction. It currently
-still consumes the shared module quota and still projects recursive edges to
-`Any`; replacing it with the promoted-heap `TypeGraph` described above remains
-unfinished.
+still consumes the shared module quota and may use `Any` internally while
+checking a forward edge, but that shadow is replaced by the persistent graph in
+the returned Analysis.
 
 The following RFC 0035 items therefore remain open:
 
-- deriving `TypeGraph` and refined Analysis from the promoted roots;
-- graph-aware assignability and recursive display/LSP traversal;
 - rejecting effectful metadata dependency closures structurally rather than
   merely suppressing bootstrap debug observation;
 - eliminating duplicated bootstrap computation and its quota cost;

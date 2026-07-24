@@ -601,6 +601,7 @@ impl<'a> HeapView<'a> {
     fn heap(&self, storage: Storage) -> Result<&'a Heap, HeapError> {
         match storage {
             Storage::Work if self.current.storage == Storage::Work => Ok(self.current),
+            Storage::Main if self.current.storage == Storage::Main => Ok(self.current),
             Storage::Main => self
                 .background
                 .filter(|heap| heap.storage == Storage::Main)

@@ -3,6 +3,7 @@ use crate::ast::{
     StringPartKind,
 };
 use crate::compiler::compile_expression_with_bindings;
+use crate::heap::{Handle, Heap, PersistentValue};
 use crate::json::{Provenance, ValuePath, ValuePathSegment};
 use crate::lexer::{FrontendError, SourceLocation};
 use crate::lir::RegisterId;
@@ -19,6 +20,453 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 const DEFAULT_TOOL_FUEL: usize = 100_000;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TypeId(u32);
+
+impl TypeId {
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TypeNode {
+    Pending,
+    Ref(TypeId),
+    Any,
+    Int,
+    Float,
+    String,
+    Bytes,
+    Atom(Atom),
+    Array(TypeId),
+    Tuple(Vec<TypeId>),
+    Struct(BTreeMap<String, TypeId>),
+    Enum(BTreeMap<String, Option<TypeId>>),
+    Union(Vec<TypeId>),
+    Function {
+        parameters: Vec<TypeId>,
+        result: TypeId,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TypeGraph {
+    nodes: Vec<TypeNode>,
+    names: BTreeMap<String, TypeId>,
+}
+
+impl TypeGraph {
+    pub fn node(&self, id: TypeId) -> &TypeNode {
+        &self.nodes[id.index()]
+    }
+
+    pub fn named(&self, name: &str) -> Option<TypeId> {
+        self.names.get(name).copied()
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = (&str, TypeId)> {
+        self.names.iter().map(|(name, id)| (name.as_str(), *id))
+    }
+
+    pub fn display(&self, id: TypeId) -> String {
+        self.display_with(id, &mut HashSet::new())
+    }
+
+    pub fn is_assignable(&self, actual: TypeId, expected: TypeId) -> bool {
+        self.assignable_with(actual, expected, &mut HashSet::new())
+    }
+
+    fn push(&mut self, node: TypeNode) -> TypeId {
+        let id = TypeId(u32::try_from(self.nodes.len()).expect("type graph exceeds u32"));
+        self.nodes.push(node);
+        id
+    }
+
+    fn intern_descriptor(&mut self, descriptor: &TypeDescriptor) -> TypeId {
+        let node = match descriptor {
+            TypeDescriptor::Any => TypeNode::Any,
+            TypeDescriptor::Int => TypeNode::Int,
+            TypeDescriptor::Float => TypeNode::Float,
+            TypeDescriptor::String => TypeNode::String,
+            TypeDescriptor::Bytes => TypeNode::Bytes,
+            TypeDescriptor::Atom(atom) => TypeNode::Atom(atom.clone()),
+            TypeDescriptor::Array(item) => TypeNode::Array(self.intern_descriptor(item)),
+            TypeDescriptor::Tuple(items) => TypeNode::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.intern_descriptor(item))
+                    .collect(),
+            ),
+            TypeDescriptor::Struct(fields) => TypeNode::Struct(
+                fields
+                    .iter()
+                    .map(|(name, item)| (name.clone(), self.intern_descriptor(item)))
+                    .collect(),
+            ),
+            TypeDescriptor::Enum(variants) => TypeNode::Enum(
+                variants
+                    .iter()
+                    .map(|(name, payload)| {
+                        (
+                            name.clone(),
+                            payload.as_deref().map(|item| self.intern_descriptor(item)),
+                        )
+                    })
+                    .collect(),
+            ),
+            TypeDescriptor::Union(variants) => TypeNode::Union(
+                variants
+                    .iter()
+                    .map(|item| self.intern_descriptor(item))
+                    .collect(),
+            ),
+            TypeDescriptor::Function { parameters, result } => TypeNode::Function {
+                parameters: parameters
+                    .iter()
+                    .map(|item| self.intern_descriptor(item))
+                    .collect(),
+                result: self.intern_descriptor(result),
+            },
+        };
+        self.push(node)
+    }
+
+    fn decode_persistent(
+        &mut self,
+        value: ValueRef<'_>,
+        path: &str,
+        links: &mut HashMap<Handle, TypeId>,
+    ) -> Result<TypeId, String> {
+        if let Some(handle) = value.hidden_up_link_handle() {
+            if let Some(id) = links.get(&handle) {
+                return Ok(*id);
+            }
+            let resolved = value.resolve_hidden_up_link().map_err(|message| {
+                format!("{path} contains an uninitialized recursive type link: {message}")
+            })?;
+            let id = self.decode_persistent(resolved, path, links)?;
+            links.insert(handle, id);
+            return Ok(id);
+        }
+        if let Some(handle) = value.object_handle() {
+            if let Some(id) = links.get(&handle) {
+                return Ok(*id);
+            }
+            let id = self.push(TypeNode::Pending);
+            links.insert(handle, id);
+            let node = self.decode_persistent_node(value, path, links)?;
+            self.nodes[id.index()] = node;
+            return Ok(id);
+        }
+        let node = self.decode_persistent_node(value, path, links)?;
+        Ok(self.push(node))
+    }
+
+    fn decode_persistent_node(
+        &mut self,
+        mut value: ValueRef<'_>,
+        path: &str,
+        links: &mut HashMap<Handle, TypeId>,
+    ) -> Result<TypeNode, String> {
+        loop {
+            let fields = value
+                .dict_fields()
+                .ok_or_else(|| format!("{path} must be a Dict"))?;
+            let kind = value
+                .dict_get("kind")
+                .and_then(ValueRef::as_atom)
+                .ok_or_else(|| format!("{path}.kind must be an Atom"))?;
+            if kind != "WithAttributes" {
+                break;
+            }
+            if fields != ["attributes", "inner", "kind"] {
+                return Err(format!("{path} has an invalid WithAttributes wrapper"));
+            }
+            let attributes = value.dict_get("attributes").expect("wrapper field exists");
+            if attributes.kind() != ValueKind::Dict {
+                return Err(format!("{path}.attributes must be a Dict"));
+            }
+            value = value.dict_get("inner").expect("wrapper field exists");
+            if value.is_hidden_up_link() {
+                let id = self.decode_persistent(value, path, links)?;
+                return Ok(TypeNode::Ref(id));
+            }
+        }
+
+        let fields = value.dict_fields().expect("metadata Dict checked above");
+        let kind = value
+            .dict_get("kind")
+            .and_then(ValueRef::as_atom)
+            .expect("metadata kind checked above");
+        let require = |expected: &[&str]| {
+            fields
+                .iter()
+                .copied()
+                .eq(expected.iter().copied())
+                .then_some(())
+                .ok_or_else(|| format!("{path} has invalid fields for {kind}"))
+        };
+        Ok(match kind {
+            "Any" => {
+                require(&["kind"])?;
+                TypeNode::Any
+            }
+            "Int" => {
+                require(&["kind"])?;
+                TypeNode::Int
+            }
+            "Float" => {
+                require(&["kind"])?;
+                TypeNode::Float
+            }
+            "String" => {
+                require(&["kind"])?;
+                TypeNode::String
+            }
+            "Bytes" => {
+                require(&["kind"])?;
+                TypeNode::Bytes
+            }
+            "Atom" => {
+                require(&["kind", "tag"])?;
+                let tag = value
+                    .dict_get("tag")
+                    .and_then(ValueRef::as_atom)
+                    .ok_or_else(|| format!("{path}.tag must be an Atom"))?;
+                TypeNode::Atom(atom_from_name(tag))
+            }
+            "Array" => {
+                require(&["item", "kind"])?;
+                let item = self.decode_persistent(
+                    value.dict_get("item").expect("field exists"),
+                    &format!("{path}.item"),
+                    links,
+                )?;
+                TypeNode::Array(item)
+            }
+            "Tuple" | "Union" => {
+                let field = if kind == "Tuple" { "items" } else { "variants" };
+                require(if kind == "Tuple" {
+                    &["items", "kind"]
+                } else {
+                    &["kind", "variants"]
+                })?;
+                let sequence = value.dict_get(field).expect("field exists");
+                if sequence.kind() != ValueKind::Array {
+                    return Err(format!("{path}.{field} must be an Array"));
+                }
+                let mut values = Vec::new();
+                for index in 0..sequence.sequence_len().expect("Array length") {
+                    values.push(self.decode_persistent(
+                        sequence.sequence_get(index).expect("Array item"),
+                        &format!("{path}.{field}[{index}]"),
+                        links,
+                    )?);
+                }
+                if kind == "Union" && values.is_empty() {
+                    return Err(format!("{path}.variants must not be empty"));
+                }
+                if kind == "Tuple" {
+                    TypeNode::Tuple(values)
+                } else {
+                    TypeNode::Union(values)
+                }
+            }
+            "Struct" => {
+                require(&["fields", "kind"])?;
+                let values = value.dict_get("fields").expect("field exists");
+                let names = values
+                    .dict_fields()
+                    .ok_or_else(|| format!("{path}.fields must be a Dict"))?;
+                let mut decoded = BTreeMap::new();
+                for name in names {
+                    let id = self.decode_persistent(
+                        values.dict_get(name).expect("Dict field"),
+                        &format!("{path}.fields.{name}"),
+                        links,
+                    )?;
+                    decoded.insert(name.to_owned(), id);
+                }
+                TypeNode::Struct(decoded)
+            }
+            "Enum" => {
+                require(&["kind", "variants"])?;
+                let values = value.dict_get("variants").expect("field exists");
+                let names = values
+                    .dict_fields()
+                    .ok_or_else(|| format!("{path}.variants must be a Dict"))?;
+                if names.is_empty() {
+                    return Err(format!("{path}.variants must not be empty"));
+                }
+                let mut decoded = BTreeMap::new();
+                for name in names {
+                    let variant_path = format!("{path}.variants.{name}");
+                    let inner = strip_attributes_ref(
+                        values.dict_get(name).expect("Dict field"),
+                        &variant_path,
+                    )?;
+                    let payload = if inner.as_atom() == Some("None") {
+                        None
+                    } else {
+                        Some(self.decode_persistent(inner, &variant_path, links)?)
+                    };
+                    decoded.insert(name.to_owned(), payload);
+                }
+                TypeNode::Enum(decoded)
+            }
+            "Function" => {
+                require(&["kind", "parameters", "result"])?;
+                let values = value.dict_get("parameters").expect("field exists");
+                if values.kind() != ValueKind::Array {
+                    return Err(format!("{path}.parameters must be an Array"));
+                }
+                let mut parameters = Vec::new();
+                for index in 0..values.sequence_len().expect("Array length") {
+                    parameters.push(self.decode_persistent(
+                        values.sequence_get(index).expect("Array item"),
+                        &format!("{path}.parameters[{index}]"),
+                        links,
+                    )?);
+                }
+                let result = self.decode_persistent(
+                    value.dict_get("result").expect("field exists"),
+                    &format!("{path}.result"),
+                    links,
+                )?;
+                TypeNode::Function { parameters, result }
+            }
+            _ => return Err(format!("{path}.kind has unknown value '{kind}'")),
+        })
+    }
+
+    fn display_with(&self, id: TypeId, active: &mut HashSet<TypeId>) -> String {
+        if !active.insert(id) {
+            return self
+                .names
+                .iter()
+                .find_map(|(name, candidate)| (*candidate == id).then(|| name.clone()))
+                .unwrap_or_else(|| "recursive".into());
+        }
+        let shown = match self.node(id) {
+            TypeNode::Pending => "<pending>".into(),
+            TypeNode::Ref(target) => self.display_with(*target, active),
+            TypeNode::Any => "Any".into(),
+            TypeNode::Int => "Int".into(),
+            TypeNode::Float => "Float".into(),
+            TypeNode::String => "String".into(),
+            TypeNode::Bytes => "Bytes".into(),
+            TypeNode::Atom(atom) => format!("'{}", atom.name()),
+            TypeNode::Array(item) => format!("Array<{}>", self.display_with(*item, active)),
+            TypeNode::Tuple(items) => format!(
+                "({})",
+                items
+                    .iter()
+                    .map(|item| self.display_with(*item, active))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            TypeNode::Struct(fields) => format!(
+                "{{{}}}",
+                fields
+                    .iter()
+                    .map(|(name, item)| format!("{name}: {}", self.display_with(*item, active)))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            TypeNode::Enum(variants) => format!(
+                "enum {{{}}}",
+                variants
+                    .iter()
+                    .map(|(name, payload)| payload.map_or_else(
+                        || name.clone(),
+                        |payload| format!("{name}({})", self.display_with(payload, active))
+                    ))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            TypeNode::Union(variants) => variants
+                .iter()
+                .map(|item| self.display_with(*item, active))
+                .collect::<Vec<_>>()
+                .join(" | "),
+            TypeNode::Function { parameters, result } => format!(
+                "fn({}) -> {}",
+                parameters
+                    .iter()
+                    .map(|item| self.display_with(*item, active))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.display_with(*result, active)
+            ),
+        };
+        active.remove(&id);
+        shown
+    }
+
+    fn assignable_with(
+        &self,
+        actual: TypeId,
+        expected: TypeId,
+        visited: &mut HashSet<(TypeId, TypeId)>,
+    ) -> bool {
+        if !visited.insert((actual, expected)) {
+            return true;
+        }
+        match (self.node(actual), self.node(expected)) {
+            (TypeNode::Ref(actual), _) => self.assignable_with(*actual, expected, visited),
+            (_, TypeNode::Ref(expected)) => self.assignable_with(actual, *expected, visited),
+            (TypeNode::Any, _) | (_, TypeNode::Any) => true,
+            (TypeNode::Array(a), TypeNode::Array(e)) => self.assignable_with(*a, *e, visited),
+            (TypeNode::Tuple(a), TypeNode::Tuple(e)) => {
+                a.len() == e.len()
+                    && a.iter()
+                        .zip(e)
+                        .all(|(a, e)| self.assignable_with(*a, *e, visited))
+            }
+            (TypeNode::Struct(a), TypeNode::Struct(e)) => {
+                a.len() == e.len()
+                    && e.iter().all(|(name, e)| {
+                        a.get(name)
+                            .is_some_and(|a| self.assignable_with(*a, *e, visited))
+                    })
+            }
+            (TypeNode::Enum(a), TypeNode::Enum(e)) => {
+                a.len() == e.len()
+                    && e.iter().all(|(name, e)| {
+                        a.get(name).is_some_and(|a| match (a, e) {
+                            (None, None) => true,
+                            (Some(a), Some(e)) => self.assignable_with(*a, *e, visited),
+                            _ => false,
+                        })
+                    })
+            }
+            (TypeNode::Union(a), _) => a
+                .iter()
+                .all(|a| self.assignable_with(*a, expected, visited)),
+            (_, TypeNode::Union(e)) => e.iter().any(|e| self.assignable_with(actual, *e, visited)),
+            (
+                TypeNode::Function {
+                    parameters: ap,
+                    result: ar,
+                },
+                TypeNode::Function {
+                    parameters: ep,
+                    result: er,
+                },
+            ) => {
+                ap.len() == ep.len()
+                    && ap
+                        .iter()
+                        .zip(ep)
+                        .all(|(a, e)| self.assignable_with(*a, *e, visited))
+                    && self.assignable_with(*ar, *er, visited)
+            }
+            (a, e) => a == e,
+        }
+    }
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TypeDescriptor {
@@ -181,12 +629,38 @@ impl TypeDescriptor {
 
 #[derive(Clone, Debug)]
 pub struct Analysis {
-    pub declared_types: BTreeMap<String, TypeDescriptor>,
-    pub binding_types: BTreeMap<String, TypeDescriptor>,
-    pub result_type: TypeDescriptor,
+    pub types: TypeGraph,
+    pub declared_types: BTreeMap<String, TypeId>,
+    pub binding_types: BTreeMap<String, TypeId>,
+    pub result_type: TypeId,
     pub(crate) prelude: BTreeMap<String, Value>,
     pub(crate) external_values: BTreeMap<String, Value>,
     pub(crate) dynamic_bindings: HashSet<String>,
+}
+
+impl Analysis {
+    pub fn display(&self, id: TypeId) -> String {
+        self.types.display(id)
+    }
+
+    pub(crate) fn install_promoted_types(
+        &mut self,
+        heap: &Heap,
+        roots: &BTreeMap<String, PersistentValue>,
+    ) -> Result<(), String> {
+        let mut links = HashMap::<Handle, TypeId>::new();
+        for (name, root) in roots {
+            let id = self.types.decode_persistent(
+                ValueRef::persistent(*root, heap),
+                &format!("type {name}"),
+                &mut links,
+            )?;
+            self.types.names.insert(name.clone(), id);
+            self.declared_types.insert(name.clone(), id);
+            self.binding_types.insert(name.clone(), id);
+        }
+        Ok(())
+    }
 }
 
 pub fn analyze_source(source_name: &str, source: &str) -> Result<Analysis, FrontendError> {
@@ -610,7 +1084,22 @@ pub(crate) fn analyze_program_with_bindings_observed(
         sources,
     )?;
     let result_type = infer_expr(&program.value.body.value.result, &static_environment);
+    let mut types = TypeGraph::default();
+    let declared_types = declared_types
+        .into_iter()
+        .map(|(name, descriptor)| {
+            let id = types.intern_descriptor(&descriptor);
+            types.names.insert(name.clone(), id);
+            (name, id)
+        })
+        .collect();
+    let binding_types = binding_types
+        .into_iter()
+        .map(|(name, descriptor)| (name, types.intern_descriptor(&descriptor)))
+        .collect();
+    let result_type = types.intern_descriptor(&result_type);
     Ok(Analysis {
+        types,
         declared_types,
         binding_types,
         result_type,
@@ -1824,7 +2313,9 @@ mod tests {
         )
         .unwrap();
         let maybe = analysis.declared_types.get("MaybeInt").unwrap();
-        assert!(matches!(maybe, TypeDescriptor::Union(variants) if variants.len() == 2));
+        assert!(
+            matches!(analysis.types.node(*maybe), TypeNode::Union(variants) if variants.len() == 2)
+        );
     }
 
     #[test]

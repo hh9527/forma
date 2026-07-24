@@ -91,13 +91,16 @@ fn types_command(arguments: &[String]) -> Result<(), String> {
     let module = engine()
         .load_module(module_path, BTreeMap::new())
         .map_err(|error| error.to_string())?;
-    for (name, descriptor) in &module.analysis.declared_types {
-        println!("type {name} = {}", descriptor.display_name());
+    for (name, type_id) in &module.analysis.declared_types {
+        println!("type {name} = {}", module.analysis.display(*type_id));
     }
-    for (name, descriptor) in &module.analysis.binding_types {
-        println!("let {name}: {}", descriptor.display_name());
+    for (name, type_id) in &module.analysis.binding_types {
+        println!("let {name}: {}", module.analysis.display(*type_id));
     }
-    println!("result: {}", module.analysis.result_type.display_name());
+    println!(
+        "result: {}",
+        module.analysis.display(module.analysis.result_type)
+    );
     Ok(())
 }
 
