@@ -13,7 +13,8 @@ use crate::semantic::{
 };
 use crate::source::{Diagnostic, SourceDatabase};
 use crate::types::{
-    Analysis, analyze_partial_types_recovered, analyze_program_with_bindings_observed,
+    Analysis, PartialAnalysisControl, analyze_partial_types_recovered_with_query,
+    analyze_program_with_bindings_observed,
 };
 use crate::{
     BytecodeFunction, Closure, DebugSink, DiscardDebugSink, Quota, QuotaAccount, Value, Vm,
@@ -299,6 +300,8 @@ impl Engine {
             .collect();
         let mut builder = RecoverableWorkspaceBuilder {
             engine: self,
+            overlays: &BTreeMap::new(),
+            query: None,
             sources,
             core_modules,
             inputs: BTreeMap::new(),
@@ -307,7 +310,47 @@ impl Engine {
             cycle_members: HashSet::new(),
             cycle_reported: false,
         };
-        builder.load_xl(&root);
+        block_on_recovery(builder.load_xl(&root));
+        Ok(WorkspaceSnapshot::build(
+            builder.sources,
+            builder.inputs.into_values().collect(),
+        ))
+    }
+
+    pub async fn recover_workspace_async(
+        &self,
+        path: impl AsRef<Path>,
+        overlays: &BTreeMap<PathBuf, crate::document::DocumentText>,
+        context: &crate::query::QueryContext,
+    ) -> Result<WorkspaceSnapshot, ModuleError> {
+        context
+            .checkpoint()
+            .await
+            .map_err(|error| ModuleError::new(error.to_string()))?;
+        let root = canonicalize(path.as_ref())?;
+        let mut main = MainWorld::building();
+        let mut sources = SourceDatabase::default();
+        let core_modules = install_core_modules(&mut main, &mut sources, &self.debug_sink)?
+            .into_iter()
+            .map(|(name, (value, _))| (name.to_owned(), value))
+            .collect();
+        let mut builder = RecoverableWorkspaceBuilder {
+            engine: self,
+            overlays,
+            query: Some(context),
+            sources,
+            core_modules,
+            inputs: BTreeMap::new(),
+            values: HashMap::new(),
+            visiting: Vec::new(),
+            cycle_members: HashSet::new(),
+            cycle_reported: false,
+        };
+        builder.load_xl(&root).await;
+        context
+            .checkpoint()
+            .await
+            .map_err(|error| ModuleError::new(error.to_string()))?;
         Ok(WorkspaceSnapshot::build(
             builder.sources,
             builder.inputs.into_values().collect(),
@@ -317,6 +360,8 @@ impl Engine {
 
 struct RecoverableWorkspaceBuilder<'a> {
     engine: &'a Engine,
+    overlays: &'a BTreeMap<PathBuf, crate::document::DocumentText>,
+    query: Option<&'a crate::query::QueryContext>,
     sources: SourceDatabase,
     core_modules: HashMap<String, Value>,
     inputs: BTreeMap<String, SemanticModuleInput>,
@@ -327,183 +372,219 @@ struct RecoverableWorkspaceBuilder<'a> {
 }
 
 impl RecoverableWorkspaceBuilder<'_> {
-    fn load_xl(&mut self, path: &Path) -> Option<Value> {
-        if let Some(value) = self.values.get(path) {
-            return Some(value.clone());
-        }
-        let key = path.to_string_lossy().into_owned();
-        if self.inputs.contains_key(&key) {
-            return None;
-        }
-        if let Some(index) = self.visiting.iter().position(|candidate| candidate == path) {
-            self.cycle_members
-                .extend(self.visiting[index..].iter().cloned());
-            self.cycle_members.insert(path.to_owned());
-            return None;
-        }
-        let source = match fs::read_to_string(path) {
-            Ok(source) => source,
-            Err(error) => {
-                self.inputs.insert(
-                    key.clone(),
-                    unavailable_input(key, path.to_owned(), WorkspaceModuleKind::Xl),
-                );
-                let _ = error;
+    fn load_xl<'a>(
+        &'a mut self,
+        path: &'a Path,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Value>> + 'a>> {
+        Box::pin(async move {
+            if let Some(context) = self.query
+                && context.checkpoint().await.is_err()
+            {
                 return None;
             }
-        };
-        let source_id = self.sources.add(key.clone(), source);
-        let parsed = parse_registered(&self.sources, source_id);
-        let program = parsed.program.clone();
-        let imports = parsed
-            .recovered
-            .bindings
-            .iter()
-            .filter(|binding| binding.value.kind == BindingKind::Import)
-            .filter_map(|binding| match &binding.value.value.value {
-                ExprKind::String(target) => Some((
-                    binding.value.name.value.clone(),
-                    binding.value.name.location,
-                    target.clone(),
-                )),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
+            if let Some(value) = self.values.get(path) {
+                return Some(value.clone());
+            }
+            let key = path.to_string_lossy().into_owned();
+            if self.inputs.contains_key(&key) {
+                return None;
+            }
+            if let Some(index) = self.visiting.iter().position(|candidate| candidate == path) {
+                self.cycle_members
+                    .extend(self.visiting[index..].iter().cloned());
+                self.cycle_members.insert(path.to_owned());
+                return None;
+            }
+            let source = match self.overlays.get(path).cloned() {
+                Some(source) => source,
+                None => match fs::read_to_string(path) {
+                    Ok(source) => crate::document::DocumentText::new(source),
+                    Err(error) => {
+                        self.inputs.insert(
+                            key.clone(),
+                            unavailable_input(key, path.to_owned(), WorkspaceModuleKind::Xl),
+                        );
+                        let _ = error;
+                        return None;
+                    }
+                },
+            };
+            let source_id = self.sources.add_document(key.clone(), source);
+            let parsed = parse_registered(&self.sources, source_id);
+            let program = parsed.program.clone();
+            let imports = parsed
+                .recovered
+                .bindings
+                .iter()
+                .filter(|binding| binding.value.kind == BindingKind::Import)
+                .filter_map(|binding| match &binding.value.value.value {
+                    ExprKind::String(target) => Some((
+                        binding.value.name.value.clone(),
+                        binding.value.name.location,
+                        target.clone(),
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
 
-        self.visiting.push(path.to_owned());
-        let mut semantic_imports = Vec::new();
-        let mut external_values = BTreeMap::new();
-        let mut unavailable_imports = HashSet::new();
-        let mut diagnostics = Vec::new();
-        for (name, location, target) in imports {
-            if target.starts_with("core:") {
+            self.visiting.push(path.to_owned());
+            let mut semantic_imports = Vec::new();
+            let mut external_values = BTreeMap::new();
+            let mut unavailable_imports = HashSet::new();
+            let mut diagnostics = Vec::new();
+            for (name, location, target) in imports {
+                if target.starts_with("core:") {
+                    semantic_imports.push(SemanticImport {
+                        name: name.clone(),
+                        location,
+                        target: SemanticModuleTarget::Core(target.clone()),
+                    });
+                    if let Some(value) = self.core_modules.get(&target) {
+                        external_values.insert(name, value.clone());
+                    } else {
+                        unavailable_imports.insert(name);
+                        diagnostics.push(Diagnostic::error(
+                            format!("unknown core module {target:?}"),
+                            location,
+                        ));
+                        self.inputs
+                            .entry(target.clone())
+                            .or_insert_with(|| SemanticModuleInput {
+                                key: target.clone(),
+                                path: None,
+                                kind: WorkspaceModuleKind::Core,
+                                source: None,
+                                program: None,
+                                analysis: None,
+                                partial: None,
+                                state: WorkspaceModuleState::Unavailable,
+                                imports: Vec::new(),
+                                diagnostics: Vec::new(),
+                            });
+                    }
+                    continue;
+                }
+
+                let joined = path
+                    .parent()
+                    .unwrap_or_else(|| Path::new("."))
+                    .join(&target);
+                let target_path = fs::canonicalize(&joined).unwrap_or(joined);
                 semantic_imports.push(SemanticImport {
                     name: name.clone(),
                     location,
-                    target: SemanticModuleTarget::Core(target.clone()),
+                    target: SemanticModuleTarget::Path(target_path.clone()),
                 });
-                if let Some(value) = self.core_modules.get(&target) {
-                    external_values.insert(name, value.clone());
+                let value = match target_path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                {
+                    Some("xl") => self.load_xl(&target_path).await,
+                    Some("json") => self.load_json(&target_path).await,
+                    _ => {
+                        let target_key = target_path.to_string_lossy().into_owned();
+                        self.inputs.entry(target_key.clone()).or_insert_with(|| {
+                            unavailable_input(
+                                target_key,
+                                target_path.clone(),
+                                WorkspaceModuleKind::Xl,
+                            )
+                        });
+                        None
+                    }
+                };
+                if let Some(value) = value {
+                    external_values.insert(name, value);
                 } else {
                     unavailable_imports.insert(name);
-                    diagnostics.push(Diagnostic::error(
-                        format!("unknown core module {target:?}"),
-                        location,
-                    ));
-                    self.inputs
-                        .entry(target.clone())
-                        .or_insert_with(|| SemanticModuleInput {
-                            key: target.clone(),
-                            path: None,
-                            kind: WorkspaceModuleKind::Core,
-                            source: None,
-                            program: None,
-                            analysis: None,
-                            partial: None,
-                            state: WorkspaceModuleState::Unavailable,
-                            imports: Vec::new(),
-                            diagnostics: Vec::new(),
-                        });
-                }
-                continue;
-            }
-
-            let joined = path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .join(&target);
-            let target_path = fs::canonicalize(&joined).unwrap_or(joined);
-            semantic_imports.push(SemanticImport {
-                name: name.clone(),
-                location,
-                target: SemanticModuleTarget::Path(target_path.clone()),
-            });
-            let value = match target_path
-                .extension()
-                .and_then(|extension| extension.to_str())
-            {
-                Some("xl") => self.load_xl(&target_path),
-                Some("json") => self.load_json(&target_path),
-                _ => {
-                    let target_key = target_path.to_string_lossy().into_owned();
-                    self.inputs.entry(target_key.clone()).or_insert_with(|| {
-                        unavailable_input(target_key, target_path.clone(), WorkspaceModuleKind::Xl)
-                    });
-                    None
-                }
-            };
-            if let Some(value) = value {
-                external_values.insert(name, value);
-            } else {
-                unavailable_imports.insert(name);
-                if self.cycle_members.contains(&target_path) {
-                    if !self.cycle_reported {
+                    if self.cycle_members.contains(&target_path) {
+                        if !self.cycle_reported {
+                            diagnostics.push(Diagnostic::error(
+                                format!("module cycle reaches {}", target_path.display()),
+                                location,
+                            ));
+                            self.cycle_reported = true;
+                        }
+                    } else {
                         diagnostics.push(Diagnostic::error(
-                            format!("module cycle reaches {}", target_path.display()),
+                            format!("module {} is unavailable", target_path.display()),
                             location,
                         ));
-                        self.cycle_reported = true;
                     }
-                } else {
-                    diagnostics.push(Diagnostic::error(
-                        format!("module {} is unavailable", target_path.display()),
-                        location,
-                    ));
                 }
             }
-        }
-        self.visiting.pop();
+            self.visiting.pop();
 
-        let partial = analyze_partial_types_recovered(
-            &self.sources,
-            source_id,
-            &parsed.recovered,
-            parsed.diagnostics,
-            self.engine.config.module_quota,
-            &external_values,
-            &unavailable_imports,
-        );
-        let strict_value = if self.cycle_members.contains(path) {
-            None
-        } else {
-            self.engine
-                .load_module(path, BTreeMap::new())
-                .ok()
-                .and_then(|module| self.engine.execute(&module).ok())
-        };
-        let state = if strict_value.is_some() {
-            WorkspaceModuleState::Known
-        } else if self.cycle_members.contains(path)
-            || partial.hir.definitions().is_empty() && partial.hir.expressions().is_empty()
-        {
-            WorkspaceModuleState::Unavailable
-        } else {
-            WorkspaceModuleState::Partial
-        };
-        self.inputs.insert(
-            key.clone(),
-            SemanticModuleInput {
-                key,
-                path: Some(path.to_owned()),
-                kind: WorkspaceModuleKind::Xl,
-                source: Some(source_id),
-                program,
-                analysis: None,
-                partial: Some(partial),
-                state,
-                imports: semantic_imports,
-                diagnostics,
-            },
-        );
-        if let Some(value) = strict_value {
-            self.values.insert(path.to_owned(), value.clone());
-            Some(value)
-        } else {
-            None
-        }
+            if let Some(context) = self.query
+                && context.checkpoint().await.is_err()
+            {
+                return None;
+            }
+
+            let partial = analyze_partial_types_recovered_with_query(
+                &self.sources,
+                source_id,
+                &parsed.recovered,
+                parsed.diagnostics,
+                self.engine.config.module_quota,
+                &external_values,
+                PartialAnalysisControl {
+                    unavailable_imports: &unavailable_imports,
+                    query: self.query,
+                },
+            );
+            let strict_value = if self.cycle_members.contains(path) {
+                None
+            } else if self.overlays.contains_key(path) {
+                program.as_ref().and_then(|program| {
+                    self.evaluate_overlay(source_id, program, &external_values)
+                        .ok()
+                })
+            } else {
+                self.engine
+                    .load_module(path, BTreeMap::new())
+                    .ok()
+                    .and_then(|module| self.engine.execute(&module).ok())
+            };
+            let state = if strict_value.is_some() {
+                WorkspaceModuleState::Known
+            } else if self.cycle_members.contains(path)
+                || partial.hir.definitions().is_empty() && partial.hir.expressions().is_empty()
+            {
+                WorkspaceModuleState::Unavailable
+            } else {
+                WorkspaceModuleState::Partial
+            };
+            self.inputs.insert(
+                key.clone(),
+                SemanticModuleInput {
+                    key,
+                    path: Some(path.to_owned()),
+                    kind: WorkspaceModuleKind::Xl,
+                    source: Some(source_id),
+                    program,
+                    analysis: None,
+                    partial: Some(partial),
+                    state,
+                    imports: semantic_imports,
+                    diagnostics,
+                },
+            );
+            if let Some(value) = strict_value {
+                self.values.insert(path.to_owned(), value.clone());
+                Some(value)
+            } else {
+                None
+            }
+        })
     }
 
-    fn load_json(&mut self, path: &Path) -> Option<Value> {
+    async fn load_json(&mut self, path: &Path) -> Option<Value> {
+        if let Some(context) = self.query
+            && context.checkpoint().await.is_err()
+        {
+            return None;
+        }
         if let Some(value) = self.values.get(path) {
             return Some(value.clone());
         }
@@ -511,17 +592,20 @@ impl RecoverableWorkspaceBuilder<'_> {
         if self.inputs.contains_key(&key) {
             return None;
         }
-        let source = match fs::read_to_string(path) {
-            Ok(source) => source,
-            Err(_) => {
-                self.inputs.insert(
-                    key.clone(),
-                    unavailable_input(key, path.to_owned(), WorkspaceModuleKind::Json),
-                );
-                return None;
-            }
+        let source = match self.overlays.get(path).cloned() {
+            Some(source) => source,
+            None => match fs::read_to_string(path) {
+                Ok(source) => crate::document::DocumentText::new(source),
+                Err(_) => {
+                    self.inputs.insert(
+                        key.clone(),
+                        unavailable_input(key, path.to_owned(), WorkspaceModuleKind::Json),
+                    );
+                    return None;
+                }
+            },
         };
-        let source_id = self.sources.add(key.clone(), source);
+        let source_id = self.sources.add_document(key.clone(), source);
         let parsed = parse_json_registered(&self.sources, source_id);
         let value = parsed.value.map(|sourced| sourced.value);
         self.inputs.insert(
@@ -547,6 +631,61 @@ impl RecoverableWorkspaceBuilder<'_> {
             self.values.insert(path.to_owned(), value.clone());
         }
         value
+    }
+
+    fn evaluate_overlay(
+        &self,
+        source_id: crate::SourceId,
+        program: &Program,
+        external_values: &BTreeMap<String, Value>,
+    ) -> Result<Value, ModuleError> {
+        let mut account = QuotaAccount::new(self.engine.config.module_quota);
+        if let Some(query) = self.query {
+            account = account.with_query(query.clone());
+        }
+        let source = self.sources.get(source_id);
+        let analysis = analyze_program_with_bindings_observed(
+            &source.name,
+            program,
+            &mut account,
+            external_values,
+            &HashSet::new(),
+            &self.sources,
+            &BTreeMap::new(),
+            &self.engine.debug_sink,
+        )
+        .map_err(|error| ModuleError::new(error.to_string()))?;
+        let function = compile_program_analyzed_in(source, program, &analysis)
+            .map_err(|error| ModuleError::new(error.to_string()))?;
+        let mut main = MainWorld::building();
+        let mut external_roots = HashMap::new();
+        for (name, value) in external_values {
+            external_roots.insert(
+                name.clone(),
+                publish_value(&mut main.heap, value)
+                    .map_err(|error| ModuleError::new(error.to_string()))?,
+            );
+        }
+        let arena = Vm::new()
+            .with_debug_sink(Arc::clone(&self.engine.debug_sink))
+            .execute_in_work(&main.heap, &external_roots, &function, &[], &mut account)
+            .map_err(|error| ModuleError::new(error.with_sources(&self.sources).to_string()))?;
+        arena
+            .export(&main.heap)
+            .map_err(|error| ModuleError::new(error.to_string()))
+    }
+}
+
+fn block_on_recovery<F: std::future::Future>(future: F) -> F::Output {
+    use std::task::{Context, Poll, Waker};
+
+    let waker = Waker::noop();
+    let mut context = Context::from_waker(waker);
+    let mut future = std::pin::pin!(future);
+    loop {
+        if let Poll::Ready(output) = future.as_mut().poll(&mut context) {
+            return output;
+        }
     }
 }
 
@@ -1416,7 +1555,8 @@ mod tests {
             module
                 .sources
                 .get(data_location.source)
-                .slice(data_location),
+                .slice(data_location)
+                .as_deref(),
             Some("1")
         );
         let rendered = failure.to_string();

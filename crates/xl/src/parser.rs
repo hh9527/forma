@@ -39,9 +39,9 @@ pub fn parse(source_name: &str, source: &str) -> Result<Program, FrontendError> 
 
 pub fn parse_registered(sources: &SourceDatabase, source_id: SourceId) -> FrontendParse {
     let source = sources.get(source_id);
-    let parsed = crate::syntax::xl::parse(source_id, &source.text);
+    let parsed = crate::syntax::xl::parse_document(source_id, source.text());
     let mut diagnostics = parsed.diagnostics;
-    let lowerer = Lowerer::new(source_id, &source.text, &parsed.syntax);
+    let lowerer = Lowerer::new(source_id, source.text(), &parsed.syntax);
     let recovered = lowerer.recover_program(&mut diagnostics);
     let program = if diagnostics.is_empty() {
         match lowerer.program() {
@@ -86,7 +86,7 @@ fn compatibility_error(
 
 struct Lowerer<'a> {
     source_id: SourceId,
-    source: &'a str,
+    source: &'a crate::document::DocumentText,
     cst: &'a CstData,
 }
 
@@ -104,7 +104,11 @@ enum CallArgument {
 }
 
 impl<'a> Lowerer<'a> {
-    fn new(source_id: SourceId, source: &'a str, cst: &'a CstData) -> Self {
+    fn new(
+        source_id: SourceId,
+        source: &'a crate::document::DocumentText,
+        cst: &'a CstData,
+    ) -> Self {
         Self {
             source_id,
             source,
@@ -1139,10 +1143,15 @@ impl<'a> Lowerer<'a> {
             .expect("CST span fits registered source")
     }
     fn identifier(&self, node: NodeRef) -> Identifier {
-        located(self.text(node).to_owned(), self.location(node))
+        located(self.text(node).into_owned(), self.location(node))
     }
-    fn text(&self, node: NodeRef) -> &str {
-        &self.source[self.cst.span(node)]
+    fn text(&self, node: NodeRef) -> std::borrow::Cow<'_, str> {
+        self.source
+            .slice(
+                crate::source::TextRange::from_usize(self.cst.span(node))
+                    .expect("CST span fits registered source"),
+            )
+            .expect("CST span is a valid source slice")
     }
     fn error(&self, node: NodeRef, message: impl Into<String>) -> Diagnostic {
         Diagnostic::error(message, self.location(node))
@@ -1226,7 +1235,7 @@ impl<'a> Lowerer<'a> {
 
     fn decode_string_component(&self, node: NodeRef) -> Result<String, Diagnostic> {
         match self.cst.get(node) {
-            Node::Token(Token::StringText, _) => Ok(self.text(node).to_owned()),
+            Node::Token(Token::StringText, _) => Ok(self.text(node).into_owned()),
             Node::Token(Token::EscapeSequence, _) => {
                 let escaped = self.text(node)[1..]
                     .chars()
@@ -1250,7 +1259,7 @@ impl<'a> Lowerer<'a> {
 
     fn decode_xl_string(&self, node: NodeRef) -> Result<String, Diagnostic> {
         let text = self.text(node);
-        let quoted = text.strip_prefix('b').unwrap_or(text);
+        let quoted = text.strip_prefix('b').unwrap_or(&text);
         let mut chars = quoted[1..quoted.len() - 1].chars();
         let mut output = String::new();
         while let Some(character) = chars.next() {

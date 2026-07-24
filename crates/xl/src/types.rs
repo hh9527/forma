@@ -791,6 +791,34 @@ pub(crate) fn analyze_partial_types_recovered(
     external_values: &BTreeMap<String, Value>,
     unavailable_imports: &HashSet<String>,
 ) -> PartialAnalysis {
+    analyze_partial_types_recovered_with_query(
+        sources,
+        source_id,
+        recovered,
+        initial_diagnostics,
+        quota,
+        external_values,
+        PartialAnalysisControl {
+            unavailable_imports,
+            query: None,
+        },
+    )
+}
+
+pub(crate) struct PartialAnalysisControl<'a> {
+    pub unavailable_imports: &'a HashSet<String>,
+    pub query: Option<&'a crate::query::QueryContext>,
+}
+
+pub(crate) fn analyze_partial_types_recovered_with_query(
+    sources: &SourceDatabase,
+    source_id: crate::SourceId,
+    recovered: &crate::parser::RecoveredProgram,
+    initial_diagnostics: Vec<Diagnostic>,
+    quota: Quota,
+    external_values: &BTreeMap<String, Value>,
+    control: PartialAnalysisControl<'_>,
+) -> PartialAnalysis {
     let source_name = sources.get(source_id).name.to_string();
     let mut vm = Vm::new();
     let prelude = core_prelude(&mut vm);
@@ -822,7 +850,7 @@ pub(crate) fn analyze_partial_types_recovered(
         .filter(|definition| {
             definition.top_level
                 && definition.kind == HirDefinitionKind::Import
-                && unavailable_imports.contains(&definition.name)
+                && control.unavailable_imports.contains(&definition.name)
         })
         .map(|definition| definition.id)
         .collect::<HashSet<_>>();
@@ -896,6 +924,9 @@ pub(crate) fn analyze_partial_types_recovered(
         tool_values.insert(binding.value.name.value.clone(), any_metadata.clone());
     }
     let mut account = QuotaAccount::new(quota);
+    if let Some(query) = control.query {
+        account = account.with_query(query.clone());
+    }
     let debug_sink: Arc<dyn DebugSink> = Arc::new(DiscardDebugSink);
 
     while facts.len() < bindings.len() {

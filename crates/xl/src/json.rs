@@ -70,10 +70,10 @@ pub fn parse_json_with_provenance(
 
 pub fn parse_json_registered(sources: &SourceDatabase, source_id: SourceId) -> JsonParse {
     let source = sources.get(source_id);
-    let parsed = crate::syntax::json::parse(source_id, &source.text);
+    let parsed = crate::syntax::json::parse_document(source_id, source.text());
     let mut diagnostics = parsed.diagnostics;
     let value = if diagnostics.is_empty() {
-        match JsonLowerer::new(source_id, &source.text, &parsed.syntax).lower() {
+        match JsonLowerer::new(source_id, source.text(), &parsed.syntax).lower() {
             Ok(value) => Some(value),
             Err(diagnostic) => {
                 diagnostics.push(diagnostic);
@@ -113,7 +113,7 @@ fn compatibility_error(
 
 struct JsonLowerer<'a> {
     source_id: SourceId,
-    source: &'a str,
+    source: &'a crate::document::DocumentText,
     cst: &'a CstData,
     vm: Vm,
     path: ValuePath,
@@ -121,7 +121,11 @@ struct JsonLowerer<'a> {
 }
 
 impl<'a> JsonLowerer<'a> {
-    fn new(source_id: SourceId, source: &'a str, cst: &'a CstData) -> Self {
+    fn new(
+        source_id: SourceId,
+        source: &'a crate::document::DocumentText,
+        cst: &'a CstData,
+    ) -> Self {
         Self {
             source_id,
             source,
@@ -303,8 +307,13 @@ impl<'a> JsonLowerer<'a> {
             Node::Token(..) => None,
         }
     }
-    fn text(&self, node: NodeRef) -> &str {
-        &self.source[self.cst.span(node)]
+    fn text(&self, node: NodeRef) -> std::borrow::Cow<'_, str> {
+        self.source
+            .slice(
+                crate::source::TextRange::from_usize(self.cst.span(node))
+                    .expect("CST span fits registered source"),
+            )
+            .expect("CST span is a valid source slice")
     }
     fn location(&self, node: NodeRef) -> Location {
         Location::from_usize(self.source_id, self.cst.span(node))

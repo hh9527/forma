@@ -165,6 +165,85 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
     (tokens, spans)
 }
 
+pub fn tokenize_document(
+    source: &crate::document::DocumentText,
+    diags: &mut Vec<Diagnostic>,
+) -> (Vec<Token>, Vec<Span>) {
+    tokenize_fragments(source.chunks(), diags)
+}
+
+fn tokenize_fragments<'a>(
+    fragments: impl IntoIterator<Item = &'a str>,
+    diags: &mut Vec<Diagnostic>,
+) -> (Vec<Token>, Vec<Span>) {
+    let mut tokens = Vec::new();
+    let mut spans = Vec::new();
+    let mut pending = String::new();
+    let mut pending_start = 0;
+    for fragment in fragments {
+        pending.push_str(fragment);
+        let mut local_diags = Vec::new();
+        let (local_tokens, local_spans) = tokenize(&pending, &mut local_diags);
+        let commit = stable_normal_prefix(&local_tokens);
+        if commit == 0 {
+            continue;
+        }
+        let committed_end = local_spans[commit - 1].end;
+        tokens.extend_from_slice(&local_tokens[..commit]);
+        spans.extend(
+            local_spans[..commit]
+                .iter()
+                .map(|span| pending_start + span.start..pending_start + span.end),
+        );
+        for mut diagnostic in local_diags {
+            if diagnostic
+                .labels
+                .iter()
+                .all(|label| label.range.end <= committed_end)
+            {
+                for label in &mut diagnostic.labels {
+                    label.range =
+                        pending_start + label.range.start..pending_start + label.range.end;
+                }
+                diags.push(diagnostic);
+            }
+        }
+        pending.drain(..committed_end);
+        pending_start += committed_end;
+    }
+    if !pending.is_empty() {
+        let mut local_diags = Vec::new();
+        let (local_tokens, local_spans) = tokenize(&pending, &mut local_diags);
+        tokens.extend(local_tokens);
+        spans.extend(
+            local_spans
+                .into_iter()
+                .map(|span| pending_start + span.start..pending_start + span.end),
+        );
+        for mut diagnostic in local_diags {
+            for label in &mut diagnostic.labels {
+                label.range = pending_start + label.range.start..pending_start + label.range.end;
+            }
+            diags.push(diagnostic);
+        }
+    }
+    (tokens, spans)
+}
+
+fn stable_normal_prefix(tokens: &[Token]) -> usize {
+    let mut string = false;
+    let mut stable = 0;
+    for (index, token) in tokens.iter().copied().enumerate() {
+        if token == Token::DoubleQuote {
+            string = !string;
+        }
+        if !string && index + 9 <= tokens.len() {
+            stable = index + 1;
+        }
+    }
+    stable
+}
+
 impl From<NormalToken> for Token {
     fn from(token: NormalToken) -> Self {
         match token {
@@ -209,6 +288,45 @@ fn token_is_invalid_escape(token: Token) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chunk_bridge_matches_contiguous_lexing() {
+        let samples = [
+            r#"{"key":"text\\nvalue","number":-12.5e+3}"#,
+            r#"[true,false,null,"😀","\\u4e2d"]"#,
+            r#"{"bad":"\\u12x","next":1}"#,
+        ];
+        for sample in samples {
+            let mut expected_diags = Vec::new();
+            let expected = tokenize(sample, &mut expected_diags);
+            for split in sample
+                .char_indices()
+                .map(|(index, _)| index)
+                .chain(std::iter::once(sample.len()))
+            {
+                let mut actual_diags = Vec::new();
+                let actual = tokenize_fragments(
+                    [sample.get(..split).unwrap(), sample.get(split..).unwrap()],
+                    &mut actual_diags,
+                );
+                assert_eq!(actual, expected, "split at {split} in {sample:?}");
+                assert_eq!(
+                    actual_diags, expected_diags,
+                    "split at {split} in {sample:?}"
+                );
+            }
+        }
+
+        let source = format!(r#"{{"value":"{}"}}"#, "long text \\n ".repeat(200));
+        let document = crate::document::DocumentText::new(&source);
+        assert!(document.chunks().count() > 1);
+        let mut expected_diags = Vec::new();
+        let expected = tokenize(&source, &mut expected_diags);
+        let mut actual_diags = Vec::new();
+        let actual = tokenize_document(&document, &mut actual_diags);
+        assert_eq!(actual, expected);
+        assert_eq!(actual_diags, expected_diags);
+    }
 
     #[test]
     fn recognizes_text_and_each_escape_as_source_ranges() {

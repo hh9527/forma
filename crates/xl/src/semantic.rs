@@ -316,6 +316,7 @@ impl WorkspaceTypeGraph {
 
 #[derive(Clone, Debug)]
 pub struct WorkspaceSnapshot {
+    revision: crate::query::Revision,
     sources: SourceDatabase,
     modules: Vec<WorkspaceModule>,
     definitions: Vec<Definition>,
@@ -445,6 +446,7 @@ impl WorkspaceSnapshot {
             })
             .collect();
         Self {
+            revision: crate::query::Revision::default(),
             sources,
             modules: vec![WorkspaceModule {
                 id: module,
@@ -471,6 +473,85 @@ impl WorkspaceSnapshot {
 
     pub fn sources(&self) -> &SourceDatabase {
         &self.sources
+    }
+
+    pub const fn revision(&self) -> crate::query::Revision {
+        self.revision
+    }
+
+    pub(crate) fn set_revision(&mut self, revision: crate::query::Revision) {
+        self.revision = revision;
+    }
+
+    pub async fn query_definition_at(
+        &self,
+        context: &crate::query::QueryContext,
+        location: Location,
+    ) -> Result<Option<&Definition>, crate::query::QueryError> {
+        context.checkpoint().await?;
+        context.ensure_snapshot(self.revision)?;
+        Ok(self.definition_at(location))
+    }
+
+    pub async fn query_reference_at(
+        &self,
+        context: &crate::query::QueryContext,
+        location: Location,
+    ) -> Result<Option<&Reference>, crate::query::QueryError> {
+        context.checkpoint().await?;
+        context.ensure_snapshot(self.revision)?;
+        Ok(self.reference_at(location))
+    }
+
+    pub async fn query_type_at(
+        &self,
+        context: &crate::query::QueryContext,
+        location: Location,
+    ) -> Result<Option<WorkspaceTypeId>, crate::query::QueryError> {
+        context.checkpoint().await?;
+        context.ensure_snapshot(self.revision)?;
+        Ok(self.type_at(location))
+    }
+
+    pub async fn query_diagnostics(
+        &self,
+        context: &crate::query::QueryContext,
+    ) -> Result<&[Diagnostic], crate::query::QueryError> {
+        context.checkpoint().await?;
+        context.ensure_snapshot(self.revision)?;
+        Ok(self.diagnostics())
+    }
+
+    pub async fn query_exports_of(
+        &self,
+        context: &crate::query::QueryContext,
+        module: WorkspaceModuleId,
+    ) -> Result<Vec<WorkspaceExport>, crate::query::QueryError> {
+        context.checkpoint().await?;
+        context.ensure_snapshot(self.revision)?;
+        let exports = self.exports_of(module);
+        context.ensure_snapshot(self.revision)?;
+        Ok(exports)
+    }
+
+    pub async fn query_references_of(
+        &self,
+        context: &crate::query::QueryContext,
+        definition: DefinitionId,
+    ) -> Result<Vec<&Reference>, crate::query::QueryError> {
+        context.checkpoint().await?;
+        context.ensure_snapshot(self.revision)?;
+        let mut references = Vec::new();
+        for (index, reference) in self.references.iter().enumerate() {
+            if index % 256 == 0 {
+                context.checkpoint().await?;
+            }
+            if reference.definition == Some(definition) {
+                references.push(reference);
+            }
+        }
+        context.ensure_snapshot(self.revision)?;
+        Ok(references)
     }
 
     pub fn modules(&self) -> &[WorkspaceModule] {
@@ -865,6 +946,7 @@ impl WorkspaceSnapshot {
         }
 
         Self {
+            revision: crate::query::Revision::default(),
             sources,
             modules,
             definitions,
@@ -1180,7 +1262,7 @@ mod tests {
                 .all(|expression| expression.ty.value.is_some())
         );
         let main_source = snapshot.sources().get(main_module.source.unwrap());
-        let literal = u32::try_from(main_source.text.find("1 + 2").unwrap()).unwrap();
+        let literal = u32::try_from(main_source.text().to_string().find("1 + 2").unwrap()).unwrap();
         let expression = snapshot
             .expression_at(Location::new(main_source.id(), TextRange::at(literal)))
             .unwrap();

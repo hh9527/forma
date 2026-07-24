@@ -60,6 +60,7 @@ pub struct QuotaAccount {
     quota: Quota,
     remaining_fuel: usize,
     requested_allocation_bytes: u64,
+    query: Option<crate::query::QueryContext>,
 }
 
 impl QuotaAccount {
@@ -68,7 +69,13 @@ impl QuotaAccount {
             remaining_fuel: quota.fuel,
             quota,
             requested_allocation_bytes: 0,
+            query: None,
         }
+    }
+
+    pub fn with_query(mut self, query: crate::query::QueryContext) -> Self {
+        self.query = Some(query);
+        self
     }
 
     pub const fn quota(&self) -> Quota {
@@ -538,6 +545,7 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimeErrorKind {
+    Cancelled,
     FuelExhausted,
     AllocationQuotaExceeded,
     CallDepthExceeded,
@@ -6972,6 +6980,16 @@ fn consume_fuel(
     function: &BytecodeFunction,
     pc: usize,
 ) -> Result<(), RuntimeError> {
+    if let Some(query) = &account.query {
+        query.check().map_err(|query_error| {
+            error(
+                RuntimeErrorKind::Cancelled,
+                query_error.to_string(),
+                function,
+                pc,
+            )
+        })?;
+    }
     if account.remaining_fuel == 0 {
         return Err(error(
             RuntimeErrorKind::FuelExhausted,

@@ -1,6 +1,6 @@
 # RFC 0045: Asynchronous workspace revisions and document overlays
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0038, RFC 0039, RFC 0044
 
 ## Summary
@@ -440,3 +440,61 @@ cache invalidation is designed.
 Protocol code units and terminal cells are projections of source text, not
 stable source identities. Storing them would duplicate derived state and make
 edits invalidate multiple location systems.
+
+## Implementation result
+
+Implemented with `crop 0.4.3` and its `utf16-metric` feature. Every
+`SourceFile`, including disk, core, JSON, test, and overlay sources, now owns
+the same private `DocumentText` rope representation. `SourceDatabase` no
+longer stores a parallel flat string or line-start index. Byte slices borrow a
+single rope chunk when possible and materialize only the requested fragmented
+span.
+
+`DocumentText` provides validated byte edits and explicit UTF-8, UTF-16, and
+UTF-32 line-column conversion. Protocol conversion rejects UTF-8 and surrogate
+interiors and treats CRLF interiors as non-protocol positions. The existing
+one-based scalar CLI source position remains a separate projection so a
+diagnostic located on line-ending bytes still renders safely. Terminal display
+cells remain presentation work for the existing diagnostic layer.
+
+Both XL and JSON Logos front ends now consume ordered rope chunks through a
+window bridge. The bridge retains an unmatched string/interpolation region and
+a conservative root-token suffix, relocates committed spans and diagnostics to
+global byte offsets, and never retains borrowed token payloads. Generated
+parsers gained internal token-stream constructors; CST validation and AST/JSON
+lowering use rope byte slices. Tests compare contiguous and chunked tokenization
+at every character split and across actual multi-leaf Crop documents.
+
+`Workspace` owns canonical overlay paths, document versions, a monotonic
+`RevisionClock`, and one atomically published `Arc<WorkspaceSnapshot>`. Ordered
+change transactions clone and edit the COW rope before replacing the current
+document. Open overlays shadow disk sources in the recoverable module graph.
+Valid overlay dependencies are evaluated in an isolated tooling world and
+supply their real exported values to dependent partial analysis; failed
+overlays provide no fabricated capability.
+
+`QueryContext` carries a revision clock and clonable cancellation token.
+Checkpoint futures check cancellation and staleness before and after yielding.
+Recoverable graph traversal is async, including recursive module loads, and
+awaits checkpoints at module and partial-analysis boundaries without spawning
+or choosing an executor. The synchronous CLI recovery entry point polls the
+same future as a compatibility adapter.
+
+Workspace snapshots record their revision. Async diagnostics, definition,
+reference, references, type, and export queries verify that their context and
+snapshot revisions match. A rebuild captures COW overlay snapshots, rejects a
+cancelled or stale result before publication, and publishes under the workspace
+state lock only after a final revision check.
+
+Tool-stage `QuotaAccount`s optionally carry the query context. Existing VM
+fuel, call, and back-edge checkpoints then terminate cancelled or stale tooling
+execution early. Ordinary runtime accounts have no query probe and preserve
+their existing behavior and quotas.
+
+Tests cover COW and transactional edits, negotiated Unicode coordinates,
+surrogate and CRLF boundaries, chunk-equivalent XL and JSON lexing, stale and
+explicitly cancelled builds, atomic publication, overlay shadowing, and real
+cross-module overlay capabilities. The workspace tests, CLI tests, strict
+Clippy, formatting, and diff checks pass. No LSP transport, async runtime,
+`line-index`, `lsp-document`, `ropey`, incremental parser, or executor-specific
+spawn policy was introduced.

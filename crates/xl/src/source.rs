@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::ops::Range;
@@ -190,36 +191,49 @@ pub struct Position {
 pub struct SourceFile {
     id: SourceId,
     pub name: Arc<str>,
-    pub text: Arc<str>,
-    line_starts: Vec<u32>,
+    text: crate::document::DocumentText,
 }
 
 impl SourceFile {
     fn new(
         id: SourceId,
         name: impl Into<Arc<str>>,
-        text: impl Into<Arc<str>>,
+        text: impl AsRef<str>,
     ) -> Result<Self, LocationError> {
-        let text = text.into();
-        if text.len() > u32::MAX as usize {
+        let text = crate::document::DocumentText::new(text);
+        if text.byte_len() > u32::MAX as usize {
             return Err(LocationError::SourceTooLarge);
-        }
-        let mut line_starts = vec![0];
-        for (offset, _) in text.match_indices('\n') {
-            line_starts.push(u32::try_from(offset + 1).map_err(|_| LocationError::SourceTooLarge)?);
         }
         Ok(Self {
             id,
             name: name.into(),
             text,
-            line_starts,
         })
     }
 
-    pub fn slice(&self, location: Loc) -> Option<&str> {
+    fn from_document(
+        id: SourceId,
+        name: impl Into<Arc<str>>,
+        text: crate::document::DocumentText,
+    ) -> Result<Self, LocationError> {
+        if text.byte_len() > u32::MAX as usize {
+            return Err(LocationError::SourceTooLarge);
+        }
+        Ok(Self {
+            id,
+            name: name.into(),
+            text,
+        })
+    }
+
+    pub fn slice(&self, location: Loc) -> Option<Cow<'_, str>> {
         (location.source == self.id)
-            .then(|| self.text.get(location.range()))
+            .then(|| self.text.slice(location.text_range()).ok())
             .flatten()
+    }
+
+    pub const fn text(&self) -> &crate::document::DocumentText {
+        &self.text
     }
 
     pub const fn id(&self) -> SourceId {
@@ -227,30 +241,20 @@ impl SourceFile {
     }
 
     pub fn position(&self, offset: u32) -> Position {
-        let offset = offset.min(self.text.len() as u32);
-        let line = self.line_starts.partition_point(|start| *start <= offset) - 1;
-        let start = self.line_starts[line] as usize;
+        let offset = offset.min(self.text.byte_len() as u32);
+        let position = self
+            .text
+            .scalar_position(offset)
+            .expect("registered source offset is valid");
         Position {
-            line: line + 1,
-            column: self.text[start..offset as usize].chars().count() + 1,
+            line: position.line as usize + 1,
+            column: position.character as usize + 1,
         }
     }
 
     pub fn offset(&self, line: usize, column: usize) -> Option<u32> {
-        let line_start = *self.line_starts.get(line.checked_sub(1)?)? as usize;
-        let line_end = self
-            .text
-            .get(line_start..)?
-            .find('\n')
-            .map_or(self.text.len(), |relative| line_start + relative);
-        let line_text = self.text.get(line_start..line_end)?;
-        let character = column.checked_sub(1)?;
-        let relative = if character == line_text.chars().count() {
-            line_text.len()
-        } else {
-            line_text.char_indices().nth(character)?.0
-        };
-        u32::try_from(line_start + relative).ok()
+        self.text
+            .scalar_offset(line.checked_sub(1)?, column.checked_sub(1)?)
     }
 }
 
@@ -260,22 +264,45 @@ pub struct SourceDatabase {
 }
 
 impl SourceDatabase {
-    pub fn try_add(
-        &mut self,
-        name: impl Into<Arc<str>>,
-        text: impl Into<Arc<str>>,
-    ) -> Result<SourceId, LocationError> {
+    fn next_id(&self) -> Result<SourceId, LocationError> {
         let raw = u32::try_from(self.files.len())
             .ok()
             .and_then(|length| length.checked_add(1))
             .and_then(NonZeroU32::new)
             .ok_or(LocationError::SourceTooLarge)?;
-        let id = SourceId(raw);
+        Ok(SourceId(raw))
+    }
+
+    pub fn try_add(
+        &mut self,
+        name: impl Into<Arc<str>>,
+        text: impl AsRef<str>,
+    ) -> Result<SourceId, LocationError> {
+        let id = self.next_id()?;
         self.files.push(SourceFile::new(id, name, text)?);
         Ok(id)
     }
 
-    pub fn add(&mut self, name: impl Into<Arc<str>>, text: impl Into<Arc<str>>) -> SourceId {
+    pub fn try_add_document(
+        &mut self,
+        name: impl Into<Arc<str>>,
+        text: crate::document::DocumentText,
+    ) -> Result<SourceId, LocationError> {
+        let id = self.next_id()?;
+        self.files.push(SourceFile::from_document(id, name, text)?);
+        Ok(id)
+    }
+
+    pub fn add_document(
+        &mut self,
+        name: impl Into<Arc<str>>,
+        text: crate::document::DocumentText,
+    ) -> SourceId {
+        self.try_add_document(name, text)
+            .expect("source fits compact location model")
+    }
+
+    pub fn add(&mut self, name: impl Into<Arc<str>>, text: impl AsRef<str>) -> SourceId {
         self.try_add(name, text)
             .expect("source fits compact location model")
     }
@@ -337,7 +364,7 @@ mod tests {
         assert_eq!(first.get(), 1);
         assert_eq!(second.get(), 2);
         let location = Location::from_usize(first, 1..2).unwrap();
-        assert_eq!(sources.get(first).slice(location), Some("b"));
+        assert_eq!(sources.get(first).slice(location).as_deref(), Some("b"));
         assert_eq!(sources.get(second).slice(location), None);
     }
 
