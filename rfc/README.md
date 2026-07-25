@@ -73,3 +73,5 @@ semantics from an earlier RFC.
 52. Unified bidirectional type checking.
 53. Generic core combinators.
 54. First-class tagged values.
+55. Typed TypeMetadata witnesses.
+56. Typed boundary errors and Result composition.
