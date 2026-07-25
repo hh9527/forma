@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
 use xl::{
     DebugEvent, DebugSink, DefinitionKind, Engine, EngineConfig, Location, Quota, TextRange, Value,
-    WorkspaceSnapshot, WorkspaceTypeId, parse_json,
+    Vm, WorkspaceSnapshot, WorkspaceTypeId, parse_json,
 };
 
 const EVALUATION_FUEL: usize = 1_000_000;
@@ -83,96 +83,83 @@ fn evaluate_module(module_path: &str, bindings: BTreeMap<String, Value>) -> Resu
     engine.execute(&module).map_err(|error| error.to_string())
 }
 
-struct ExecSpec {
-    install: Vec<String>,
-    command: String,
-    args: Vec<String>,
-}
-
 fn exec_command(arguments: &[String]) -> Result<(), String> {
-    let [module_path] = arguments else {
-        return Err(format!("exec requires one module path\n{}", usage()));
-    };
-    let spec = decode_exec_spec(evaluate_module(module_path, BTreeMap::new())?)?;
-    let installs = spec
-        .install
-        .iter()
-        .map(|locator| simulated_install_path(locator))
-        .collect::<Vec<_>>();
-    let mut command = Command::new(&spec.command);
-    command.args(&spec.args);
-    command.env("XL_EXEC_INSTALL_COUNT", installs.len().to_string());
-    for (name, _) in env::vars_os() {
-        if name.to_str().is_some_and(|name| {
-            name.starts_with("XL_EXEC_INSTALL_") && name != "XL_EXEC_INSTALL_COUNT"
-        }) {
-            command.env_remove(name);
+    let (module_path, request_args) = match arguments {
+        [dry_run, module_path] if dry_run == "--dry-run" => (module_path, &[][..]),
+        [dry_run, module_path, separator, request_args @ ..]
+            if dry_run == "--dry-run" && separator == "--" =>
+        {
+            (module_path, request_args)
         }
-    }
-    for (index, path) in installs.iter().enumerate() {
-        command.env(format!("XL_EXEC_INSTALL_{index}"), path);
-    }
-    let status = command
-        .status()
-        .map_err(|error| format!("cannot start command {:?}: {error}", spec.command))?;
-    if !status.success() {
-        return Err(format!("command {:?} exited with {status}", spec.command));
-    }
+        _ => {
+            return Err(format!("exec currently requires --dry-run\n{}", usage()));
+        }
+    };
+    let engine = engine();
+    let module = engine
+        .load_module(module_path, BTreeMap::new())
+        .map_err(|error| error.to_string())?;
+    let entry = engine.execute(&module).map_err(|error| error.to_string())?;
+    let mut values = Vm::new();
+    let settings = exec_settings(&mut values)?;
+    let request = exec_request(&mut values, request_args)?;
+    let plan = engine
+        .invoke(&module, &entry, &[settings, request])
+        .map_err(|error| error.to_string())?;
+    let Value::Dict(_) = plan else {
+        return Err(format!(
+            "exec entry must return a Dict, found {}",
+            plan.type_name()
+        ));
+    };
+    println!("{}", canonical_json(&plan)?);
     Ok(())
 }
 
-fn decode_exec_spec(value: Value) -> Result<ExecSpec, String> {
-    let Value::Dict(spec) = value else {
-        return Err("exec result must be a Dict".into());
-    };
-    let expected = ["args", "command", "install"];
-    if spec.shape().fields() != expected {
-        return Err(format!(
-            "exec result must contain exactly args, command, and install; found {}",
-            spec.shape().fields().join(", ")
-        ));
-    }
-    let install = decode_string_array(
-        spec.get("install").expect("validated ExecSpec field"),
-        "install",
-    )?;
-    let command = match spec.get("command").expect("validated ExecSpec field") {
-        Value::String(command) => command.to_string(),
-        _ => return Err("exec field command must be a String".into()),
-    };
-    let args = decode_string_array(spec.get("args").expect("validated ExecSpec field"), "args")?;
-    Ok(ExecSpec {
-        install,
-        command,
-        args,
-    })
+fn exec_settings(vm: &mut Vm) -> Result<Value, String> {
+    let cache = cache_root().join("xl").join("exec");
+    let platform = vm.make_dict(vec![
+        ("arch".into(), Value::string(env::consts::ARCH)),
+        ("os".into(), Value::string(env::consts::OS)),
+    ])?;
+    vm.make_dict(vec![
+        (
+            "cache_prefix".into(),
+            Value::string(path_string(&cache.join("downloads"))?),
+        ),
+        (
+            "install_prefix".into(),
+            Value::string(path_string(&cache.join("installs"))?),
+        ),
+        ("platform".into(), platform),
+    ])
 }
 
-fn decode_string_array(value: &Value, field: &str) -> Result<Vec<String>, String> {
-    let Value::Array(values) = value else {
-        return Err(format!("exec field {field} must be an Array(String)"));
-    };
-    values
-        .iter()
-        .enumerate()
-        .map(|(index, value)| match value {
-            Value::String(value) => Ok(value.to_string()),
-            _ => Err(format!("exec field {field}[{index}] must be a String")),
-        })
-        .collect()
-}
-
-fn simulated_install_path(locator: &str) -> PathBuf {
-    let mut hash = 0xcbf29ce484222325_u64;
-    for byte in locator.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x100000001b3);
+fn exec_request(vm: &mut Vm, arguments: &[String]) -> Result<Value, String> {
+    let mut environment = Vec::new();
+    for (name, value) in env::vars_os() {
+        let name = name
+            .into_string()
+            .map_err(|_| "exec environment contains a non-UTF-8 name".to_owned())?;
+        let value = value
+            .into_string()
+            .map_err(|_| format!("exec environment variable {name:?} is not UTF-8"))?;
+        environment.push((name, Value::string(value)));
     }
-    cache_root()
-        .join("xl")
-        .join("exec")
-        .join("artifacts")
-        .join(format!("{hash:016x}"))
+    let environment = vm.make_dict(environment)?;
+    vm.make_dict(vec![
+        (
+            "args".into(),
+            Value::Array(arguments.iter().cloned().map(Value::string).collect()),
+        ),
+        (
+            "cwd".into(),
+            Value::string(path_string(
+                &env::current_dir().map_err(|error| error.to_string())?,
+            )?),
+        ),
+        ("env".into(), environment),
+    ])
 }
 
 fn cache_root() -> PathBuf {
@@ -181,6 +168,83 @@ fn cache_root() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
         .unwrap_or_else(env::temp_dir)
+}
+
+fn path_string(path: &Path) -> Result<String, String> {
+    path.to_str()
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| format!("path is not UTF-8: {}", path.display()))
+}
+
+fn canonical_json(value: &Value) -> Result<String, String> {
+    fn write_value(output: &mut String, value: &Value) -> Result<(), String> {
+        match value {
+            Value::Int(value) => write!(output, "{value}").unwrap(),
+            Value::Float(value) if value.is_finite() => write!(output, "{value}").unwrap(),
+            Value::Float(_) => return Err("Exec contains a non-finite Float".into()),
+            Value::String(value) => write_string(output, value),
+            Value::Atom(atom) if atom.name() == "None" => output.push_str("null"),
+            Value::Atom(atom) if atom.name() == "True" => output.push_str("true"),
+            Value::Atom(atom) if atom.name() == "False" => output.push_str("false"),
+            Value::Array(values) => {
+                output.push('[');
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    write_value(output, value)?;
+                }
+                output.push(']');
+            }
+            Value::Dict(value) => {
+                output.push('{');
+                for (index, (name, value)) in value
+                    .shape()
+                    .fields()
+                    .iter()
+                    .zip(value.values())
+                    .enumerate()
+                {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    write_string(output, name);
+                    output.push(':');
+                    write_value(output, value)?;
+                }
+                output.push('}');
+            }
+            _ => {
+                return Err(format!(
+                    "Exec contains a non-JSON {} value",
+                    value.type_name()
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn write_string(output: &mut String, value: &str) {
+        output.push('"');
+        for character in value.chars() {
+            match character {
+                '"' => output.push_str("\\\""),
+                '\\' => output.push_str("\\\\"),
+                '\n' => output.push_str("\\n"),
+                '\r' => output.push_str("\\r"),
+                '\t' => output.push_str("\\t"),
+                character if character.is_control() => {
+                    write!(output, "\\u{:04x}", u32::from(character)).unwrap();
+                }
+                character => output.push(character),
+            }
+        }
+        output.push('"');
+    }
+
+    let mut output = String::new();
+    write_value(&mut output, value)?;
+    Ok(output)
 }
 
 fn check_command(arguments: &[String]) -> Result<(), String> {
@@ -485,5 +549,5 @@ fn read_input(path: &str) -> Result<Value, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  xl run <module.xl> [--input <file|->]\n  xl exec <module.xl>\n  xl check <module.xl>\n  xl types <module.xl>\n  xl show <module.xl> [at <source> <line> <column>]".into()
+    "usage:\n  xl run <module.xl> [--input <file|->]\n  xl exec --dry-run <module.xl> [-- <arguments>...]\n  xl check <module.xl>\n  xl types <module.xl>\n  xl show <module.xl> [at <source> <line> <column>]".into()
 }

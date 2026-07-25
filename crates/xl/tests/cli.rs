@@ -141,22 +141,40 @@ fn run_writes_debug_events_only_to_stderr() {
 
 #[cfg(unix)]
 #[test]
-fn exec_evaluates_shebang_spec_and_passes_simulated_install_positions() {
+fn exec_dry_run_invokes_explicit_pure_entry() {
     let directory = fixture_dir();
     let cache = directory.join("cache");
-    let locator = "http://url/to/python/tarball";
     let main = directory.join("exec.xl");
     fs::write(
         &main,
-        format!(
-            "#!/usr/bin/env -S xl exec\n# deps.json inside\n{{install: [\"{locator}\"], command: \"env\", args: []}}"
-        ),
+        r#"#!/usr/bin/env -S xl exec --dry-run
+import hash from "core:hash";
+let captured = "python3";
+fn(settings, request) {
+    {
+        command: captured,
+        args: request.args,
+        env_value: request.env.XL_EXEC_TEST,
+        cwd: request.cwd,
+        os: settings.platform.os,
+        cache: "\{settings.cache_prefix}/\{hash.sha256("abc")}",
+        install: settings.install_prefix,
+    }
+}"#,
     )
     .unwrap();
 
     let output = xl()
         .env("XL_CACHE_HOME", &cache)
-        .args(["exec", main.to_str().unwrap()])
+        .env("XL_EXEC_TEST", "visible")
+        .args([
+            "exec",
+            "--dry-run",
+            main.to_str().unwrap(),
+            "--",
+            "one",
+            "two words",
+        ])
         .output()
         .unwrap();
     assert!(
@@ -164,56 +182,85 @@ fn exec_evaluates_shebang_spec_and_passes_simulated_install_positions() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("XL_EXEC_INSTALL_COUNT=1"), "{stdout}");
-    let artifact_prefix = format!("XL_EXEC_INSTALL_0={}/xl/exec/artifacts/", cache.display());
-    let position = stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("XL_EXEC_INSTALL_0="))
-        .expect("child install position");
-    assert!(stdout.contains(&artifact_prefix), "{stdout}");
-    assert!(!PathBuf::from(position).exists());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains(r#""args":["one","two words"]"#), "{stdout}");
+    assert!(stdout.contains(r#""command":"python3""#), "{stdout}");
+    assert!(stdout.contains(r#""env_value":"visible""#), "{stdout}");
+    assert!(
+        stdout.contains("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(&format!(
+            r#""install":"{}/xl/exec/installs""#,
+            cache.display()
+        )),
+        "{stdout}"
+    );
+    assert!(!cache.exists());
     let repeated = xl()
         .env("XL_CACHE_HOME", &cache)
-        .args(["exec", main.to_str().unwrap()])
+        .env("XL_EXEC_TEST", "visible")
+        .args([
+            "exec",
+            "--dry-run",
+            main.to_str().unwrap(),
+            "--",
+            "one",
+            "two words",
+        ])
         .output()
         .unwrap();
-    let repeated_stdout = String::from_utf8_lossy(&repeated.stdout);
-    let repeated_position = repeated_stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("XL_EXEC_INSTALL_0="))
-        .expect("repeated child install position");
-    assert_eq!(repeated_position, position);
+    assert!(repeated.status.success());
+    assert_eq!(repeated.stdout, stdout.as_bytes());
+    assert!(!cache.exists());
     fs::remove_dir_all(directory).unwrap();
 }
 
 #[cfg(unix)]
 #[test]
-fn exec_rejects_bad_specs_and_reports_child_failure() {
+fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
     let directory = fixture_dir();
-    let malformed = directory.join("malformed.xl");
-    fs::write(
-        &malformed,
-        r#"{install: [], command: "env", args: [], typo: 1}"#,
-    )
-    .unwrap();
+    let value = directory.join("value.xl");
+    fs::write(&value, "42").unwrap();
+
     let rejected = xl()
-        .args(["exec", malformed.to_str().unwrap()])
+        .args(["exec", value.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(!rejected.status.success());
-    assert!(
-        String::from_utf8_lossy(&rejected.stderr).contains("exactly args, command, and install")
-    );
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("currently requires --dry-run"));
 
-    let failing = directory.join("failing.xl");
-    fs::write(&failing, r#"{install: [], command: "false", args: []}"#).unwrap();
-    let failed = xl()
-        .args(["exec", failing.to_str().unwrap()])
+    let short = xl()
+        .args(["exec", "-n", value.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(!failed.status.success());
-    assert!(String::from_utf8_lossy(&failed.stderr).contains("exited with"));
+    assert!(!short.status.success());
+
+    let not_function = xl()
+        .args(["exec", "--dry-run", value.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!not_function.status.success());
+    assert!(String::from_utf8_lossy(&not_function.stderr).contains("must be a function"));
+
+    let not_dict = directory.join("not-dict.xl");
+    fs::write(&not_dict, "fn(settings, request) { 42 }").unwrap();
+    let not_dict = xl()
+        .args(["exec", "--dry-run", not_dict.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!not_dict.status.success());
+    assert!(String::from_utf8_lossy(&not_dict.stderr).contains("must return a Dict"));
+
+    let non_json = directory.join("non-json.xl");
+    fs::write(&non_json, "fn(settings, request) { {bad: 'Named} }").unwrap();
+    let non_json = xl()
+        .args(["exec", "--dry-run", non_json.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!non_json.status.success());
+    assert!(String::from_utf8_lossy(&non_json.stderr).contains("non-JSON Atom"));
     fs::remove_dir_all(directory).unwrap();
 }
 

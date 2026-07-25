@@ -5,8 +5,9 @@ use crate::heap::{
 use crate::lir::RegisterId;
 use crate::value::{
     BuiltinAtom, CoreArrayFunction, CoreAttributesFunction, CoreBuiltinTypeFunction,
-    CoreCodecFunction, CoreDebugFunction, CoreDictFunction, CoreJsonFunction, CoreModelFunction,
-    CoreResultFunction, Dict, NativeError, NativeKind, NativeLimit, Shape, Value,
+    CoreCodecFunction, CoreDebugFunction, CoreDictFunction, CoreHashFunction, CoreJsonFunction,
+    CoreModelFunction, CoreResultFunction, Dict, NativeError, NativeKind, NativeLimit, Shape,
+    Value,
 };
 use crate::{Diagnostic, Origin, SourceDatabase};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -925,6 +926,20 @@ impl Vm {
         account: &mut QuotaAccount,
     ) -> Result<WorkWorld, RuntimeError> {
         self.execute_frame(background, externals, function, arguments, &[], account)
+    }
+
+    pub(crate) fn execute_function_with_captures_in_work(
+        &mut self,
+        background: &Heap,
+        externals: &HashMap<String, PersistentValue>,
+        function: &BytecodeFunction,
+        captures: &[Value],
+        arguments: &[Value],
+        account: &mut QuotaAccount,
+    ) -> Result<WorkWorld, RuntimeError> {
+        self.execute_frame(
+            background, externals, function, arguments, captures, account,
+        )
     }
 
     #[allow(clippy::needless_borrow)]
@@ -2194,6 +2209,16 @@ fn drive_vm_action(
                                 background,
                                 debug_sink,
                             )?,
+                            NativeKind::CoreHash(function) => run_core_hash(
+                                function,
+                                &arguments,
+                                return_target,
+                                &call_function,
+                                call_pc,
+                                current,
+                                background,
+                                account,
+                            )?,
                             NativeKind::CoreCodec(operation) => run_core_codec(
                                 operation,
                                 &arguments,
@@ -2599,6 +2624,52 @@ fn charge_array_output(
 
 const fn core_array_name(function: CoreArrayFunction) -> &'static str {
     function.name()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_core_hash(
+    operation: CoreHashFunction,
+    arguments: &[RichValue],
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let input = view
+        .string_text(arguments[0])
+        .map_err(|heap_error| {
+            error(
+                RuntimeErrorKind::InvalidBytecode,
+                heap_error.to_string(),
+                function,
+                pc,
+            )
+        })?
+        .ok_or_else(|| {
+            error(
+                RuntimeErrorKind::TypeMismatch,
+                format!("{} expects String", operation.name()),
+                function,
+                pc,
+            )
+        })?;
+    let digest = match operation {
+        CoreHashFunction::Sha256 => crate::sha256::hex(input.as_bytes()),
+    };
+    charge_allocation(account, digest.len() as u64, function, pc)?;
+    Ok(VmAction::Return {
+        value: RichValue::new(
+            current.string(Some(background), &digest),
+            instruction_location(function, pc),
+        ),
+        return_target,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]

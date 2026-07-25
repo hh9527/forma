@@ -225,6 +225,21 @@ pub(crate) enum CoreDebugFunction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreHashFunction {
+    Sha256,
+}
+
+impl CoreHashFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        "core:hash.sha256"
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        1
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CoreCodecFunction {
     Decode,
     Encode,
@@ -378,6 +393,7 @@ pub(crate) enum NativeKind {
     CoreBuiltinType(CoreBuiltinTypeFunction),
     CoreDict(CoreDictFunction),
     CoreDebug(CoreDebugFunction),
+    CoreHash(CoreHashFunction),
     CoreCodec(CoreCodecFunction),
     CoreResult(CoreResultFunction),
     CoreJson(CoreJsonFunction),
@@ -452,6 +468,15 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreDebug(function),
+        }
+    }
+
+    pub(crate) const fn core_hash(function: CoreHashFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreHash(function),
         }
     }
 

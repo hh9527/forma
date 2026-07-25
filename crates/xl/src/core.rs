@@ -1,6 +1,6 @@
 use crate::value::{
     CoreArrayFunction, CoreAttributesFunction, CoreCodecFunction, CoreDebugFunction,
-    CoreDictFunction, CoreJsonFunction, CoreResultFunction, NativeFunction,
+    CoreDictFunction, CoreHashFunction, CoreJsonFunction, CoreResultFunction, NativeFunction,
 };
 
 pub(crate) const ARRAY_MODULE: &str = "core:array";
@@ -11,6 +11,7 @@ pub(crate) const CODEC_MODULE: &str = "core:codec";
 pub(crate) const OPTION_MODULE: &str = "core:option";
 pub(crate) const RESULT_MODULE: &str = "core:result";
 pub(crate) const JSON_MODULE: &str = "core:json";
+pub(crate) const HASH_MODULE: &str = "core:hash";
 
 pub(crate) struct CoreModuleSpec {
     pub(crate) name: &'static str,
@@ -197,6 +198,17 @@ def is_ok: for(A, E) Fn(Result(A, E)) -> Bool = fn(result) {
             functions: vec![(
                 "unwrap",
                 NativeFunction::core_result(CoreResultFunction::Unwrap),
+            )],
+        },
+        CoreModuleSpec {
+            name: HASH_MODULE,
+            source: r#"
+native sha256: Fn(String) -> String;
+{sha256: sha256}
+"#,
+            functions: vec![(
+                "sha256",
+                NativeFunction::core_hash(CoreHashFunction::Sha256),
             )],
         },
         CoreModuleSpec {

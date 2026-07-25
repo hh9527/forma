@@ -18,7 +18,8 @@ use crate::types::{
     analyze_program_with_bindings_observed,
 };
 use crate::{
-    BytecodeFunction, Closure, DebugSink, DiscardDebugSink, Quota, QuotaAccount, Value, Vm,
+    BytecodeFunction, Closure, DebugSink, DiscardDebugSink, Prototype, Quota, QuotaAccount, Value,
+    Vm,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -227,6 +228,41 @@ impl LoadedModule {
             .export(&self.runtime.main.heap)
             .map_err(|error| crate::RuntimeError::from_heap_error(&self.function, error))
     }
+
+    pub fn invoke_with_quota_and_debug_sink(
+        &self,
+        callee: &Value,
+        arguments: &[Value],
+        quota: Quota,
+        debug_sink: Arc<dyn DebugSink>,
+    ) -> Result<Value, ModuleError> {
+        let Value::Func(closure) = callee else {
+            return Err(ModuleError::new(format!(
+                "module result must be a function, found {}",
+                callee.type_name()
+            )));
+        };
+        let Prototype::Bytecode(function) = closure.prototype() else {
+            return Err(ModuleError::new(
+                "module result must be an XL function, found a native function",
+            ));
+        };
+        let mut account = QuotaAccount::new(quota);
+        let arena = Vm::new()
+            .with_debug_sink(debug_sink)
+            .execute_function_with_captures_in_work(
+                &self.runtime.main.heap,
+                &self.runtime.externals,
+                function,
+                closure.upvalues(),
+                arguments,
+                &mut account,
+            )
+            .map_err(|error| ModuleError::new(error.with_sources(&self.sources).to_string()))?;
+        arena
+            .export(&self.runtime.main.heap)
+            .map_err(|error| ModuleError::new(error.to_string()))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -281,6 +317,20 @@ impl Engine {
 
     pub fn execute(&self, module: &LoadedModule) -> Result<Value, crate::RuntimeError> {
         module.execute_with_quota_and_debug_sink(
+            self.config.session_quota,
+            Arc::clone(&self.debug_sink),
+        )
+    }
+
+    pub fn invoke(
+        &self,
+        module: &LoadedModule,
+        callee: &Value,
+        arguments: &[Value],
+    ) -> Result<Value, ModuleError> {
+        module.invoke_with_quota_and_debug_sink(
+            callee,
+            arguments,
             self.config.session_quota,
             Arc::clone(&self.debug_sink),
         )

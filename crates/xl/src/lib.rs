@@ -13,6 +13,7 @@ pub mod module_id;
 pub mod parser;
 pub mod query;
 pub mod semantic;
+mod sha256;
 pub mod source;
 pub mod syntax;
 pub mod types;
