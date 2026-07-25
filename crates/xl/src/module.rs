@@ -435,7 +435,9 @@ impl RecoverableWorkspaceBuilder<'_> {
                     }
                 },
             };
-            let source_id = self.sources.add_document(key.clone(), source);
+            let source_id = self
+                .sources
+                .add_document(path.display().to_string(), source);
             let parsed = parse_registered(&self.sources, source_id);
             let program = parsed.program.clone();
             let imports = parsed
@@ -650,7 +652,9 @@ impl RecoverableWorkspaceBuilder<'_> {
                 }
             },
         };
-        let source_id = self.sources.add_document(key.clone(), source);
+        let source_id = self
+            .sources
+            .add_document(path.display().to_string(), source);
         let parsed = parse_json_registered(&self.sources, source_id);
         let value = parsed.value.map(|sourced| sourced.value);
         self.inputs.insert(
@@ -4056,9 +4060,11 @@ mod tests {
         );
         assert!(main.imports.iter().any(|import| import.target == model.id));
         assert_ne!(main.source, model.source);
+        let model_path = model.path.as_ref().unwrap();
+        assert_eq!(model.name, ResolvedModuleId::local(model_path).to_string());
         assert_eq!(
             snapshot.sources().get(model.source.unwrap()).name.as_ref(),
-            model.name
+            model_path.to_string_lossy()
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -4204,8 +4210,8 @@ mod tests {
         fs::create_dir(&app).unwrap();
         fs::create_dir(&models).unwrap();
         fs::write(
-            directory.join("xl-deps.toml"),
-            "[dependencies]\nmodels = { path = \"models\" }\n",
+            directory.join("xl-deps.json"),
+            r#"{"dependencies":{"models":{"path":"models"}}}"#,
         )
         .unwrap();
         fs::write(models.join("base.xl"), "{answer: 42}").unwrap();

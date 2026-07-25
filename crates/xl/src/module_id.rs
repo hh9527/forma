@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
+use crate::Value;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ModuleFormat {
     Xl,
@@ -175,7 +177,7 @@ impl ModuleResolver {
             .ok_or_else(|| ResolveModuleError::Io("root module has no parent directory".into()))?;
         let manifest = start
             .ancestors()
-            .map(|directory| directory.join("xl-deps.toml"))
+            .map(|directory| directory.join("xl-deps.json"))
             .find(|candidate| candidate.is_file());
         let workspace_root = manifest
             .as_ref()
@@ -252,39 +254,60 @@ impl ModuleResolver {
         let source = std::fs::read_to_string(manifest).map_err(|error| {
             ResolveModuleError::Manifest(format!("cannot read {}: {error}", manifest.display()))
         })?;
-        let value = toml::from_str::<toml::Value>(&source).map_err(|error| {
-            ResolveModuleError::Manifest(format!("invalid {}: {error}", manifest.display()))
-        })?;
-        if let Some(dependencies) = value.get("dependencies") {
-            let dependencies = dependencies.as_table().ok_or_else(|| {
-                ResolveModuleError::Manifest("[dependencies] must be a table".into())
+        let value =
+            crate::json::parse_json(&manifest.display().to_string(), &source).map_err(|error| {
+                ResolveModuleError::Manifest(format!("invalid {}: {error}", manifest.display()))
             })?;
-            for (name, specification) in dependencies {
-                let path = specification
-                    .as_table()
-                    .and_then(|table| table.get("path"))
-                    .and_then(toml::Value::as_str)
-                    .ok_or_else(|| {
-                        ResolveModuleError::Manifest(format!(
-                            "dependency {name:?} must have a String path"
-                        ))
-                    })?;
+        let Value::Dict(manifest_value) = value else {
+            return Err(ResolveModuleError::Manifest(
+                "dependency manifest must be a JSON object".into(),
+            ));
+        };
+        if let Some(dependencies) = manifest_value.get("dependencies") {
+            let Value::Dict(dependencies) = dependencies else {
+                return Err(ResolveModuleError::Manifest(
+                    "manifest field \"dependencies\" must be an object".into(),
+                ));
+            };
+            for (name, specification) in dependencies
+                .shape()
+                .fields()
+                .iter()
+                .zip(dependencies.values())
+            {
+                let path = match specification {
+                    Value::Dict(specification) => match specification.get("path") {
+                        Some(Value::String(path)) => path.as_ref(),
+                        _ => {
+                            return Err(ResolveModuleError::Manifest(format!(
+                                "dependency {name:?} must have a String path"
+                            )));
+                        }
+                    },
+                    _ => {
+                        return Err(ResolveModuleError::Manifest(format!(
+                            "dependency {name:?} must be an object"
+                        )));
+                    }
+                };
                 let root = resolve_physical(&self.workspace_root.join(path))?;
-                self.dependencies.insert(name.clone(), root);
+                self.dependencies.insert(name.to_owned(), root);
             }
         }
-        if let Some(formats) = value.get("formats") {
-            let formats = formats
-                .as_table()
-                .ok_or_else(|| ResolveModuleError::Manifest("[formats] must be a table".into()))?;
-            for (module, format) in formats {
-                let format = format.as_str().ok_or_else(|| {
-                    ResolveModuleError::Manifest(format!(
+        if let Some(formats) = manifest_value.get("formats") {
+            let Value::Dict(formats) = formats else {
+                return Err(ResolveModuleError::Manifest(
+                    "manifest field \"formats\" must be an object".into(),
+                ));
+            };
+            for (module, format) in formats.shape().fields().iter().zip(formats.values()) {
+                let Value::String(format) = format else {
+                    return Err(ResolveModuleError::Manifest(format!(
                         "format override {module:?} must be a String"
-                    ))
-                })?;
+                    )));
+                };
                 self.formats
-                    .insert(module.clone(), ModuleFormat::parse(format)?);
+                    .insert(module.to_owned(), ModuleFormat::parse(format.as_ref())?);
             }
         }
         Ok(())
@@ -461,8 +484,8 @@ mod tests {
         std::fs::create_dir_all(temporary.join("models")).unwrap();
         std::fs::write(temporary.join("app/main.xl"), "0").unwrap();
         std::fs::write(
-            temporary.join("xl-deps.toml"),
-            "[dependencies]\nmodels = { path = \"models\" }\n",
+            temporary.join("xl-deps.json"),
+            r#"{"dependencies":{"models":{"path":"models"}}}"#,
         )
         .unwrap();
         std::fs::write(temporary.join("models/user.xl"), "0").unwrap();
@@ -501,6 +524,48 @@ mod tests {
         std::fs::remove_dir_all(temporary).unwrap();
     }
 
+    #[test]
+    fn json_manifest_validates_shape_and_exact_format_overrides() {
+        let temporary =
+            std::env::temp_dir().join(format!("xl-module-manifest-test-{}", std::process::id()));
+        let app = temporary.join("app");
+        let dependency = temporary.join("dependency");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&dependency).unwrap();
+        let main = app.join("main.xl");
+        std::fs::write(&main, "0").unwrap();
+        std::fs::write(dependency.join("schema"), "{}").unwrap();
+        std::fs::write(
+            temporary.join("xl-deps.json"),
+            r#"{
+                "dependencies": {"dep": {"path": "dependency"}},
+                "formats": {"deps://dep/schema": "json"}
+            }"#,
+        )
+        .unwrap();
+        let resolver = ModuleResolver::for_root(&main).unwrap();
+        let root = resolver.resolve_root(&main).unwrap();
+        let schema = resolver
+            .resolve_import(&root.id, "deps://dep/schema")
+            .unwrap();
+        assert_eq!(schema.format, ModuleFormat::Json);
+
+        std::fs::write(temporary.join("xl-deps.json"), r#"{"dependencies": []}"#).unwrap();
+        assert!(matches!(
+            ModuleResolver::for_root(&main),
+            Err(ResolveModuleError::Manifest(message))
+                if message.contains("dependencies") && message.contains("object")
+        ));
+
+        std::fs::write(temporary.join("xl-deps.json"), "{").unwrap();
+        assert!(matches!(
+            ModuleResolver::for_root(&main),
+            Err(ResolveModuleError::Manifest(message))
+                if message.contains("invalid") && message.contains("xl-deps.json")
+        ));
+        std::fs::remove_dir_all(temporary).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn dependency_resolution_rejects_lexical_and_symlink_escapes() {
@@ -515,8 +580,8 @@ mod tests {
         std::fs::write(app.join("main.xl"), "0").unwrap();
         std::fs::write(temporary.join("outside.xl"), "0").unwrap();
         std::fs::write(
-            temporary.join("xl-deps.toml"),
-            "[dependencies]\ndep = { path = \"dependency\" }\n",
+            temporary.join("xl-deps.json"),
+            r#"{"dependencies":{"dep":{"path":"dependency"}}}"#,
         )
         .unwrap();
         symlink(temporary.join("outside.xl"), dependency.join("escape.xl")).unwrap();
