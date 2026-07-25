@@ -67,6 +67,37 @@ user.json:1:21: expected Int
 
 命令行改写同样属于这段纯计算。一个 gcc 或 rustc 启动器可以根据计算出的安装位置补充 sysroot 和平台相关搜索路径，注入 `source-prefix-map`，再改写用户传入的源文件参数。返回的 `Exec` 已经包含最终的 command、args、env 和路径：宿主不展开模板、不替换变量，也不重新解释策略。这里没有特殊的上下文模块或启动器语法，只有显式参数、普通函数和可 JSON 化的数据；内外世界的连接点因此很薄。
 
+效果边界正在收敛为一组普通的 Forma 类型。安装方式是可扩展的枚举，`ExecEnv` 则只包含效果层需要消费的最终值：
+
+```forma
+@enum type UnpackType = {
+    TarGzip: 'None,
+    Tar: 'None,
+};
+
+@struct type UnpackOpt = {
+    dest: String,
+    ty: UnpackType,
+    src: String,
+    strip: Int,
+    digest: Option(String),
+};
+
+@enum type Install = {
+    Unpack: UnpackOpt,
+};
+
+@struct type ExecEnv = {
+    install: Array(Install),
+    cwd: Option(String),
+    bin: String,
+    args: Array(String),
+    env: Dict(String),
+};
+```
+
+其中 `Dict(String)` 是目标协议所需、尚待加入 TypeMetadata 的字符串字典类型；其余部分已经使用现有的 Struct、Enum、Array 和 Option 表达。协议本身仍然只是数据，不会增加专用的安装语句或命令行改写语法。
+
 例如，一个可再生的 gcc 启动计划可以完整地写成：
 
 ```forma

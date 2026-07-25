@@ -118,6 +118,42 @@ or launcher syntax here, only explicit parameters, ordinary functions, and
 JSON-compatible data; the connection between the closed world and the effectful
 host stays narrow.
 
+The effect boundary is converging on a set of ordinary Forma types. Installation
+methods form an extensible enum, while `ExecEnv` contains only the final values
+consumed by the effect layer:
+
+```forma
+@enum type UnpackType = {
+    TarGzip: 'None,
+    Tar: 'None,
+};
+
+@struct type UnpackOpt = {
+    dest: String,
+    ty: UnpackType,
+    src: String,
+    strip: Int,
+    digest: Option(String),
+};
+
+@enum type Install = {
+    Unpack: UnpackOpt,
+};
+
+@struct type ExecEnv = {
+    install: Array(Install),
+    cwd: Option(String),
+    bin: String,
+    args: Array(String),
+    env: Dict(String),
+};
+```
+
+`Dict(String)` is the string-dictionary metadata type required by the target
+protocol and has not yet been added to TypeMetadata. The rest already uses the
+existing Struct, Enum, Array, and Option model. The protocol remains data; it
+adds no special installation statement or command-line rewriting syntax.
+
 For example, a reproducible gcc launch plan can be written in full:
 
 ```forma
