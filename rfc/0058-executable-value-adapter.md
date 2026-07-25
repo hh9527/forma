@@ -1,6 +1,6 @@
 # RFC 0058: Executable value adapter
 
-- Status: Accepted (explicit entry amendment)
+- Status: Implemented
 - Depends on: RFC 0004, RFC 0005, RFC 0011, RFC 0054
 
 ## Amendment
@@ -229,3 +229,27 @@ The first implementation shipped the fixed `ExecSpec` and simulated FNV install
 environment described in commit `599eef2`. It performed no downloads, but its
 host-side materialization model is superseded by this amendment and is removed
 by the amended implementation.
+
+## Amended implementation result
+
+Commit `5037221` implements the explicit pure-function boundary. `LoadedModule`
+and `Engine` now expose quota-aware invocation of exported XL bytecode closures,
+including captured values, against the module's frozen main world. Non-functions
+and native functions are rejected at this host boundary.
+
+The `core:hash` module exposes `sha256: Fn(String) -> String` and produces the
+lowercase SHA-256 digest of UTF-8 input. Its implementation is internal, has no
+external package dependency, charges the 64-byte output allocation, and passes
+the standard empty-input and `abc` vectors.
+
+The CLI accepts only `xl exec --dry-run <module> [-- <arguments>...]`. It builds
+the specified settings and request Dicts, invokes the module result under the
+session quota, requires a JSON-compatible Dict, and prints canonical compact
+JSON. The superseded FNV paths, install environment variables, and process
+launcher have been removed. Tests cover shebang parsing, closure captures,
+ordered arguments, environment and platform inputs, deterministic SHA-based
+paths, repeatable output, invalid entries and results, rejected CLI forms, and
+the absence of cache-directory side effects.
+
+The amended implementation passes the full workspace test suite, formatting,
+strict Clippy checks, and whitespace validation.
