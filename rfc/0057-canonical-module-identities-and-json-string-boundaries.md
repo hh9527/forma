@@ -1,5 +1,10 @@
 # RFC 0057: Canonical module identities and JSON string boundaries
 
+> Module identity amendment: RFC 0059 replaces this RFC's public `core:`,
+> `local:`, and `deps:` identity spellings and its corresponding import syntax.
+> The JSON string boundary, manifest data model, format selection, physical
+> containment, and transport conclusions remain in force.
+
 - Status: Implemented
 - Depends on: RFC 0004, RFC 0020, RFC 0035, RFC 0044, RFC 0045, RFC 0055, RFC 0056
 

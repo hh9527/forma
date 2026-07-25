@@ -100,14 +100,14 @@ These are input Strings only. The host does not create them.
 Environment, arguments, cwd, platform, and prefixes vary per invocation, but
 the module itself does not: explicit function parameters preserve ordinary
 module identity, once-only initialization, tooling, and testability. No
-ambient `core:ctx` module is introduced.
+ambient `@bim/runtime/ctx` module is introduced.
 
 ## Pure hashing
 
 XL adds one generally useful pure core capability:
 
 ```xl
-import hash from "core:hash";
+import hash from "@bim/std/hash";
 hash.sha256: Fn(String) -> String
 ```
 
@@ -169,7 +169,7 @@ stderr behavior.
 - ordinary effectful `xl exec`;
 - downloading, unpacking, installing, or verifying artifacts;
 - process creation, `PATH` modification, or command resolution;
-- an ambient or dynamically resolved `core:ctx` module;
+- an ambient or dynamically resolved `@bim/runtime/ctx` module;
 - a fixed host-owned Exec schema;
 - lockfiles, registries, dependency solving, or platform acquisition;
 - sandboxing or capability control;
@@ -179,7 +179,7 @@ stderr behavior.
 ## Implementation plan
 
 1. add quota-aware host invocation of an exported XL closure;
-2. add pure `core:hash.sha256`;
+2. add pure `@bim/std/hash.sha256`;
 3. parse the single `exec --dry-run` CLI form;
 4. construct `ExecSettings` and `ExecRequest` as ordinary Values;
 5. invoke the entry and encode a JSON-compatible Dict canonically;
@@ -194,7 +194,7 @@ stderr behavior.
 3. `exec --dry-run` exposes platform, prefixes, all UTF-8 environment, cwd, and
    ordered user arguments through explicit function parameters;
 4. exported XL closures retain captures and use the normal session quota;
-5. `core:hash.sha256` matches standard SHA-256 vectors;
+5. `@bim/std/hash.sha256` matches standard SHA-256 vectors;
 6. the result is a JSON-compatible Dict encoded as deterministic compact JSON;
 7. dry-run performs no download, installation, path creation, or process spawn;
 8. ordinary `exec`, malformed options, non-functions, native functions,
@@ -205,7 +205,7 @@ stderr behavior.
 
 ## Rejected alternatives
 
-### Dynamic `core:ctx`
+### Dynamic `@bim/runtime/ctx`
 
 Ambient invocation state makes evaluation of the same module ID depend on the
 command that loaded it. Explicit parameters preserve module caching, make the
@@ -237,7 +237,7 @@ and `Engine` now expose quota-aware invocation of exported XL bytecode closures,
 including captured values, against the module's frozen main world. Non-functions
 and native functions are rejected at this host boundary.
 
-The `core:hash` module exposes `sha256: Fn(String) -> String` and produces the
+The `@bim/std/hash` module exposes `sha256: Fn(String) -> String` and produces the
 lowercase SHA-256 digest of UTF-8 input. Its implementation is internal, has no
 external package dependency, charges the 64-byte output allocation, and passes
 the standard empty-input and `abc` vectors.

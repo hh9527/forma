@@ -39,9 +39,8 @@ Files below `src/` are importable working-crate modules. Selecting a file below
 
 `@main` is observable by graph, diagnostic, debug, and tooling APIs but is not
 searchable or importable. `bin-src` files cannot import one another. Entries use
-`@src/...` to import reusable program modules; relative imports from `@main`
-are rejected because its physical publication-time directory is intentionally
-not part of the graph.
+`@src/...` or root-relative `./...` requests to import reusable program modules;
+the physical `bin-src` directory is intentionally not part of the graph.
 
 ## Resolved module identities
 
@@ -166,3 +165,25 @@ not change the resolution contract in this RFC.
 7. built-in imports and identities use only `@bim/std/...`;
 8. `src`, `bin-src`, path dependencies, JSON formats, symlink containment,
    workspace recovery, semantic queries, LSP, and execution tests pass.
+
+## Resolver implementation result
+
+Commit `6e09f3d` implements the deterministic resolver core. One public
+`ModuleId` now represents `@main`, working-crate `@src/...`, dependency alias,
+and `@bim/...` identities. Physical paths live on resolved source records rather
+than module IDs. The selected root maps to `@main`; a conventional `src/`
+directory is the working source root, with a compatibility fallback for
+standalone files that have no crate layout.
+
+Imports now support owner-preserving relative paths, contextual `@src/...`,
+bare dependency aliases, and `@bim/std/...`. Lexical normalization and physical
+symlink containment enforce crate boundaries. `@main` is rejected as an import
+target, and cycles remain detectable among ordinary source modules. Existing
+`core:` and `deps:` public spellings were removed from implementation and test
+fixtures rather than retained as aliases.
+
+The implementation migrates workspace and semantic graph projection to logical
+IDs, adds crate-layout and contextual-`@src` tests, and passes the complete
+workspace suite and strict Clippy checks. The embedded `$manifest`, pinned git
+location, packaging, stdin, and HTTP phases remain pending, so this RFC remains
+Accepted rather than Implemented.
