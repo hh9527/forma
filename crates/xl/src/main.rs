@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::{self, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 use xl::{
     DebugEvent, DebugSink, DefinitionKind, Engine, EngineConfig, Location, Quota, TextRange, Value,
@@ -45,6 +46,7 @@ fn run_cli(arguments: Vec<String>) -> Result<(), String> {
     };
     match command {
         "run" => run_command(&arguments[1..]),
+        "exec" => exec_command(&arguments[1..]),
         "check" => check_command(&arguments[1..]),
         "types" => types_command(&arguments[1..]),
         "show" => show_command(&arguments[1..]),
@@ -68,13 +70,117 @@ fn run_command(arguments: &[String]) -> Result<(), String> {
         }
         _ => return Err(format!("invalid run arguments\n{}", usage())),
     }
+    let result = evaluate_module(module_path, bindings)?;
+    println!("{result}");
+    Ok(())
+}
+
+fn evaluate_module(module_path: &str, bindings: BTreeMap<String, Value>) -> Result<Value, String> {
     let engine = engine();
     let module = engine
         .load_module(module_path, bindings)
         .map_err(|error| error.to_string())?;
-    let result = engine.execute(&module).map_err(|error| error.to_string())?;
-    println!("{result}");
+    engine.execute(&module).map_err(|error| error.to_string())
+}
+
+struct ExecSpec {
+    install: Vec<String>,
+    command: String,
+    args: Vec<String>,
+}
+
+fn exec_command(arguments: &[String]) -> Result<(), String> {
+    let [module_path] = arguments else {
+        return Err(format!("exec requires one module path\n{}", usage()));
+    };
+    let spec = decode_exec_spec(evaluate_module(module_path, BTreeMap::new())?)?;
+    let installs = spec
+        .install
+        .iter()
+        .map(|locator| simulated_install_path(locator))
+        .collect::<Vec<_>>();
+    let mut command = Command::new(&spec.command);
+    command.args(&spec.args);
+    command.env("XL_EXEC_INSTALL_COUNT", installs.len().to_string());
+    for (name, _) in env::vars_os() {
+        if name.to_str().is_some_and(|name| {
+            name.starts_with("XL_EXEC_INSTALL_") && name != "XL_EXEC_INSTALL_COUNT"
+        }) {
+            command.env_remove(name);
+        }
+    }
+    for (index, path) in installs.iter().enumerate() {
+        command.env(format!("XL_EXEC_INSTALL_{index}"), path);
+    }
+    let status = command
+        .status()
+        .map_err(|error| format!("cannot start command {:?}: {error}", spec.command))?;
+    if !status.success() {
+        return Err(format!("command {:?} exited with {status}", spec.command));
+    }
     Ok(())
+}
+
+fn decode_exec_spec(value: Value) -> Result<ExecSpec, String> {
+    let Value::Dict(spec) = value else {
+        return Err("exec result must be a Dict".into());
+    };
+    let expected = ["args", "command", "install"];
+    if spec.shape().fields() != expected {
+        return Err(format!(
+            "exec result must contain exactly args, command, and install; found {}",
+            spec.shape().fields().join(", ")
+        ));
+    }
+    let install = decode_string_array(
+        spec.get("install").expect("validated ExecSpec field"),
+        "install",
+    )?;
+    let command = match spec.get("command").expect("validated ExecSpec field") {
+        Value::String(command) => command.to_string(),
+        _ => return Err("exec field command must be a String".into()),
+    };
+    let args = decode_string_array(spec.get("args").expect("validated ExecSpec field"), "args")?;
+    Ok(ExecSpec {
+        install,
+        command,
+        args,
+    })
+}
+
+fn decode_string_array(value: &Value, field: &str) -> Result<Vec<String>, String> {
+    let Value::Array(values) = value else {
+        return Err(format!("exec field {field} must be an Array(String)"));
+    };
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| match value {
+            Value::String(value) => Ok(value.to_string()),
+            _ => Err(format!("exec field {field}[{index}] must be a String")),
+        })
+        .collect()
+}
+
+fn simulated_install_path(locator: &str) -> PathBuf {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in locator.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    cache_root()
+        .join("xl")
+        .join("exec")
+        .join("artifacts")
+        .join(format!("{hash:016x}"))
+}
+
+fn cache_root() -> PathBuf {
+    env::var_os("XL_CACHE_HOME")
+        .or_else(|| env::var_os("XDG_CACHE_HOME"))
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
+        .unwrap_or_else(env::temp_dir)
 }
 
 fn check_command(arguments: &[String]) -> Result<(), String> {
@@ -379,5 +485,5 @@ fn read_input(path: &str) -> Result<Value, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  xl run <module.xl> [--input <file|->]\n  xl check <module.xl>\n  xl types <module.xl>\n  xl show <module.xl> [at <source> <line> <column>]".into()
+    "usage:\n  xl run <module.xl> [--input <file|->]\n  xl exec <module.xl>\n  xl check <module.xl>\n  xl types <module.xl>\n  xl show <module.xl> [at <source> <line> <column>]".into()
 }

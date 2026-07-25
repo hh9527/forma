@@ -139,6 +139,84 @@ fn run_writes_debug_events_only_to_stderr() {
     fs::remove_dir_all(directory).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn exec_evaluates_shebang_spec_and_passes_simulated_install_positions() {
+    let directory = fixture_dir();
+    let cache = directory.join("cache");
+    let locator = "http://url/to/python/tarball";
+    let main = directory.join("exec.xl");
+    fs::write(
+        &main,
+        format!(
+            "#!/usr/bin/env -S xl exec\n# deps.json inside\n{{install: [\"{locator}\"], command: \"env\", args: []}}"
+        ),
+    )
+    .unwrap();
+
+    let output = xl()
+        .env("XL_CACHE_HOME", &cache)
+        .args(["exec", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("XL_EXEC_INSTALL_COUNT=1"), "{stdout}");
+    let artifact_prefix = format!("XL_EXEC_INSTALL_0={}/xl/exec/artifacts/", cache.display());
+    let position = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("XL_EXEC_INSTALL_0="))
+        .expect("child install position");
+    assert!(stdout.contains(&artifact_prefix), "{stdout}");
+    assert!(!PathBuf::from(position).exists());
+    let repeated = xl()
+        .env("XL_CACHE_HOME", &cache)
+        .args(["exec", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let repeated_stdout = String::from_utf8_lossy(&repeated.stdout);
+    let repeated_position = repeated_stdout
+        .lines()
+        .find_map(|line| line.strip_prefix("XL_EXEC_INSTALL_0="))
+        .expect("repeated child install position");
+    assert_eq!(repeated_position, position);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_rejects_bad_specs_and_reports_child_failure() {
+    let directory = fixture_dir();
+    let malformed = directory.join("malformed.xl");
+    fs::write(
+        &malformed,
+        r#"{install: [], command: "env", args: [], typo: 1}"#,
+    )
+    .unwrap();
+    let rejected = xl()
+        .args(["exec", malformed.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    assert!(
+        String::from_utf8_lossy(&rejected.stderr).contains("exactly args, command, and install")
+    );
+
+    let failing = directory.join("failing.xl");
+    fs::write(&failing, r#"{install: [], command: "false", args: []}"#).unwrap();
+    let failed = xl()
+        .args(["exec", failing.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("exited with"));
+    fs::remove_dir_all(directory).unwrap();
+}
+
 #[test]
 fn show_observes_deterministic_workspace_and_position_queries() {
     let directory = fixture_dir();
