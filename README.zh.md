@@ -1,31 +1,86 @@
 # Forma
 
-> **Forma 是 XL 语言的新名字。** 项目推送至远端仓库后完成改名；改名决策与范围见
-> [rfc/0060](rfc/0060-rename-xl-to-forma.md)。历史 RFC 文档保留当初的 XL 措辞，
-> 作为设计过程的记录。
+> Forma 原名 XL，发布后更名。设计演进的全过程记录在 [rfc/](rfc/)。
 
-Forma 是一门实验性通用编程语言，拥有不可变的动态字节码运行时，以及封闭世界、
-两阶段的类型元数据模型。设计命题见 [VISION.md](VISION.md)，设计演进序列见
-[rfc/](rfc/)。English documentation: [README.md](README.md)。
+**Forma 是一门实验性语言，它想回答一个问题：当类型只是普通数据的时候，一门语言会变成什么样。**
 
-核心假设：在足够封闭的世界里，类型就是普通的不可变元数据，而高阶类型操作就是
-普通的纯函数——由工具链内嵌的同一个语言运行时求值。
+配置语言已经探索出几条成熟路线：CUE 以合一（unification）组织约束，Dhall 以强规范化换取可判定的执行边界，Starlark 提供受控的通用计算，Nickel 则把契约与配置合并作为核心抽象。这些选择各自解决了真实问题，也把相应的领域概念放进了语言机制。
 
-语言当前已验证的能力：
+Forma 赌的是另一个方向：**领域语义应该住在数据里，语言只提供计算**。配置、校验、规范化、编解码、schema 生成——这些不是语言特性，而是普通函数对普通数据的普通操作。
 
-- 类 Rust 的表达式语法，`fn(args) { ... }` 闭包与 `|>` 管道；
-- 不可变的 Dict、Array、Tuple、Atom，以及一等的 `'Tag(payload)` Tagged 值；
-- 带 payload 类型传播的模式匹配；
-- 显式单次赋值递归（`decl`/`def`）与 proper tail call；
-- 普通函数在工具阶段 VM 中计算类型元数据；
-- 同一份元数据同时用于结构注解检查、运行时校验与派生 JSON codec；
-- `@struct`/`@enum`/`@union` 归一化模型与扁平值属性；
-- `native`、`decl`、`def` 绑定上的显式前束泛型契约（`for(A, B)`），运行时完全擦除；
-- `Type` 与 `TypeOf(A)` 元数据见证，`decode(User, input)` 的类型是
-  `Result(User, BlameError)`；
-- crate 相对的模块身份（`@src/...`、依赖别名、`@bim/std/...`）与封闭依赖图；
-- 语言服务器：诊断、悬停、定义跳转、引用查找与保守补全，构建在可恢复的语义快照之上；
-- 通过 `forma exec --dry-run` 输出可审查的执行计划。
+## 三个相互咬合的赌注
+
+### 一种语言，两个阶段
+
+Forma 有工具阶段和程序阶段，但它们共享同一套值模型、同一个字节码 VM、同一份求值语义。没有独立的"类型层语言"，没有宏语言，没有编译期的第二套求值器。工具阶段跑的就是普通 Forma 代码——有燃料上限、有配额、确定性、可缓存。
+
+### 类型即元数据
+
+类型声明求值的结果不是只能由编译器访问的内部结构，而是普通的 Forma 数据：
+
+```forma
+def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) {
+    Option(Item)
+};
+
+type MaybeInt = Maybe(Int);
+```
+
+`Maybe` 不是类型操作符，它是一个普通函数，在工具阶段被普通地调用，返回普通的数据。类型检查器不重新实现它的函数体——它解释这份数据。这意味着：
+
+- **类型可以被打印**：`debug.dbg(User)` 把你的类型原样打出来，因为它就是值
+- **类型可以被函数变换**：`Partial(User)`、`Array(User)` 都是函数调用
+- **类型知道自己描述谁**：`TypeOf(A)` 让 `decode(User, input)` 的类型是 `Result(User, BlameError)` 而不是 `Result(Any, Any)`——实例类型穿越边界，全程不丢
+
+### 封闭世界
+
+模块路径静态可知，依赖固定，无运行时 `eval`，外部数据经显式边界进入。封闭世界不是限制，是杠杆：它让编译期求值可再生、让工具链能枚举全部代码、让"在别人的进程里安全地跑别人的配置"成为默认能力——每次执行有燃料、栈、分配、深度的独立配额，失败原子地丢弃，不污染共享世界。
+
+## 这些理念长出了什么
+
+**Serde，但没有宏。** 装饰器是普通函数，属性是普通数据，codec 是元数据的普通解释器：
+
+```forma
+import json from "@bim/std/json";
+
+@json.rename_all('CamelCase)
+@struct
+type User = {
+    user_id: Int,
+    @json.default('None)
+    nickname: Option(String),
+};
+```
+
+字段重命名、默认值、扁平化、跳过条件——全部是库函数写在元数据上的标注，编解码器按同一份计划双向工作，JSON Schema 也从同一份计划生成。语言本身对这些词汇一无所知。
+
+**会指路的错误信息。** 每个值都带着自己的源码位置旅行——穿过导入、变换、codec 归一化。校验失败时：
+
+```text
+user.json:1:21: expected Int
+  User.forma:3:47: contract rule declared here
+```
+
+错误同时标出数据位置和规则位置。Forma 的 `BlameError` 直接保留这两类来源，不需要为 codec 另建一套与值模型分离的诊断结构。
+
+**可执行的计划。** Forma 模块可以求值为一个纯函数：宿主向它提供环境、参数和工作目录，它返回一个具体的执行计划。当前的 `forma exec --dry-run` 负责校验并输出这份计划，不下载、不安装，也不启动进程。确定性决策因此可以被审查、纳入版本控制并独立测试。构建规则和 K8s 调谐也可以采用同一种边界：**纯函数生成计划，宿主执行效果**。
+
+**一个保守的语言服务器。** 悬停看到的类型来自与运行时校验相同的元数据；遇到 `Any` 时，补全不会推测不存在的结构；残缺的源码仍然可以产生导航和诊断，并明确区分"未知、冲突、不可计算"等状态。
+
+## 设计取舍
+
+- **与 CUE 相比**：Forma 不以合一作为约束与组合的基础语义。类型是数据，校验和组合策略是显式函数。
+- **与 Dhall 相比**：两者都重视纯计算和可再生结果；Dhall 通过强规范化保证终止，Forma 允许递归并用执行燃料和资源配额建立边界。
+- **与 Starlark 相比**：两者都适合在宿主中执行受控代码；Forma 进一步让类型元数据参与普通计算，并让静态工具和运行时解释同一份元数据。
+- **与 Nickel 相比**：Nickel 把契约、合并和优先级作为配置领域的核心机制；Forma 倾向于把这些策略表达成可以检查、替换和组合的库函数。
+
+Forma 的取舍不是消除复杂度，而是尽量把领域复杂度放进库和数据。库可以被阅读、替换和扩展，语言核心则保持较小且一致。
+
+## 诚实的边界
+
+Forma 是实验品。它今天没有效果系统、没有包获取（只有路径依赖）、没有 YAML/TOML 解析器、没有 trait、没有类型收窄。静态推断宁可显式说"不知道"，也不猜测。这些不是疏忽，是刻意：先把"类型即元数据"这一个假设验证到根，再谈扩张。60 份 RFC 记录了每一步的取舍——包括每个被拒绝的替代方案。
+
+Forma 面向的场景也由此变得清晰：**构建规则的表达、K8s operator 的持续调谐、可复用的配置包**——宿主需要确定地执行外部提供的逻辑，并在失败时解释数据与规则来自何处。
 
 ## 试一试
 
@@ -36,122 +91,11 @@ cargo run -p forma -- show examples/mvp/main.forma
 cargo run -p forma-lsp -- --help
 ```
 
-## 语法速览
+## 文档
 
-```xl
-@struct
-type User = {
-    name: String,
-    age: Int,
-    nickname: Option(String),
-};
-
-let user: User = imported_user;
-validate(User, user)
-```
-
-`value |> f` 与 `f(value)` 完全等价。显式调用节（call section）用 `\(` 与占位符
-构造普通闭包：
-
-```text
-transform\(_, option)
-// 等价于 fn(value) { transform(value, option) }
-
-reorder\(_1, fixed, _0)
-// 等价于 fn(a, b) { reorder(b, fixed, a) }
-```
-
-裸占位符按出现顺序生成参数；带下标的占位符可以重排或复用参数，且必须构成从
-`_0` 开始的连续区间。
-
-集合操作就是普通的导入函数：
-
-```xl
-import arrays from "@bim/std/array";
-import dicts from "@bim/std/dict";
-
-[1, 2, 3]
-    |> arrays.map\(_, fn(value) { value + 1 })
-    |> arrays.filter\(_, fn(value) { 2 < value })
-```
-
-派生 codec 让外部数据边界显式且有类型：
-
-```xl
-import data from "./abc.json";
-import User from "./User.xl";
-import result from "@bim/std/result";
-import json from "@bim/std/json";
-
-let user = data |> User.decode |> result.unwrap;
-// user : User
-user |> User.encode |> json.stringify_pretty(2)
-```
-
-见 `examples/codec`。枚举值是一等的：`'None` 是 Atom，`'Some("Ada")` 是 Tagged
-值。每个 Atom 都是一元构造器，所以 `arrays.map([1, 2], 'Some)` 可以直接写。
-
-## 类型元数据
-
-类型声明求值为规范的 Dict/Array/Atom 元数据——普通 Forma 表达式也能构造同样的
-数据。泛型元数据函数就是普通的带注解定义：
-
-```xl
-def Maybe: Fn(Type) -> Type = fn(Item) {
-    Option(Item)
-};
-
-type MaybeInt = Maybe(Int);
-```
-
-内建的校验与 codec 契约携带见证（witness），实例类型穿越边界而不丢失：
-
-```xl
-native decode: for(A) Fn(TypeOf(A), Any) -> Result(A, BlameError);
-native unwrap: for(A, E) Fn(Result(A, E)) -> A;
-```
-
-## 执行世界
-
-运行时所有权分固定的两层。内建模块与已初始化的模块导出住在 `MainWorld`；每次
-模块初始化或服务调用在全新的 `WorkWorld` 中分配。VM 执行只读 Main、只写 Work。
-模块发布把可达的 Work 值原子地复制进 Main。加载完成后 Main 被冻结；服务结果
-直接导出，Work 整体丢弃——重复的会话无法改写已加载的应用。
-
-## 工具链
-
-`forma-lsp` 二进制提供异步语言服务器：带跨文件 blame 标签的诊断、悬停查看计算
-出的类型元数据、定义与引用导航、针对模块导出和 Struct 字段的保守补全。
-`forma show`、测试与 LSP 适配器共享同一份不可变工作区快照；不完整的源码也能
-恢复出语法、定义与显式的事实状态，而不是猜测出的类型。
-
-## 可执行计划
-
-Forma 模块可以求值为一个纯的计划函数。宿主提供不可变的调用输入，模块计算出
-具体结果：
-
-```xl
-#!/usr/bin/env -S forma exec --dry-run
-
-fn(settings, request) {
-    {
-        install: [],
-        command: "python3",
-        args: request.args,
-        env: request.env,
-        cwd: request.cwd,
-    }
-}
-```
-
-`forma exec --dry-run tool.xl -- arg1 arg2` 打印规范的 JSON 计划。所有确定性
-决策都在 Forma 内；当前阶段宿主不做下载、安装，也不创建进程。
-
-## 当前限制
-
-Forma 没有效果系统、路径依赖之外的包获取、YAML/TOML 解析器、trait、类型收窄
-（narrowing），也没有生产级垃圾回收。静态推断宁可显式不可用或降级为 `Any`，
-也不猜测。各 RFC 的 deferred work 一节有完整的诚实清单。
+- [VISION.md](VISION.md)：设计命题
+- [rfc/](rfc/)：60 份设计文档，每份含被拒方案与验收标准
+- [README.md](README.md)：English
 
 ## 验证
 
