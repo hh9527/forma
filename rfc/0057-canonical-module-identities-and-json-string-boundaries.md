@@ -1,38 +1,58 @@
 # RFC 0057: Canonical module identities and JSON string boundaries
 
-- Status: Accepted
+- Status: Accepted (dependency identity amendment)
 - Depends on: RFC 0004, RFC 0020, RFC 0035, RFC 0044, RFC 0045, RFC 0055, RFC 0056
 
-## Summary
+## Amendment
 
-XL assigns every resolved module one canonical, self-describing identity:
+The first accepted text rendered source modules as
+`local:///path/file.json#json` and reserved equivalent HTTP fragments. Further
+design established that format is resolution metadata, not resource identity.
+This amendment removes format fragments and introduces a dependency namespace
+resolved by a workspace `xl-deps.toml` manifest.
+
+Canonical module identities are now:
 
 ```text
 core:json
-local:///absolute/path/model.xl#xl
-local:///absolute/path/data.json#json
+local:///absolute/path/data.json
+deps://models/domain/user.xl
 ```
 
-The source URI identifies bytes or text. The mandatory fragment identifies the
-format used to interpret that source. Local import literals continue to use
-ordinary relative paths; the resolver derives the format exclusively from a
-small standard extension table and emits the canonical identity.
+Each identity resolves to exactly one format within a workspace snapshot.
+Standard extensions determine almost every format. A manifest may provide a
+rare exact override; individual imports do not carry format or target-type
+parameters.
 
-Import remains an untyped, once-only module dependency. Applications that want
-a cached typed projection define an ordinary XL wrapper module and rely on
-existing once-only module evaluation:
+## Summary
 
-```xl
-import raw from "./users.json";
-import codec from "core:codec";
-import result from "core:result";
-import models from "./models.xl";
+XL assigns every resolved module one canonical logical identity. Core modules,
+workspace-owned local modules, and externally owned dependency modules occupy
+disjoint namespaces:
 
-{users: result.unwrap(codec.decode(Array(models.User), raw))}
+```text
+core:<name>
+local:///absolute/path
+deps://<dependency>/<relative-path>
 ```
 
-For dynamic String input, `core:json` adds `parse` and `decode` Result
-boundaries:
+Resolution also produces the physical source and `ModuleFormat`, but neither
+is recovered later by parsing the display String:
+
+```rust
+struct ResolvedModule {
+    id: ResolvedModuleId,
+    format: ModuleFormat,
+    source: PhysicalSource,
+}
+```
+
+Local import literals continue to use relative paths. Standard extensions
+select XL, JSON, and future TOML/YAML parsers. Import remains an untyped,
+once-only module dependency. Applications cache a typed projection by defining
+an ordinary wrapper XL module.
+
+For dynamic String input, `core:json` adds:
 
 ```xl
 json.parse: Fn(String) -> Result(Any, BlameError)
@@ -42,48 +62,41 @@ json.decode: for(A) Fn(TypeOf(A), String) -> Result(A, BlameError)
 ## Motivation
 
 The strict loader, recoverable workspace, and overlay owner currently use
-related but scattered `PathBuf`, filesystem canonicalization, fallback joins,
-and formatted String keys. The behavior is mostly once-only already, but the
-identity protocol is implicit and cannot be extended to non-file sources
-without changing every layer.
+related but scattered canonical paths, fallback joins, and formatted String
+keys. The behavior is mostly once-only already, but ownership and dependency
+resolution are implicit.
 
-A canonical module identity makes caching and graph equality explicit. It also
-separates source acquisition from interpretation:
+`local:` and `deps:` separate workspace source from external dependency source.
+A dependency may be acquired from a sibling directory, Git, a registry, or a
+future HTTP transport without exposing a machine-specific cache path in module
+identity or diagnostics.
 
-```text
-source identity: local:///absolute/path/data.json
-module identity: local:///absolute/path/data.json#json
+Typed imports are deliberately unnecessary. A target such as
+`Array(models.User)` is a contextual HIR expression containing References, not
+a flat cache-key name. Ordinary wrapper modules already provide explicit,
+correct decode-result reuse through once-only module evaluation:
+
+```xl
+import raw from "./users.json";
+import codec from "core:codec";
+import result from "core:result";
+import models from "deps://models/models.xl";
+
+{users: result.unwrap(codec.decode(Array(models.User), raw))}
 ```
 
-This distinction anticipates future HTTP sources without enabling network
-imports now. One fetched source could later admit a statically selected format:
+## Identity model
 
-```text
-https://example.com/config#json
-https://example.com/config#yaml
-```
-
-Typed imports are deliberately unnecessary. A type annotation is an HIR
-expression containing contextual References, not a flat cache-key name.
-Ordinary wrapper modules already provide explicit, correct decode-result reuse
-without introducing a second projection graph.
-
-## Resolved module identity
-
-The semantic model is:
+The semantic identity is:
 
 ```rust
 enum ResolvedModuleId {
     Core(CoreModuleName),
-    Source {
-        source: ResolvedSourceId,
-        format: ModuleFormat,
-    },
-}
-
-enum ResolvedSourceId {
     Local(ResolvedLocalPath),
-    // Reserved, not implemented: Http(CanonicalUrl),
+    Dependency {
+        dependency: ResolvedDependencyId,
+        path: DependencyPath,
+    },
 }
 
 enum ModuleFormat {
@@ -94,73 +107,24 @@ enum ModuleFormat {
 }
 ```
 
-The canonical display forms are:
+`WorkspaceModuleId(u32)` remains compact and snapshot-local. It may change when
+a graph is rebuilt and is never a persistent cache key. Resolved identity is
+used for equality, cycles, deterministic sorting, source sharing, and module
+caching.
+
+Within one workspace snapshot:
 
 ```text
-core:<canonical-name>
-<canonical-source-uri>#<canonical-format-name>
+ResolvedModuleId -> exactly one ModuleFormat
 ```
 
-Canonical format names are lowercase `xl`, `json`, `toml`, and `yaml`.
-`.yaml` and `.yml` both normalize to `#yaml`.
+A conflicting format configuration is an error rather than a second module
+projection. Manifest, overlay, or dependency-resolution changes create a new
+workspace revision, so snapshot-local caches cannot reuse the old mapping.
 
-`WorkspaceModuleId(u32)` remains a compact, snapshot-local projection. It may
-change when a graph is rebuilt and must never be used as a persistent cache
-identity. `ResolvedModuleId` is the equality, cycle, sorting, source-sharing,
-and module-cache identity.
+## Core modules
 
-## Local resolution
-
-An ordinary local import remains:
-
-```xl
-import data from "../data/users.json";
-```
-
-Resolution performs these steps:
-
-1. reject empty, non-UTF-8, unknown-extension, and unsupported-format targets;
-2. resolve a relative path against the importing local module's directory;
-3. convert the path to an absolute path;
-4. for an existing target, use filesystem canonicalization, including symlink
-   resolution;
-5. for a missing target or an overlay-only document, lexically normalize `.`
-   and `..` without consulting nonexistent filesystem components;
-6. classify the final standard extension;
-7. construct the canonical source URI and append the canonical format fragment.
-
-Strict loading still reports a missing target as an I/O failure. Recoverable
-workspace construction retains the normalized unavailable module identity.
-Identity is immutable within one workspace snapshot. If creating a file or
-changing a symlink changes its filesystem-canonical identity, the next
-revision rebuilds the graph with the new identity.
-
-The first implementation recognizes only lowercase extensions:
-
-```text
-.xl    -> #xl
-.json  -> #json
-```
-
-`.toml`, `.yaml`, and `.yml` are reserved mappings but remain unsupported until
-their parsers exist. Uppercase variants are not aliases. No format is inferred
-from file contents or HTTP `Content-Type`.
-
-Local paths display as `local:` URIs with an absolute path and percent encoding
-where required:
-
-```text
-local:///workspace/data/users.json#json
-```
-
-The implementation stores structured paths and formats; it does not recover
-them later by parsing its own display String. Platform-native path equality is
-preserved internally. URI rendering is deterministic and lossless for
-supported UTF-8 paths.
-
-## Core identities
-
-Core modules retain their compact, disjoint identities:
+Core capabilities retain their stable compact names:
 
 ```text
 core:array
@@ -168,55 +132,154 @@ core:codec
 core:json
 ```
 
-They do not gain `#xl`: a core identity selects an installed capability, not a
-source interpreted by a format provider. Unknown core names remain graph nodes
-in recoverable tooling and strict errors at execution boundaries.
+Unknown core names remain recoverable graph nodes and strict load errors.
 
-## Source and module caching
+## Local resolution
+
+An ordinary import remains:
+
+```xl
+import data from "../data/users.json";
+```
+
+Resolution:
+
+1. resolves relative paths against the importing local or dependency module;
+2. converts local targets to absolute paths;
+3. uses filesystem canonicalization for existing files, including symlinks;
+4. uses lexical `.`/`..` normalization for missing and overlay-only files;
+5. rejects non-UTF-8 local identities;
+6. determines format from the exact lowercase standard extension;
+7. constructs a structured `ResolvedModule`.
+
+Canonical display uses a `local:` URI:
+
+```text
+local:///workspace/data/users.json
+```
+
+Strict loading reports missing targets as I/O failures. Recoverable workspace
+construction retains the normalized unavailable identity. Identity cannot
+change within one snapshot; filesystem changes are observed by the next
+revision.
+
+The extension table is:
+
+```text
+.xl    -> Xl
+.json  -> Json
+.toml  -> Toml
+.yaml  -> Yaml
+.yml   -> Yaml
+```
+
+The first implementation parses only XL and JSON. TOML/YAML identities are
+recognized but unavailable until their parsers exist. Uppercase variants are
+not aliases. Content sniffing is forbidden.
+
+## Dependency resolution
+
+The workspace root may contain:
+
+```text
+xl-deps.toml
+```
+
+The initial manifest supports path dependencies:
+
+```toml
+[dependencies]
+models = { path = "../models" }
+contracts = { path = "vendor/contracts" }
+```
+
+Source imports use logical identities:
+
+```xl
+import models from "deps://models/models.xl";
+import schema from "deps://contracts/schema.json";
+```
+
+`deps://name/path` resolution:
+
+1. requires `name` in the workspace manifest;
+2. resolves the dependency root relative to the manifest directory;
+3. canonicalizes the dependency root and records a snapshot resolution ID;
+4. normalizes the module-relative path without allowing it to escape the root;
+5. resolves symlinks and rejects a final physical target outside the dependency
+   root;
+6. derives format from an exact manifest override or standard extension;
+7. retains the logical `deps:` identity in graphs and diagnostics rather than
+   exposing the physical cache or checkout path.
+
+Relative imports inside a dependency retain dependency ownership:
+
+```text
+deps://models/domain/user.xl
+  + ../common.xl
+  = deps://models/common.xl
+```
+
+A path dependency and workspace local path may physically reference the same
+file but remain distinct logical ownership domains. The resolver may share
+immutable source text internally; module identity does not silently cross the
+ownership boundary.
+
+The minimal optional override table is exact, not glob based:
+
+```toml
+[formats]
+"deps://contracts/schema" = "json"
+```
+
+Override priority is:
+
+```text
+exact manifest override > standard extension > error
+```
+
+An override conflicting with a recognized extension is an error. Overrides are
+primarily for extensionless external resources and are expected to be rare.
+
+Git, registry, and remote acquisition are deferred. Future manifests may map a
+dependency name to those transports while preserving `deps:` imports. HTTP is
+therefore a dependency transport, not an import namespace required by source
+code.
+
+## Workspace root
+
+The first implementation determines one workspace root from the root XL module:
+
+- the nearest ancestor containing `xl-deps.toml`, if present;
+- otherwise the root module's parent directory.
+
+Dependency imports without a manifest are errors. Nested dependency manifests
+do not replace the root workspace resolution while building one graph.
+
+Manifest contents participate in workspace revision input. Changing the
+manifest invalidates the resolved graph and all snapshot-local module caches.
+Persistent lockfiles and cross-process caches are deferred.
+
+## Caching
 
 The conceptual caches are:
 
 ```text
-source_cache[ResolvedSourceId] -> immutable text/bytes
-module_cache[ResolvedModuleId] -> parsed or evaluated module root
+source_cache[PhysicalSourceIdentity] -> immutable text/bytes
+module_cache[ResolvedModuleId]       -> parsed or evaluated root
 ```
 
-The first implementation may retain one module cache because every supported
-local extension selects exactly one format. The identity split is still
-observable and authoritative. Imports resolving to the same ID read, parse or
-evaluate, promote, and publish exactly once per loader/snapshot build.
+The implementation may keep one module cache while supported resources map
+one-to-one to physical source text. Imports resolving to the same module ID
+read, parse or evaluate, promote, and publish exactly once per build.
 
-An overlay shadows disk text for the same local source identity. It does not
-create a second module or alter the `#format` fragment. All source locations,
-diagnostics, dependency edges, and module lookup use the same resolved ID.
+An overlay shadows disk text for the same local identity. It does not create a
+second module. Dependency overlays are deferred until editors have a concrete
+need to address checked-out dependency documents through logical IDs.
 
 No decode-result cache is added. Wrapper modules are the explicit memoization
-unit for typed projections. Two independently written wrappers may decode the
-same raw module twice; callers that require reuse import one shared wrapper.
-
-## Future source schemes
-
-HTTP and HTTPS identities are reserved design constraints, not enabled
-capabilities:
-
-```text
-https://host/path/data.json#json
-https://host/api/config#yaml
-```
-
-The fragment is a client-side format selector and is not sent in an HTTP
-request. A future resolver will canonicalize scheme, host, default ports, dot
-segments, and percent encoding while preserving query semantics. A standard
-path extension may supply the fragment; an extensionless URL must provide it;
-an explicit fragment and extension must agree.
-
-The fragment namespace is reserved for module format. It is not a JSON Pointer
-or YAML document selector. Resource projections require a separate future
-syntax and identity component.
-
-Network imports require a separate RFC covering reproducibility, redirects,
-offline operation, quotas, timeouts, credentials, host policy, and snapshot
-consistency.
+unit. Two independently written wrappers may decode the same raw value twice;
+callers requiring reuse import one shared wrapper.
 
 ## JSON String boundaries
 
@@ -228,119 +291,100 @@ native decode: for(A) Fn(TypeOf(A), String) -> Result(A, BlameError);
 ```
 
 `parse` maps valid JSON text to the same canonical JSON-shaped XL values used
-by `.json` modules. A syntax failure returns:
+by JSON modules. Syntax failure returns:
 
 ```xl
-'Err({
-    message: String,
-    data: source,
-    rule: 'Json,
-})
+'Err({message: String, data: source, rule: 'Json})
 ```
 
-The error's data side retains the input String location. The initial message
-contains the JSON parser's deterministic line, column, and expectation. No
-synthetic file module or module-cache entry is created for a dynamic String.
+`decode(T, source)` composes parse with `codec.decode(T, value)`. It preserves
+one `BlameError` type across syntax and TypeMetadata mismatch, does not read a
+file, creates no graph node, and promises no workspace-level memoization.
 
-`decode(T, source)` is semantically:
+## Diagnostics and display
 
-```xl
-result.flat_map(json.parse(source), fn(value) {
-    codec.decode(T, value)
-})
-```
+Human source excerpts retain readable physical paths. Graph/debug output uses
+canonical logical IDs. Equivalent local spellings and equivalent dependency
+imports resolve to one node and one root failure.
 
-It preserves one `BlameError` type across JSON syntax and TypeMetadata
-mismatches. It does not read files, participate in the module graph, or promise
-workspace-level memoization.
-
-## Diagnostics
-
-Diagnostics display the human source path at primary locations and may display
-the canonical resolved module ID in graph/debug output. Equivalent import
-spellings must resolve to one node and one root failure. Blocked dependents do
-not duplicate a failed source diagnostic.
-
-Format errors distinguish:
-
-- missing extension;
-- unknown extension;
-- reserved but unsupported format;
-- explicit future fragment conflicting with a standard extension.
-
-`BlameError` remains reserved for content-versus-rule mismatches. Missing files,
-permissions, and future transport failures are I/O failures.
+Format errors distinguish missing, unknown, reserved-but-unsupported, and
+conflicting configured formats. `BlameError` remains content-versus-rule;
+missing files, permissions, manifest errors, and future transport failures are
+I/O or resolution errors.
 
 ## Non-goals
 
-- HTTP or HTTPS fetching;
+- Git, registry, HTTP, or HTTPS fetching;
 - TOML or YAML parsing;
-- explicit `format=` or provider import syntax;
+- per-import format/provider syntax;
 - typed imports, `as=Type`, or decode-result memoization;
-- content sniffing or `Content-Type` format selection;
-- package names, search paths, import maps, or version resolution;
-- persistent caches across processes or workspace revisions;
-- stable numeric workspace IDs;
-- resource fragments or sub-document selection.
+- content sniffing or `Content-Type` selection;
+- package versions, lockfiles, import maps, or search paths;
+- persistent caches across processes or revisions;
+- dependency overlays;
+- stable numeric workspace IDs.
 
 ## Implementation plan
 
-1. introduce structured resolved source, format, and module identity types;
-2. centralize root, relative import, missing-target, and overlay resolution;
-3. key strict and recoverable module graphs by resolved identity;
-4. render canonical `local:///...#format` and stable core identities;
-5. dispatch parsers from the resolved format rather than ad hoc extensions;
-6. add native JSON String parsing with structured `BlameError` failures;
-7. add typed JSON decode while reusing the existing codec transformation;
-8. test alias paths, symlinks, missing nodes, overlays, format failures, cache
-   reuse, JSON syntax blame, typed decode, and workspace determinism.
+1. introduce structured module identity, format, and physical source types;
+2. centralize local, root, missing-target, and overlay resolution;
+3. discover the workspace root and parse minimal `xl-deps.toml` path entries;
+4. resolve `deps:` imports without leaking physical paths into logical IDs;
+5. key strict and recoverable graphs by resolved identity;
+6. dispatch parsers from resolved format metadata;
+7. add native JSON String parsing with structured `BlameError` failures;
+8. add typed JSON decode using the existing codec transformation;
+9. test aliases, symlinks, dependencies, escape rejection, missing nodes,
+   overlays, format failures, cache reuse, JSON blame, and determinism.
 
 ## Acceptance criteria
 
 1. equivalent relative, dotted, absolute, and symlinked local imports resolve
-   to one `ResolvedModuleId`;
-2. canonical local IDs display as absolute `local:` URIs with mandatory
-   lowercase format fragments;
-3. `.yaml` and `.yml` reserve the same `#yaml` identity while reporting the
-   format as unsupported in this implementation;
-4. unknown, missing, and uppercase extensions are deterministic errors and are
-   never content-sniffed;
-5. strict loading, recoverable graph construction, overlays, cycles, sorting,
-   and module lookup agree on identity;
-6. the same JSON ID is read and parsed once per build and imported edges share
-   one persistent root;
-7. `json.parse(String)` returns JSON-shaped `Any` or `BlameError`;
-8. `json.decode(T, String)` returns `Result(T, BlameError)` and preserves the
-   precise `TypeOf(T)` relationship;
-9. wrapper XL modules remain the only decoded-resource cache mechanism;
-10. existing XL/JSON programs, CLI behavior, LSP snapshots, source locations,
-    quotas, and cancellation remain valid;
-11. workspace tests, formatting, clippy, and strict static checks pass.
+   to one local ID;
+2. canonical local IDs display as absolute `local:` URIs without format
+   fragments;
+3. format is precise resolver metadata derived from an exact override or
+   standard lowercase extension;
+4. unknown, missing, uppercase, conflicting, and unsupported formats are
+   deterministic errors and never content-sniffed;
+5. strict loading, recovery, overlays, cycles, sorting, and lookup agree on
+   identity;
+6. same-ID JSON imports parse once and share one persistent root;
+7. minimal path dependencies resolve through `xl-deps.toml` to stable `deps:`
+   graph identities;
+8. dependency paths and symlinks cannot escape their declared roots;
+9. `json.parse(String)` returns JSON-shaped `Any` or `BlameError`;
+10. `json.decode(T, String)` returns `Result(T, BlameError)` with precise
+    `TypeOf(T)` propagation;
+11. wrapper modules remain the only decoded-resource cache mechanism;
+12. existing XL/JSON programs, CLI, LSP snapshots, locations, quotas, and
+    cancellation remain valid;
+13. workspace tests, formatting, clippy, and strict checks pass.
 
 ## Rejected alternatives
 
-### PathBuf alone is the permanent module identity
+### Encode format in a URI fragment
 
-It is sufficient for today's local loader but conflates acquisition with
-format and forces a later identity migration for non-file sources. The
-structured ID retains native paths internally while defining the extensible
-protocol now.
+It makes interpretation look like resource identity and adds syntax to every
+resolved name even though standard extensions or one workspace manifest
+already determine the format. Resolution metadata provides the same cache
+correctness with simpler logical IDs.
 
-### Put `as=User` in the resolved URI
+### Direct HTTP imports
 
-`User` is a contextual HIR Reference and the target may be an arbitrary type
-expression such as `Array(models.User)`. It has no stable flat-name identity
-before semantic resolution and TypeMetadata evaluation. Wrapper modules reuse
-the existing reference, dependency, and once-only evaluation machinery.
+They expose transport policy in source imports and immediately require
+reproducibility, security, offline, redirect, credential, and cache semantics.
+`deps:` keeps source stable while the manifest and future lockfile own
+acquisition.
 
-### Let fragment override a local extension
+### Put `as=User` in module identity
 
-Allowing `file.json#yaml` creates competing interpretations of one local file
-and makes editor and build-tool behavior disagree. Local standard extensions
-and fragments must agree; ordinary path imports simply derive the fragment.
+`User` is a contextual HIR Reference and targets may be arbitrary type
+expressions. Wrapper modules reuse the existing semantic dependency and
+once-only evaluation machinery.
 
-### Infer HTTP format from Content-Type
+### Infer format from content
 
-It makes module identity unavailable until after a request and is frequently
-misconfigured in practice. Future HTTP imports use standard path extensions or
-an explicit format fragment.
+Content sniffing makes graph identity depend on parsing and creates ambiguous
+or platform-specific behavior. Exact configuration and standard extensions are
+deterministic before reading content.
