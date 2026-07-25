@@ -1,6 +1,6 @@
 # RFC 0057: Canonical module identities and JSON string boundaries
 
-- Status: Accepted (dependency identity amendment)
+- Status: Implemented
 - Depends on: RFC 0004, RFC 0020, RFC 0035, RFC 0044, RFC 0045, RFC 0055, RFC 0056
 
 ## Amendment
@@ -388,3 +388,36 @@ once-only evaluation machinery.
 Content sniffing makes graph identity depend on parsing and creates ambiguous
 or platform-specific behavior. Exact configuration and standard extensions are
 deterministic before reading content.
+
+## Implementation result
+
+Implemented in July 2026.
+
+- `ResolvedModuleId` now distinguishes `core:`, canonical absolute `local:`,
+  and logical `deps:` identities. `ResolvedModule` carries the selected
+  `ModuleFormat`; local and dependency variants retain their resolved physical
+  paths so loaders never reconstruct them from display strings.
+- One `ModuleResolver` is created for a root graph and is shared by strict and
+  recoverable loading. Cache keys, cycle detection, semantic import edges, and
+  workspace module names use resolved IDs. File reads and overlays use the
+  associated physical path.
+- The nearest `xl-deps.toml` supplies minimal path dependencies and exact
+  format overrides. Dependency-relative imports preserve ownership, while
+  lexical and resolved-symlink escapes are rejected.
+- XL and JSON dispatch through resolver metadata. TOML and YAML extensions are
+  recognized deterministically but remain unavailable as specified by the
+  non-goals. Missing, unknown, uppercase, and conflicting formats fail without
+  content sniffing.
+- `core:json` exports `parse` and generic `decode` with the accepted
+  `BlameError` contracts. Parsing uses the existing canonical JSON lowerer;
+  typed decode reuses the existing codec transformation. Syntax failures keep
+  the original String in `data` and use `'Json` as `rule`.
+- JSON String parsing accounts for the materialized value and Result wrapper
+  against the VM allocation quota. Query checkpoints and existing cancellation
+  behavior remain unchanged.
+- Tests cover canonical display, dotted aliases, exact extensions, path
+  dependencies, dependency-relative imports, lexical and symlink escape
+  rejection, JSON success/failure, typed propagation, and shared module roots.
+
+Deferred items are exactly the RFC non-goals: TOML/YAML parsers, non-path
+dependency acquisition, dependency overlays, lockfiles, and persistent caches.
