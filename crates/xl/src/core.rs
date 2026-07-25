@@ -127,9 +127,18 @@ native dbg_with: for(A) Fn(String, A) -> A;
         CoreModuleSpec {
             name: CODEC_MODULE,
             source: r#"
-native decode: for(A) Fn(TypeOf(A), Any) -> Result(A, Any);
-native encode: for(A) Fn(TypeOf(A), A) -> Result(Any, Any);
-{ decode: decode, encode: encode }
+@struct type DecodeError = {message: String, data: Any, rule: Any};
+@struct type EncodeError = {message: String, data: Any, rule: Any};
+native decode: for(A) Fn(TypeOf(A), Any) -> Result(A, ValidationError);
+native encode: for(A) Fn(TypeOf(A), A) -> Result(Any, ValidationError);
+def format_error: Fn(ValidationError) -> String = fn(error) { error.message };
+{
+    DecodeError: DecodeError,
+    EncodeError: EncodeError,
+    decode: decode,
+    encode: encode,
+    format_error: format_error,
+}
 "#,
             functions: vec![
                 (
@@ -164,9 +173,12 @@ def is_some: for(A) Fn(Option(A)) -> Bool = fn(option) {
         CoreModuleSpec {
             name: RESULT_MODULE,
             source: r#"
-native unwrap: Fn(Any) -> Any;
+native unwrap: for(A, E) Fn(Result(A, E)) -> A;
 def map: for(A, E, B) Fn(Result(A, E), Fn(A) -> B) -> Result(B, E) = fn(result, function) {
     match result { 'Ok(value) => 'Ok(function(value)), 'Err(error) => 'Err(error) }
+};
+def flat_map: for(A, E, B) Fn(Result(A, E), Fn(A) -> Result(B, E)) -> Result(B, E) = fn(result, function) {
+    match result { 'Ok(value) => function(value), 'Err(error) => 'Err(error) }
 };
 def map_err: for(A, E, F) Fn(Result(A, E), Fn(E) -> F) -> Result(A, F) = fn(result, function) {
     match result { 'Ok(value) => 'Ok(value), 'Err(error) => 'Err(function(error)) }
@@ -177,7 +189,14 @@ def unwrap_or: for(A, E) Fn(Result(A, E), A) -> A = fn(result, fallback) {
 def is_ok: for(A, E) Fn(Result(A, E)) -> Bool = fn(result) {
     match result { 'Ok(_) => 'True, 'Err(_) => 'False }
 };
-{ unwrap: unwrap, map: map, map_err: map_err, unwrap_or: unwrap_or, is_ok: is_ok }
+{
+    unwrap: unwrap,
+    map: map,
+    flat_map: flat_map,
+    map_err: map_err,
+    unwrap_or: unwrap_or,
+    is_ok: is_ok,
+}
 "#,
             functions: vec![(
                 "unwrap",

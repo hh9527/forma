@@ -1,6 +1,6 @@
 # RFC 0056: Typed boundary errors and Result composition
 
-- Status: Accepted
+- Status: Implemented
 - Depends on: RFC 0020, RFC 0021, RFC 0031, RFC 0032, RFC 0036, RFC 0052, RFC 0053, RFC 0055
 
 ## Summary

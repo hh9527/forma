@@ -1410,7 +1410,10 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 format!("declaration {name} has invalid contract metadata: {message}"),
             )
         })?;
-        if !scheme_parameters.is_empty() || contains_metatype(&descriptor) {
+        if binding.value.kind != BindingKind::Native
+            || !scheme_parameters.is_empty()
+            || contains_metatype(&descriptor)
+        {
             binding_schemes.insert(
                 name.clone(),
                 TypeScheme {
@@ -2111,6 +2114,10 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
         prelude.insert(name.into(), descriptor.to_value(vm));
     }
     prelude.insert("Bool".into(), normalized_bool_value(vm));
+    prelude.insert(
+        "ValidationError".into(),
+        boundary_error_descriptor().to_value(vm),
+    );
     for function in [
         NativeFunction::core_model(CoreModelFunction::Struct),
         NativeFunction::core_model(CoreModelFunction::Enum),
@@ -2149,6 +2156,7 @@ fn core_static_prelude() -> HashMap<String, TypeDescriptor> {
         ("String", TypeDescriptor::String),
         ("Bytes", TypeDescriptor::Bytes),
         ("Bool", normalized_bool_descriptor()),
+        ("ValidationError", boundary_error_descriptor()),
     ] {
         prelude.insert(name.into(), TypeDescriptor::TypeOf(Box::new(instance)));
     }
@@ -2253,7 +2261,7 @@ fn core_static_schemes() -> HashMap<String, TypeScheme> {
             "validate".into(),
             scheme(function(
                 vec![witness(bound(0)), TypeDescriptor::Any],
-                result_descriptor(bound(0), TypeDescriptor::String),
+                result_descriptor(bound(0), boundary_error_descriptor()),
             )),
         ),
     ])
@@ -2263,6 +2271,14 @@ fn option_descriptor(item: TypeDescriptor) -> TypeDescriptor {
     TypeDescriptor::Enum(BTreeMap::from([
         ("None".into(), None),
         ("Some".into(), Some(Box::new(item))),
+    ]))
+}
+
+fn boundary_error_descriptor() -> TypeDescriptor {
+    TypeDescriptor::Struct(BTreeMap::from([
+        ("data".into(), TypeDescriptor::Any),
+        ("message".into(), TypeDescriptor::String),
+        ("rule".into(), TypeDescriptor::Any),
     ]))
 }
 
@@ -2418,7 +2434,16 @@ fn native_validate(context: &mut CallContext<'_, '_>) -> Result<(), NativeError>
         }
         Err(message) => {
             context.set_atom(tag, "Err")?;
-            context.set_string(payload, message)?;
+            let error_message = context.scratch()?;
+            context.set_string(error_message, message)?;
+            context.make_dict(
+                payload,
+                &[
+                    ("message".into(), error_message),
+                    ("data".into(), value_register),
+                    ("rule".into(), type_register),
+                ],
+            )?;
         }
     }
     context.make_tagged(context.result(), tag, payload)
@@ -3328,6 +3353,42 @@ impl<'a> GenericInference<'a> {
         }
     }
 
+    fn default_inference_variables_to_any(&mut self, ty: &TypeDescriptor) {
+        match self.resolve(ty) {
+            TypeDescriptor::Inference(variable) => {
+                self.substitutions.insert(variable, TypeDescriptor::Any);
+            }
+            TypeDescriptor::Array(item) | TypeDescriptor::TypeOf(item) => {
+                self.default_inference_variables_to_any(&item);
+            }
+            TypeDescriptor::Tagged { payload, .. } => {
+                self.default_inference_variables_to_any(&payload);
+            }
+            TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
+                for item in items {
+                    self.default_inference_variables_to_any(&item);
+                }
+            }
+            TypeDescriptor::Struct(fields) => {
+                for field in fields.values() {
+                    self.default_inference_variables_to_any(field);
+                }
+            }
+            TypeDescriptor::Enum(variants) => {
+                for payload in variants.values().flatten() {
+                    self.default_inference_variables_to_any(payload);
+                }
+            }
+            TypeDescriptor::Function { parameters, result } => {
+                for parameter in parameters {
+                    self.default_inference_variables_to_any(&parameter);
+                }
+                self.default_inference_variables_to_any(&result);
+            }
+            _ => {}
+        }
+    }
+
     fn infer(
         &mut self,
         expression: &Expr,
@@ -3509,10 +3570,23 @@ impl<'a> GenericInference<'a> {
                                 arguments.len()
                             ));
                         }
+                        let mut partial_tagged_evidence = false;
                         for (argument, parameter) in arguments.iter().zip(&parameters) {
                             let argument_type =
                                 self.infer(argument, environment, Some(parameter))?;
+                            partial_tagged_evidence |= matches!(
+                                self.resolve(&argument_type),
+                                TypeDescriptor::Tagged { .. }
+                            );
+                            if matches!(self.resolve(&argument_type), TypeDescriptor::Any) {
+                                self.default_inference_variables_to_any(parameter);
+                            }
                             self.unify(&argument_type, parameter)?;
+                        }
+                        if partial_tagged_evidence {
+                            for parameter in &parameters {
+                                self.default_inference_variables_to_any(parameter);
+                            }
                         }
                         if let Some(expected) = expected {
                             self.unify(&result, expected)?;

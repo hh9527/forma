@@ -2311,11 +2311,39 @@ mod tests {
         fs::write(
             directory.join("main.xl"),
             r#"import codec from "core:codec";
+               import result from "core:result";
                @struct type User = {name: String};
                let decoded = codec.decode(User, {name: "Ada"});
                let encoded = codec.encode(User, {name: "Lin"});
                let checked = validate(User, {name: "Grace"});
-               {decoded: decoded, encoded: encoded, checked: checked}"#,
+               let invalid = validate(User, {name: 1});
+               let formatted = result.map_err(
+                   codec.decode(User, {name: 1}),
+                   codec.format_error,
+               );
+               let chained = result.flat_map(
+                   codec.decode(User, {name: "Mira"}),
+                   fn(user) { validate(User, user) },
+               );
+               let name = result.unwrap(result.map(
+                   codec.decode(User, {name: "Kai"}),
+                   fn(user) { user.name },
+               ));
+               let decode_error = codec.DecodeError;
+               let encode_error = codec.EncodeError;
+               let validation_error = ValidationError;
+               {
+                   decoded: decoded,
+                   encoded: encoded,
+                   checked: checked,
+                   invalid: invalid,
+                   formatted: formatted,
+                   chained: chained,
+                   name: name,
+                   DecodeError: decode_error,
+                   EncodeError: encode_error,
+                   ValidationError: validation_error,
+               }"#,
         )
         .unwrap();
         let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
@@ -2323,21 +2351,80 @@ mod tests {
             module
                 .analysis
                 .display(module.analysis.binding_types["decoded"]),
-            "enum {Err(Any), Ok({name: String})}"
+            "enum {Err({data: Any, message: String, rule: Any}), Ok({name: String})}"
         );
         assert_eq!(
             module
                 .analysis
                 .display(module.analysis.binding_types["checked"]),
-            "enum {Err(String), Ok({name: String})}"
+            "enum {Err({data: Any, message: String, rule: Any}), Ok({name: String})}"
         );
         assert_eq!(
             module
                 .analysis
                 .display(module.analysis.binding_types["encoded"]),
-            "enum {Err(Any), Ok(Any)}"
+            "enum {Err({data: Any, message: String, rule: Any}), Ok(Any)}"
         );
-        assert!(module.execute(100_000).is_ok());
+        assert_eq!(
+            module
+                .analysis
+                .display(module.analysis.binding_types["formatted"]),
+            "enum {Err(String), Ok({name: String})}"
+        );
+        assert_eq!(
+            module
+                .analysis
+                .display(module.analysis.binding_types["chained"]),
+            "enum {Err({data: Any, message: String, rule: Any}), Ok({name: String})}"
+        );
+        assert_eq!(
+            module
+                .analysis
+                .display(module.analysis.binding_types["name"]),
+            "String"
+        );
+        for binding in ["decode_error", "encode_error", "validation_error"] {
+            assert_eq!(
+                module
+                    .analysis
+                    .display(module.analysis.binding_types[binding]),
+                "TypeOf({data: Any, message: String, rule: Any})",
+                "{binding}"
+            );
+        }
+        let Value::Dict(output) = module.execute(100_000).unwrap() else {
+            panic!("typed boundary test must return a Dict")
+        };
+        assert_eq!(output.get("name").unwrap().to_string(), "\"Kai\"");
+        assert!(
+            output
+                .get("formatted")
+                .unwrap()
+                .to_string()
+                .contains("expected String")
+        );
+        let Value::Tagged { tag, payload } = output.get("invalid").unwrap() else {
+            panic!("invalid validation must return a Result")
+        };
+        assert_eq!(tag.name(), "Err");
+        let Value::Dict(error) = payload.as_ref() else {
+            panic!("validation failure must be a structured error")
+        };
+        assert!(
+            error
+                .get("message")
+                .unwrap()
+                .to_string()
+                .contains("must be String")
+        );
+        assert_eq!(error.get("data").unwrap().to_string(), "{name: 1}");
+        assert!(error.get("rule").unwrap().to_string().contains("'Struct"));
+        for field in ["DecodeError", "EncodeError", "ValidationError"] {
+            assert!(
+                output.get(field).unwrap().to_string().contains("'Struct"),
+                "{field}"
+            );
+        }
 
         fs::write(
             directory.join("wrong-encode.xl"),
