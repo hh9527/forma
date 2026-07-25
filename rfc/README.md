@@ -78,3 +78,4 @@ semantics from an earlier RFC.
 57. Canonical module identities and JSON String boundaries.
 58. Executable value adapter.
 59. Crate-relative module resolution.
+60. Rename XL to Forma.

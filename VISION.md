@@ -1,8 +1,8 @@
-# XL Language Vision
+# Forma Language Vision
 
 ## Purpose
 
-XL is an experimental general-purpose programming language implemented in Rust.
+Forma is an experimental general-purpose programming language implemented in Rust.
 It explores whether a small dynamic runtime, a mostly pure functional language,
 and a closed-world toolchain can use the same ordinary language to perform both
 program computation and higher-order type metadata computation.
@@ -13,7 +13,7 @@ The central hypothesis is:
 > and higher-order type operations can be pure functions evaluated by a
 > toolchain-hosted instance of the language runtime.
 
-XL is not a configuration DSL. Configuration, validation, normalization,
+Forma is not a configuration DSL. Configuration, validation, normalization,
 encoding, and similar domains should be expressed by general-purpose functions
 and libraries rather than special merge rules or domain-specific evaluation
 semantics.
@@ -22,7 +22,7 @@ semantics.
 
 ### One language across two stages
 
-XL has a tool stage and a program stage. Both stages use the same value model,
+Forma has a tool stage and a program stage. Both stages use the same value model,
 function semantics, and evaluator.
 
 - The tool stage evaluates closed, pure metadata computations for type
@@ -106,14 +106,14 @@ atoms:
 'None, 'Some, 'Ok, 'Err, 'True, 'False
 ```
 
-Boolean conditions accept only `'True` and `'False`; XL does not use general
+Boolean conditions accept only `'True` and `'False`; Forma does not use general
 truthy/falsy coercion. Tags remain ordinary observable atoms, and tagged values
 remain ordinary tuples even when bytecode instructions optimize their use.
 
 ### Types are metadata
 
 A type declaration provides a static constraint and a canonical metadata value.
-Metadata is composed only from ordinary XL values and fixed, documented shapes.
+Metadata is composed only from ordinary Forma values and fixed, documented shapes.
 It can be inspected, passed to functions, transformed, and retained at runtime.
 
 The same metadata may support:
@@ -141,7 +141,7 @@ tool-stage evaluation cannot provide.
 
 ### General-purpose composition
 
-XL does not define configuration-specific merge, priority, defaulting, or
+Forma does not define configuration-specific merge, priority, defaulting, or
 constraint semantics. Such policies are explicit functions:
 
 ```text
@@ -180,14 +180,14 @@ closed dependency graph:
 - JSON Lines produces an `Array` of data values.
 
 Arbitrary external object keys should remain strings rather than permanently
-interned atoms. Format features that cannot map deterministically to XL values
+interned atoms. Format features that cannot map deterministically to Forma values
 must be rejected or handled by an explicit library policy.
 
 ## MVP Thesis
 
 The MVP is successful only if it demonstrates this vertical loop:
 
-1. Parse and execute expression-oriented XL code on a bytecode VM.
+1. Parse and execute expression-oriented Forma code on a bytecode VM.
 2. Load a static data module into the same immutable value model.
 3. Represent a type as canonical runtime metadata.
 4. Execute an ordinary pure function over that metadata in the tool-stage VM.
