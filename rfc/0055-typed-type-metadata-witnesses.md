@@ -9,9 +9,9 @@ XL refines the static type of TypeMetadata values from the erased `Type` to
 `TypeOf(A)`, meaning metadata that describes values of type `A`:
 
 ```xl
-Int          // TypeOf(Int)
-Array(Int)   // TypeOf(Array(Int))
-Option(Int)  // TypeOf(Option(Int))
+Int          # TypeOf(Int)
+Array(Int)   # TypeOf(Array(Int))
+Option(Int)  # TypeOf(Option(Int))
 ```
 
 This witness relationship allows ordinary generic contracts to recover an

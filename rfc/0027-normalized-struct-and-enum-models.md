@@ -45,7 +45,7 @@ Decorator application supplies the RFC 0025 context:
 @struct
 type User = fields;
 
-// struct({kind: 'Type, name: "User"}, fields)
+# struct({kind: 'Type, name: "User"}, fields)
 ```
 
 Explicit construction uses `'None` when no syntax target exists:
@@ -140,8 +140,8 @@ field Strings and become runtime Atom tags.
 Runtime representation has exactly two forms:
 
 ```text
-'Variant             // unit variant
-('Variant, payload)  // payload variant
+'Variant             # unit variant
+('Variant, payload)  # payload variant
 ```
 
 The outer tagged tuple always has two elements. Multiple positional values use

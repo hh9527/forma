@@ -23,21 +23,22 @@ The file is compiled as a zero-argument bytecode function named after its
 source. Its result expression becomes the function result.
 
 UTF-8 input is accepted, while identifiers in the MVP use ASCII letters,
-digits, and underscores. `//` starts a line comment.
+digits, and underscores. `#` starts a line comment. A first-line shebang such
+as `#!/usr/bin/env -S xl run` is therefore ordinary comment trivia.
 
 ## Literals
 
 The surface language includes:
 
 ```text
-42                       // Int
-3.5                      // Float
-"hello"                  // String
-b"bytes"                 // Bytes
-'Ready                   // Atom
-[1, 2, 3]                // Array
-(1, "two")               // Tuple
-{name: "Ada", age: 36}   // Dict
+42                       # Int
+3.5                      # Float
+"hello"                  # String
+b"bytes"                 # Bytes
+'Ready                   # Atom
+[1, 2, 3]                # Array
+(1, "two")               # Tuple
+{name: "Ada", age: 36}   # Dict
 ```
 
 Dict keys are identifiers or string literals. The compiler emits canonical

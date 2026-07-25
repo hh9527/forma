@@ -1458,6 +1458,16 @@ mod tests {
     use crate::source::Located;
 
     #[test]
+    fn accepts_hash_comments_and_shebangs() {
+        let program = parse(
+            "script.xl",
+            "#!/usr/bin/env -S xl run\nlet value = 42; # answer\nvalue",
+        )
+        .unwrap();
+        assert_eq!(program.value.body.value.bindings.len(), 1);
+    }
+
+    #[test]
     fn lowers_directly_from_cst_with_spans_and_precedence() {
         let mut sources = SourceDatabase::default();
         let id = sources.add("test.xl", "let x = 1; x == 2");

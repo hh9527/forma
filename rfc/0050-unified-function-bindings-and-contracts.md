@@ -169,8 +169,8 @@ This keeps one authoritative scheme and avoids a contract-equivalence rule.
 `fn` and `Fn` are distinct case-sensitive keywords:
 
 ```xl
-fn(value) { value }  // expression producing a function value
-Fn(Int) -> String    // contract producing Function TypeMetadata
+fn(value) { value }  # expression producing a function value
+Fn(Int) -> String    # contract producing Function TypeMetadata
 ```
 
 `Fn` remains parser-recognized rather than a normal type binding because its

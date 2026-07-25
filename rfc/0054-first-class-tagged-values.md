@@ -9,9 +9,9 @@ XL introduces `Tagged` as the dedicated value and type shape for an Atom tag
 carrying exactly one payload:
 
 ```xl
-'None                    // Atom('None)
-'Some(42)                // Tagged('Some, 42)
-'Ok({name: "Ada"})       // Tagged('Ok, {name: "Ada"})
+'None                    # Atom('None)
+'Some(42)                # Tagged('Some, 42)
+'Ok({name: "Ada"})       # Tagged('Ok, {name: "Ada"})
 ```
 
 An Atom remains a zero-payload value and is also a first-class unary tag
@@ -361,8 +361,8 @@ and Tagged are never equal, even when they use the same tag.
 This is an intentional source and value compatibility break:
 
 ```xl
-('Some, value)  // remains an ordinary Tuple, not an Option value
-'Some(value)    // canonical payload variant
+('Some, value)  # remains an ordinary Tuple, not an Option value
+'Some(value)    # canonical payload variant
 ```
 
 All repository core modules, examples, tests, codec fixtures, and diagnostics

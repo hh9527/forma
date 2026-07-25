@@ -168,9 +168,9 @@ choice does not require a separate error model.
 A future ordinary file capability can expose the stages explicitly:
 
 ```xl
-file.read(path)       // Result(Bytes, IoError)
-json.parse(bytes)     // Result(Any, BlameError)
-codec.decode(T, data) // Result(T, BlameError)
+file.read(path)       # Result(Bytes, IoError)
+json.parse(bytes)     # Result(Any, BlameError)
+codec.decode(T, data) # Result(T, BlameError)
 ```
 
 Missing files, permissions, and transport failures are `IoError`, not

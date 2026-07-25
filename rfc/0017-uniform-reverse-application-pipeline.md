@@ -28,8 +28,8 @@ partial application, placeholders, and compatibility rewriting are deferred.
 RFC 0002 gives `|>` two related but distinct elaborations:
 
 ```xl
-value |> f          // f(value)
-value |> f(option)  // f(value, option)
+value |> f          # f(value)
+value |> f(option)  # f(value, option)
 ```
 
 The second form does not preserve the ordinary meaning of `f(option)` as an

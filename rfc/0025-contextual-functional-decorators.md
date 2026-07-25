@@ -74,7 +74,7 @@ A bare decorator is itself the transforming function:
 @f
 type a = rhs;
 
-// f(ctx, rhs)
+# f(ctx, rhs)
 ```
 
 A configured decorator evaluates its expression first:
@@ -83,7 +83,7 @@ A configured decorator evaluates its expression first:
 @f(1)
 type a = rhs;
 
-// f(1)(ctx, rhs)
+# f(1)(ctx, rhs)
 ```
 
 Multiple decorators use Python nesting order. The decorator nearest the target
@@ -94,7 +94,7 @@ runs first:
 @inner(1)
 type a = rhs;
 
-// outer(ctx, inner(1)(ctx, rhs))
+# outer(ctx, inner(1)(ctx, rhs))
 ```
 
 Every decorator receives an equivalent immutable context. Decorator

@@ -166,7 +166,7 @@ enum NormalToken {
     Identifier,
     #[regex(r"[ \t\r\n]+")]
     Whitespace,
-    #[regex(r"//[^\r\n]*", allow_greedy = true)]
+    #[regex(r"#[^\r\n]*", allow_greedy = true)]
     Comment,
 }
 
@@ -494,9 +494,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hash_is_the_only_line_comment_marker() {
+        let mut diagnostics = Vec::new();
+        let (tokens, _) = tokenize("# comment\n//", &mut diagnostics);
+        assert_eq!(
+            tokens,
+            vec![
+                Token::Comment,
+                Token::Whitespace,
+                Token::Slash,
+                Token::Slash,
+            ]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn chunk_bridge_matches_contiguous_lexing() {
         let samples = [
-            "let identifier = 123.456 // comment\nidentifier",
+            "#!/usr/bin/env -S xl run\nlet identifier = 123.456 # comment\nidentifier",
             r#"b\"bytes\" \"text \{name} tail\""#,
             "_12 |> transform\\(_1, 2)",
             "let 中 = \"emoji 😀 and escape \\n\"; 中",

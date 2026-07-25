@@ -64,8 +64,8 @@ They are not identifiers. `_` and `_N` cannot be declared as binding or
 parameter names. Names containing other characters remain identifiers:
 
 ```xl
-let _ignored = value; // valid
-let _0 = value;       // invalid
+let _ignored = value; # valid
+let _0 = value;       # invalid
 ```
 
 The numeric suffix is decimal and zero-based. It is decoded during semantic
@@ -160,7 +160,7 @@ elaborates to a unary closure. The set of referenced indices must be exactly
 the continuous range `0..=max`; gaps are errors:
 
 ```xl
-f\(_2, _0) // error: missing _1
+f\(_2, _0) # error: missing _1
 ```
 
 Continuity prevents a call section from silently creating unused parameters.
@@ -171,7 +171,7 @@ One call section may use bare placeholders or indexed placeholders, but not
 both:
 
 ```xl
-f\(_0, _) // error
+f\(_0, _) # error
 ```
 
 Nested call sections are independent. Mixing and index continuity are checked

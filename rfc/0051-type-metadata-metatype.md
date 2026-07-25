@@ -9,9 +9,9 @@ XL introduces `Type` as the static type of valid TypeMetadata values and gives
 the built-in TypeMetadata constructors explicit static contracts:
 
 ```xl
-Int                  // Type
-Array(Int)           // Type
-Fn(Int) -> String    // Type
+Int                  # Type
+Array(Int)           # Type
+Fn(Int) -> String    # Type
 
 def Maybe: Fn(Type) -> Type = fn(Item) {
     Option(Item)

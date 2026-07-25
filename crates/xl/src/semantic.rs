@@ -1448,11 +1448,7 @@ mod tests {
 
     #[test]
     fn completion_does_not_recognize_strings_comments_or_bare_names() {
-        for source_text in [
-            "\"value.alpha\"",
-            "1 // value.alpha",
-            "let value = 1; value",
-        ] {
+        for source_text in ["\"value.alpha\"", "1 # value.alpha", "let value = 1; value"] {
             let snapshot = WorkspaceSnapshot::recover_source("context.xl", source_text);
             let source = snapshot.modules()[0].source.unwrap();
             let context =

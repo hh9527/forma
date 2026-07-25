@@ -71,7 +71,8 @@ mod tests {
 
     #[test]
     fn cst_is_lossless_and_recovery_collects_diagnostics() {
-        let source = "let x = 1 // keep me\n let y = ;\n match x { => 1, _ => }";
+        let source =
+            "#!/usr/bin/env -S xl run\nlet x = 1 # keep me\n let y = ;\n match x { => 1, _ => }";
         let mut sources = crate::source::SourceDatabase::default();
         let id = sources.add("broken.xl", source);
         let parsed = parse(id, source);
