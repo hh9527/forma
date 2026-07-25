@@ -41,6 +41,7 @@ pub enum TypeNode {
     Ref(TypeId),
     Any,
     Type,
+    TypeOf(TypeId),
     Int,
     Float,
     String,
@@ -106,6 +107,7 @@ impl TypeGraph {
             TypeDescriptor::Bound(_) | TypeDescriptor::Inference(_) => TypeNode::Any,
             TypeDescriptor::Any => TypeNode::Any,
             TypeDescriptor::Type => TypeNode::Type,
+            TypeDescriptor::TypeOf(instance) => TypeNode::TypeOf(self.intern_descriptor(instance)),
             TypeDescriptor::Int => TypeNode::Int,
             TypeDescriptor::Float => TypeNode::Float,
             TypeDescriptor::String => TypeNode::String,
@@ -239,6 +241,15 @@ impl TypeGraph {
             "Type" => {
                 require(&["kind"])?;
                 TypeNode::Type
+            }
+            "TypeOf" => {
+                require(&["instance", "kind"])?;
+                let instance = self.decode_persistent(
+                    value.dict_get("instance").expect("field exists"),
+                    &format!("{path}.instance"),
+                    links,
+                )?;
+                TypeNode::TypeOf(instance)
             }
             "Int" => {
                 require(&["kind"])?;
@@ -397,6 +408,9 @@ impl TypeGraph {
             TypeNode::Ref(target) => self.display_with(*target, active),
             TypeNode::Any => "Any".into(),
             TypeNode::Type => "Type".into(),
+            TypeNode::TypeOf(instance) => {
+                format!("TypeOf({})", self.display_with(*instance, active))
+            }
             TypeNode::Int => "Int".into(),
             TypeNode::Float => "Float".into(),
             TypeNode::String => "String".into(),
@@ -465,6 +479,8 @@ impl TypeGraph {
             (TypeNode::Ref(actual), _) => self.assignable_with(*actual, expected, visited),
             (_, TypeNode::Ref(expected)) => self.assignable_with(actual, *expected, visited),
             (TypeNode::Any, _) | (_, TypeNode::Any) => true,
+            (TypeNode::TypeOf(_), TypeNode::Type) => true,
+            (TypeNode::TypeOf(a), TypeNode::TypeOf(e)) => self.assignable_with(*a, *e, visited),
             (TypeNode::Array(a), TypeNode::Array(e)) => self.assignable_with(*a, *e, visited),
             (
                 TypeNode::Tagged {
@@ -555,6 +571,7 @@ pub enum TypeDescriptor {
     Inference(InferenceVariableId),
     Any,
     Type,
+    TypeOf(Box<TypeDescriptor>),
     Int,
     Float,
     String,
@@ -585,6 +602,12 @@ impl TypeDescriptor {
             Self::Inference(_) => panic!("inference variables are not runtime type metadata"),
             Self::Any => vec![kind_entry("Any")],
             Self::Type => vec![kind_entry("Type")],
+            Self::TypeOf(instance) => {
+                vec![
+                    kind_entry("TypeOf"),
+                    ("instance".into(), instance.to_value(vm)),
+                ]
+            }
             Self::Int => vec![kind_entry("Int")],
             Self::Float => vec![kind_entry("Float")],
             Self::String => vec![kind_entry("String")],
@@ -678,6 +701,7 @@ impl TypeDescriptor {
             Self::Inference(variable) => format!("?{}", variable.0),
             Self::Any => "Any".into(),
             Self::Type => "Type".into(),
+            Self::TypeOf(instance) => format!("TypeOf({})", instance.display_name()),
             Self::Int => "Int".into(),
             Self::Float => "Float".into(),
             Self::String => "String".into(),
@@ -784,15 +808,16 @@ impl Analysis {
                 &format!("type {name}"),
                 &mut links,
             )?;
+            let witness = self.types.push(TypeNode::TypeOf(id));
             self.types.names.insert(name.clone(), id);
             self.declared_types.insert(name.clone(), id);
-            self.binding_types.insert(name.clone(), id);
+            self.binding_types.insert(name.clone(), witness);
             for definition in self.hir.definitions() {
                 if definition.top_level
                     && definition.kind == HirDefinitionKind::Type
                     && definition.name == *name
                 {
-                    self.definition_types.insert(definition.id, id);
+                    self.definition_types.insert(definition.id, witness);
                 }
             }
         }
@@ -1323,7 +1348,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
     }
 
     let mut definition_contracts = HashMap::new();
-    let mut binding_schemes = HashMap::new();
+    let mut binding_schemes = core_static_schemes();
     let mut declaration_locations = HashMap::new();
     let mut definition_counts = HashMap::<String, usize>::new();
     for binding in &program.value.body.value.bindings {
@@ -1466,11 +1491,16 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 declared_types.insert(binding.value.name.value.clone(), descriptor);
                 declared_type_spans.insert(binding.value.name.value.clone(), binding.location);
                 tool_values.insert(binding.value.name.value.clone(), value);
+                let witness = TypeDescriptor::TypeOf(Box::new(
+                    declared_types[&binding.value.name.value].clone(),
+                ));
+                static_environment.insert(binding.value.name.value.clone(), witness.clone());
+                binding_types.insert(binding.value.name.value.clone(), witness.clone());
                 binding_schemes.insert(
                     binding.value.name.value.clone(),
                     TypeScheme {
                         parameters: Vec::new(),
-                        body: TypeDescriptor::Type,
+                        body: witness,
                     },
                 );
             }
@@ -1551,7 +1581,10 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 let name = &binding.value.name.value;
                 let inferred = inferred_expression;
                 let checked = if let Some(expected) = definition_contracts.get(name) {
-                    if !assignable(&inferred, expected) {
+                    if !assignable(
+                        &erase_type_witnesses(&inferred),
+                        &erase_type_witnesses(expected),
+                    ) {
                         let declaration = declaration_locations
                             .get(name)
                             .copied()
@@ -1662,7 +1695,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
             continue;
         }
         let expected = if binding.value.kind == BindingKind::Type {
-            Some(&TypeDescriptor::Type)
+            binding_types.get(&binding.value.name.value)
         } else {
             binding
                 .value
@@ -2086,6 +2119,7 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
         NativeFunction::core_builtin_type(CoreBuiltinTypeFunction::Result),
         NativeFunction::new("Atom", 1, native_atom_type),
         NativeFunction::new("Array", 1, native_array_type),
+        NativeFunction::new("TypeOf", 1, native_type_of_type),
         NativeFunction::new("Tagged", 2, native_tagged_type),
         NativeFunction::new("Tuple", 1, native_tuple_type),
         NativeFunction::new("Fn", 2, native_function_type),
@@ -2107,8 +2141,16 @@ fn core_static_prelude() -> HashMap<String, TypeDescriptor> {
             result: Box::new(result),
         };
     let mut prelude = HashMap::new();
-    for name in ["Type", "Any", "Int", "Float", "String", "Bytes", "Bool"] {
-        prelude.insert(name.into(), metadata.clone());
+    for (name, instance) in [
+        ("Type", TypeDescriptor::Type),
+        ("Any", TypeDescriptor::Any),
+        ("Int", TypeDescriptor::Int),
+        ("Float", TypeDescriptor::Float),
+        ("String", TypeDescriptor::String),
+        ("Bytes", TypeDescriptor::Bytes),
+        ("Bool", normalized_bool_descriptor()),
+    ] {
+        prelude.insert(name.into(), TypeDescriptor::TypeOf(Box::new(instance)));
     }
     prelude.insert(
         "Atom".into(),
@@ -2116,6 +2158,10 @@ fn core_static_prelude() -> HashMap<String, TypeDescriptor> {
     );
     prelude.insert(
         "Array".into(),
+        function(vec![metadata.clone()], metadata.clone()),
+    );
+    prelude.insert(
+        "TypeOf".into(),
         function(vec![metadata.clone()], metadata.clone()),
     );
     prelude.insert(
@@ -2163,6 +2209,70 @@ fn core_static_prelude() -> HashMap<String, TypeDescriptor> {
     prelude
 }
 
+fn core_static_schemes() -> HashMap<String, TypeScheme> {
+    let bound = |index| TypeDescriptor::Bound(TypeParameterId(index));
+    let witness = |instance| TypeDescriptor::TypeOf(Box::new(instance));
+    let function = |parameters, result| TypeDescriptor::Function {
+        parameters,
+        result: Box::new(result),
+    };
+    let scheme = |body| TypeScheme {
+        parameters: Vec::new(),
+        body,
+    };
+    HashMap::from([
+        (
+            "Array".into(),
+            scheme(function(
+                vec![witness(bound(0))],
+                witness(TypeDescriptor::Array(Box::new(bound(0)))),
+            )),
+        ),
+        (
+            "TypeOf".into(),
+            scheme(function(
+                vec![witness(bound(0))],
+                witness(witness(bound(0))),
+            )),
+        ),
+        (
+            "Option".into(),
+            scheme(function(
+                vec![witness(bound(0))],
+                witness(option_descriptor(bound(0))),
+            )),
+        ),
+        (
+            "Result".into(),
+            scheme(function(
+                vec![witness(bound(0)), witness(bound(1))],
+                witness(result_descriptor(bound(0), bound(1))),
+            )),
+        ),
+        (
+            "validate".into(),
+            scheme(function(
+                vec![witness(bound(0)), TypeDescriptor::Any],
+                result_descriptor(bound(0), TypeDescriptor::String),
+            )),
+        ),
+    ])
+}
+
+fn option_descriptor(item: TypeDescriptor) -> TypeDescriptor {
+    TypeDescriptor::Enum(BTreeMap::from([
+        ("None".into(), None),
+        ("Some".into(), Some(Box::new(item))),
+    ]))
+}
+
+fn result_descriptor(ok: TypeDescriptor, err: TypeDescriptor) -> TypeDescriptor {
+    TypeDescriptor::Enum(BTreeMap::from([
+        ("Err".into(), Some(Box::new(err))),
+        ("Ok".into(), Some(Box::new(ok))),
+    ]))
+}
+
 fn normalized_bool_value(vm: &mut Vm) -> Value {
     let variants = ["False", "True"]
         .into_iter()
@@ -2178,6 +2288,13 @@ fn normalized_bool_value(vm: &mut Vm) -> Value {
         ])
         .expect("Bool metadata fields are unique");
     normalized_legacy_value(vm, metadata)
+}
+
+fn normalized_bool_descriptor() -> TypeDescriptor {
+    TypeDescriptor::Enum(BTreeMap::from([
+        ("False".into(), None),
+        ("True".into(), None),
+    ]))
 }
 
 fn normalized_legacy_value(vm: &mut Vm, inner: Value) -> Value {
@@ -2208,6 +2325,15 @@ fn native_array_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeErro
         decode_native_type(value)?;
     }
     write_native_type_record(context, "Array", &[("item", item)])
+}
+
+fn native_type_of_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+    let instance = context.argument(0)?;
+    let value = context.value(instance)?;
+    if !value.is_hidden_up_link() {
+        decode_native_type(value)?;
+    }
+    write_native_type_record(context, "TypeOf", &[("instance", instance)])
 }
 
 fn native_tagged_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
@@ -2352,6 +2478,16 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
         "Type" => {
             require(&["kind"])?;
             TypeDescriptor::Type
+        }
+        "TypeOf" => {
+            require(&["instance", "kind"])?;
+            let instance = value
+                .dict_get("instance")
+                .ok_or_else(|| format!("{path}.instance is missing"))?;
+            TypeDescriptor::TypeOf(Box::new(decode_type_ref(
+                instance,
+                &format!("{path}.instance"),
+            )?))
         }
         "Int" => {
             require(&["kind"])?;
@@ -2536,6 +2672,18 @@ fn validate_value_ref(
     match descriptor {
         TypeDescriptor::Any => Ok(()),
         TypeDescriptor::Type => decode_type_ref(value, path).map(|_| ()),
+        TypeDescriptor::TypeOf(expected) => {
+            let actual = decode_type_ref(value, path)?;
+            if assignable(&actual, expected) && assignable(expected, &actual) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{path} must describe {}, got {}",
+                    expected.display_name(),
+                    actual.display_name()
+                ))
+            }
+        }
         TypeDescriptor::Int if value.kind() == ValueKind::Int => Ok(()),
         TypeDescriptor::Float if value.kind() == ValueKind::Float => Ok(()),
         TypeDescriptor::String if value.kind() == ValueKind::String => Ok(()),
@@ -2683,6 +2831,13 @@ fn decode_type(value: &Value, path: &str) -> Result<TypeDescriptor, String> {
         "Type" => {
             require_fields(metadata, path, &["kind"])?;
             TypeDescriptor::Type
+        }
+        "TypeOf" => {
+            require_fields(metadata, path, &["instance", "kind"])?;
+            TypeDescriptor::TypeOf(Box::new(decode_type(
+                metadata.get("instance").expect("required field"),
+                &format!("{path}.instance"),
+            )?))
         }
         "Int" => {
             require_fields(metadata, path, &["kind"])?;
@@ -2914,6 +3069,9 @@ impl<'a> GenericInference<'a> {
             TypeDescriptor::Array(item) => {
                 TypeDescriptor::Array(Box::new(self.instantiate_with(item, variables)))
             }
+            TypeDescriptor::TypeOf(instance) => {
+                TypeDescriptor::TypeOf(Box::new(self.instantiate_with(instance, variables)))
+            }
             TypeDescriptor::Tagged { tag, payload } => TypeDescriptor::Tagged {
                 tag: tag.clone(),
                 payload: Box::new(self.instantiate_with(payload, variables)),
@@ -2967,6 +3125,9 @@ impl<'a> GenericInference<'a> {
                 .get(variable)
                 .map_or_else(|| ty.clone(), |ty| self.resolve(ty)),
             TypeDescriptor::Array(item) => TypeDescriptor::Array(Box::new(self.resolve(item))),
+            TypeDescriptor::TypeOf(instance) => {
+                TypeDescriptor::TypeOf(Box::new(self.resolve(instance)))
+            }
             TypeDescriptor::Tagged { tag, payload } => TypeDescriptor::Tagged {
                 tag: tag.clone(),
                 payload: Box::new(self.resolve(payload)),
@@ -3014,6 +3175,7 @@ impl<'a> GenericInference<'a> {
         match self.resolve(ty) {
             TypeDescriptor::Inference(candidate) => candidate == variable,
             TypeDescriptor::Array(item) => self.occurs(variable, &item),
+            TypeDescriptor::TypeOf(instance) => self.occurs(variable, &instance),
             TypeDescriptor::Tagged { payload, .. } => self.occurs(variable, &payload),
             TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
                 items.iter().any(|item| self.occurs(variable, item))
@@ -3062,6 +3224,10 @@ impl<'a> GenericInference<'a> {
                 Ok(())
             }
             (TypeDescriptor::Any, _) | (_, TypeDescriptor::Any) => Ok(()),
+            (TypeDescriptor::TypeOf(_), TypeDescriptor::Type) => Ok(()),
+            (TypeDescriptor::TypeOf(left), TypeDescriptor::TypeOf(right)) => {
+                self.unify(left, right)
+            }
             (TypeDescriptor::Array(left), TypeDescriptor::Array(right)) => self.unify(left, right),
             (
                 TypeDescriptor::Tagged {
@@ -3196,7 +3362,9 @@ impl<'a> GenericInference<'a> {
             ExprKind::Atom(name) => TypeDescriptor::Atom(atom_from_name(name)),
             ExprKind::Array(items) => {
                 let item_expected = match expected.map(|ty| self.resolve(ty)) {
-                    Some(TypeDescriptor::Array(item)) => Some(*item),
+                    Some(TypeDescriptor::Array(item)) if !contains_type_variable(&item) => {
+                        Some(*item)
+                    }
                     _ => None,
                 };
                 let mut item_types = Vec::new();
@@ -3230,14 +3398,14 @@ impl<'a> GenericInference<'a> {
                 )
             }
             ExprKind::Dict(fields) => {
-                if matches!(
-                    expected.map(|ty| self.resolve(ty)),
-                    Some(TypeDescriptor::Type)
-                ) {
+                let metadata_expected = expected
+                    .map(|ty| self.resolve(ty))
+                    .filter(|ty| matches!(ty, TypeDescriptor::Type | TypeDescriptor::TypeOf(_)));
+                if let Some(metadata_expected) = metadata_expected {
                     for field in fields {
                         self.infer(&field.value.value, environment, None)?;
                     }
-                    TypeDescriptor::Type
+                    metadata_expected
                 } else {
                     let expected_fields = match expected.map(|ty| self.resolve(ty)) {
                         Some(TypeDescriptor::Struct(fields)) => fields,
@@ -3350,6 +3518,13 @@ impl<'a> GenericInference<'a> {
                             self.unify(&result, expected)?;
                         }
                         let result = self.resolve(&result);
+                        let result = if matches!(result, TypeDescriptor::TypeOf(_))
+                            && contains_type_variable(&result)
+                        {
+                            TypeDescriptor::Type
+                        } else {
+                            result
+                        };
                         if contains_type_variable(&result) {
                             return Err(format!(
                                 "cannot infer generic result type {}",
@@ -3479,6 +3654,7 @@ fn contains_type_variable(ty: &TypeDescriptor) -> bool {
         TypeDescriptor::Inference(_) => true,
         TypeDescriptor::Bound(_) => false,
         TypeDescriptor::Array(item) => contains_type_variable(item),
+        TypeDescriptor::TypeOf(instance) => contains_type_variable(instance),
         TypeDescriptor::Tagged { payload, .. } => contains_type_variable(payload),
         TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
             items.iter().any(contains_type_variable)
@@ -3498,6 +3674,7 @@ fn contains_type_variable(ty: &TypeDescriptor) -> bool {
 fn contains_metatype(ty: &TypeDescriptor) -> bool {
     match ty {
         TypeDescriptor::Type => true,
+        TypeDescriptor::TypeOf(instance) => contains_metatype(instance),
         TypeDescriptor::Array(item) => contains_metatype(item),
         TypeDescriptor::Tagged { payload, .. } => contains_metatype(payload),
         TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
@@ -3781,6 +3958,7 @@ fn interpolation_type_supported(descriptor: &TypeDescriptor) -> bool {
         }),
         TypeDescriptor::Float
         | TypeDescriptor::Type
+        | TypeDescriptor::TypeOf(_)
         | TypeDescriptor::Bytes
         | TypeDescriptor::Array(_)
         | TypeDescriptor::Tagged { .. }
@@ -3862,13 +4040,25 @@ fn bind_pattern_types_from(
 
 fn common_type(types: Vec<TypeDescriptor>) -> Option<TypeDescriptor> {
     let first = types.first()?.clone();
-    types.iter().all(|item| item == &first).then_some(first)
+    if types.iter().all(|item| item == &first) {
+        Some(first)
+    } else if types
+        .iter()
+        .all(|item| assignable(item, &TypeDescriptor::Type))
+    {
+        Some(TypeDescriptor::Type)
+    } else {
+        None
+    }
 }
 
 fn erase_type_variables(descriptor: &TypeDescriptor) -> TypeDescriptor {
     match descriptor {
         TypeDescriptor::Bound(_) | TypeDescriptor::Inference(_) => TypeDescriptor::Any,
         TypeDescriptor::Array(item) => TypeDescriptor::Array(Box::new(erase_type_variables(item))),
+        TypeDescriptor::TypeOf(instance) => {
+            TypeDescriptor::TypeOf(Box::new(erase_type_variables(instance)))
+        }
         TypeDescriptor::Tagged { tag, payload } => TypeDescriptor::Tagged {
             tag: tag.clone(),
             payload: Box::new(erase_type_variables(payload)),
@@ -3906,6 +4096,47 @@ fn erase_type_variables(descriptor: &TypeDescriptor) -> TypeDescriptor {
     }
 }
 
+fn erase_type_witnesses(descriptor: &TypeDescriptor) -> TypeDescriptor {
+    match descriptor {
+        TypeDescriptor::TypeOf(_) => TypeDescriptor::Type,
+        TypeDescriptor::Array(item) => TypeDescriptor::Array(Box::new(erase_type_witnesses(item))),
+        TypeDescriptor::Tagged { tag, payload } => TypeDescriptor::Tagged {
+            tag: tag.clone(),
+            payload: Box::new(erase_type_witnesses(payload)),
+        },
+        TypeDescriptor::Tuple(items) => {
+            TypeDescriptor::Tuple(items.iter().map(erase_type_witnesses).collect())
+        }
+        TypeDescriptor::Struct(fields) => TypeDescriptor::Struct(
+            fields
+                .iter()
+                .map(|(name, field)| (name.clone(), erase_type_witnesses(field)))
+                .collect(),
+        ),
+        TypeDescriptor::Enum(variants) => TypeDescriptor::Enum(
+            variants
+                .iter()
+                .map(|(name, payload)| {
+                    (
+                        name.clone(),
+                        payload
+                            .as_ref()
+                            .map(|payload| Box::new(erase_type_witnesses(payload))),
+                    )
+                })
+                .collect(),
+        ),
+        TypeDescriptor::Union(variants) => {
+            TypeDescriptor::Union(variants.iter().map(erase_type_witnesses).collect())
+        }
+        TypeDescriptor::Function { parameters, result } => TypeDescriptor::Function {
+            parameters: parameters.iter().map(erase_type_witnesses).collect(),
+            result: Box::new(erase_type_witnesses(result)),
+        },
+        descriptor => descriptor.clone(),
+    }
+}
+
 fn union_or_single(mut types: Vec<TypeDescriptor>) -> TypeDescriptor {
     let mut unique = Vec::new();
     for item in types.drain(..) {
@@ -3924,6 +4155,10 @@ fn union_or_single(mut types: Vec<TypeDescriptor>) -> TypeDescriptor {
 fn assignable(actual: &TypeDescriptor, expected: &TypeDescriptor) -> bool {
     match (actual, expected) {
         (TypeDescriptor::Any, _) | (_, TypeDescriptor::Any) => true,
+        (TypeDescriptor::TypeOf(_), TypeDescriptor::Type) => true,
+        (TypeDescriptor::TypeOf(actual), TypeDescriptor::TypeOf(expected)) => {
+            assignable(actual, expected)
+        }
         (TypeDescriptor::Enum(actual), TypeDescriptor::Enum(expected)) => {
             actual.len() == expected.len()
                 && expected.iter().all(|(name, expected)| {
@@ -4395,20 +4630,26 @@ mod tests {
         let metatype = TypeDescriptor::Type;
         let value = metatype.to_value(&mut Vm::new());
         assert_eq!(TypeDescriptor::from_value(&value).unwrap(), metatype);
+
+        let witness = TypeDescriptor::TypeOf(Box::new(TypeDescriptor::Array(Box::new(
+            TypeDescriptor::Int,
+        ))));
+        let value = witness.to_value(&mut Vm::new());
+        assert_eq!(TypeDescriptor::from_value(&value).unwrap(), witness);
     }
 
     #[test]
     fn metadata_values_and_typed_constructors_have_the_type_metatype() {
         let analysis = analyze_source(
             "metatype.xl",
-            "def Maybe: Fn(Type) -> Type = fn(Item) { Option(Item) };\
+            "def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) { Option(Item) };\
              type MaybeInt = Maybe(Int);\
              (Type, Int, Array(Int), Maybe)",
         )
         .unwrap();
         assert_eq!(
             analysis.display(analysis.result_type),
-            "(Type, Type, Type, Fn(Type) -> Type)"
+            "(TypeOf(Type), TypeOf(Int), TypeOf(Array<Int>), Fn(TypeOf(Any)) -> TypeOf(enum {None, Some(Any)}))"
         );
         let maybe_int = analysis
             .hir
@@ -4418,7 +4659,7 @@ mod tests {
             .expect("MaybeInt definition");
         assert_eq!(
             analysis.display(analysis.definition_types[&maybe_int.id]),
-            "Type"
+            "TypeOf(enum {None, Some(Int)})"
         );
         assert!(matches!(
             analysis.types.node(analysis.declared_types["MaybeInt"]),

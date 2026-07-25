@@ -127,8 +127,8 @@ native dbg_with: for(A) Fn(String, A) -> A;
         CoreModuleSpec {
             name: CODEC_MODULE,
             source: r#"
-native decode: Fn(Any, Any) -> Any;
-native encode: Fn(Any, Any) -> Any;
+native decode: for(A) Fn(TypeOf(A), Any) -> Result(A, Any);
+native encode: for(A) Fn(TypeOf(A), A) -> Result(Any, Any);
 { decode: decode, encode: encode }
 "#,
             functions: vec![

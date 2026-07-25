@@ -2065,7 +2065,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("constructors.xl"),
-            r#"def Maybe: Fn(Type) -> Type = fn(Item) { Option(Item) };
+            r#"def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) { Option(Item) };
                {Maybe: Maybe}"#,
         )
         .unwrap();
@@ -2302,6 +2302,61 @@ mod tests {
         for (name, expected) in expected {
             assert_eq!(result.get(name).unwrap().to_string(), expected, "{name}");
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn typed_metadata_witnesses_flow_through_codec_and_validation_boundaries() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.xl"),
+            r#"import codec from "core:codec";
+               @struct type User = {name: String};
+               let decoded = codec.decode(User, {name: "Ada"});
+               let encoded = codec.encode(User, {name: "Lin"});
+               let checked = validate(User, {name: "Grace"});
+               {decoded: decoded, encoded: encoded, checked: checked}"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            module
+                .analysis
+                .display(module.analysis.binding_types["decoded"]),
+            "enum {Err(Any), Ok({name: String})}"
+        );
+        assert_eq!(
+            module
+                .analysis
+                .display(module.analysis.binding_types["checked"]),
+            "enum {Err(String), Ok({name: String})}"
+        );
+        assert_eq!(
+            module
+                .analysis
+                .display(module.analysis.binding_types["encoded"]),
+            "enum {Err(Any), Ok(Any)}"
+        );
+        assert!(module.execute(100_000).is_ok());
+
+        fs::write(
+            directory.join("wrong-encode.xl"),
+            r#"import codec from "core:codec";
+               @struct type User = {name: String};
+               codec.encode(User, {name: 1})"#,
+        )
+        .unwrap();
+        let error =
+            load_module(directory.join("wrong-encode.xl"), BTreeMap::new(), 100_000).unwrap_err();
+        assert!(error.to_string().contains("cannot unify Int with String"));
+
+        fs::write(
+            directory.join("erased.xl"),
+            "let metadata: Type = Int; validate(metadata, 1)",
+        )
+        .unwrap();
+        let error = load_module(directory.join("erased.xl"), BTreeMap::new(), 100_000).unwrap_err();
+        assert!(error.to_string().contains("TypeOf"));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -3607,7 +3662,7 @@ mod tests {
                };
                codec.encode(Model, {
                    items: [{value: 0}, {value: 2}],
-                   nested: 42,
+                   nested: {required: "present"},
                })"#,
         )
         .unwrap();

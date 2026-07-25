@@ -342,7 +342,7 @@ mod tests {
         assert_eq!(fact.state, crate::FactState::Known);
         assert_eq!(
             snapshot.types().display(fact.value.unwrap()).unwrap(),
-            "Type"
+            "TypeOf(String)"
         );
         std::fs::remove_dir_all(directory).unwrap();
     }

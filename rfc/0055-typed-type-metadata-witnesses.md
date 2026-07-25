@@ -1,6 +1,6 @@
 # RFC 0055: Typed TypeMetadata witnesses
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0003, RFC 0020, RFC 0034, RFC 0048, RFC 0051, RFC 0052, RFC 0053
 
 ## Summary

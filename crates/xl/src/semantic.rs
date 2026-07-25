@@ -231,6 +231,7 @@ pub enum WorkspaceTypeNode {
     Ref(WorkspaceTypeId),
     Any,
     Type,
+    TypeOf(WorkspaceTypeId),
     Int,
     Float,
     String,
@@ -314,6 +315,9 @@ impl WorkspaceTypeGraph {
             WorkspaceTypeNode::Ref(target) => self.display_with(*target, active),
             WorkspaceTypeNode::Any => "Any".into(),
             WorkspaceTypeNode::Type => "Type".into(),
+            WorkspaceTypeNode::TypeOf(instance) => {
+                format!("TypeOf({})", self.display_with(*instance, active))
+            }
             WorkspaceTypeNode::Int => "Int".into(),
             WorkspaceTypeNode::Float => "Float".into(),
             WorkspaceTypeNode::String => "String".into(),
@@ -1260,6 +1264,7 @@ fn merge_type_node(
         TypeNode::Ref(child) => WorkspaceTypeNode::Ref(map(*child, target, mapped)),
         TypeNode::Any => WorkspaceTypeNode::Any,
         TypeNode::Type => WorkspaceTypeNode::Type,
+        TypeNode::TypeOf(instance) => WorkspaceTypeNode::TypeOf(map(*instance, target, mapped)),
         TypeNode::Int => WorkspaceTypeNode::Int,
         TypeNode::Float => WorkspaceTypeNode::Float,
         TypeNode::String => WorkspaceTypeNode::String,
