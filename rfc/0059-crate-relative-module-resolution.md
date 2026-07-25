@@ -126,7 +126,7 @@ The independent `xl-deps.json` remains the development configuration. A future
 entry-only declaration embeds its publishable literal subset:
 
 ```xl
-$manifest {
+@@manifest {
     name: "command-name",
     dependencies: {
         parser: {git: "https://example/parser.git", rev: "<commit>"},
@@ -134,7 +134,7 @@ $manifest {
 };
 ```
 
-`$manifest` contains only JSON-compatible immediate data and is decoded by the
+`@@manifest` contains only JSON-compatible immediate data and is decoded by the
 same configuration model as `xl-deps.json`. It may occur only in an entry and
 does not evaluate in the VM. A packaging command will project development path
 dependencies to pinned publication dependencies and combine the manifest with
@@ -184,6 +184,6 @@ fixtures rather than retained as aliases.
 
 The implementation migrates workspace and semantic graph projection to logical
 IDs, adds crate-layout and contextual-`@src` tests, and passes the complete
-workspace suite and strict Clippy checks. The embedded `$manifest`, pinned git
+workspace suite and strict Clippy checks. The embedded `@@manifest`, pinned git
 location, packaging, stdin, and HTTP phases remain pending, so this RFC remains
 Accepted rather than Implemented.
