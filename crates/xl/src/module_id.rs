@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
-use crate::Value;
+use crate::ast::{Expr, ExprKind};
+use crate::{Value, Vm};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ModuleFormat {
@@ -150,6 +151,20 @@ pub struct ModuleResolver {
 
 impl ModuleResolver {
     pub fn for_root(root_module: &Path) -> Result<Self, ResolveModuleError> {
+        Self::for_root_source(root_module, None)
+    }
+
+    pub fn for_root_with_source(
+        root_module: &Path,
+        source: &crate::document::DocumentText,
+    ) -> Result<Self, ResolveModuleError> {
+        Self::for_root_source(root_module, Some(source.to_string()))
+    }
+
+    fn for_root_source(
+        root_module: &Path,
+        root_source: Option<String>,
+    ) -> Result<Self, ResolveModuleError> {
         let root = absolute_normalized(root_module)?;
         let start = root
             .parent()
@@ -158,10 +173,15 @@ impl ModuleResolver {
             .ancestors()
             .map(|directory| directory.join("xl-deps.json"))
             .find(|candidate| candidate.is_file());
+        let inferred_root = if start.file_name().and_then(|name| name.to_str()) == Some("bin-src") {
+            start.parent().unwrap_or(start)
+        } else {
+            start
+        };
         let workspace_root = manifest
             .as_ref()
             .and_then(|manifest| manifest.parent())
-            .unwrap_or(start)
+            .unwrap_or(inferred_root)
             .to_owned();
         let source_candidate = workspace_root.join("src");
         let source_root = if source_candidate.is_dir() {
@@ -176,8 +196,37 @@ impl ModuleResolver {
             dependencies: BTreeMap::new(),
             formats: BTreeMap::new(),
         };
+        let has_external_manifest = manifest.is_some();
         if let Some(manifest) = manifest {
             resolver.load_manifest(&manifest)?;
+        }
+        let source = match root_source {
+            Some(source) => Some(source),
+            None => match std::fs::read_to_string(&root) {
+                Ok(source) => Some(source),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => {
+                    return Err(ResolveModuleError::Io(format!(
+                        "cannot read {}: {error}",
+                        root.display()
+                    )));
+                }
+            },
+        };
+        if let Some(source) = source {
+            let mut sources = crate::SourceDatabase::default();
+            let source_id = sources.add(root.display().to_string(), source);
+            let parsed = crate::parser::parse_registered(&sources, source_id);
+            if let Some(manifest) = parsed.manifest {
+                if has_external_manifest {
+                    return Err(ResolveModuleError::Manifest(
+                        "@main cannot use both xl-deps.json and @@manifest".into(),
+                    ));
+                }
+                let mut values = Vm::new();
+                let manifest = immediate_value(&manifest, &mut values)?;
+                resolver.apply_manifest(&manifest)?;
+            }
         }
         Ok(resolver)
     }
@@ -257,6 +306,10 @@ impl ModuleResolver {
             crate::json::parse_json(&manifest.display().to_string(), &source).map_err(|error| {
                 ResolveModuleError::Manifest(format!("invalid {}: {error}", manifest.display()))
             })?;
+        self.apply_manifest(&value)
+    }
+
+    fn apply_manifest(&mut self, value: &Value) -> Result<(), ResolveModuleError> {
         let Value::Dict(manifest_value) = value else {
             return Err(ResolveModuleError::Manifest(
                 "dependency manifest must be a JSON object".into(),
@@ -421,6 +474,35 @@ pub fn resolve_root_module(path: &Path) -> Result<ResolvedModule, ResolveModuleE
     ModuleResolver::for_root(path)?.resolve_root(path)
 }
 
+fn immediate_value(expression: &Expr, vm: &mut Vm) -> Result<Value, ResolveModuleError> {
+    match &expression.value {
+        ExprKind::Int(value) => Ok(Value::Int(*value)),
+        ExprKind::Float(value) if value.is_finite() => Ok(Value::Float(*value)),
+        ExprKind::String(value) => Ok(Value::string(value.as_str())),
+        ExprKind::Atom(name) if matches!(name.as_str(), "None" | "True" | "False") => {
+            Ok(Value::atom(name.clone()))
+        }
+        ExprKind::Array(values) => values
+            .iter()
+            .map(|value| immediate_value(value, vm))
+            .collect::<Result<Vec<_>, _>>()
+            .map(|values| Value::Array(values.into())),
+        ExprKind::Dict(fields) => {
+            let entries = fields
+                .iter()
+                .map(|field| {
+                    immediate_value(&field.value.value, vm)
+                        .map(|value| (field.value.name.value.clone(), value))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            vm.make_dict(entries).map_err(ResolveModuleError::Manifest)
+        }
+        _ => Err(ResolveModuleError::Manifest(
+            "@@manifest accepts only JSON-compatible immediate values".into(),
+        )),
+    }
+}
+
 fn absolute_normalized(path: &Path) -> Result<PathBuf, ResolveModuleError> {
     if path.as_os_str().is_empty() {
         return Err(ResolveModuleError::EmptyPath);
@@ -580,6 +662,46 @@ mod tests {
         assert!(matches!(
             resolver.resolve_import(&local.id, "@main"),
             Err(ResolveModuleError::InvalidImport(_))
+        ));
+        std::fs::remove_dir_all(temporary).unwrap();
+    }
+
+    #[test]
+    fn embedded_manifest_marks_the_crate_root_and_supplies_dependencies() {
+        let temporary =
+            std::env::temp_dir().join(format!("xl-embedded-manifest-test-{}", std::process::id()));
+        let app = temporary.join("app");
+        let dependency = temporary.join("dependency");
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::create_dir_all(app.join("bin-src")).unwrap();
+        std::fs::create_dir_all(dependency.join("src")).unwrap();
+        let main = app.join("bin-src/tool.xl");
+        std::fs::write(
+            &main,
+            r#"@@manifest {name: "tool", dependencies: {dep: {path: "../dependency"}}};
+import value from "dep/value.xl";
+value"#,
+        )
+        .unwrap();
+        std::fs::write(dependency.join("src/value.xl"), "42").unwrap();
+
+        let resolver = ModuleResolver::for_root(&main).unwrap();
+        assert_eq!(resolver.workspace_root(), app);
+        let root = resolver.resolve_root(&main).unwrap();
+        assert_eq!(
+            resolver
+                .resolve_import(&root.id, "dep/value.xl")
+                .unwrap()
+                .id
+                .to_string(),
+            "dep/value.xl"
+        );
+
+        std::fs::write(app.join("xl-deps.json"), r#"{"dependencies":{}}"#).unwrap();
+        assert!(matches!(
+            ModuleResolver::for_root(&main),
+            Err(ResolveModuleError::Manifest(message))
+                if message.contains("both xl-deps.json and @@manifest")
         ));
         std::fs::remove_dir_all(temporary).unwrap();
     }

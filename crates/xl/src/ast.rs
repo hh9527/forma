@@ -13,6 +13,7 @@ pub type StringPart = Located<StringPartKind>;
 
 #[derive(Clone, Debug)]
 pub struct ProgramKind {
+    pub manifest: Option<Expr>,
     pub body: Block,
 }
 

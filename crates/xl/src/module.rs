@@ -389,7 +389,13 @@ impl Engine {
             .checkpoint()
             .await
             .map_err(|error| ModuleError::new(error.to_string()))?;
-        let resolver = ModuleResolver::for_root(path.as_ref())
+        let root_path = path.as_ref();
+        let resolver = overlays
+            .get(root_path)
+            .map_or_else(
+                || ModuleResolver::for_root(root_path),
+                |source| ModuleResolver::for_root_with_source(root_path, source),
+            )
             .map_err(|error| ModuleError::new(error.to_string()))?;
         let root_module = resolver
             .resolve_root(path.as_ref())
@@ -489,6 +495,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                 .sources
                 .add_document(path.display().to_string(), source);
             let parsed = parse_registered(&self.sources, source_id);
+            let has_manifest = parsed.manifest.is_some();
             let program = parsed.program.clone();
             let imports = parsed
                 .recovered
@@ -511,6 +518,12 @@ impl RecoverableWorkspaceBuilder<'_> {
             let mut external_interfaces = BTreeMap::new();
             let mut unavailable_imports = HashSet::new();
             let mut diagnostics = Vec::new();
+            if has_manifest && module_id != ModuleId::Main {
+                diagnostics.push(Diagnostic::error(
+                    "@@manifest is only allowed in @main",
+                    parsed.manifest.as_ref().expect("checked manifest").location,
+                ));
+            }
             for (name, location, target) in imports {
                 if target.starts_with("@bim/") {
                     semantic_imports.push(SemanticImport {
@@ -620,7 +633,9 @@ impl RecoverableWorkspaceBuilder<'_> {
                     query: self.query,
                 },
             );
-            let strict = if self.cycle_members.contains(&module_id) {
+            let strict = if self.cycle_members.contains(&module_id)
+                || has_manifest && module_id != ModuleId::Main
+            {
                 None
             } else {
                 program.as_ref().and_then(|program| {
@@ -1048,6 +1063,11 @@ impl ModuleLoader {
         let source_name = path.display().to_string();
         let source_id = self.sources.add(source_name.clone(), source);
         let parsed = parse_registered(&self.sources, source_id);
+        if parsed.manifest.is_some() && *module_id != ModuleId::Main {
+            return Err(ModuleError::new(format!(
+                "{source_name}: @@manifest is only allowed in @main"
+            )));
+        }
         let program = parsed.program.ok_or_else(|| {
             ModuleError::new(
                 parsed
@@ -4289,6 +4309,39 @@ mod tests {
             .collect::<HashSet<_>>();
         assert!(names.contains("models/user.xl"));
         assert!(names.contains("models/base.xl"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn embedded_manifest_resolves_before_imports_and_is_root_only() {
+        let directory = fixture_dir();
+        let app = directory.join("app");
+        let dependency = directory.join("dependency");
+        fs::create_dir_all(app.join("bin-src")).unwrap();
+        fs::create_dir_all(app.join("src")).unwrap();
+        fs::create_dir_all(dependency.join("src")).unwrap();
+        let main = app.join("bin-src/tool.xl");
+        fs::write(
+            &main,
+            r#"@@manifest {name: "tool", dependencies: {dep: {path: "../dependency"}}};
+               import answer from "dep/answer.xl";
+               answer"#,
+        )
+        .unwrap();
+        fs::write(dependency.join("src/answer.xl"), "42").unwrap();
+
+        let engine = recovery_engine();
+        let loaded = engine.load_module(&main, BTreeMap::new()).unwrap();
+        assert_eq!(engine.execute(&loaded).unwrap().to_string(), "42");
+
+        fs::write(
+            app.join("src/helper.xl"),
+            "@@manifest {name: \"nested\", dependencies: {}}; 1",
+        )
+        .unwrap();
+        fs::write(&main, "import helper from \"@src/helper.xl\"; helper").unwrap();
+        let error = engine.load_module(&main, BTreeMap::new()).unwrap_err();
+        assert!(error.message().contains("only allowed in @main"));
         fs::remove_dir_all(directory).unwrap();
     }
 }

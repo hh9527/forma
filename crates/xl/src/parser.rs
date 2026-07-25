@@ -11,6 +11,7 @@ use crate::syntax::xl::parser::{CstData, Node, NodeRef, Rule};
 #[derive(Debug)]
 pub struct FrontendParse {
     pub cst: CstData,
+    pub manifest: Option<Expr>,
     pub program: Option<Program>,
     pub recovered: RecoveredProgram,
     pub diagnostics: Vec<Diagnostic>,
@@ -42,6 +43,13 @@ pub fn parse_registered(sources: &SourceDatabase, source_id: SourceId) -> Fronte
     let parsed = crate::syntax::xl::parse_document(source_id, source.text());
     let mut diagnostics = parsed.diagnostics;
     let lowerer = Lowerer::new(source_id, source.text(), &parsed.syntax);
+    let manifest = match lowerer.manifest() {
+        Ok(manifest) => manifest,
+        Err(diagnostic) => {
+            push_unique_diagnostic(&mut diagnostics, diagnostic);
+            None
+        }
+    };
     let recovered = lowerer.recover_program(&mut diagnostics);
     let program = if diagnostics.is_empty() {
         match lowerer.program() {
@@ -56,6 +64,7 @@ pub fn parse_registered(sources: &SourceDatabase, source_id: SourceId) -> Fronte
     };
     FrontendParse {
         cst: parsed.syntax,
+        manifest,
         program,
         recovered,
         diagnostics,
@@ -103,6 +112,41 @@ enum CallArgument {
     },
 }
 
+fn validate_manifest_literal(expression: &Expr) -> Result<(), Diagnostic> {
+    let valid = match &expression.value {
+        ExprKind::Int(_) | ExprKind::String(_) => true,
+        ExprKind::Float(value) => value.is_finite(),
+        ExprKind::Atom(name) => matches!(name.as_str(), "None" | "True" | "False"),
+        ExprKind::Array(values) => {
+            for value in values {
+                validate_manifest_literal(value)?;
+            }
+            true
+        }
+        ExprKind::Dict(fields) => {
+            for field in fields {
+                if !field.value.decorators.is_empty() {
+                    return Err(Diagnostic::error(
+                        "@@manifest fields cannot have decorators",
+                        field.location,
+                    ));
+                }
+                validate_manifest_literal(&field.value.value)?;
+            }
+            true
+        }
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(Diagnostic::error(
+            "@@manifest accepts only JSON-compatible immediate values",
+            expression.location,
+        ))
+    }
+}
+
 impl<'a> Lowerer<'a> {
     fn new(
         source_id: SourceId,
@@ -125,10 +169,34 @@ impl<'a> Lowerer<'a> {
             .ok_or_else(|| self.error(root, "program has no body"))?;
         Ok(located(
             ProgramKind {
+                manifest: self.manifest()?,
                 body: self.block_body(body_node)?,
             },
             self.location(root),
         ))
+    }
+
+    fn manifest(&self) -> Result<Option<Expr>, Diagnostic> {
+        let Some(node) = self
+            .rule_children(NodeRef::ROOT)
+            .find(|node| self.rule(*node) == Some(Rule::ModuleManifest))
+        else {
+            return Ok(None);
+        };
+        let name = self
+            .children(node)
+            .find(|child| matches!(self.cst.get(*child), Node::Token(Token::Identifier, _)))
+            .ok_or_else(|| self.error(node, "module directive has no name"))?;
+        if self.text(name) != "manifest" {
+            return Err(self.error(name, "unknown module directive; expected @@manifest"));
+        }
+        let value = self
+            .rule_children(node)
+            .find(|child| self.rule(*child) == Some(Rule::DictExpr))
+            .ok_or_else(|| self.error(node, "@@manifest requires a Dict literal"))?;
+        let value = self.expression(value)?;
+        validate_manifest_literal(&value)?;
+        Ok(Some(value))
     }
 
     fn recover_program(&self, diagnostics: &mut Vec<Diagnostic>) -> RecoveredProgram {
@@ -1749,5 +1817,28 @@ mod tests {
 
         let unterminated = parse("test", r#""unfinished"#).unwrap_err();
         assert!(unterminated.message.contains("expected"));
+    }
+
+    #[test]
+    fn lowers_only_immediate_module_manifests() {
+        let program = parse(
+            "manifest.xl",
+            r#"@@manifest {name: "tool", dependencies: {}, enabled: 'True}; 0"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            program.value.manifest.as_ref().map(|value| &value.value),
+            Some(ExprKind::Dict(_))
+        ));
+
+        for invalid in [
+            "@@other {}; 0",
+            "@@manifest {name: value}; 0",
+            "@@manifest {name: \"tool-\\{value}\"}; 0",
+            "let value = 1; @@manifest {}; 0",
+            "@@manifest {}; @@manifest {}; 0",
+        ] {
+            assert!(parse("invalid-manifest.xl", invalid).is_err(), "{invalid}");
+        }
     }
 }

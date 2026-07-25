@@ -203,6 +203,7 @@ pub(crate) fn compile_metadata_initializer(
     );
     let metadata_program = located(
         ProgramKind {
+            manifest: None,
             body: located(
                 BlockKind {
                     bindings,

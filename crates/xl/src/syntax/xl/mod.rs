@@ -100,6 +100,20 @@ mod tests {
     }
 
     #[test]
+    fn cst_preserves_a_leading_module_manifest() {
+        let source = r#"#!/usr/bin/env -S xl exec
+@@manifest {name: "tool", dependencies: {}};
+fn(settings, request) { {args: request.args} }"#;
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("manifest.xl", source);
+        let parsed = parse(id, source);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+    }
+
+    #[test]
     fn cst_preserves_generic_definition_declarations_losslessly() {
         let source =
             "decl identity: for(A) Fn(A) -> A; def identity = fn(value) { value }; identity";

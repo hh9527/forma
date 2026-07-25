@@ -14,7 +14,9 @@ token Whitespace Comment;
 skip Whitespace Comment;
 start program;
 
-program: body;
+program: [?1 module_manifest] body;
+module_manifest: '@' '@' Identifier manifest_dict ';';
+manifest_dict: '{' [dict_field (?1 ',' dict_field)* [',']] '}' @dict_expr;
 body: (?1 binding)* expression;
 binding^: let_binding | decl_binding | def_binding | native_binding | type_binding | import_binding;
 let_binding: 'let' Identifier [':' expression] '=' expression ';';
