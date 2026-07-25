@@ -1,6 +1,6 @@
 # RFC 0058: Executable value adapter
 
-- Status: Accepted
+- Status: Implemented
 - Depends on: RFC 0004, RFC 0005, RFC 0011, RFC 0054
 
 ## Summary
@@ -158,3 +158,27 @@ consumer and does not alter parsing or module identity.
 The first implementation has no artifact contents or known layout. Indexed
 environment variables expose computed positions without implying installation
 has occurred.
+
+## Implementation result
+
+Implemented in July 2026.
+
+- `xl run` and `xl exec` share the same module evaluation helper and therefore
+  retain identical loading, quota, debug, and runtime behavior.
+- The CLI validates the evaluated legacy `Value` as an exact three-field
+  `ExecSpec`; field and array-element mismatches fail before process creation.
+- Locator bytes are mapped with stable 64-bit FNV-1a to the documented cache
+  layout. The adapter only constructs `PathBuf` values and performs no artifact
+  filesystem or network operation.
+- The child is launched through `std::process::Command` with direct arguments,
+  inherited standard streams and environment, and indexed
+  `XL_EXEC_INSTALL_*` variables. Stale indexed variables inherited by `xl` are
+  removed from the child environment.
+- CLI integration tests cover shebang evaluation, repeated path stability,
+  child visibility, absence of the simulated path, exact-shape rejection, and
+  non-zero child status. The process-observation tests are Unix-only because
+  they use the standard `env` and `false` utilities; the adapter implementation
+  itself uses portable Rust process APIs.
+
+No download, unpack, cache creation, `PATH` modification, or language-level
+effect was added.
