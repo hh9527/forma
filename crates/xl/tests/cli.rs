@@ -121,7 +121,7 @@ fn run_writes_debug_events_only_to_stderr() {
     let directory = fixture_dir();
     fs::write(
         directory.join("debug.xl"),
-        r#"import debug from "core:debug";
+        r#"import debug from "@bim/std/debug";
            42 |> debug.dbg_with\("answer\nlabel", _)"#,
     )
     .unwrap();
@@ -148,7 +148,7 @@ fn exec_dry_run_invokes_explicit_pure_entry() {
     fs::write(
         &main,
         r#"#!/usr/bin/env -S xl exec --dry-run
-import hash from "core:hash";
+import hash from "@bim/std/hash";
 let captured = "python3";
 fn(settings, request) {
     {

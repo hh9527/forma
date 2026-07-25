@@ -49,60 +49,40 @@ impl ModuleFormat {
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub enum ResolvedModuleId {
-    Core(String),
-    Local(PathBuf),
-    Dependency {
-        name: String,
-        resolution_root: PathBuf,
-        path: PathBuf,
-        physical_path: PathBuf,
-    },
+pub enum ModuleId {
+    Main,
+    Source(PathBuf),
+    Builtin(String),
+    Dependency { name: String, path: PathBuf },
 }
 
-impl ResolvedModuleId {
-    pub fn core(name: impl Into<String>) -> Self {
-        Self::Core(name.into())
-    }
-
-    pub fn local(path: impl Into<PathBuf>) -> Self {
-        Self::Local(path.into())
-    }
-
-    pub fn path(&self) -> Option<&Path> {
-        match self {
-            Self::Core(_) => None,
-            Self::Local(path) => Some(path),
-            Self::Dependency { physical_path, .. } => Some(physical_path),
-        }
+impl ModuleId {
+    pub fn builtin(name: impl Into<String>) -> Self {
+        Self::Builtin(name.into())
     }
 }
 
-impl fmt::Display for ResolvedModuleId {
+impl fmt::Display for ModuleId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Core(name) => formatter.write_str(name),
-            Self::Local(path) => {
-                formatter.write_str("local://")?;
-                write_uri_path(formatter, path)
-            }
-            Self::Dependency { name, path, .. } => {
-                write!(formatter, "deps://{name}/")?;
-                write_uri_path(formatter, path)
-            }
+            Self::Main => formatter.write_str("@main"),
+            Self::Source(path) => write!(formatter, "@src/{}", path.display()),
+            Self::Builtin(name) => formatter.write_str(name),
+            Self::Dependency { name, path } => write!(formatter, "{name}/{}", path.display()),
         }
     }
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ResolvedModule {
-    pub id: ResolvedModuleId,
+    pub id: ModuleId,
     pub format: ModuleFormat,
+    physical_path: Option<PathBuf>,
 }
 
 impl ResolvedModule {
     pub fn path(&self) -> Option<&Path> {
-        self.id.path()
+        self.physical_path.as_deref()
     }
 }
 
@@ -120,8 +100,8 @@ pub enum ResolveModuleError {
     UnknownExtension(String),
     UnknownFormat(String),
     UnknownDependency(String),
-    InvalidDependencyUri(String),
-    DependencyEscape(String),
+    InvalidImport(String),
+    CrateEscape(String),
     Manifest(String),
     FormatConflict {
         configured: ModuleFormat,
@@ -141,12 +121,9 @@ impl fmt::Display for ResolveModuleError {
             }
             Self::UnknownFormat(format) => write!(formatter, "unknown module format {format:?}"),
             Self::UnknownDependency(name) => write!(formatter, "unknown dependency {name:?}"),
-            Self::InvalidDependencyUri(uri) => write!(formatter, "invalid dependency URI {uri:?}"),
-            Self::DependencyEscape(uri) => {
-                write!(
-                    formatter,
-                    "dependency module escapes its declared root: {uri}"
-                )
+            Self::InvalidImport(request) => write!(formatter, "invalid module import {request:?}"),
+            Self::CrateEscape(request) => {
+                write!(formatter, "module import escapes its crate root: {request}")
             }
             Self::Manifest(message) | Self::Io(message) => formatter.write_str(message),
             Self::FormatConflict {
@@ -165,6 +142,8 @@ impl fmt::Display for ResolveModuleError {
 #[derive(Clone, Debug)]
 pub struct ModuleResolver {
     workspace_root: PathBuf,
+    source_root: PathBuf,
+    main_path: PathBuf,
     dependencies: BTreeMap<String, PathBuf>,
     formats: BTreeMap<String, ModuleFormat>,
 }
@@ -184,8 +163,16 @@ impl ModuleResolver {
             .and_then(|manifest| manifest.parent())
             .unwrap_or(start)
             .to_owned();
+        let source_candidate = workspace_root.join("src");
+        let source_root = if source_candidate.is_dir() {
+            resolve_physical(&source_candidate)?
+        } else {
+            resolve_physical(start)?
+        };
         let mut resolver = Self {
             workspace_root,
+            source_root,
+            main_path: resolve_physical(&root)?,
             dependencies: BTreeMap::new(),
             formats: BTreeMap::new(),
         };
@@ -201,53 +188,65 @@ impl ModuleResolver {
 
     pub fn resolve_root(&self, path: &Path) -> Result<ResolvedModule, ResolveModuleError> {
         let path = resolve_physical(path)?;
-        let format = self.format_for(&ResolvedModuleId::local(path.clone()), &path)?;
+        let format = self.format_for(&ModuleId::Main, &path)?;
         Ok(ResolvedModule {
-            id: ResolvedModuleId::local(path),
+            id: ModuleId::Main,
             format,
+            physical_path: Some(path),
         })
     }
 
     pub fn resolve_import(
         &self,
-        importer: &ResolvedModuleId,
+        importer: &ModuleId,
         target: &str,
     ) -> Result<ResolvedModule, ResolveModuleError> {
-        if target.starts_with("core:") {
+        if target.starts_with("@bim/") {
             return Ok(ResolvedModule {
-                id: ResolvedModuleId::core(target),
+                id: ModuleId::builtin(target),
                 format: ModuleFormat::Xl,
+                physical_path: None,
             });
-        }
-        if let Some(rest) = target.strip_prefix("deps://") {
-            return self.resolve_dependency(rest, target);
         }
         if target.is_empty() {
             return Err(ResolveModuleError::EmptyPath);
         }
-        match importer {
-            ResolvedModuleId::Local(path) => self.resolve_root(
-                &path
-                    .parent()
-                    .ok_or_else(|| ResolveModuleError::Io("local importer has no parent".into()))?
-                    .join(target),
-            ),
-            ResolvedModuleId::Dependency {
-                name,
-                resolution_root,
-                path,
-                ..
-            } => {
-                let logical = lexical_normalize_relative(
-                    &path.parent().unwrap_or_else(|| Path::new("")).join(target),
-                )
-                .ok_or_else(|| ResolveModuleError::DependencyEscape(target.into()))?;
-                self.resolve_dependency_parts(name, resolution_root, logical, target)
-            }
-            ResolvedModuleId::Core(_) => Err(ResolveModuleError::Io(
-                "core modules cannot use relative imports".into(),
-            )),
+        if target == "@main" || target.starts_with("@main/") {
+            return Err(ResolveModuleError::InvalidImport(target.into()));
         }
+        if let Some(path) = target.strip_prefix("@src/") {
+            return self.resolve_in_owner(importer, Path::new(path), target);
+        }
+        if target.starts_with("./") || target.starts_with("../") {
+            return match importer {
+                ModuleId::Main => {
+                    let logical = lexical_normalize_relative(Path::new(target))
+                        .ok_or_else(|| ResolveModuleError::CrateEscape(target.into()))?;
+                    self.resolve_source(logical, target)
+                }
+                ModuleId::Source(path) => {
+                    let logical = lexical_normalize_relative(
+                        &path.parent().unwrap_or_else(|| Path::new("")).join(target),
+                    )
+                    .ok_or_else(|| ResolveModuleError::CrateEscape(target.into()))?;
+                    self.resolve_source(logical, target)
+                }
+                ModuleId::Dependency { name, path } => {
+                    let logical = lexical_normalize_relative(
+                        &path.parent().unwrap_or_else(|| Path::new("")).join(target),
+                    )
+                    .ok_or_else(|| ResolveModuleError::CrateEscape(target.into()))?;
+                    self.resolve_dependency_parts(name, logical, target)
+                }
+                ModuleId::Builtin(_) => Err(ResolveModuleError::InvalidImport(
+                    "built-in modules cannot use relative imports".into(),
+                )),
+            };
+        }
+        if target.starts_with('@') {
+            return Err(ResolveModuleError::InvalidImport(target.into()));
+        }
+        self.resolve_dependency(target, target)
     }
 
     fn load_manifest(&mut self, manifest: &Path) -> Result<(), ResolveModuleError> {
@@ -320,43 +319,87 @@ impl ModuleResolver {
     ) -> Result<ResolvedModule, ResolveModuleError> {
         let (name, path) = rest
             .split_once('/')
-            .ok_or_else(|| ResolveModuleError::InvalidDependencyUri(original.into()))?;
+            .ok_or_else(|| ResolveModuleError::InvalidImport(original.into()))?;
         if name.is_empty() || path.is_empty() {
-            return Err(ResolveModuleError::InvalidDependencyUri(original.into()));
+            return Err(ResolveModuleError::InvalidImport(original.into()));
         }
-        let root = self
-            .dependencies
-            .get(name)
-            .ok_or_else(|| ResolveModuleError::UnknownDependency(name.into()))?;
         let path = lexical_normalize_relative(Path::new(path))
-            .ok_or_else(|| ResolveModuleError::DependencyEscape(original.into()))?;
-        self.resolve_dependency_parts(name, root, path, original)
+            .ok_or_else(|| ResolveModuleError::CrateEscape(original.into()))?;
+        self.resolve_dependency_parts(name, path, original)
+    }
+
+    fn resolve_in_owner(
+        &self,
+        importer: &ModuleId,
+        path: &Path,
+        original: &str,
+    ) -> Result<ResolvedModule, ResolveModuleError> {
+        let path = lexical_normalize_relative(path)
+            .ok_or_else(|| ResolveModuleError::CrateEscape(original.into()))?;
+        match importer {
+            ModuleId::Main | ModuleId::Source(_) => self.resolve_source(path, original),
+            ModuleId::Dependency { name, .. } => {
+                self.resolve_dependency_parts(name, path, original)
+            }
+            ModuleId::Builtin(_) => Err(ResolveModuleError::InvalidImport(
+                "@src is unavailable to built-in modules".into(),
+            )),
+        }
+    }
+
+    fn resolve_source(
+        &self,
+        path: PathBuf,
+        original: &str,
+    ) -> Result<ResolvedModule, ResolveModuleError> {
+        let physical = resolve_physical(&self.source_root.join(&path))?;
+        if !physical.starts_with(&self.source_root) || physical == self.main_path {
+            return Err(ResolveModuleError::CrateEscape(original.into()));
+        }
+        let id = ModuleId::Source(path);
+        let format = self.format_for(&id, &physical)?;
+        Ok(ResolvedModule {
+            id,
+            format,
+            physical_path: Some(physical),
+        })
     }
 
     fn resolve_dependency_parts(
         &self,
         name: &str,
-        root: &Path,
         path: PathBuf,
         original: &str,
     ) -> Result<ResolvedModule, ResolveModuleError> {
-        let physical = resolve_physical(&root.join(&path))?;
-        if !physical.starts_with(root) {
-            return Err(ResolveModuleError::DependencyEscape(original.into()));
+        let root = self
+            .dependencies
+            .get(name)
+            .ok_or_else(|| ResolveModuleError::UnknownDependency(name.into()))?;
+        let source_candidate = root.join("src");
+        let source_root = if source_candidate.is_dir() {
+            resolve_physical(&source_candidate)?
+        } else {
+            root.clone()
+        };
+        let physical = resolve_physical(&source_root.join(&path))?;
+        if !physical.starts_with(&source_root) {
+            return Err(ResolveModuleError::CrateEscape(original.into()));
         }
-        let id = ResolvedModuleId::Dependency {
+        let id = ModuleId::Dependency {
             name: name.into(),
-            resolution_root: root.to_owned(),
             path,
-            physical_path: physical.clone(),
         };
         let format = self.format_for(&id, &physical)?;
-        Ok(ResolvedModule { id, format })
+        Ok(ResolvedModule {
+            id,
+            format,
+            physical_path: Some(physical),
+        })
     }
 
     fn format_for(
         &self,
-        id: &ResolvedModuleId,
+        id: &ModuleId,
         physical: &Path,
     ) -> Result<ModuleFormat, ResolveModuleError> {
         let configured = self.formats.get(&id.to_string()).copied();
@@ -445,26 +488,14 @@ fn lexical_normalize_relative(path: &Path) -> Option<PathBuf> {
     Some(normalized)
 }
 
-fn write_uri_path(formatter: &mut fmt::Formatter<'_>, path: &Path) -> fmt::Result {
-    let path = path.to_str().ok_or(fmt::Error)?;
-    for byte in path.bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~' | b':') {
-            formatter.write_str(&(byte as char).to_string())?;
-        } else {
-            write!(formatter, "%{byte:02X}")?;
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn formats_local_ids_without_format_fragments() {
-        let id = ResolvedModuleId::local("/workspace/a file.yml");
-        assert_eq!(id.to_string(), "local:///workspace/a%20file.yml");
+    fn formats_logical_ids_without_physical_paths() {
+        let id = ModuleId::Source(PathBuf::from("a file.yml"));
+        assert_eq!(id.to_string(), "@src/a file.yml");
         assert_eq!(
             ModuleFormat::from_path(Path::new("a.yaml")),
             Ok(ModuleFormat::Yaml)
@@ -493,11 +524,63 @@ mod tests {
         let root = resolver
             .resolve_root(&temporary.join("app/main.xl"))
             .unwrap();
-        let dependency = resolver
-            .resolve_import(&root.id, "deps://models/user.xl")
-            .unwrap();
-        assert_eq!(dependency.id.to_string(), "deps://models/user.xl");
+        let dependency = resolver.resolve_import(&root.id, "models/user.xl").unwrap();
+        assert_eq!(dependency.id.to_string(), "models/user.xl");
         assert_eq!(dependency.format, ModuleFormat::Xl);
+        std::fs::remove_dir_all(temporary).unwrap();
+    }
+
+    #[test]
+    fn crate_layout_resolves_main_source_and_contextual_source_roots() {
+        let temporary =
+            std::env::temp_dir().join(format!("xl-crate-layout-test-{}", std::process::id()));
+        let app = temporary.join("app");
+        let dependency = temporary.join("dependency");
+        std::fs::create_dir_all(app.join("src/model")).unwrap();
+        std::fs::create_dir_all(app.join("bin-src")).unwrap();
+        std::fs::create_dir_all(dependency.join("src/model")).unwrap();
+        let main = app.join("bin-src/tool.xl");
+        std::fs::write(&main, "0").unwrap();
+        std::fs::write(app.join("src/model/a.xl"), "0").unwrap();
+        std::fs::write(dependency.join("src/model/a.xl"), "0").unwrap();
+        std::fs::write(
+            app.join("xl-deps.json"),
+            r#"{"dependencies":{"parser":{"path":"../dependency"}}}"#,
+        )
+        .unwrap();
+
+        let resolver = ModuleResolver::for_root(&main).unwrap();
+        let root = resolver.resolve_root(&main).unwrap();
+        assert_eq!(root.id, ModuleId::Main);
+        assert_eq!(root.to_string(), "@main");
+
+        let local = resolver
+            .resolve_import(&root.id, "@src/model/a.xl")
+            .unwrap();
+        assert_eq!(local.to_string(), "@src/model/a.xl");
+        assert_eq!(
+            resolver
+                .resolve_import(&root.id, "./model/a.xl")
+                .unwrap()
+                .id,
+            local.id
+        );
+
+        let dependency = resolver
+            .resolve_import(&root.id, "parser/model/a.xl")
+            .unwrap();
+        assert_eq!(dependency.to_string(), "parser/model/a.xl");
+        assert_eq!(
+            resolver
+                .resolve_import(&dependency.id, "@src/model/a.xl")
+                .unwrap()
+                .id,
+            dependency.id
+        );
+        assert!(matches!(
+            resolver.resolve_import(&local.id, "@main"),
+            Err(ResolveModuleError::InvalidImport(_))
+        ));
         std::fs::remove_dir_all(temporary).unwrap();
     }
 
@@ -515,7 +598,7 @@ mod tests {
         let dotted = resolver
             .resolve_import(&root.id, "./sub/../data.json")
             .unwrap();
-        let absolute = resolver.resolve_root(&data).unwrap();
+        let absolute = resolver.resolve_import(&root.id, "@src/data.json").unwrap();
         assert_eq!(dotted, absolute);
         assert_eq!(dotted.format, ModuleFormat::Json);
         assert!(ModuleFormat::from_path(Path::new("data.JSON")).is_err());
@@ -539,15 +622,13 @@ mod tests {
             temporary.join("xl-deps.json"),
             r#"{
                 "dependencies": {"dep": {"path": "dependency"}},
-                "formats": {"deps://dep/schema": "json"}
+                "formats": {"dep/schema": "json"}
             }"#,
         )
         .unwrap();
         let resolver = ModuleResolver::for_root(&main).unwrap();
         let root = resolver.resolve_root(&main).unwrap();
-        let schema = resolver
-            .resolve_import(&root.id, "deps://dep/schema")
-            .unwrap();
+        let schema = resolver.resolve_import(&root.id, "dep/schema").unwrap();
         assert_eq!(schema.format, ModuleFormat::Json);
 
         std::fs::write(temporary.join("xl-deps.json"), r#"{"dependencies": []}"#).unwrap();
@@ -588,12 +669,12 @@ mod tests {
         let resolver = ModuleResolver::for_root(&app.join("main.xl")).unwrap();
         let root = resolver.resolve_root(&app.join("main.xl")).unwrap();
         assert!(matches!(
-            resolver.resolve_import(&root.id, "deps://dep/../outside.xl"),
-            Err(ResolveModuleError::DependencyEscape(_))
+            resolver.resolve_import(&root.id, "dep/../outside.xl"),
+            Err(ResolveModuleError::CrateEscape(_))
         ));
         assert!(matches!(
-            resolver.resolve_import(&root.id, "deps://dep/escape.xl"),
-            Err(ResolveModuleError::DependencyEscape(_))
+            resolver.resolve_import(&root.id, "dep/escape.xl"),
+            Err(ResolveModuleError::CrateEscape(_))
         ));
         std::fs::remove_dir_all(temporary).unwrap();
     }

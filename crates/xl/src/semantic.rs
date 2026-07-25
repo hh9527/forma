@@ -1,6 +1,6 @@
 use crate::ast::Program;
 use crate::hir::{HirDefinitionId, HirProgram, HirResolution};
-use crate::module_id::ResolvedModuleId;
+use crate::module_id::ModuleId;
 use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
 use crate::types::{Analysis, PartialAnalysis, TypeGraph, TypeId, TypeNode};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -893,8 +893,8 @@ impl WorkspaceSnapshot {
             .iter()
             .flat_map(|input| input.imports.iter())
             .filter_map(|import| match &import.target {
-                ResolvedModuleId::Core(name) => Some(name.clone()),
-                ResolvedModuleId::Local(_) | ResolvedModuleId::Dependency { .. } => None,
+                ModuleId::Builtin(name) => Some(name.clone()),
+                ModuleId::Main | ModuleId::Source(_) | ModuleId::Dependency { .. } => None,
             })
             .collect::<HashSet<_>>();
         for name in core_names.drain() {
@@ -1316,7 +1316,7 @@ fn merge_type_node(
 pub(crate) struct SemanticImport {
     pub name: String,
     pub location: Location,
-    pub target: ResolvedModuleId,
+    pub target: ModuleId,
 }
 
 #[derive(Clone, Debug)]

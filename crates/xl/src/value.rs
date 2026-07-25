@@ -158,12 +158,12 @@ pub(crate) enum CoreAttributesFunction {
 impl CoreAttributesFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Normalize => "core:attributes.normalize",
-            Self::Add => "core:attributes.add",
-            Self::Get => "core:attributes.get",
-            Self::Has => "core:attributes.has",
-            Self::All => "core:attributes.all",
-            Self::Strip => "core:attributes.strip",
+            Self::Normalize => "@bim/std/attributes.normalize",
+            Self::Add => "@bim/std/attributes.add",
+            Self::Get => "@bim/std/attributes.get",
+            Self::Has => "@bim/std/attributes.has",
+            Self::All => "@bim/std/attributes.all",
+            Self::Strip => "@bim/std/attributes.strip",
         }
     }
 
@@ -231,7 +231,7 @@ pub(crate) enum CoreHashFunction {
 
 impl CoreHashFunction {
     pub(crate) const fn name(self) -> &'static str {
-        "core:hash.sha256"
+        "@bim/std/hash.sha256"
     }
 
     pub(crate) const fn arity(self) -> usize {
@@ -248,8 +248,8 @@ pub(crate) enum CoreCodecFunction {
 impl CoreCodecFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Decode => "core:codec.decode",
-            Self::Encode => "core:codec.encode",
+            Self::Decode => "@bim/std/codec.decode",
+            Self::Encode => "@bim/std/codec.encode",
         }
     }
 
@@ -265,7 +265,7 @@ pub(crate) enum CoreResultFunction {
 
 impl CoreResultFunction {
     pub(crate) const fn name(self) -> &'static str {
-        "core:result.unwrap"
+        "@bim/std/result.unwrap"
     }
 
     pub(crate) const fn arity(self) -> usize {
@@ -296,22 +296,22 @@ pub(crate) enum CoreJsonFunction {
 impl CoreJsonFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Parse => "core:json.parse",
-            Self::Decode => "core:json.decode",
-            Self::Stringify => "core:json.stringify",
-            Self::StringifyPretty => "core:json.stringify_pretty",
-            Self::StringifyPrettyValue => "core:json.stringify_pretty.configured",
-            Self::Rename => "core:json.rename",
-            Self::RenameDecorator => "core:json.rename.configured",
-            Self::RenameAll => "core:json.rename_all",
-            Self::RenameAllDecorator => "core:json.rename_all.configured",
-            Self::Flatten => "core:json.flatten",
-            Self::Untagged => "core:json.untagged",
-            Self::Schema => "core:json.schema",
-            Self::Default => "core:json.default",
-            Self::DefaultDecorator => "core:json.default.configured",
-            Self::SkipSerializingIf => "core:json.skip_serializing_if",
-            Self::SkipSerializingIfDecorator => "core:json.skip_serializing_if.configured",
+            Self::Parse => "@bim/std/json.parse",
+            Self::Decode => "@bim/std/json.decode",
+            Self::Stringify => "@bim/std/json.stringify",
+            Self::StringifyPretty => "@bim/std/json.stringify_pretty",
+            Self::StringifyPrettyValue => "@bim/std/json.stringify_pretty.configured",
+            Self::Rename => "@bim/std/json.rename",
+            Self::RenameDecorator => "@bim/std/json.rename.configured",
+            Self::RenameAll => "@bim/std/json.rename_all",
+            Self::RenameAllDecorator => "@bim/std/json.rename_all.configured",
+            Self::Flatten => "@bim/std/json.flatten",
+            Self::Untagged => "@bim/std/json.untagged",
+            Self::Schema => "@bim/std/json.schema",
+            Self::Default => "@bim/std/json.default",
+            Self::DefaultDecorator => "@bim/std/json.default.configured",
+            Self::SkipSerializingIf => "@bim/std/json.skip_serializing_if",
+            Self::SkipSerializingIfDecorator => "@bim/std/json.skip_serializing_if.configured",
         }
     }
 
@@ -332,8 +332,8 @@ impl CoreJsonFunction {
 impl CoreDebugFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Dbg => "core:debug.dbg",
-            Self::DbgWith => "core:debug.dbg_with",
+            Self::Dbg => "@bim/std/debug.dbg",
+            Self::DbgWith => "@bim/std/debug.dbg_with",
         }
     }
 
@@ -348,11 +348,11 @@ impl CoreDebugFunction {
 impl CoreDictFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Keys => "core:dict.keys",
-            Self::Values => "core:dict.values",
-            Self::Pairs => "core:dict.pairs",
-            Self::FromPairs => "core:dict.from_pairs",
-            Self::Merge => "core:dict.merge",
+            Self::Keys => "@bim/std/dict.keys",
+            Self::Values => "@bim/std/dict.values",
+            Self::Pairs => "@bim/std/dict.pairs",
+            Self::FromPairs => "@bim/std/dict.from_pairs",
+            Self::Merge => "@bim/std/dict.merge",
         }
     }
 
@@ -367,11 +367,11 @@ impl CoreDictFunction {
 impl CoreArrayFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Length => "core:array.length",
-            Self::Map => "core:array.map",
-            Self::Filter => "core:array.filter",
-            Self::FlatMap => "core:array.flat_map",
-            Self::Fold => "core:array.fold",
+            Self::Length => "@bim/std/array.length",
+            Self::Map => "@bim/std/array.map",
+            Self::Filter => "@bim/std/array.filter",
+            Self::FlatMap => "@bim/std/array.flat_map",
+            Self::Fold => "@bim/std/array.fold",
         }
     }
 

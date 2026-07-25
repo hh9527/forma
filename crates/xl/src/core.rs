@@ -3,15 +3,15 @@ use crate::value::{
     CoreDictFunction, CoreHashFunction, CoreJsonFunction, CoreResultFunction, NativeFunction,
 };
 
-pub(crate) const ARRAY_MODULE: &str = "core:array";
-pub(crate) const ATTRIBUTES_MODULE: &str = "core:attributes";
-pub(crate) const DICT_MODULE: &str = "core:dict";
-pub(crate) const DEBUG_MODULE: &str = "core:debug";
-pub(crate) const CODEC_MODULE: &str = "core:codec";
-pub(crate) const OPTION_MODULE: &str = "core:option";
-pub(crate) const RESULT_MODULE: &str = "core:result";
-pub(crate) const JSON_MODULE: &str = "core:json";
-pub(crate) const HASH_MODULE: &str = "core:hash";
+pub(crate) const ARRAY_MODULE: &str = "@bim/std/array";
+pub(crate) const ATTRIBUTES_MODULE: &str = "@bim/std/attributes";
+pub(crate) const DICT_MODULE: &str = "@bim/std/dict";
+pub(crate) const DEBUG_MODULE: &str = "@bim/std/debug";
+pub(crate) const CODEC_MODULE: &str = "@bim/std/codec";
+pub(crate) const OPTION_MODULE: &str = "@bim/std/option";
+pub(crate) const RESULT_MODULE: &str = "@bim/std/result";
+pub(crate) const JSON_MODULE: &str = "@bim/std/json";
+pub(crate) const HASH_MODULE: &str = "@bim/std/hash";
 
 pub(crate) struct CoreModuleSpec {
     pub(crate) name: &'static str,

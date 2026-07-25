@@ -6,7 +6,7 @@ use crate::compiler::{
 use crate::core::module_specs;
 use crate::heap::{Heap, PersistentValue, publish_root, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
-use crate::module_id::{ModuleFormat, ModuleResolver, ResolvedModule, ResolvedModuleId};
+use crate::module_id::{ModuleFormat, ModuleId, ModuleResolver, ResolvedModule};
 use crate::parser::parse_registered;
 use crate::semantic::{
     SemanticImport, SemanticModuleInput, WorkspaceModuleKind, WorkspaceModuleState,
@@ -434,10 +434,10 @@ struct RecoverableWorkspaceBuilder<'a> {
     sources: SourceDatabase,
     core_modules: HashMap<String, (Value, ModuleInterface)>,
     inputs: BTreeMap<String, SemanticModuleInput>,
-    values: HashMap<ResolvedModuleId, Value>,
-    interfaces: HashMap<ResolvedModuleId, ModuleInterface>,
-    visiting: Vec<ResolvedModuleId>,
-    cycle_members: HashSet<ResolvedModuleId>,
+    values: HashMap<ModuleId, Value>,
+    interfaces: HashMap<ModuleId, ModuleInterface>,
+    visiting: Vec<ModuleId>,
+    cycle_members: HashSet<ModuleId>,
     cycle_reported: bool,
 }
 
@@ -452,8 +452,8 @@ impl RecoverableWorkspaceBuilder<'_> {
             {
                 return None;
             }
+            let path = module.path()?.to_owned();
             let module_id = module.id;
-            let path = module_id.path()?.to_owned();
             if let Some(value) = self.values.get(&module_id) {
                 return Some(value.clone());
             }
@@ -512,11 +512,11 @@ impl RecoverableWorkspaceBuilder<'_> {
             let mut unavailable_imports = HashSet::new();
             let mut diagnostics = Vec::new();
             for (name, location, target) in imports {
-                if target.starts_with("core:") {
+                if target.starts_with("@bim/") {
                     semantic_imports.push(SemanticImport {
                         name: name.clone(),
                         location,
-                        target: ResolvedModuleId::core(target.clone()),
+                        target: ModuleId::builtin(target.clone()),
                     });
                     if let Some((value, interface)) = self.core_modules.get(&target) {
                         external_values.insert(name.clone(), value.clone());
@@ -524,7 +524,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                     } else {
                         unavailable_imports.insert(name);
                         diagnostics.push(Diagnostic::error(
-                            format!("unknown core module {target:?}"),
+                            format!("unknown built-in module {target:?}"),
                             location,
                         ));
                         self.inputs
@@ -680,8 +680,8 @@ impl RecoverableWorkspaceBuilder<'_> {
         {
             return None;
         }
+        let path = module.path()?.to_owned();
         let module_id = module.id;
-        let path = module_id.path()?.to_owned();
         if let Some(value) = self.values.get(&module_id) {
             return Some(value.clone());
         }
@@ -861,10 +861,10 @@ pub fn load_module_with_quota_and_debug_sink(
 
 struct ModuleLoader {
     resolver: ModuleResolver,
-    cache: HashMap<ResolvedModuleId, ModuleState>,
+    cache: HashMap<ModuleId, ModuleState>,
     core_modules: HashMap<&'static str, (Value, PersistentValue, ModuleInterface)>,
     main: MainWorld,
-    visiting: Vec<ResolvedModuleId>,
+    visiting: Vec<ModuleId>,
     dependencies: BTreeSet<PathBuf>,
     module_quota: Quota,
     debug_sink: Arc<dyn DebugSink>,
@@ -888,8 +888,12 @@ impl ModuleLoader {
         module: ResolvedModule,
         external_bindings: BTreeMap<String, Value>,
     ) -> Result<LoadedModule, ModuleError> {
+        let path = module
+            .path()
+            .expect("root module has a physical path")
+            .to_owned();
         let module_id = module.id;
-        let path = module_id.path().expect("local root has a path").to_owned();
+        self.dependencies.insert(path.clone());
         self.enter(&module_id)?;
         let mut account = QuotaAccount::new(self.module_quota);
         let result = self.compile_xl(&module_id, &path, external_bindings, true, &mut account);
@@ -922,16 +926,17 @@ impl ModuleLoader {
 
     fn load_resolved_value(&mut self, module: ResolvedModule) -> Result<SourcedValue, ModuleError> {
         let format = module.format;
-        let module_id = module.id;
-        let path = module_id
+        let path = module
             .path()
-            .expect("local module has a local path")
+            .expect("source module has a physical path")
             .to_owned();
+        let module_id = module.id;
         if let Some(ModuleState::Ready { root, sourced, .. }) = self.cache.get(&module_id) {
             let _persistent_root = root;
             return Ok(sourced.clone());
         }
         self.enter(&module_id)?;
+        self.dependencies.insert(path.clone());
         let result: Result<(SourcedValue, PersistentValue, bool, ModuleInterface), ModuleError> =
             match format {
                 ModuleFormat::Json => {
@@ -1033,7 +1038,7 @@ impl ModuleLoader {
 
     fn compile_xl(
         &mut self,
-        module_id: &ResolvedModuleId,
+        module_id: &ModuleId,
         path: &Path,
         mut external_bindings: BTreeMap<String, Value>,
         is_root: bool,
@@ -1073,12 +1078,12 @@ impl ModuleLoader {
             let ExprKind::String(relative) = &binding.value.value.value else {
                 return Err(ModuleError::new("import path must be a string"));
             };
-            if relative.starts_with("core:") {
+            if relative.starts_with("@bim/") {
                 let (value, root, interface) = self.load_core_module(relative)?;
                 semantic_imports.push(SemanticImport {
                     name: binding.value.name.value.clone(),
                     location: binding.value.name.location,
-                    target: ResolvedModuleId::core(relative.clone()),
+                    target: ModuleId::builtin(relative.clone()),
                 });
                 external_roots.insert(binding.value.name.value.clone(), root);
                 external_interfaces.insert(binding.value.name.value.clone(), interface);
@@ -1251,7 +1256,7 @@ impl ModuleLoader {
             .ok_or_else(|| ModuleError::new(format!("unknown core module {name:?}")))
     }
 
-    fn enter(&mut self, module_id: &ResolvedModuleId) -> Result<(), ModuleError> {
+    fn enter(&mut self, module_id: &ModuleId) -> Result<(), ModuleError> {
         if let Some(index) = self
             .visiting
             .iter()
@@ -1268,13 +1273,10 @@ impl ModuleLoader {
             )));
         }
         self.visiting.push(module_id.clone());
-        if let Some(path) = module_id.path() {
-            self.dependencies.insert(path.to_owned());
-        }
         Ok(())
     }
 
-    fn leave(&mut self, module_id: &ResolvedModuleId) {
+    fn leave(&mut self, module_id: &ModuleId) {
         let popped = self.visiting.pop();
         debug_assert_eq!(popped.as_ref(), Some(module_id));
     }
@@ -1427,7 +1429,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import debug from "core:debug";
+            r#"import debug from "@bim/std/debug";
                let identity = fn(value) { value };
                let data = { text: "line\nnext", items: [1, 'Ok, (2,)] };
                let observed = debug.dbg_with("loaded\nvalue", data);
@@ -1464,7 +1466,7 @@ mod tests {
 
         fs::write(
             directory.join("bad-label.xl"),
-            r#"import debug from "core:debug"; debug.dbg_with(1, 42)"#,
+            r#"import debug from "@bim/std/debug"; debug.dbg_with(1, 42)"#,
         )
         .unwrap();
         let bad = engine
@@ -1480,12 +1482,12 @@ mod tests {
         fs::write(directory.join("data.json"), r#"{"value":42}"#).unwrap();
         fs::write(
             directory.join("dependency.xl"),
-            r#"import debug from "core:debug"; debug.dbg_with("tool", 41)"#,
+            r#"import debug from "@bim/std/debug"; debug.dbg_with("tool", 41)"#,
         )
         .unwrap();
         fs::write(
             directory.join("main.xl"),
-            r#"import debug from "core:debug";
+            r#"import debug from "@bim/std/debug";
                import dependency from "./dependency.xl";
                import data from "./data.json";
                type Observed = debug.dbg(Int);
@@ -1567,7 +1569,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("erased.xl"),
-            r#"import debug from "core:debug";
+            r#"import debug from "@bim/std/debug";
                def observe = fn(value) { debug.dbg_with("metadata", value) };
                type Observed = observe(Int);
                0"#,
@@ -1593,7 +1595,7 @@ mod tests {
 
         fs::write(
             directory.join("retained.xl"),
-            r#"import debug from "core:debug";
+            r#"import debug from "@bim/std/debug";
                def observe = fn(value) { debug.dbg_with("observed", value) };
                type Observed = observe(Int);
                observe(1)"#,
@@ -1619,7 +1621,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import debug from "core:debug";
+            r#"import debug from "@bim/std/debug";
                type Observed = debug.dbg(Int);
                0"#,
         )
@@ -1645,8 +1647,8 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("User.xl"),
-            r#"import codec from "core:codec";
-               import result from "core:result";
+            r#"import codec from "@bim/std/codec";
+               import result from "@bim/std/result";
                @struct type User = {v: Option(String)};
                let decode = fn(value) { codec.decode(User, value) };
                let encode = fn(value) {
@@ -1659,8 +1661,8 @@ mod tests {
             directory.join("main.xl"),
             r#"import data from "./abc.json";
                import User from "./User.xl";
-               import result from "core:result";
-               import json from "core:json";
+               import result from "@bim/std/result";
+               import json from "@bim/std/json";
                let user = data |> User.decode |> result.unwrap;
                user |> User.encode |> json.stringify_pretty(2)"#,
         )
@@ -1740,8 +1742,8 @@ mod tests {
         fs::write(
             directory.join("main.xl"),
             r#"import data from "./data.json";
-               import codec from "core:codec";
-               import result from "core:result";
+               import codec from "@bim/std/codec";
+               import result from "@bim/std/result";
                type StringRule = {kind: 'String};
                type UserRule = {kind: 'Struct, fields: {v: StringRule}};
                codec.decode(UserRule, data) |> result.unwrap"#,
@@ -1756,7 +1758,7 @@ mod tests {
 
         fs::write(
             directory.join("legacy.xl"),
-            r#"import result from "core:result"; result.unwrap('Err("legacy"))"#,
+            r#"import result from "@bim/std/result"; result.unwrap('Err("legacy"))"#,
         )
         .unwrap();
         let legacy = load_module(directory.join("legacy.xl"), BTreeMap::new(), 100_000)
@@ -1772,25 +1774,25 @@ mod tests {
         let directory = fixture_dir();
         let cases = [
             (
-                r#"import codec from "core:codec";
-                   import result from "core:result";
+                r#"import codec from "@bim/std/codec";
+                   import result from "@bim/std/result";
                    @struct type T = {name: String};
                    codec.decode(T, {}) |> result.unwrap"#,
                 "$.name: missing required field",
             ),
             (
-                r#"import codec from "core:codec";
-                   import result from "core:result";
+                r#"import codec from "@bim/std/codec";
+                   import result from "@bim/std/result";
                    @struct type T = {name: String};
                    codec.decode(T, {name: "Ada", extra: 1}) |> result.unwrap"#,
                 "$.extra: unknown field",
             ),
             (
-                r#"import json from "core:json"; json.stringify((1, 2))"#,
+                r#"import json from "@bim/std/json"; json.stringify((1, 2))"#,
                 "JSON cannot encode Tuple",
             ),
             (
-                r#"import json from "core:json"; json.stringify_pretty(17)"#,
+                r#"import json from "@bim/std/json"; json.stringify_pretty(17)"#,
                 "indent must be between 0 and 16",
             ),
         ];
@@ -1805,7 +1807,7 @@ mod tests {
         let path = directory.join("compact.xl");
         fs::write(
             &path,
-            r#"import json from "core:json";
+            r#"import json from "@bim/std/json";
                json.stringify({z: [1, 'True], a: "line\nnext"})"#,
         )
         .unwrap();
@@ -1851,9 +1853,10 @@ mod tests {
     #[test]
     fn rejects_module_cycles() {
         let directory = fixture_dir();
+        fs::write(directory.join("main.xl"), "import a from \"./a.xl\"; a").unwrap();
         fs::write(directory.join("a.xl"), "import b from \"./b.xl\"; b").unwrap();
         fs::write(directory.join("b.xl"), "import a from \"./a.xl\"; a").unwrap();
-        let error = load_module(directory.join("a.xl"), BTreeMap::new(), 100_000).unwrap_err();
+        let error = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap_err();
         assert!(error.message().contains("cycle"));
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2052,7 +2055,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import arrays from "core:array"; arrays.map([1, 2], fn(x) { x + 1 })"#,
+            r#"import arrays from "@bim/std/array"; arrays.map([1, 2], fn(x) { x + 1 })"#,
         )
         .unwrap();
         let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
@@ -2070,7 +2073,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import arrays from "core:array";
+            r#"import arrays from "@bim/std/array";
                let values = [1, 2, 3];
                let empty: Array(Int) = [];
                {
@@ -2119,7 +2122,7 @@ mod tests {
         let main = directory.join("main.xl");
         fs::write(
             &main,
-            r#"import arrays from "core:array";
+            r#"import arrays from "@bim/std/array";
                {
                    ints: arrays.map([1, 2], fn(value) { value + 1 }),
                    strings: arrays.map(["a"], fn(value) { value }),
@@ -2134,7 +2137,7 @@ mod tests {
 
         fs::write(
             &main,
-            r#"import arrays from "core:array";
+            r#"import arrays from "@bim/std/array";
                let map = arrays.map;
                (map([1], fn(value) { value }), map(["a"], fn(value) { value }))"#,
         )
@@ -2203,7 +2206,7 @@ mod tests {
         fs::write(directory.join("values.json"), data).unwrap();
         fs::write(
             directory.join("main.xl"),
-            r#"import arrays from "core:array";
+            r#"import arrays from "@bim/std/array";
                import values from "./values.json";
                arrays.map(values, fn(value) { value + 1 })"#,
         )
@@ -2264,7 +2267,7 @@ mod tests {
 
         fs::write(
             directory.join("types.xl"),
-            r#"import arrays from "core:array";
+            r#"import arrays from "@bim/std/array";
                type Pair = Tuple(arrays.map([Int, String], fn(item) { item }));
                let pair: Pair = (1, "one");
                pair"#,
@@ -2282,7 +2285,7 @@ mod tests {
             let path = directory.join(name);
             fs::write(
                 &path,
-                format!("import arrays from \"core:array\"; {expression}"),
+                format!("import arrays from \"@bim/std/array\"; {expression}"),
             )
             .unwrap();
             load_module(path, BTreeMap::new(), 100_000).unwrap_err()
@@ -2291,7 +2294,7 @@ mod tests {
             let path = directory.join(name);
             fs::write(
                 &path,
-                format!("import arrays from \"core:array\"; {expression}"),
+                format!("import arrays from \"@bim/std/array\"; {expression}"),
             )
             .unwrap();
             let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
@@ -2324,7 +2327,7 @@ mod tests {
             callback
                 .trace
                 .iter()
-                .any(|frame| frame.function == "core:array.map")
+                .any(|frame| frame.function == "@bim/std/array.map")
         );
 
         let nested_depth = run_error(
@@ -2345,7 +2348,7 @@ mod tests {
         let unknown_path = directory.join("unknown-core.xl");
         fs::write(
             &unknown_path,
-            "import unknown from \"core:unknown\"; unknown",
+            "import unknown from \"@bim/std/unknown\"; unknown",
         )
         .unwrap();
         assert!(
@@ -2362,8 +2365,8 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import options from "core:option";
-               import results from "core:result";
+            r#"import options from "@bim/std/option";
+               import results from "@bim/std/result";
                let ok: Result(Int, String) = 'Ok(3);
                let err: Result(Int, String) = 'Err("bad");
                {
@@ -2419,8 +2422,8 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import codec from "core:codec";
-               import result from "core:result";
+            r#"import codec from "@bim/std/codec";
+               import result from "@bim/std/result";
                @struct type User = {name: String};
                let decoded = codec.decode(User, {name: "Ada"});
                let encoded = codec.encode(User, {name: "Lin"});
@@ -2531,7 +2534,7 @@ mod tests {
 
         fs::write(
             directory.join("wrong-encode.xl"),
-            r#"import codec from "core:codec";
+            r#"import codec from "@bim/std/codec";
                @struct type User = {name: String};
                codec.encode(User, {name: 1})"#,
         )
@@ -2555,7 +2558,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import dicts from "core:dict";
+            r#"import dicts from "@bim/std/dict";
                let source = { z: 3, a: 1, middle: 2 };
                {
                    keys: dicts.keys(source),
@@ -2606,7 +2609,7 @@ mod tests {
         fs::write(directory.join("data.json"), r#"{"a":1,"long":2}"#).unwrap();
         fs::write(
             directory.join("main.xl"),
-            r#"import dicts from "core:dict";
+            r#"import dicts from "@bim/std/dict";
                import data from "./data.json";
                dicts.keys(data)"#,
         )
@@ -2647,7 +2650,7 @@ mod tests {
 
         fs::write(
             directory.join("types.xl"),
-            r#"import dicts from "core:dict";
+            r#"import dicts from "@bim/std/dict";
                type Pair = Tuple(dicts.values({ first: Int, second: String }));
                let pair: Pair = (1, "one");
                pair"#,
@@ -2663,7 +2666,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import attributes from "core:attributes";
+            r#"import attributes from "@bim/std/attributes";
                let nested = {
                    kind: 'WithAttributes,
                    inner: {
@@ -2728,11 +2731,11 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import attributes from "core:attributes";
-               import codec from "core:codec";
+            r#"import attributes from "@bim/std/attributes";
+               import codec from "@bim/std/codec";
                let rename = fn(name) {
                    fn(ctx, value) {
-                       attributes.add(value, { "core:json.rename": name })
+                       attributes.add(value, { "@bim/std/json.rename": name })
                    }
                };
                let model = fn(ctx, value) {
@@ -2800,7 +2803,7 @@ mod tests {
         };
         assert_eq!(
             field_attributes
-                .get("core:json.rename")
+                .get("@bim/std/json.rename")
                 .unwrap()
                 .to_string(),
             "\"type\""
@@ -2813,7 +2816,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import attributes from "core:attributes";
+            r#"import attributes from "@bim/std/attributes";
                let annotate = fn(key, payload) {
                    fn(ctx, value) { attributes.add(value, { marker: (key, payload) }) }
                };
@@ -2960,7 +2963,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import codec from "core:codec";
+            r#"import codec from "@bim/std/codec";
                @enum
                type Choice = { None: 'None, Number: Int };
                {
@@ -2988,9 +2991,9 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import codec from "core:codec";
-               import json from "core:json";
-               import result from "core:result";
+            r#"import codec from "@bim/std/codec";
+               import json from "@bim/std/json";
+               import result from "@bim/std/result";
                @struct type User = {name: String};
                @json.rename_all('CamelCase)
                @enum type Event = {
@@ -3038,8 +3041,8 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import codec from "core:codec";
-               import json from "core:json";
+            r#"import codec from "@bim/std/codec";
+               import json from "@bim/std/json";
                @json.untagged @enum type Scalar = {Text: String, Count: Int};
                @json.untagged @enum type Ambiguous = {Anything: Any, Text: String};
                {
@@ -3080,9 +3083,9 @@ mod tests {
         fs::write(
             directory.join("main.xl"),
             r#"import data from "./data.json";
-               import codec from "core:codec";
-               import json from "core:json";
-               import result from "core:result";
+               import codec from "@bim/std/codec";
+               import json from "@bim/std/json";
+               import result from "@bim/std/result";
                @struct type User = {name: String};
                @struct type Details = {city_name: String};
                @json.rename_all('CamelCase)
@@ -3184,7 +3187,7 @@ mod tests {
         let path = directory.join("main.xl");
         fs::write(
             &path,
-            r#"import json from "core:json";
+            r#"import json from "@bim/std/json";
                json.schema(union('None, [Int, Array(String), {kind: 'Tuple, items: [Int, String]}]))"#,
         )
         .unwrap();
@@ -3214,9 +3217,9 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import codec from "core:codec";
-               import json from "core:json";
-               import result from "core:result";
+            r#"import codec from "@bim/std/codec";
+               import json from "@bim/std/json";
+               import result from "@bim/std/result";
                {
                    boolean: codec.decode(Bool, 'True) |> result.unwrap,
                    none: codec.decode(Option(Int), 'None) |> result.unwrap,
@@ -3243,7 +3246,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("Types.xl"),
-            r#"import json from "core:json";
+            r#"import json from "@bim/std/json";
                @struct type Node = {
                    value: Int,
                    children: Array(Node),
@@ -3276,9 +3279,9 @@ mod tests {
         fs::write(
             directory.join("main.xl"),
             r#"import Types from "./Types.xl";
-               import codec from "core:codec";
-               import json from "core:json";
-               import result from "core:result";
+               import codec from "@bim/std/codec";
+               import json from "@bim/std/json";
+               import result from "@bim/std/result";
                let node = codec.decode(Types.Node, {
                    value: 1,
                    children: [{value: 2, children: []}],
@@ -3318,8 +3321,8 @@ mod tests {
             directory.join("bad.xl"),
             r#"import data from "./bad.json";
                import Types from "./Types.xl";
-               import codec from "core:codec";
-               import result from "core:result";
+               import codec from "@bim/std/codec";
+               import result from "@bim/std/result";
                codec.decode(Types.Node, data) |> result.unwrap"#,
         )
         .unwrap();
@@ -3332,7 +3335,7 @@ mod tests {
         fs::write(
             directory.join("leak.xl"),
             r#"import Types from "./Types.xl";
-               import json from "core:json";
+               import json from "@bim/std/json";
                json.stringify(Types.Node)"#,
         )
         .unwrap();
@@ -3351,7 +3354,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import codec from "core:codec";
+            r#"import codec from "@bim/std/codec";
                @struct type Forward = {next: Later};
                let premature = codec.decode(Forward, {next: 1});
                type Later = Int;
@@ -3371,7 +3374,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import attributes from "core:attributes";
+            r#"import attributes from "@bim/std/attributes";
                type Maybe = Option(attributes.add(Int, { marker: "payload" }));
                type Outcome = Result(String, Int);
                let compared: Bool = 1 < 2;
@@ -3553,7 +3556,7 @@ mod tests {
         let path = directory.join("main.xl");
         fs::write(
             &path,
-            r#"import attributes from "core:attributes";
+            r#"import attributes from "@bim/std/attributes";
                attributes.normalize({kind: 'WithAttributes, inner: 1, attributes: []})"#,
         )
         .unwrap();
@@ -3563,7 +3566,7 @@ mod tests {
 
         fs::write(
             &path,
-            r#"import attributes from "core:attributes";
+            r#"import attributes from "@bim/std/attributes";
                attributes.normalize(1)"#,
         )
         .unwrap();
@@ -3588,7 +3591,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import json from "core:json";
+            r#"import json from "@bim/std/json";
                @json.rename_all('CamelCase)
                @struct
                type Model = {
@@ -3613,7 +3616,7 @@ mod tests {
         };
         assert_eq!(
             root_attributes
-                .get("core:json.rename_all")
+                .get("@bim/std/json.rename_all")
                 .unwrap()
                 .to_string(),
             "'CamelCase"
@@ -3634,16 +3637,16 @@ mod tests {
             panic!("expected field attributes")
         };
         assert_eq!(
-            attributes.get("core:json.rename").unwrap().to_string(),
+            attributes.get("@bim/std/json.rename").unwrap().to_string(),
             "\"outerName\""
         );
         assert_eq!(
-            attributes.get("core:json.default").unwrap().to_string(),
+            attributes.get("@bim/std/json.default").unwrap().to_string(),
             "7"
         );
         assert_eq!(
             attributes
-                .get("core:json.skip_serializing_if")
+                .get("@bim/std/json.skip_serializing_if")
                 .unwrap()
                 .to_string(),
             "'None"
@@ -3656,7 +3659,7 @@ mod tests {
         };
         assert_eq!(
             nested_attributes
-                .get("core:json.flatten")
+                .get("@bim/std/json.flatten")
                 .unwrap()
                 .to_string(),
             "'True"
@@ -3669,9 +3672,9 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import codec from "core:codec";
-               import json from "core:json";
-               import result from "core:result";
+            r#"import codec from "@bim/std/codec";
+               import json from "@bim/std/json";
+               import result from "@bim/std/result";
 
                @struct type Coordinates = {
                    latitude: Int,
@@ -3726,9 +3729,9 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import codec from "core:codec";
-               import debug from "core:debug";
-               import json from "core:json";
+            r#"import codec from "@bim/std/codec";
+               import debug from "@bim/std/debug";
+               import json from "@bim/std/json";
                let zero = 0;
                def is_zero = fn(value) { value == zero };
                @struct type Model = {
@@ -3769,7 +3772,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("arity.xl"),
-            r#"import json from "core:json";
+            r#"import json from "@bim/std/json";
                def wrong = fn(left, right) { 'False };
                @struct type Model = {
                    @json.skip_serializing_if(wrong) value: Int,
@@ -3782,8 +3785,8 @@ mod tests {
 
         fs::write(
             directory.join("result.xl"),
-            r#"import codec from "core:codec";
-               import json from "core:json";
+            r#"import codec from "@bim/std/codec";
+               import json from "@bim/std/json";
                def identity = fn(value) { value };
                @struct type Model = {
                    @json.skip_serializing_if(identity) value: Int,
@@ -3799,13 +3802,13 @@ mod tests {
             result
                 .trace
                 .iter()
-                .any(|frame| frame.function == "core:codec.encode")
+                .any(|frame| frame.function == "@bim/std/codec.encode")
         );
 
         fs::write(
             directory.join("callback.xl"),
-            r#"import codec from "core:codec";
-               import json from "core:json";
+            r#"import codec from "@bim/std/codec";
+               import json from "@bim/std/json";
                def fails = fn(value) { 1 / 0 };
                @struct type Model = {
                    @json.skip_serializing_if(fails) value: Int,
@@ -3827,7 +3830,7 @@ mod tests {
             failure
                 .trace
                 .iter()
-                .any(|frame| frame.function == "core:codec.encode")
+                .any(|frame| frame.function == "@bim/std/codec.encode")
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3837,8 +3840,8 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.xl"),
-            r#"import codec from "core:codec";
-               import json from "core:json";
+            r#"import codec from "@bim/std/codec";
+               import json from "@bim/std/json";
                def is_zero = fn(value) { value == 0 };
                def always = fn(value) { 'True };
                @struct type Item = {
@@ -3870,8 +3873,8 @@ mod tests {
         let cases = [
             (
                 "collision.xl",
-                r#"import codec from "core:codec";
-                   import json from "core:json";
+                r#"import codec from "@bim/std/codec";
+                   import json from "@bim/std/json";
                    @struct type T = {
                        @json.rename("same") first: Int,
                        @json.rename("same") second: Int,
@@ -3881,16 +3884,16 @@ mod tests {
             ),
             (
                 "flatten-type.xl",
-                r#"import codec from "core:codec";
-                   import json from "core:json";
+                r#"import codec from "@bim/std/codec";
+                   import json from "@bim/std/json";
                    @struct type T = {@json.flatten value: Int};
                    codec.decode(T, {})"#,
                 "flatten requires Struct metadata",
             ),
             (
                 "flatten-rename.xl",
-                r#"import codec from "core:codec";
-                   import json from "core:json";
+                r#"import codec from "@bim/std/codec";
+                   import json from "@bim/std/json";
                    @struct type Inner = {value: Int};
                    @struct type T = {
                        @json.flatten @json.rename("x") inner: Inner,
@@ -3900,8 +3903,8 @@ mod tests {
             ),
             (
                 "default.xl",
-                r#"import codec from "core:codec";
-                   import json from "core:json";
+                r#"import codec from "@bim/std/codec";
+                   import json from "@bim/std/json";
                    @struct type T = {@json.default("wrong") value: Int};
                    codec.decode(T, {})"#,
                 "expected Int",
@@ -3925,7 +3928,7 @@ mod tests {
             let path = directory.join(name);
             fs::write(
                 &path,
-                format!("import json from \"core:json\"; {expression}"),
+                format!("import json from \"@bim/std/json\"; {expression}"),
             )
             .unwrap();
             load_module(path, BTreeMap::new(), 100_000)
@@ -3952,7 +3955,7 @@ mod tests {
         let path = directory.join("quota.xl");
         fs::write(
             &path,
-            "import json from \"core:json\"; json.rename(\"name\")",
+            "import json from \"@bim/std/json\"; json.rename(\"name\")",
         )
         .unwrap();
         let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
@@ -3978,7 +3981,7 @@ mod tests {
             let path = directory.join(name);
             fs::write(
                 &path,
-                format!("import dicts from \"core:dict\"; {expression}"),
+                format!("import dicts from \"@bim/std/dict\"; {expression}"),
             )
             .unwrap();
             let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
@@ -4111,7 +4114,7 @@ mod tests {
         assert!(main.imports.iter().any(|import| import.target == model.id));
         assert_ne!(main.source, model.source);
         let model_path = model.path.as_ref().unwrap();
-        assert_eq!(model.name, ResolvedModuleId::local(model_path).to_string());
+        assert_eq!(model.name, "@src/model.xl");
         assert_eq!(
             snapshot.sources().get(model.source.unwrap()).name.as_ref(),
             model_path.to_string_lossy()
@@ -4151,7 +4154,7 @@ mod tests {
             &main,
             "import data from \"./data.json\";\
              import model from \"./model.xl\";\
-             import attributes from \"core:attributes\";\
+             import attributes from \"@bim/std/attributes\";\
              type FromData = if data.kind == \"int\" { Int } else { String };\
              type FromXl = model.Shared;\
              type FromCore = attributes.strip(String);\
@@ -4201,11 +4204,13 @@ mod tests {
     #[test]
     fn recoverable_workspace_retains_module_cycles_once() {
         let directory = fixture_dir();
+        let main = directory.join("main.xl");
         let a = directory.join("a.xl");
         let b = directory.join("b.xl");
+        fs::write(&main, "import a from \"./a.xl\"; a").unwrap();
         fs::write(&a, "import b from \"./b.xl\"; type A = String; 0").unwrap();
         fs::write(&b, "import a from \"./a.xl\"; type B = String; 0").unwrap();
-        let snapshot = recovery_engine().recover_workspace(&a).unwrap();
+        let snapshot = recovery_engine().recover_workspace(&main).unwrap();
         assert_eq!(
             snapshot
                 .modules()
@@ -4232,8 +4237,8 @@ mod tests {
         let main = directory.join("main.xl");
         fs::write(
             &main,
-            r#"import json from "core:json";
-               import result from "core:result";
+            r#"import json from "@bim/std/json";
+               import result from "@bim/std/result";
                {
                    parsed: result.unwrap(json.parse("{\"answer\": 42}")),
                    decoded: result.unwrap(json.decode(Int, "42")),
@@ -4271,11 +4276,7 @@ mod tests {
         )
         .unwrap();
         let main = app.join("main.xl");
-        fs::write(
-            &main,
-            "import user from \"deps://models/user.xl\"; user.answer",
-        )
-        .unwrap();
+        fs::write(&main, "import user from \"models/user.xl\"; user.answer").unwrap();
 
         let engine = recovery_engine();
         let loaded = engine.load_module(&main, BTreeMap::new()).unwrap();
@@ -4286,8 +4287,8 @@ mod tests {
             .iter()
             .map(|module| module.name.as_str())
             .collect::<HashSet<_>>();
-        assert!(names.contains("deps://models/user.xl"));
-        assert!(names.contains("deps://models/base.xl"));
+        assert!(names.contains("models/user.xl"));
+        assert!(names.contains("models/base.xl"));
         fs::remove_dir_all(directory).unwrap();
     }
 }

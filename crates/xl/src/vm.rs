@@ -2457,7 +2457,7 @@ fn resume_array_continuation(
             _ => {
                 return Err(error(
                     RuntimeErrorKind::TypeMismatch,
-                    "core:array.filter predicate must return 'True or 'False",
+                    "@bim/std/array.filter predicate must return 'True or 'False",
                     &continuation.call_function,
                     continuation.call_pc,
                 ));
@@ -2467,7 +2467,7 @@ fn resume_array_continuation(
             let RuntimeValue::Array(handle) = value.value else {
                 return Err(error(
                     RuntimeErrorKind::TypeMismatch,
-                    "core:array.flat_map callback must return an Array",
+                    "@bim/std/array.flat_map callback must return an Array",
                     &continuation.call_function,
                     continuation.call_pc,
                 ));
@@ -2722,7 +2722,11 @@ fn run_core_dict(
             let entries =
                 core_dict_entries(arguments[0], "Dict", function, pc, current, background)?;
             let slot_count = entries.len().checked_mul(3).ok_or_else(|| {
-                allocation_error("core:dict.pairs allocation size overflowed", function, pc)
+                allocation_error(
+                    "@bim/std/dict.pairs allocation size overflowed",
+                    function,
+                    pc,
+                )
             })?;
             charge_core_dict_output(
                 slot_count,
@@ -2775,7 +2779,9 @@ fn run_core_dict(
                 let RuntimeValue::Tuple(pair) = item.value else {
                     return Err(error(
                         RuntimeErrorKind::TypeMismatch,
-                        format!("core:dict.from_pairs item {index} must be a two-element Tuple"),
+                        format!(
+                            "@bim/std/dict.from_pairs item {index} must be a two-element Tuple"
+                        ),
                         function,
                         pc,
                     ));
@@ -2786,7 +2792,9 @@ fn run_core_dict(
                 if pair.len() != 2 {
                     return Err(error(
                         RuntimeErrorKind::TypeMismatch,
-                        format!("core:dict.from_pairs item {index} must be a two-element Tuple"),
+                        format!(
+                            "@bim/std/dict.from_pairs item {index} must be a two-element Tuple"
+                        ),
                         function,
                         pc,
                     ));
@@ -2797,7 +2805,7 @@ fn run_core_dict(
                 else {
                     return Err(error(
                         RuntimeErrorKind::TypeMismatch,
-                        format!("core:dict.from_pairs item {index} key must be a String"),
+                        format!("@bim/std/dict.from_pairs item {index} key must be a String"),
                         function,
                         pc,
                     ));
@@ -2812,7 +2820,7 @@ fn run_core_dict(
             {
                 return Err(error(
                     RuntimeErrorKind::TypeMismatch,
-                    format!("core:dict.from_pairs contains duplicate field {duplicate:?}"),
+                    format!("@bim/std/dict.from_pairs contains duplicate field {duplicate:?}"),
                     function,
                     pc,
                 ));
@@ -2928,15 +2936,15 @@ fn charge_core_dict_output(
     account: &mut QuotaAccount,
 ) -> Result<(), RuntimeError> {
     let text_bytes = text_lengths.try_fold(0u64, |total, length| {
-        total
-            .checked_add(length as u64)
-            .ok_or_else(|| allocation_error("core:dict allocation size overflowed", function, pc))
+        total.checked_add(length as u64).ok_or_else(|| {
+            allocation_error("@bim/std/dict allocation size overflowed", function, pc)
+        })
     })?;
     let value_bytes = logical_value_bytes(value_slots)
         .map_err(|native_error| allocation_error(native_error.message, function, pc))?;
-    let bytes = text_bytes
-        .checked_add(value_bytes)
-        .ok_or_else(|| allocation_error("core:dict allocation size overflowed", function, pc))?;
+    let bytes = text_bytes.checked_add(value_bytes).ok_or_else(|| {
+        allocation_error("@bim/std/dict allocation size overflowed", function, pc)
+    })?;
     charge_allocation(account, bytes, function, pc)
 }
 
@@ -3750,7 +3758,7 @@ fn continue_json_encode(
             pending_rule: failure.rule,
             return_target,
             trace_frame: RuntimeFrame {
-                function: "core:codec.encode".into(),
+                function: "@bim/std/codec.encode".into(),
                 instruction: 0,
                 origin: call_function.origin_at(call_pc),
             },
@@ -3790,7 +3798,7 @@ fn resume_json_encode_continuation(
         _ => {
             let mut runtime = error(
                 RuntimeErrorKind::TypeMismatch,
-                "core:json.skip_serializing_if predicate must return 'True or 'False",
+                "@bim/std/json.skip_serializing_if predicate must return 'True or 'False",
                 &continuation.call_function,
                 continuation.call_pc,
             );
@@ -4641,7 +4649,7 @@ fn plan_struct(
     path: &str,
     view: &HeapView<'_>,
 ) -> Result<StructPlan, CodecFailure> {
-    let rename_all = match schema.attributes.get("core:json.rename_all").copied() {
+    let rename_all = match schema.attributes.get("@bim/std/json.rename_all").copied() {
         Some(rule) => {
             if view
                 .atom_text(rule)
@@ -4662,7 +4670,7 @@ fn plan_struct(
     let mut external_names: BTreeMap<String, RichValue> = BTreeMap::new();
     for (internal_name, field) in fields {
         let field_schema = resolve_codec_type_once(field, data, view)?;
-        let rename = field.attributes.get("core:json.rename").copied();
+        let rename = field.attributes.get("@bim/std/json.rename").copied();
         let rename = rename
             .map(|rule| {
                 view.string_text(rule)
@@ -4677,7 +4685,7 @@ fn plan_struct(
                     })
             })
             .transpose()?;
-        let flatten_rule = field.attributes.get("core:json.flatten").copied();
+        let flatten_rule = field.attributes.get("@bim/std/json.flatten").copied();
         let flatten = if let Some(rule) = flatten_rule {
             if view
                 .atom_text(rule)
@@ -4694,11 +4702,11 @@ fn plan_struct(
         } else {
             false
         };
-        let default = field.attributes.get("core:json.default").copied();
+        let default = field.attributes.get("@bim/std/json.default").copied();
         if flatten && (rename.is_some() || default.is_some()) {
             let rule = rename
-                .and_then(|_| field.attributes.get("core:json.rename").copied())
-                .or_else(|| field.attributes.get("core:json.default").copied())
+                .and_then(|_| field.attributes.get("@bim/std/json.rename").copied())
+                .or_else(|| field.attributes.get("@bim/std/json.default").copied())
                 .unwrap_or(field.rule);
             return Err(CodecFailure::new(
                 format!(
@@ -4710,7 +4718,7 @@ fn plan_struct(
         }
         let skip = field
             .attributes
-            .get("core:json.skip_serializing_if")
+            .get("@bim/std/json.skip_serializing_if")
             .copied()
             .map(|rule| {
                 let policy = view
@@ -4744,7 +4752,7 @@ fn plan_struct(
             })
             .transpose()?;
         let config_rule = flatten_rule
-            .or_else(|| field.attributes.get("core:json.rename").copied())
+            .or_else(|| field.attributes.get("@bim/std/json.rename").copied())
             .unwrap_or(field.rule);
         let (external_name, flattened) = if flatten {
             let CodecKind::Struct(nested_fields) = &field_schema.kind else {
@@ -4884,7 +4892,7 @@ fn plan_enum(
     path: &str,
     view: &HeapView<'_>,
 ) -> Result<EnumPlan, CodecFailure> {
-    let untagged = match schema.attributes.get("core:json.untagged").copied() {
+    let untagged = match schema.attributes.get("@bim/std/json.untagged").copied() {
         Some(rule) => {
             if view
                 .atom_text(rule)
@@ -4901,7 +4909,7 @@ fn plan_enum(
         }
         None => false,
     };
-    let rename_all = match schema.attributes.get("core:json.rename_all").copied() {
+    let rename_all = match schema.attributes.get("@bim/std/json.rename_all").copied() {
         Some(rule) => {
             if untagged {
                 return Err(CodecFailure::new(
@@ -4928,7 +4936,7 @@ fn plan_enum(
     let mut names = BTreeMap::new();
     let mut planned = Vec::with_capacity(variants.len());
     for (internal_name, variant) in variants {
-        let rename_rule = variant.attributes.get("core:json.rename").copied();
+        let rename_rule = variant.attributes.get("@bim/std/json.rename").copied();
         if let (true, Some(rule)) = (untagged, rename_rule) {
             return Err(CodecFailure::new(
                 format!("{path}.{internal_name}: rename is not meaningful in an untagged Enum"),
@@ -6093,7 +6101,7 @@ fn run_core_result(
     let RuntimeValue::Tagged(handle) = arguments[0].value else {
         return Err(error(
             RuntimeErrorKind::TypeMismatch,
-            "core:result.unwrap expects 'Ok(value) or 'Err(message)",
+            "@bim/std/result.unwrap expects 'Ok(value) or 'Err(message)",
             function,
             pc,
         ));
@@ -6164,7 +6172,7 @@ fn run_core_result(
             } else {
                 return Err(error(
                     RuntimeErrorKind::TypeMismatch,
-                    "core:result.unwrap Err payload must be a String or diagnostic Dict",
+                    "@bim/std/result.unwrap Err payload must be a String or diagnostic Dict",
                     function,
                     pc,
                 ));
@@ -6175,7 +6183,7 @@ fn run_core_result(
         }
         _ => Err(error(
             RuntimeErrorKind::TypeMismatch,
-            "core:result.unwrap expects 'Ok(value) or 'Err(message)",
+            "@bim/std/result.unwrap expects 'Ok(value) or 'Err(message)",
             function,
             pc,
         )),
@@ -6404,33 +6412,33 @@ fn run_core_json(
     ) {
         let (key, payload) = match operation {
             CoreJsonFunction::Flatten => (
-                "core:json.flatten",
+                "@bim/std/json.flatten",
                 RichValue::new(
                     RuntimeValue::BuiltinAtom(BuiltinAtom::True),
                     instruction_location(function, pc),
                 ),
             ),
             CoreJsonFunction::Untagged => (
-                "core:json.untagged",
+                "@bim/std/json.untagged",
                 RichValue::new(
                     RuntimeValue::BuiltinAtom(BuiltinAtom::True),
                     instruction_location(function, pc),
                 ),
             ),
             CoreJsonFunction::RenameDecorator => (
-                "core:json.rename",
+                "@bim/std/json.rename",
                 configured_json_attribute(upvalues, function, pc)?,
             ),
             CoreJsonFunction::RenameAllDecorator => (
-                "core:json.rename_all",
+                "@bim/std/json.rename_all",
                 configured_json_attribute(upvalues, function, pc)?,
             ),
             CoreJsonFunction::DefaultDecorator => (
-                "core:json.default",
+                "@bim/std/json.default",
                 configured_json_attribute(upvalues, function, pc)?,
             ),
             CoreJsonFunction::SkipSerializingIfDecorator => (
-                "core:json.skip_serializing_if",
+                "@bim/std/json.skip_serializing_if",
                 configured_json_attribute(upvalues, function, pc)?,
             ),
             _ => unreachable!(),
@@ -6475,7 +6483,7 @@ fn run_core_json(
         if !(0..=16).contains(&indent) {
             return Err(error(
                 RuntimeErrorKind::TypeMismatch,
-                "core:json.stringify_pretty indent must be between 0 and 16",
+                "@bim/std/json.stringify_pretty indent must be between 0 and 16",
                 function,
                 pc,
             ));
@@ -6606,10 +6614,10 @@ fn validate_json_attribute_configuration(
         return Ok(());
     }
     let message = match operation {
-        CoreJsonFunction::Rename => "core:json.rename expects a String",
-        CoreJsonFunction::RenameAll => "core:json.rename_all currently expects 'CamelCase",
+        CoreJsonFunction::Rename => "@bim/std/json.rename expects a String",
+        CoreJsonFunction::RenameAll => "@bim/std/json.rename_all currently expects 'CamelCase",
         CoreJsonFunction::SkipSerializingIf => {
-            "core:json.skip_serializing_if expects 'None, 'False, 'Empty, or a unary Func"
+            "@bim/std/json.skip_serializing_if expects 'None, 'False, 'Empty, or a unary Func"
         }
         _ => unreachable!(),
     };
@@ -6828,7 +6836,7 @@ fn core_debug_heap_error(
 ) -> RuntimeError {
     error(
         RuntimeErrorKind::InvalidBytecode,
-        format!("core:debug formatter: {heap_error}"),
+        format!("@bim/std/debug formatter: {heap_error}"),
         function,
         pc,
     )
