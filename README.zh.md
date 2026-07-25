@@ -63,7 +63,53 @@ user.json:1:21: expected Int
 
 错误同时标出数据位置和规则位置。Forma 的 `BlameError` 直接保留这两类来源，不需要为 codec 另建一套与值模型分离的诊断结构。
 
-**可执行的计划。** Forma 模块可以求值为一个纯函数：宿主向它提供环境、参数和工作目录，它返回一个具体的执行计划。当前的 `forma exec --dry-run` 负责校验并输出这份计划，不下载、不安装，也不启动进程。确定性决策因此可以被审查、纳入版本控制并独立测试。构建规则和 K8s 调谐也可以采用同一种边界：**纯函数生成计划，宿主执行效果**。
+**可执行的计划。** Forma 可以表达一种能力更丰富的 DotSlash：入口模块是普通的纯函数 `Fn(ExecSettings, ExecRequest) -> Exec`，宿主显式传入平台、缓存前缀、环境、参数和工作目录，函数返回已经完全确定的执行计划。它可以选择多个工件，例如把平台相关的解释器与平台无关的运行时分别安装；可以用 `hash.sha256` 计算稳定的下载和安装位置；也可以构造搜索路径、库路径和环境变量。
+
+命令行改写同样属于这段纯计算。一个 gcc 或 rustc 启动器可以根据计算出的安装位置补充 sysroot 和平台相关搜索路径，注入 `source-prefix-map`，再改写用户传入的源文件参数。返回的 `Exec` 已经包含最终的 command、args、env 和路径：宿主不展开模板、不替换变量，也不重新解释策略。这里没有特殊的上下文模块或启动器语法，只有显式参数、普通函数和可 JSON 化的数据；内外世界的连接点因此很薄。
+
+例如，一个可再生的 gcc 启动计划可以完整地写成：
+
+```forma
+#!/usr/bin/env -S forma exec --dry-run
+
+import arrays from "@bim/std/array";
+import hash from "@bim/std/hash";
+
+fn(settings, request) {
+    let platform = "\{settings.platform.os}-\{settings.platform.arch}";
+    let toolchain_url = "https://example.invalid/gcc-\{platform}.tar.zst";
+    let sysroot_url = "https://example.invalid/sysroot-\{platform}.tar.zst";
+    let toolchain_cache = "\{settings.cache_prefix}/\{hash.sha256(toolchain_url)}";
+    let sysroot_cache = "\{settings.cache_prefix}/\{hash.sha256(sysroot_url)}";
+    let toolchain = "\{settings.install_prefix}/\{hash.sha256("gcc:\{toolchain_url}:unpack-v1")}";
+    let sysroot = "\{settings.install_prefix}/\{hash.sha256("sysroot:\{sysroot_url}:unpack-v1")}";
+    let args: Array(String) = arrays.flat_map([
+        [
+            "--sysroot=\{sysroot}",
+            "-isystem\{sysroot}/usr/include",
+            "-ffile-prefix-map=\{request.cwd}=.",
+        ],
+        request.args,
+    ], fn(part) { part });
+
+    {
+        downloads: [
+            {url: toolchain_url, cache: toolchain_cache},
+            {url: sysroot_url, cache: sysroot_cache},
+        ],
+        installs: [
+            {name: "gcc", source: toolchain_cache, path: toolchain},
+            {name: "sysroot", source: sysroot_cache, path: sysroot},
+        ],
+        command: "\{toolchain}/bin/gcc",
+        args: args,
+        env: {FORMA_SYSROOT: sysroot},
+        cwd: request.cwd,
+    }
+}
+```
+
+当前的 `forma exec --dry-run` 只校验并输出这份计划，不下载、不安装，也不启动进程。即便效果层尚未实现，所有确定性决策已经可以被审查、纳入版本控制并独立测试。未来的宿主只需消费这份具体计划并执行效果。同一边界也适用于构建规则和 K8s 调谐：**纯函数生成计划，宿主执行效果**。
 
 **一个保守的语言服务器。** 悬停看到的类型来自与运行时校验相同的元数据；遇到 `Any` 时，补全不会推测不存在的结构；残缺的源码仍然可以产生导航和诊断，并明确区分"未知、冲突、不可计算"等状态。
 

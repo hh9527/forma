@@ -98,12 +98,73 @@ The error identifies both the data location and the rule location.
 `BlameError` preserves both sources directly, without a codec-specific
 diagnostic structure separate from the value model.
 
-**Executable plans.** A Forma module can evaluate to a pure function: the host
-provides the environment, arguments, and working directory, and the function
-returns a concrete execution plan. Today, `forma exec --dry-run` validates and
-prints that plan; it does not download, install, or start a process.
-Deterministic decisions can therefore be reviewed, versioned, and tested in
-isolation. Build rules and Kubernetes reconciliation can use the same
+**Executable plans.** Forma can express a more capable form of DotSlash. An
+entry module is an ordinary pure function,
+`Fn(ExecSettings, ExecRequest) -> Exec`: the host explicitly supplies the
+platform, cache and install prefixes, environment, arguments, and working
+directory, and the function returns a fully concrete execution plan. It can
+select multiple artifacts, for example installing a platform-specific
+interpreter separately from a platform-independent runtime; derive stable
+download and installation locations with `hash.sha256`; and construct search
+paths, library paths, and environment variables.
+
+Command-line rewriting belongs to the same pure computation. A gcc or rustc
+launcher can add a sysroot and platform-specific search paths, inject
+`source-prefix-map`, and rewrite user-supplied source arguments after artifact
+locations are known. The returned `Exec` already contains the final command,
+arguments, environment, and paths. The host expands no templates, substitutes
+no variables, and reinterprets no policy. There is no special context module
+or launcher syntax here, only explicit parameters, ordinary functions, and
+JSON-compatible data; the connection between the closed world and the effectful
+host stays narrow.
+
+For example, a reproducible gcc launch plan can be written in full:
+
+```forma
+#!/usr/bin/env -S forma exec --dry-run
+
+import arrays from "@bim/std/array";
+import hash from "@bim/std/hash";
+
+fn(settings, request) {
+    let platform = "\{settings.platform.os}-\{settings.platform.arch}";
+    let toolchain_url = "https://example.invalid/gcc-\{platform}.tar.zst";
+    let sysroot_url = "https://example.invalid/sysroot-\{platform}.tar.zst";
+    let toolchain_cache = "\{settings.cache_prefix}/\{hash.sha256(toolchain_url)}";
+    let sysroot_cache = "\{settings.cache_prefix}/\{hash.sha256(sysroot_url)}";
+    let toolchain = "\{settings.install_prefix}/\{hash.sha256("gcc:\{toolchain_url}:unpack-v1")}";
+    let sysroot = "\{settings.install_prefix}/\{hash.sha256("sysroot:\{sysroot_url}:unpack-v1")}";
+    let args: Array(String) = arrays.flat_map([
+        [
+            "--sysroot=\{sysroot}",
+            "-isystem\{sysroot}/usr/include",
+            "-ffile-prefix-map=\{request.cwd}=.",
+        ],
+        request.args,
+    ], fn(part) { part });
+
+    {
+        downloads: [
+            {url: toolchain_url, cache: toolchain_cache},
+            {url: sysroot_url, cache: sysroot_cache},
+        ],
+        installs: [
+            {name: "gcc", source: toolchain_cache, path: toolchain},
+            {name: "sysroot", source: sysroot_cache, path: sysroot},
+        ],
+        command: "\{toolchain}/bin/gcc",
+        args: args,
+        env: {FORMA_SYSROOT: sysroot},
+        cwd: request.cwd,
+    }
+}
+```
+
+Today, `forma exec --dry-run` only validates and prints the plan; it does not
+download, install, or start a process. Even before the effect layer exists,
+every deterministic decision can be reviewed, versioned, and tested in
+isolation. A future host only needs to consume the concrete plan and perform
+its effects. Build rules and Kubernetes reconciliation can use the same
 boundary: **pure functions produce plans; the host performs effects**.
 
 **A conservative language server.** Hover information comes from the same
