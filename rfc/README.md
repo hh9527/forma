@@ -75,3 +75,4 @@ semantics from an earlier RFC.
 54. First-class tagged values.
 55. Typed TypeMetadata witnesses.
 56. Typed boundary errors and Result composition.
+57. Canonical module identities and JSON String boundaries.
