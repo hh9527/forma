@@ -1,7 +1,21 @@
-# RFC 0056: Typed boundary errors and Result composition
+# RFC 0056: Typed blame errors and Result composition
 
-- Status: Implemented
+- Status: Accepted (BlameError amendment)
 - Depends on: RFC 0020, RFC 0021, RFC 0031, RFC 0032, RFC 0036, RFC 0052, RFC 0053, RFC 0055
+
+## Amendment
+
+The original accepted text exposed separate `DecodeError`, `EncodeError`, and
+`ValidationError` names with identical structural definitions. Its first
+implementation then used `ValidationError` in all three native contracts while
+still exporting codec-owned aliases, exposing that the names did not represent
+an observable semantic distinction.
+
+This amendment replaces all three names with `BlameError`. The change is a
+design convergence, not merely an implementation workaround: codec,
+validation, JSON parsing, and future data-loading boundaries all report the
+same data-versus-rule relationship. Environmental I/O failures remain outside
+this type.
 
 ## Summary
 
@@ -23,27 +37,27 @@ The boundary contracts become:
 
 ```xl
 codec.decode:
-    for(A) Fn(TypeOf(A), Any) -> Result(A, codec.DecodeError)
+    for(A) Fn(TypeOf(A), Any) -> Result(A, BlameError)
 codec.encode:
-    for(A) Fn(TypeOf(A), A) -> Result(Any, codec.EncodeError)
+    for(A) Fn(TypeOf(A), A) -> Result(Any, BlameError)
 validate:
-    for(A) Fn(TypeOf(A), Any) -> Result(A, ValidationError)
+    for(A) Fn(TypeOf(A), Any) -> Result(A, BlameError)
 ```
 
-`DecodeError`, `EncodeError`, and `ValidationError` are semantic names for the
-same first public boundary-diagnostic shape:
+All three operations use one public boundary-diagnostic type:
 
 ```xl
-@struct type BoundaryError = {
+@struct type BlameError = {
     message: String,
     data: Any,
     rule: Any,
 };
 ```
 
-XL structural typing intentionally makes the three types interchangeable in
-this RFC. Their names document which boundary produced a failure and leave
-room for compatible evolution without introducing nominal error classes.
+`BlameError` means that a data value does not satisfy a rule. It is deliberately
+shared across phases and APIs: the relationship between the two blamed values
+is more fundamental than whether codec, validation, or module loading observed
+the mismatch.
 
 ## Motivation
 
@@ -62,41 +76,42 @@ Typed boundaries also remove the reason RFC 0053 kept `result.unwrap` dynamic.
 Its runtime behavior already preserves the Ok payload, so its declaration can
 now express that relationship directly.
 
-## Public error model
+## Blame error model
 
-`core:codec` exports two TypeMetadata values in addition to its functions:
+The prelude exports one TypeMetadata value:
 
 ```xl
-@struct type DecodeError = {message: String, data: Any, rule: Any};
-@struct type EncodeError = {message: String, data: Any, rule: Any};
+@struct type BlameError = {message: String, data: Any, rule: Any};
+```
+
+`core:codec` uses that shared type rather than defining codec-owned aliases:
+
+```xl
 
 native decode:
-    for(A) Fn(TypeOf(A), Any) -> Result(A, DecodeError);
+    for(A) Fn(TypeOf(A), Any) -> Result(A, BlameError);
 native encode:
-    for(A) Fn(TypeOf(A), A) -> Result(Any, EncodeError);
+    for(A) Fn(TypeOf(A), A) -> Result(Any, BlameError);
 
 def format_error:
-    Fn(DecodeError) -> String
+    Fn(BlameError) -> String
 = fn(error) { error.message };
 ```
 
-Because `DecodeError` and `EncodeError` are structurally equal,
-`format_error` accepts either one. It returns the deterministic message already
-produced by the runtime and does not discard locations from the original error
-value; it merely projects a String for display-oriented consumers.
-
-The prelude exports:
+Validation uses the same contract:
 
 ```xl
-@struct type ValidationError = {message: String, data: Any, rule: Any};
-
 native validate:
-    for(A) Fn(TypeOf(A), Any) -> Result(A, ValidationError);
+    for(A) Fn(TypeOf(A), Any) -> Result(A, BlameError);
 ```
 
 On validation failure, `data` is the rejected value and `rule` is the supplied
 TypeMetadata value. Success still returns the original input value without
 copying or normalization.
+
+`format_error` returns the deterministic message already produced by the
+runtime. It does not discard locations from the original error value; it merely
+projects a String for display-oriented consumers.
 
 The initial `message` remains the existing deterministic logical-path String.
 For example, `value.user.name must be String` remains a String rather than
@@ -142,11 +157,33 @@ Results and previously compiled modules.
 No exception hierarchy, stack unwinding rule, VM opcode, heap object kind, or
 native ABI is added.
 
+## Files and phase boundaries
+
+An imported JSON document is also data checked against rules. A malformed JSON
+file blames source bytes against the JSON grammar, while a decoded document
+blames a JSON-shaped value against TypeMetadata. The current module loader may
+turn either failure directly into a compile-time diagnostic, but this phase
+choice does not require a separate error model.
+
+A future ordinary file capability can expose the stages explicitly:
+
+```xl
+file.read(path)       // Result(Bytes, IoError)
+json.parse(bytes)     // Result(Any, BlameError)
+codec.decode(T, data) // Result(T, BlameError)
+```
+
+Missing files, permissions, and transport failures are `IoError`, not
+`BlameError`, because no data-versus-rule mismatch occurred. A convenience
+loader may combine them with an ordinary Tagged error type. Future replacement
+of data imports with functions can therefore reuse `BlameError` without
+conflating environmental failure with invalid content.
+
 ## Static semantics and module boundaries
 
-The three error bindings have type `TypeOf({message: String, data: Any,
-rule: Any})`. Their use in native declarations is trusted exactly like every
-other declarative native capability.
+`BlameError` has type `TypeOf({message: String, data: Any, rule: Any})`. Its use
+in native declarations is trusted exactly like every other declarative native
+capability.
 
 The concrete structural error descriptors cross `ModuleInterface` and
 workspace snapshots through the existing type graph. Member observation must
@@ -159,18 +196,17 @@ Rust callbacks.
 ## Non-goals
 
 - interface, trait, associated-type, or effect systems;
-- nominal distinction among decode, encode, and validation errors;
 - a general language-wide `Error` supertype;
 - parsing message Strings back into structured paths;
 - accumulating multiple failures or defining applicative validation;
-- attaching host filesystem or network errors to this model;
+- treating host filesystem or network errors as blame;
 - changing codec matching, normalization, or JSON representation rules.
 
 ## Implementation plan
 
-1. export `DecodeError` and `EncodeError` metadata from `core:codec`;
+1. add `BlameError` metadata to the runtime and static preludes;
 2. refine codec native declarations and add ordinary `format_error`;
-3. add `ValidationError` metadata to the runtime and static preludes;
+3. use `BlameError` in the validation contract;
 4. return the structured payload from validation failures;
 5. refine `result.unwrap` and add ordinary `result.flat_map`;
 6. preserve legacy unwrap handling for String Err payloads;
@@ -179,11 +215,10 @@ Rust callbacks.
 
 ## Acceptance criteria
 
-1. `codec.DecodeError` and `codec.EncodeError` are observable as precise
-   `TypeOf` witnesses;
-2. `decode(User, input)` has type `Result(User, DecodeError)`;
-3. `encode(User, user)` has type `Result(Any, EncodeError)`;
-4. `validate(User, input)` has type `Result(User, ValidationError)`;
+1. `BlameError` is observable as a precise `TypeOf` witness;
+2. `decode(User, input)` has type `Result(User, BlameError)`;
+3. `encode(User, user)` has type `Result(Any, BlameError)`;
+4. `validate(User, input)` has type `Result(User, BlameError)`;
 5. all three failures contain `message`, `data`, and `rule` with stable runtime
    values and useful source locations;
 6. `codec.format_error` accepts codec and validation errors by structural
@@ -198,7 +233,7 @@ Rust callbacks.
 - a structured `ValuePath` with field, index, and variant segments;
 - diagnostic accumulation and `validate_all`-style APIs;
 - stable error codes and machine-oriented expectation payloads;
-- host I/O errors and source-provider diagnostics;
+- an ordinary file capability, `IoError`, and source-provider Results;
 - nominal or capability-based error abstraction.
 
 ## Rejected alternatives
@@ -209,11 +244,12 @@ This preserves a smaller value but throws away the rejected data and rule
 locations precisely when validation is used as an application boundary. It
 also forces codec and validation callers into different error pipelines.
 
-### Expose only one global Error type
+### Separate DecodeError, EncodeError, and ValidationError
 
-A single global name obscures which API owns the contract and prematurely
-claims a language-wide error abstraction. Structural aliases provide uniform
-handling while keeping ownership explicit.
+Three structurally identical aliases imply distinctions that the values cannot
+observe and make shared pipelines noisier. `BlameError` names the common
+data-versus-rule relationship without claiming to represent unrelated I/O,
+cancellation, quota, or program errors.
 
 ### Add a structured path immediately
 
