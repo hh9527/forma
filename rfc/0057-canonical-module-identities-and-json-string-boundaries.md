@@ -9,7 +9,7 @@ The first accepted text rendered source modules as
 `local:///path/file.json#json` and reserved equivalent HTTP fragments. Further
 design established that format is resolution metadata, not resource identity.
 This amendment removes format fragments and introduces a dependency namespace
-resolved by a workspace `xl-deps.toml` manifest.
+resolved by a workspace `xl-deps.json` manifest.
 
 Canonical module identities are now:
 
@@ -182,15 +182,18 @@ not aliases. Content sniffing is forbidden.
 The workspace root may contain:
 
 ```text
-xl-deps.toml
+xl-deps.json
 ```
 
 The initial manifest supports path dependencies:
 
-```toml
-[dependencies]
-models = { path = "../models" }
-contracts = { path = "vendor/contracts" }
+```json
+{
+  "dependencies": {
+    "models": { "path": "../models" },
+    "contracts": { "path": "vendor/contracts" }
+  }
+}
 ```
 
 Source imports use logical identities:
@@ -227,9 +230,12 @@ ownership boundary.
 
 The minimal optional override table is exact, not glob based:
 
-```toml
-[formats]
-"deps://contracts/schema" = "json"
+```json
+{
+  "formats": {
+    "deps://contracts/schema": "json"
+  }
+}
 ```
 
 Override priority is:
@@ -250,7 +256,7 @@ code.
 
 The first implementation determines one workspace root from the root XL module:
 
-- the nearest ancestor containing `xl-deps.toml`, if present;
+- the nearest ancestor containing `xl-deps.json`, if present;
 - otherwise the root module's parent directory.
 
 Dependency imports without a manifest are errors. Nested dependency manifests
@@ -328,7 +334,7 @@ I/O or resolution errors.
 
 1. introduce structured module identity, format, and physical source types;
 2. centralize local, root, missing-target, and overlay resolution;
-3. discover the workspace root and parse minimal `xl-deps.toml` path entries;
+3. discover the workspace root and parse minimal `xl-deps.json` path entries;
 4. resolve `deps:` imports without leaking physical paths into logical IDs;
 5. key strict and recoverable graphs by resolved identity;
 6. dispatch parsers from resolved format metadata;
@@ -350,7 +356,7 @@ I/O or resolution errors.
 5. strict loading, recovery, overlays, cycles, sorting, and lookup agree on
    identity;
 6. same-ID JSON imports parse once and share one persistent root;
-7. minimal path dependencies resolve through `xl-deps.toml` to stable `deps:`
+7. minimal path dependencies resolve through `xl-deps.json` to stable `deps:`
    graph identities;
 8. dependency paths and symlinks cannot escape their declared roots;
 9. `json.parse(String)` returns JSON-shaped `Any` or `BlameError`;
@@ -401,7 +407,7 @@ Implemented in July 2026.
   recoverable loading. Cache keys, cycle detection, semantic import edges, and
   workspace module names use resolved IDs. File reads and overlays use the
   associated physical path.
-- The nearest `xl-deps.toml` supplies minimal path dependencies and exact
+- The nearest `xl-deps.json` supplies minimal path dependencies and exact
   format overrides. Dependency-relative imports preserve ownership, while
   lexical and resolved-symlink escapes are rejected.
 - XL and JSON dispatch through resolver metadata. TOML and YAML extensions are
@@ -421,3 +427,16 @@ Implemented in July 2026.
 
 Deferred items are exactly the RFC non-goals: TOML/YAML parsers, non-path
 dependency acquisition, dependency overlays, lockfiles, and persistent caches.
+
+## JSON manifest amendment
+
+The initial implementation used `xl-deps.toml` and the external `toml` crate.
+Before the manifest acquired compatibility constraints, the format was changed
+to `xl-deps.json`. The dependency model and resolution semantics are unchanged.
+
+The resolver parses the manifest with XL's own lossless JSON parser and lowers
+the resulting canonical XL value. This avoids carrying an external TOML/Serde
+stack solely for a small configuration surface and ensures manifest syntax
+errors use the same parser behavior as JSON modules. A future native TOML
+parser should be implemented once, with the same lexer/CST/diagnostic quality
+as JSON, and then serve both `.toml` modules and any future TOML-facing API.
