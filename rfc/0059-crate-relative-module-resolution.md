@@ -1,6 +1,6 @@
 # RFC 0059: Crate-relative module resolution
 
-- Status: Accepted
+- Status: Implemented
 - Depends on: RFC 0004, RFC 0044, RFC 0057, RFC 0058
 
 ## Summary
@@ -122,7 +122,7 @@ that detail does not affect its identity.
 
 ## Manifest and publication
 
-The independent `xl-deps.json` remains the development configuration. A future
+The independent `xl-deps.json` remains the development configuration. An
 entry-only declaration embeds its publishable literal subset:
 
 ```xl
@@ -184,6 +184,27 @@ fixtures rather than retained as aliases.
 
 The implementation migrates workspace and semantic graph projection to logical
 IDs, adds crate-layout and contextual-`@src` tests, and passes the complete
-workspace suite and strict Clippy checks. The embedded `@@manifest`, pinned git
-location, packaging, stdin, and HTTP phases remain pending, so this RFC remains
-Accepted rather than Implemented.
+workspace suite and strict Clippy checks.
+
+## Embedded manifest implementation result
+
+Commit `094848a` implements `@@manifest { ... };` as a lossless file-level CST
+node and a distinct `ProgramKind` field rather than a runtime binding. It must
+precede the ordinary module body, is recognized only under the name `manifest`,
+and recursively accepts only JSON-compatible immediate Int, finite Float,
+String, built-in boolean/null Atom, Array, and Dict values. Variables, calls,
+interpolation, decorators, duplicate directives, and directives after ordinary
+module content are rejected before VM execution.
+
+The resolver reads the lowered manifest before resolving imports and passes it
+through the same dependency and format decoder used by `xl-deps.json`. An entry
+cannot use both representations, and imported modules containing `@@manifest`
+are rejected. A `bin-src` parent identifies the crate root for an embedded
+entry, while `src` remains its `@src` root. Resolver construction can consume an
+explicit document snapshot so unsaved LSP overlays do not require a physical
+root file.
+
+The currently implemented embedded dependency form is the same exact path
+mapping supported by the development manifest. Pinned git location, packaging,
+stdin, and HTTP acquisition remain later `locate` and publication work; they do
+not alter the now-implemented module resolution and embedded metadata contract.
