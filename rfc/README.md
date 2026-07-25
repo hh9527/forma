@@ -76,3 +76,4 @@ semantics from an earlier RFC.
 55. Typed TypeMetadata witnesses.
 56. Typed boundary errors and Result composition.
 57. Canonical module identities and JSON String boundaries.
+58. Executable value adapter.
