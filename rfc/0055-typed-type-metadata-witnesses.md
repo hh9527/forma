@@ -124,7 +124,7 @@ result unless the API contract preserves it.
 
 - a `typeof(metadata)` type-projection keyword;
 - preserving unions of different metadata witnesses across control flow;
-- a public `DecodeError` or `ValidationError` structural type;
+- richer machine-readable fields beyond RFC 0056's public `BlameError`;
 - singleton metadata values and general dependent function contracts;
 - reflection over arbitrary runtime values.
 

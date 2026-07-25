@@ -1,6 +1,6 @@
 # RFC 0056: Typed blame errors and Result composition
 
-- Status: Accepted (BlameError amendment)
+- Status: Implemented
 - Depends on: RFC 0020, RFC 0021, RFC 0031, RFC 0032, RFC 0036, RFC 0052, RFC 0053, RFC 0055
 
 ## Amendment
@@ -235,6 +235,27 @@ Rust callbacks.
 - stable error codes and machine-oriented expectation payloads;
 - an ordinary file capability, `IoError`, and source-provider Results;
 - nominal or capability-based error abstraction.
+
+## Implementation result
+
+The implementation exposes exactly one prelude metadata binding,
+`BlameError`, and uses it in the native `decode`, `encode`, and `validate`
+schemes and the ordinary XL `format_error` definition. The earlier
+`codec.DecodeError`, `codec.EncodeError`, and prelude `ValidationError` names
+were removed rather than retained as compatibility aliases; they had been
+introduced only by the first implementation of this RFC and had no distinct
+runtime representation.
+
+Validation failures now use the same existing `{message, data, rule}` rich
+value representation as codec failures. Result composition, legacy String Err
+unwrapping, gradual `Any` calls, and source-location behavior remain as
+implemented by the original RFC.
+
+Workspace observation expands structural metadata names and therefore shows
+the concrete `{data: Any, message: String, rule: Any}` error shape in Result
+types, while direct observation of `BlameError` shows the corresponding
+`TypeOf` witness. No file-loading behavior changed in this implementation; the
+file and phase model above records the contract for a later capability RFC.
 
 ## Rejected alternatives
 

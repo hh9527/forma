@@ -127,14 +127,10 @@ native dbg_with: for(A) Fn(String, A) -> A;
         CoreModuleSpec {
             name: CODEC_MODULE,
             source: r#"
-@struct type DecodeError = {message: String, data: Any, rule: Any};
-@struct type EncodeError = {message: String, data: Any, rule: Any};
-native decode: for(A) Fn(TypeOf(A), Any) -> Result(A, ValidationError);
-native encode: for(A) Fn(TypeOf(A), A) -> Result(Any, ValidationError);
-def format_error: Fn(ValidationError) -> String = fn(error) { error.message };
+native decode: for(A) Fn(TypeOf(A), Any) -> Result(A, BlameError);
+native encode: for(A) Fn(TypeOf(A), A) -> Result(Any, BlameError);
+def format_error: Fn(BlameError) -> String = fn(error) { error.message };
 {
-    DecodeError: DecodeError,
-    EncodeError: EncodeError,
     decode: decode,
     encode: encode,
     format_error: format_error,

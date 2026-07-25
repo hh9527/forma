@@ -2329,9 +2329,7 @@ mod tests {
                    codec.decode(User, {name: "Kai"}),
                    fn(user) { user.name },
                ));
-               let decode_error = codec.DecodeError;
-               let encode_error = codec.EncodeError;
-               let validation_error = ValidationError;
+               let blame_error = BlameError;
                {
                    decoded: decoded,
                    encoded: encoded,
@@ -2340,9 +2338,7 @@ mod tests {
                    formatted: formatted,
                    chained: chained,
                    name: name,
-                   DecodeError: decode_error,
-                   EncodeError: encode_error,
-                   ValidationError: validation_error,
+                   BlameError: blame_error,
                }"#,
         )
         .unwrap();
@@ -2383,15 +2379,12 @@ mod tests {
                 .display(module.analysis.binding_types["name"]),
             "String"
         );
-        for binding in ["decode_error", "encode_error", "validation_error"] {
-            assert_eq!(
-                module
-                    .analysis
-                    .display(module.analysis.binding_types[binding]),
-                "TypeOf({data: Any, message: String, rule: Any})",
-                "{binding}"
-            );
-        }
+        assert_eq!(
+            module
+                .analysis
+                .display(module.analysis.binding_types["blame_error"]),
+            "TypeOf({data: Any, message: String, rule: Any})"
+        );
         let Value::Dict(output) = module.execute(100_000).unwrap() else {
             panic!("typed boundary test must return a Dict")
         };
@@ -2419,12 +2412,13 @@ mod tests {
         );
         assert_eq!(error.get("data").unwrap().to_string(), "{name: 1}");
         assert!(error.get("rule").unwrap().to_string().contains("'Struct"));
-        for field in ["DecodeError", "EncodeError", "ValidationError"] {
-            assert!(
-                output.get(field).unwrap().to_string().contains("'Struct"),
-                "{field}"
-            );
-        }
+        assert!(
+            output
+                .get("BlameError")
+                .unwrap()
+                .to_string()
+                .contains("'Struct")
+        );
 
         fs::write(
             directory.join("wrong-encode.xl"),

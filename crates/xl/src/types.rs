@@ -2114,10 +2114,7 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
         prelude.insert(name.into(), descriptor.to_value(vm));
     }
     prelude.insert("Bool".into(), normalized_bool_value(vm));
-    prelude.insert(
-        "ValidationError".into(),
-        boundary_error_descriptor().to_value(vm),
-    );
+    prelude.insert("BlameError".into(), blame_error_descriptor().to_value(vm));
     for function in [
         NativeFunction::core_model(CoreModelFunction::Struct),
         NativeFunction::core_model(CoreModelFunction::Enum),
@@ -2156,7 +2153,7 @@ fn core_static_prelude() -> HashMap<String, TypeDescriptor> {
         ("String", TypeDescriptor::String),
         ("Bytes", TypeDescriptor::Bytes),
         ("Bool", normalized_bool_descriptor()),
-        ("ValidationError", boundary_error_descriptor()),
+        ("BlameError", blame_error_descriptor()),
     ] {
         prelude.insert(name.into(), TypeDescriptor::TypeOf(Box::new(instance)));
     }
@@ -2261,7 +2258,7 @@ fn core_static_schemes() -> HashMap<String, TypeScheme> {
             "validate".into(),
             scheme(function(
                 vec![witness(bound(0)), TypeDescriptor::Any],
-                result_descriptor(bound(0), boundary_error_descriptor()),
+                result_descriptor(bound(0), blame_error_descriptor()),
             )),
         ),
     ])
@@ -2274,7 +2271,7 @@ fn option_descriptor(item: TypeDescriptor) -> TypeDescriptor {
     ]))
 }
 
-fn boundary_error_descriptor() -> TypeDescriptor {
+fn blame_error_descriptor() -> TypeDescriptor {
     TypeDescriptor::Struct(BTreeMap::from([
         ("data".into(), TypeDescriptor::Any),
         ("message".into(), TypeDescriptor::String),
