@@ -512,7 +512,7 @@ mod tests {
     #[test]
     fn chunk_bridge_matches_contiguous_lexing() {
         let samples = [
-            "#!/usr/bin/env -S xl run\nlet identifier = 123.456 # comment\nidentifier",
+            "#!/usr/bin/env -S forma run\nlet identifier = 123.456 # comment\nidentifier",
             r#"b\"bytes\" \"text \{name} tail\""#,
             "_12 |> transform\\(_1, 2)",
             "let 中 = \"emoji 😀 and escape \\n\"; 中",

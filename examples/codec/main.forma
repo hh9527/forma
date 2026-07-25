@@ -1,5 +1,5 @@
 import data from "./abc.json";
-import User from "./User.xl";
+import User from "./User.forma";
 import result from "core:result";
 import json from "core:json";
 

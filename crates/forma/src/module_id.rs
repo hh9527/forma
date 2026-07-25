@@ -7,7 +7,7 @@ use crate::{Value, Vm};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ModuleFormat {
-    Xl,
+    Forma,
     Json,
     Toml,
     Yaml,
@@ -16,7 +16,7 @@ pub enum ModuleFormat {
 impl ModuleFormat {
     pub fn from_path(path: &Path) -> Result<Self, ResolveModuleError> {
         match path.extension().and_then(|extension| extension.to_str()) {
-            Some("xl") => Ok(Self::Xl),
+            Some("forma") => Ok(Self::Forma),
             Some("json") => Ok(Self::Json),
             Some("toml") => Ok(Self::Toml),
             Some("yaml" | "yml") => Ok(Self::Yaml),
@@ -27,7 +27,7 @@ impl ModuleFormat {
 
     pub fn parse(name: &str) -> Result<Self, ResolveModuleError> {
         match name {
-            "xl" => Ok(Self::Xl),
+            "forma" => Ok(Self::Forma),
             "json" => Ok(Self::Json),
             "toml" => Ok(Self::Toml),
             "yaml" => Ok(Self::Yaml),
@@ -37,7 +37,7 @@ impl ModuleFormat {
 
     pub const fn name(self) -> &'static str {
         match self {
-            Self::Xl => "xl",
+            Self::Forma => "forma",
             Self::Json => "json",
             Self::Toml => "toml",
             Self::Yaml => "yaml",
@@ -45,7 +45,7 @@ impl ModuleFormat {
     }
 
     pub const fn is_supported(self) -> bool {
-        matches!(self, Self::Xl | Self::Json)
+        matches!(self, Self::Forma | Self::Json)
     }
 }
 
@@ -171,7 +171,7 @@ impl ModuleResolver {
             .ok_or_else(|| ResolveModuleError::Io("root module has no parent directory".into()))?;
         let manifest = start
             .ancestors()
-            .map(|directory| directory.join("xl-deps.json"))
+            .map(|directory| directory.join("forma-deps.json"))
             .find(|candidate| candidate.is_file());
         let inferred_root = if start.file_name().and_then(|name| name.to_str()) == Some("bin-src") {
             start.parent().unwrap_or(start)
@@ -220,7 +220,7 @@ impl ModuleResolver {
             if let Some(manifest) = parsed.manifest {
                 if has_external_manifest {
                     return Err(ResolveModuleError::Manifest(
-                        "@main cannot use both xl-deps.json and @@manifest".into(),
+                        "@main cannot use both forma-deps.json and @@manifest".into(),
                     ));
                 }
                 let mut values = Vm::new();
@@ -253,7 +253,7 @@ impl ModuleResolver {
         if target.starts_with("@bim/") {
             return Ok(ResolvedModule {
                 id: ModuleId::builtin(target),
-                format: ModuleFormat::Xl,
+                format: ModuleFormat::Forma,
                 physical_path: None,
             });
         }
@@ -592,41 +592,43 @@ mod tests {
     #[test]
     fn path_dependencies_keep_logical_identity() {
         let temporary =
-            std::env::temp_dir().join(format!("xl-module-id-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("forma-module-id-test-{}", std::process::id()));
         std::fs::create_dir_all(temporary.join("app")).unwrap();
         std::fs::create_dir_all(temporary.join("models")).unwrap();
-        std::fs::write(temporary.join("app/main.xl"), "0").unwrap();
+        std::fs::write(temporary.join("app/main.forma"), "0").unwrap();
         std::fs::write(
-            temporary.join("xl-deps.json"),
+            temporary.join("forma-deps.json"),
             r#"{"dependencies":{"models":{"path":"models"}}}"#,
         )
         .unwrap();
-        std::fs::write(temporary.join("models/user.xl"), "0").unwrap();
-        let resolver = ModuleResolver::for_root(&temporary.join("app/main.xl")).unwrap();
+        std::fs::write(temporary.join("models/user.forma"), "0").unwrap();
+        let resolver = ModuleResolver::for_root(&temporary.join("app/main.forma")).unwrap();
         let root = resolver
-            .resolve_root(&temporary.join("app/main.xl"))
+            .resolve_root(&temporary.join("app/main.forma"))
             .unwrap();
-        let dependency = resolver.resolve_import(&root.id, "models/user.xl").unwrap();
-        assert_eq!(dependency.id.to_string(), "models/user.xl");
-        assert_eq!(dependency.format, ModuleFormat::Xl);
+        let dependency = resolver
+            .resolve_import(&root.id, "models/user.forma")
+            .unwrap();
+        assert_eq!(dependency.id.to_string(), "models/user.forma");
+        assert_eq!(dependency.format, ModuleFormat::Forma);
         std::fs::remove_dir_all(temporary).unwrap();
     }
 
     #[test]
     fn crate_layout_resolves_main_source_and_contextual_source_roots() {
         let temporary =
-            std::env::temp_dir().join(format!("xl-crate-layout-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("forma-crate-layout-test-{}", std::process::id()));
         let app = temporary.join("app");
         let dependency = temporary.join("dependency");
         std::fs::create_dir_all(app.join("src/model")).unwrap();
         std::fs::create_dir_all(app.join("bin-src")).unwrap();
         std::fs::create_dir_all(dependency.join("src/model")).unwrap();
-        let main = app.join("bin-src/tool.xl");
+        let main = app.join("bin-src/tool.forma");
         std::fs::write(&main, "0").unwrap();
-        std::fs::write(app.join("src/model/a.xl"), "0").unwrap();
-        std::fs::write(dependency.join("src/model/a.xl"), "0").unwrap();
+        std::fs::write(app.join("src/model/a.forma"), "0").unwrap();
+        std::fs::write(dependency.join("src/model/a.forma"), "0").unwrap();
         std::fs::write(
-            app.join("xl-deps.json"),
+            app.join("forma-deps.json"),
             r#"{"dependencies":{"parser":{"path":"../dependency"}}}"#,
         )
         .unwrap();
@@ -637,24 +639,24 @@ mod tests {
         assert_eq!(root.to_string(), "@main");
 
         let local = resolver
-            .resolve_import(&root.id, "@src/model/a.xl")
+            .resolve_import(&root.id, "@src/model/a.forma")
             .unwrap();
-        assert_eq!(local.to_string(), "@src/model/a.xl");
+        assert_eq!(local.to_string(), "@src/model/a.forma");
         assert_eq!(
             resolver
-                .resolve_import(&root.id, "./model/a.xl")
+                .resolve_import(&root.id, "./model/a.forma")
                 .unwrap()
                 .id,
             local.id
         );
 
         let dependency = resolver
-            .resolve_import(&root.id, "parser/model/a.xl")
+            .resolve_import(&root.id, "parser/model/a.forma")
             .unwrap();
-        assert_eq!(dependency.to_string(), "parser/model/a.xl");
+        assert_eq!(dependency.to_string(), "parser/model/a.forma");
         assert_eq!(
             resolver
-                .resolve_import(&dependency.id, "@src/model/a.xl")
+                .resolve_import(&dependency.id, "@src/model/a.forma")
                 .unwrap()
                 .id,
             dependency.id
@@ -668,40 +670,42 @@ mod tests {
 
     #[test]
     fn embedded_manifest_marks_the_crate_root_and_supplies_dependencies() {
-        let temporary =
-            std::env::temp_dir().join(format!("xl-embedded-manifest-test-{}", std::process::id()));
+        let temporary = std::env::temp_dir().join(format!(
+            "forma-embedded-manifest-test-{}",
+            std::process::id()
+        ));
         let app = temporary.join("app");
         let dependency = temporary.join("dependency");
         std::fs::create_dir_all(app.join("src")).unwrap();
         std::fs::create_dir_all(app.join("bin-src")).unwrap();
         std::fs::create_dir_all(dependency.join("src")).unwrap();
-        let main = app.join("bin-src/tool.xl");
+        let main = app.join("bin-src/tool.forma");
         std::fs::write(
             &main,
             r#"@@manifest {name: "tool", dependencies: {dep: {path: "../dependency"}}};
-import value from "dep/value.xl";
+import value from "dep/value.forma";
 value"#,
         )
         .unwrap();
-        std::fs::write(dependency.join("src/value.xl"), "42").unwrap();
+        std::fs::write(dependency.join("src/value.forma"), "42").unwrap();
 
         let resolver = ModuleResolver::for_root(&main).unwrap();
         assert_eq!(resolver.workspace_root(), app);
         let root = resolver.resolve_root(&main).unwrap();
         assert_eq!(
             resolver
-                .resolve_import(&root.id, "dep/value.xl")
+                .resolve_import(&root.id, "dep/value.forma")
                 .unwrap()
                 .id
                 .to_string(),
-            "dep/value.xl"
+            "dep/value.forma"
         );
 
-        std::fs::write(app.join("xl-deps.json"), r#"{"dependencies":{}}"#).unwrap();
+        std::fs::write(app.join("forma-deps.json"), r#"{"dependencies":{}}"#).unwrap();
         assert!(matches!(
             ModuleResolver::for_root(&main),
             Err(ResolveModuleError::Manifest(message))
-                if message.contains("both xl-deps.json and @@manifest")
+                if message.contains("both forma-deps.json and @@manifest")
         ));
         std::fs::remove_dir_all(temporary).unwrap();
     }
@@ -709,9 +713,9 @@ value"#,
     #[test]
     fn local_aliases_share_one_identity_and_formats_are_exact() {
         let temporary =
-            std::env::temp_dir().join(format!("xl-module-alias-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("forma-module-alias-test-{}", std::process::id()));
         std::fs::create_dir_all(temporary.join("app/sub")).unwrap();
-        let main = temporary.join("app/main.xl");
+        let main = temporary.join("app/main.forma");
         let data = temporary.join("app/data.json");
         std::fs::write(&main, "0").unwrap();
         std::fs::write(&data, "{}").unwrap();
@@ -732,16 +736,16 @@ value"#,
     #[test]
     fn json_manifest_validates_shape_and_exact_format_overrides() {
         let temporary =
-            std::env::temp_dir().join(format!("xl-module-manifest-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("forma-module-manifest-test-{}", std::process::id()));
         let app = temporary.join("app");
         let dependency = temporary.join("dependency");
         std::fs::create_dir_all(&app).unwrap();
         std::fs::create_dir_all(&dependency).unwrap();
-        let main = app.join("main.xl");
+        let main = app.join("main.forma");
         std::fs::write(&main, "0").unwrap();
         std::fs::write(dependency.join("schema"), "{}").unwrap();
         std::fs::write(
-            temporary.join("xl-deps.json"),
+            temporary.join("forma-deps.json"),
             r#"{
                 "dependencies": {"dep": {"path": "dependency"}},
                 "formats": {"dep/schema": "json"}
@@ -753,18 +757,18 @@ value"#,
         let schema = resolver.resolve_import(&root.id, "dep/schema").unwrap();
         assert_eq!(schema.format, ModuleFormat::Json);
 
-        std::fs::write(temporary.join("xl-deps.json"), r#"{"dependencies": []}"#).unwrap();
+        std::fs::write(temporary.join("forma-deps.json"), r#"{"dependencies": []}"#).unwrap();
         assert!(matches!(
             ModuleResolver::for_root(&main),
             Err(ResolveModuleError::Manifest(message))
                 if message.contains("dependencies") && message.contains("object")
         ));
 
-        std::fs::write(temporary.join("xl-deps.json"), "{").unwrap();
+        std::fs::write(temporary.join("forma-deps.json"), "{").unwrap();
         assert!(matches!(
             ModuleResolver::for_root(&main),
             Err(ResolveModuleError::Manifest(message))
-                if message.contains("invalid") && message.contains("xl-deps.json")
+                if message.contains("invalid") && message.contains("forma-deps.json")
         ));
         std::fs::remove_dir_all(temporary).unwrap();
     }
@@ -775,27 +779,31 @@ value"#,
         use std::os::unix::fs::symlink;
 
         let temporary =
-            std::env::temp_dir().join(format!("xl-module-escape-test-{}", std::process::id()));
+            std::env::temp_dir().join(format!("forma-module-escape-test-{}", std::process::id()));
         let app = temporary.join("app");
         let dependency = temporary.join("dependency");
         std::fs::create_dir_all(&app).unwrap();
         std::fs::create_dir_all(&dependency).unwrap();
-        std::fs::write(app.join("main.xl"), "0").unwrap();
-        std::fs::write(temporary.join("outside.xl"), "0").unwrap();
+        std::fs::write(app.join("main.forma"), "0").unwrap();
+        std::fs::write(temporary.join("outside.forma"), "0").unwrap();
         std::fs::write(
-            temporary.join("xl-deps.json"),
+            temporary.join("forma-deps.json"),
             r#"{"dependencies":{"dep":{"path":"dependency"}}}"#,
         )
         .unwrap();
-        symlink(temporary.join("outside.xl"), dependency.join("escape.xl")).unwrap();
-        let resolver = ModuleResolver::for_root(&app.join("main.xl")).unwrap();
-        let root = resolver.resolve_root(&app.join("main.xl")).unwrap();
+        symlink(
+            temporary.join("outside.forma"),
+            dependency.join("escape.forma"),
+        )
+        .unwrap();
+        let resolver = ModuleResolver::for_root(&app.join("main.forma")).unwrap();
+        let root = resolver.resolve_root(&app.join("main.forma")).unwrap();
         assert!(matches!(
-            resolver.resolve_import(&root.id, "dep/../outside.xl"),
+            resolver.resolve_import(&root.id, "dep/../outside.forma"),
             Err(ResolveModuleError::CrateEscape(_))
         ));
         assert!(matches!(
-            resolver.resolve_import(&root.id, "dep/escape.xl"),
+            resolver.resolve_import(&root.id, "dep/escape.forma"),
             Err(ResolveModuleError::CrateEscape(_))
         ));
         std::fs::remove_dir_all(temporary).unwrap();

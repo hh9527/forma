@@ -8,13 +8,13 @@ fn fixture_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("xl-cli-test-{unique}"));
+    let path = std::env::temp_dir().join(format!("forma-cli-test-{unique}"));
     fs::create_dir(&path).unwrap();
     path
 }
 
-fn xl() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_xl"))
+fn forma() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_forma"))
 }
 
 #[test]
@@ -22,7 +22,7 @@ fn check_run_and_types_cover_the_closed_world_loop() {
     let directory = fixture_dir();
     fs::write(directory.join("data.json"), r#"{"name":"Ada","age":36}"#).unwrap();
     fs::write(
-        directory.join("main.xl"),
+        directory.join("main.forma"),
         "import data from \"./data.json\";\
          @struct type User = {name: String, age: Int};\
          let user: User = data;\
@@ -30,8 +30,8 @@ fn check_run_and_types_cover_the_closed_world_loop() {
     )
     .unwrap();
 
-    let check = xl()
-        .args(["check", directory.join("main.xl").to_str().unwrap()])
+    let check = forma()
+        .args(["check", directory.join("main.forma").to_str().unwrap()])
         .output()
         .unwrap();
     assert!(
@@ -41,15 +41,15 @@ fn check_run_and_types_cover_the_closed_world_loop() {
     );
     assert!(String::from_utf8_lossy(&check.stdout).contains("2 dependencies"));
 
-    let types = xl()
-        .args(["types", directory.join("main.xl").to_str().unwrap()])
+    let types = forma()
+        .args(["types", directory.join("main.forma").to_str().unwrap()])
         .output()
         .unwrap();
     assert!(types.status.success());
     assert!(String::from_utf8_lossy(&types.stdout).contains("type User ="));
 
-    let run = xl()
-        .args(["run", directory.join("main.xl").to_str().unwrap()])
+    let run = forma()
+        .args(["run", directory.join("main.forma").to_str().unwrap()])
         .output()
         .unwrap();
     assert!(
@@ -64,13 +64,13 @@ fn check_run_and_types_cover_the_closed_world_loop() {
 #[test]
 fn run_accepts_external_json_and_failures_are_nonzero() {
     let directory = fixture_dir();
-    fs::write(directory.join("main.xl"), "input").unwrap();
+    fs::write(directory.join("main.forma"), "input").unwrap();
     fs::write(directory.join("input.json"), "[1, 2, 3]").unwrap();
 
-    let run = xl()
+    let run = forma()
         .args([
             "run",
-            directory.join("main.xl").to_str().unwrap(),
+            directory.join("main.forma").to_str().unwrap(),
             "--input",
             directory.join("input.json").to_str().unwrap(),
         ])
@@ -79,15 +79,15 @@ fn run_accepts_external_json_and_failures_are_nonzero() {
     assert!(run.status.success());
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "[1, 2, 3]");
 
-    fs::write(directory.join("bad.xl"), "1 / 0").unwrap();
-    let failure = xl()
-        .args(["run", directory.join("bad.xl").to_str().unwrap()])
+    fs::write(directory.join("bad.forma"), "1 / 0").unwrap();
+    let failure = forma()
+        .args(["run", directory.join("bad.forma").to_str().unwrap()])
         .output()
         .unwrap();
     assert!(!failure.status.success());
     let stderr = String::from_utf8_lossy(&failure.stderr);
     assert!(stderr.contains("division by zero"));
-    assert!(stderr.contains("bad.xl:1:1"));
+    assert!(stderr.contains("bad.forma:1:1"));
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -95,13 +95,16 @@ fn run_accepts_external_json_and_failures_are_nonzero() {
 fn run_evaluates_structured_string_interpolation() {
     let directory = fixture_dir();
     fs::write(
-        directory.join("interpolation.xl"),
+        directory.join("interpolation.forma"),
         r#"let name = "Ada"; let count = 2; "hi, \{name} x\{count}""#,
     )
     .unwrap();
 
-    let run = xl()
-        .args(["run", directory.join("interpolation.xl").to_str().unwrap()])
+    let run = forma()
+        .args([
+            "run",
+            directory.join("interpolation.forma").to_str().unwrap(),
+        ])
         .output()
         .unwrap();
     assert!(
@@ -120,14 +123,14 @@ fn run_evaluates_structured_string_interpolation() {
 fn run_writes_debug_events_only_to_stderr() {
     let directory = fixture_dir();
     fs::write(
-        directory.join("debug.xl"),
+        directory.join("debug.forma"),
         r#"import debug from "@bim/std/debug";
            42 |> debug.dbg_with\("answer\nlabel", _)"#,
     )
     .unwrap();
 
-    let run = xl()
-        .args(["run", directory.join("debug.xl").to_str().unwrap()])
+    let run = forma()
+        .args(["run", directory.join("debug.forma").to_str().unwrap()])
         .output()
         .unwrap();
     assert!(run.status.success());
@@ -144,10 +147,10 @@ fn run_writes_debug_events_only_to_stderr() {
 fn exec_dry_run_invokes_explicit_pure_entry() {
     let directory = fixture_dir();
     let cache = directory.join("cache");
-    let main = directory.join("exec.xl");
+    let main = directory.join("exec.forma");
     fs::write(
         &main,
-        r#"#!/usr/bin/env -S xl exec --dry-run
+        r#"#!/usr/bin/env -S forma exec --dry-run
 import hash from "@bim/std/hash";
 let captured = "python3";
 fn(settings, request) {
@@ -164,8 +167,8 @@ fn(settings, request) {
     )
     .unwrap();
 
-    let output = xl()
-        .env("XL_CACHE_HOME", &cache)
+    let output = forma()
+        .env("FORMA_CACHE_HOME", &cache)
         .env("XL_EXEC_TEST", "visible")
         .args([
             "exec",
@@ -192,14 +195,14 @@ fn(settings, request) {
     );
     assert!(
         stdout.contains(&format!(
-            r#""install":"{}/xl/exec/installs""#,
+            r#""install":"{}/forma/exec/installs""#,
             cache.display()
         )),
         "{stdout}"
     );
     assert!(!cache.exists());
-    let repeated = xl()
-        .env("XL_CACHE_HOME", &cache)
+    let repeated = forma()
+        .env("FORMA_CACHE_HOME", &cache)
         .env("XL_EXEC_TEST", "visible")
         .args([
             "exec",
@@ -221,41 +224,41 @@ fn(settings, request) {
 #[test]
 fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
     let directory = fixture_dir();
-    let value = directory.join("value.xl");
+    let value = directory.join("value.forma");
     fs::write(&value, "42").unwrap();
 
-    let rejected = xl()
+    let rejected = forma()
         .args(["exec", value.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(!rejected.status.success());
     assert!(String::from_utf8_lossy(&rejected.stderr).contains("currently requires --dry-run"));
 
-    let short = xl()
+    let short = forma()
         .args(["exec", "-n", value.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(!short.status.success());
 
-    let not_function = xl()
+    let not_function = forma()
         .args(["exec", "--dry-run", value.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(!not_function.status.success());
     assert!(String::from_utf8_lossy(&not_function.stderr).contains("must be a function"));
 
-    let not_dict = directory.join("not-dict.xl");
+    let not_dict = directory.join("not-dict.forma");
     fs::write(&not_dict, "fn(settings, request) { 42 }").unwrap();
-    let not_dict = xl()
+    let not_dict = forma()
         .args(["exec", "--dry-run", not_dict.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(!not_dict.status.success());
     assert!(String::from_utf8_lossy(&not_dict.stderr).contains("must return a Dict"));
 
-    let non_json = directory.join("non-json.xl");
+    let non_json = directory.join("non-json.forma");
     fs::write(&non_json, "fn(settings, request) { {bad: 'Named} }").unwrap();
-    let non_json = xl()
+    let non_json = forma()
         .args(["exec", "--dry-run", non_json.to_str().unwrap()])
         .output()
         .unwrap();
@@ -267,14 +270,14 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
 #[test]
 fn show_observes_deterministic_workspace_and_position_queries() {
     let directory = fixture_dir();
-    let main = directory.join("main.xl");
+    let main = directory.join("main.forma");
     fs::write(&main, "let answer = 42;\nanswer").unwrap();
 
-    let first = xl()
+    let first = forma()
         .args(["show", main.to_str().unwrap()])
         .output()
         .unwrap();
-    let second = xl()
+    let second = forma()
         .args(["show", main.to_str().unwrap()])
         .output()
         .unwrap();
@@ -292,7 +295,7 @@ fn show_observes_deterministic_workspace_and_position_queries() {
     assert!(report.contains("answer"));
     assert!(report.contains(" = Int"));
 
-    let at = xl()
+    let at = forma()
         .args([
             "show",
             main.to_str().unwrap(),
@@ -319,14 +322,14 @@ fn show_observes_deterministic_workspace_and_position_queries() {
 #[test]
 fn types_projects_recursive_types_from_the_workspace_snapshot() {
     let directory = fixture_dir();
-    let main = directory.join("main.xl");
+    let main = directory.join("main.forma");
     fs::write(
         &main,
         "@struct type Node = {children: Array(Node)}; {Node: Node}",
     )
     .unwrap();
 
-    let types = xl()
+    let types = forma()
         .args(["types", main.to_str().unwrap()])
         .output()
         .unwrap();
@@ -347,14 +350,14 @@ fn types_projects_recursive_types_from_the_workspace_snapshot() {
 #[test]
 fn show_recovers_semantics_from_damaged_source_while_check_remains_strict() {
     let directory = fixture_dir();
-    let main = directory.join("main.xl");
+    let main = directory.join("main.forma");
     fs::write(
         &main,
         "let before = 1; let broken = ; let after = missing; after",
     )
     .unwrap();
 
-    let show = xl()
+    let show = forma()
         .args(["show", main.to_str().unwrap()])
         .output()
         .unwrap();
@@ -369,7 +372,7 @@ fn show_recovers_semantics_from_damaged_source_while_check_remains_strict() {
     assert!(output.contains("after"), "{output}");
     assert!(output.contains("Unknown(UnresolvedName)"), "{output}");
 
-    let check = xl()
+    let check = forma()
         .args(["check", main.to_str().unwrap()])
         .output()
         .unwrap();
@@ -380,7 +383,7 @@ fn show_recovers_semantics_from_damaged_source_while_check_remains_strict() {
 #[test]
 fn show_continues_independent_type_metadata_after_tool_failure() {
     let directory = fixture_dir();
-    let main = directory.join("partial.xl");
+    let main = directory.join("partial.forma");
     fs::write(
         &main,
         "type A = broken(Int);\
@@ -391,7 +394,7 @@ fn show_continues_independent_type_metadata_after_tool_failure() {
     )
     .unwrap();
 
-    let show = xl()
+    let show = forma()
         .args(["show", main.to_str().unwrap()])
         .output()
         .unwrap();
@@ -418,7 +421,7 @@ fn show_continues_independent_type_metadata_after_tool_failure() {
         "{output}"
     );
 
-    let check = xl()
+    let check = forma()
         .args(["check", main.to_str().unwrap()])
         .output()
         .unwrap();
@@ -429,8 +432,8 @@ fn show_continues_independent_type_metadata_after_tool_failure() {
 #[test]
 fn show_recovers_types_and_causes_across_failed_modules() {
     let directory = fixture_dir();
-    let model = directory.join("model.xl");
-    let main = directory.join("main.xl");
+    let model = directory.join("model.forma");
+    let main = directory.join("main.forma");
     fs::write(
         &model,
         "type Broken = missing(Int); type Good = String; {Good: Good}",
@@ -438,7 +441,7 @@ fn show_recovers_types_and_causes_across_failed_modules() {
     .unwrap();
     fs::write(
         &main,
-        "import model from \"./model.xl\";\
+        "import model from \"./model.forma\";\
          type Local = String;\
          type Uses = model.Good;\
          type Down = Array(Uses);\
@@ -446,7 +449,7 @@ fn show_recovers_types_and_causes_across_failed_modules() {
     )
     .unwrap();
 
-    let show = xl()
+    let show = forma()
         .args(["show", main.to_str().unwrap()])
         .output()
         .unwrap();
@@ -457,7 +460,7 @@ fn show_recovers_types_and_causes_across_failed_modules() {
     );
     let output = String::from_utf8_lossy(&show.stdout);
     assert!(output.contains("Partial"), "{output}");
-    assert!(output.contains("model.xl"), "{output}");
+    assert!(output.contains("model.forma"), "{output}");
     assert!(
         output.contains("Local") && output.contains(" = String"),
         "{output}"
@@ -471,7 +474,7 @@ fn show_recovers_types_and_causes_across_failed_modules() {
         "{output}"
     );
 
-    let check = xl()
+    let check = forma()
         .args(["check", main.to_str().unwrap()])
         .output()
         .unwrap();

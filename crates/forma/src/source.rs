@@ -371,10 +371,10 @@ mod tests {
     #[test]
     fn resolves_utf8_byte_offsets_to_character_columns() {
         let mut sources = SourceDatabase::default();
-        let source = sources.add("utf8.xl", "一二\n  x");
+        let source = sources.add("utf8.forma", "一二\n  x");
         let location = Location::new(source, TextRange::new(9, 10).unwrap());
         let diagnostic = Diagnostic::error("bad value", location);
-        assert_eq!(sources.render(&diagnostic), "utf8.xl:2:3: bad value");
+        assert_eq!(sources.render(&diagnostic), "utf8.forma:2:3: bad value");
         let file = sources.get(source);
         assert_eq!(file.offset(1, 1), Some(0));
         assert_eq!(file.offset(1, 2), Some(3));
@@ -387,7 +387,7 @@ mod tests {
     fn validation_diagnostic_can_label_data_and_rule_sources() {
         let mut sources = SourceDatabase::default();
         let data = sources.add("user.json", "{\"age\":\"old\"}");
-        let rule = sources.add("schema.xl", "type User = Int;");
+        let rule = sources.add("schema.forma", "type User = Int;");
         let diagnostic = Diagnostic::error(
             "expected Int",
             Location::new(data, TextRange::new(7, 12).unwrap()),
@@ -398,7 +398,7 @@ mod tests {
         );
         assert_eq!(
             sources.render(&diagnostic),
-            "user.json:1:8: expected Int\n  schema.xl:1:13: required by User"
+            "user.json:1:8: expected Int\n  schema.forma:1:13: required by User"
         );
     }
 }

@@ -72,9 +72,9 @@ mod tests {
     #[test]
     fn cst_is_lossless_and_recovery_collects_diagnostics() {
         let source =
-            "#!/usr/bin/env -S xl run\nlet x = 1 # keep me\n let y = ;\n match x { => 1, _ => }";
+            "#!/usr/bin/env -S forma run\nlet x = 1 # keep me\n let y = ;\n match x { => 1, _ => }";
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("broken.xl", source);
+        let id = sources.add("broken.forma", source);
         let parsed = parse(id, source);
         let mut reconstructed = String::new();
         reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
@@ -86,7 +86,7 @@ mod tests {
     fn cst_preserves_native_declarations_losslessly() {
         let source = "native map: for(A, B) Fn(Array(A), Fn(A) -> B) -> Array(B); map";
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("native.xl", source);
+        let id = sources.add("native.forma", source);
         let parsed = parse(id, source);
         assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
         let mut reconstructed = String::new();
@@ -101,11 +101,11 @@ mod tests {
 
     #[test]
     fn cst_preserves_a_leading_module_manifest() {
-        let source = r#"#!/usr/bin/env -S xl exec
+        let source = r#"#!/usr/bin/env -S forma exec
 @@manifest {name: "tool", dependencies: {}};
 fn(settings, request) { {args: request.args} }"#;
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("manifest.xl", source);
+        let id = sources.add("manifest.forma", source);
         let parsed = parse(id, source);
         assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
         let mut reconstructed = String::new();
@@ -118,7 +118,7 @@ fn(settings, request) { {args: request.args} }"#;
         let source =
             "decl identity: for(A) Fn(A) -> A; def identity = fn(value) { value }; identity";
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("identity.xl", source);
+        let id = sources.add("identity.forma", source);
         let parsed = parse(id, source);
         assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
         let mut reconstructed = String::new();
@@ -136,7 +136,7 @@ fn(settings, request) { {args: request.args} }"#;
     fn cst_preserves_annotated_definitions_and_rejects_removed_function_forms() {
         let source = "def identity: for(A) Fn(A) -> A = fn(value) { value }; identity";
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("annotated-def.xl", source);
+        let id = sources.add("annotated-def.forma", source);
         let parsed = parse(id, source);
         assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
         let mut reconstructed = String::new();
@@ -153,7 +153,7 @@ fn(settings, request) { {args: request.args} }"#;
             "fn identity(value) { value } identity",
             "decl identity: fn(Int) -> Int; def identity = fn(value) { value }; identity",
         ] {
-            let id = sources.add("removed-function-form.xl", removed);
+            let id = sources.add("removed-function-form.forma", removed);
             assert!(parse(id, removed).has_errors());
         }
     }
@@ -162,7 +162,7 @@ fn(settings, request) { {args: request.args} }"#;
     fn native_type_schemes_reject_nested_for_binders() {
         let source = "native use: Fn(for(A) Fn(A) -> A) -> Int; use";
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("nested-scheme.xl", source);
+        let id = sources.add("nested-scheme.forma", source);
         let parsed = parse(id, source);
         assert!(parsed.has_errors());
     }
@@ -171,7 +171,7 @@ fn(settings, request) { {args: request.args} }"#;
     fn cst_preserves_type_and_field_decorators_losslessly() {
         let source = "@outer @factory(1) type T = Int; { @field value: 2 }";
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("decorators.xl", source);
+        let id = sources.add("decorators.forma", source);
         let parsed = parse(id, source);
         assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
         let mut reconstructed = String::new();
@@ -188,7 +188,7 @@ fn(settings, request) { {args: request.args} }"#;
     fn decorators_reject_unsupported_binding_targets() {
         let source = "@f let value = 1; value";
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("unsupported.xl", source);
+        let id = sources.add("unsupported.forma", source);
         let parsed = parse(id, source);
         assert!(parsed.has_errors());
     }
@@ -197,7 +197,7 @@ fn(settings, request) { {args: request.args} }"#;
     fn cst_preserves_string_quotes_text_escapes_and_interpolation() {
         let source = r#""hi\n \{name}""#;
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("strings.xl", source);
+        let id = sources.add("strings.forma", source);
         let parsed = parse(id, source);
         assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
         let tokens = parsed
@@ -227,7 +227,7 @@ fn(settings, request) { {args: request.args} }"#;
     fn cst_preserves_explicit_call_sections() {
         let source = r"value |> transform\(_1, 123, _0)";
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("section.xl", source);
+        let id = sources.add("section.forma", source);
         let parsed = parse(id, source);
         assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
         let mut reconstructed = String::new();
@@ -246,7 +246,7 @@ fn(settings, request) { {args: request.args} }"#;
     fn typed_views_query_later_syntax_around_a_missing_value() {
         let source = "let x = ; let y = 2; y";
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("incomplete.xl", source);
+        let id = sources.add("incomplete.forma", source);
         let parsed = parse(id, source);
         let program = Program::root(&parsed.syntax);
         let body = program.body().unwrap();
@@ -293,7 +293,7 @@ fn(settings, request) { {args: request.args} }"#;
         ];
         for source in samples {
             let mut sources = crate::source::SourceDatabase::default();
-            let id = sources.add("sample.xl", source);
+            let id = sources.add("sample.forma", source);
             let parsed = parse(id, source);
             let program = Program::root(&parsed.syntax);
             let _ = program.body().map(|body| {
@@ -306,7 +306,7 @@ fn(settings, request) { {args: request.args} }"#;
 
         let source = "let x = 1, 2; let y = 3; y";
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("error.xl", source);
+        let id = sources.add("error.forma", source);
         let parsed = parse(id, source);
         assert!(contains_rule_error(&parsed.syntax, NodeRef::ROOT));
         let mut reconstructed = String::new();
@@ -315,7 +315,7 @@ fn(settings, request) { {args: request.args} }"#;
 
         let source = "let = 1; 0";
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("missing-name.xl", source);
+        let id = sources.add("missing-name.forma", source);
         let parsed = parse(id, source);
         let issues = ast::validate(id, &parsed.syntax);
         assert!(
@@ -330,7 +330,7 @@ fn(settings, request) { {args: request.args} }"#;
     fn unknown_escape_remains_inside_a_queryable_string() {
         let source = r#""a\(b""#;
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("escape.xl", source);
+        let id = sources.add("escape.forma", source);
         let parsed = parse(id, source);
         assert_eq!(parsed.diagnostics.len(), 1);
         assert_eq!(parsed.diagnostics[0].labels[0].location.range(), 2..4);
@@ -382,9 +382,9 @@ fn(settings, request) { {args: request.args} }"#;
     #[test]
     #[ignore = "manual full-file parse baseline"]
     fn full_file_parse_baseline() {
-        let source = include_str!("../../../../../examples/mvp/main.xl");
+        let source = include_str!("../../../../../examples/mvp/main.forma");
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("main.xl", source);
+        let id = sources.add("main.forma", source);
         let started = std::time::Instant::now();
         for _ in 0..1_000 {
             assert!(!parse(id, source).has_errors());

@@ -5,8 +5,8 @@ use crate::ast::{
 };
 use crate::lexer::{FrontendError, SourceLocation};
 use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
-use crate::syntax::xl::lexer::Token;
-use crate::syntax::xl::parser::{CstData, Node, NodeRef, Rule};
+use crate::syntax::forma::lexer::Token;
+use crate::syntax::forma::parser::{CstData, Node, NodeRef, Rule};
 
 #[derive(Debug)]
 pub struct FrontendParse {
@@ -40,7 +40,7 @@ pub fn parse(source_name: &str, source: &str) -> Result<Program, FrontendError> 
 
 pub fn parse_registered(sources: &SourceDatabase, source_id: SourceId) -> FrontendParse {
     let source = sources.get(source_id);
-    let parsed = crate::syntax::xl::parse_document(source_id, source.text());
+    let parsed = crate::syntax::forma::parse_document(source_id, source.text());
     let mut diagnostics = parsed.diagnostics;
     let lowerer = Lowerer::new(source_id, source.text(), &parsed.syntax);
     let manifest = match lowerer.manifest() {
@@ -200,7 +200,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn recover_program(&self, diagnostics: &mut Vec<Diagnostic>) -> RecoveredProgram {
-        use crate::syntax::xl::ast::{AstNode, Program as SyntaxProgram};
+        use crate::syntax::forma::ast::{AstNode, Program as SyntaxProgram};
 
         let root = SyntaxProgram::root(self.cst);
         let mut bindings = Vec::new();
@@ -1528,8 +1528,8 @@ mod tests {
     #[test]
     fn accepts_hash_comments_and_shebangs() {
         let program = parse(
-            "script.xl",
-            "#!/usr/bin/env -S xl run\nlet value = 42; # answer\nvalue",
+            "script.forma",
+            "#!/usr/bin/env -S forma run\nlet value = 42; # answer\nvalue",
         )
         .unwrap();
         assert_eq!(program.value.body.value.bindings.len(), 1);
@@ -1538,7 +1538,7 @@ mod tests {
     #[test]
     fn lowers_directly_from_cst_with_spans_and_precedence() {
         let mut sources = SourceDatabase::default();
-        let id = sources.add("test.xl", "let x = 1; x == 2");
+        let id = sources.add("test.forma", "let x = 1; x == 2");
         let parsed = parse_registered(&sources, id);
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let program = parsed.program.unwrap();
@@ -1558,7 +1558,7 @@ mod tests {
 
     #[test]
     fn lowers_tagged_patterns() {
-        let program = parse("test.xl", "match 'Some(1) { 'Some(value) => value }").unwrap();
+        let program = parse("test.forma", "match 'Some(1) { 'Some(value) => value }").unwrap();
         let ExprKind::Match { arms, .. } = &program.value.body.value.result.value else {
             panic!("expected match");
         };
@@ -1576,7 +1576,7 @@ mod tests {
     #[test]
     fn lowers_heterogeneous_tuple_contracts_through_array_metadata() {
         let program = parse(
-            "test.xl",
+            "test.forma",
             "native pairs: Fn(Any) -> Array(Tuple(String, Any)); 0",
         )
         .unwrap();
@@ -1601,22 +1601,22 @@ mod tests {
     fn diagnoses_invalid_placeholder_sections_with_source_locations() {
         let cases = [
             (
-                "mixed.xl",
+                "mixed.forma",
                 "let f = fn(a, b) { a }; f\\(_0, _)",
                 "cannot mix",
             ),
             (
-                "gap.xl",
+                "gap.forma",
                 "let f = fn(a, b) { a }; f\\(_2, _0)",
                 "missing _1",
             ),
             (
-                "limit.xl",
+                "limit.forma",
                 "let f = fn(a) { a }; f\\(_65535)",
                 "exceeds the limit",
             ),
             (
-                "overflow.xl",
+                "overflow.forma",
                 "let f = fn(a) { a }; f\\(_999999999999999999999999999999999)",
                 "exceeds the supported range",
             ),
@@ -1637,14 +1637,14 @@ mod tests {
         }
 
         let mut sources = SourceDatabase::default();
-        let id = sources.add("outside.xl", "let value = _; value");
+        let id = sources.add("outside.forma", "let value = _; value");
         let parsed = parse_registered(&sources, id);
         assert!(parsed.program.is_none());
         assert!(!parsed.diagnostics.is_empty());
 
         for (name, source) in [
-            ("ordinary-call.xl", "let f = fn(a, b) { a }; f(_, 1)"),
-            ("reserved-name.xl", "let _0 = 1; _0"),
+            ("ordinary-call.forma", "let f = fn(a, b) { a }; f(_, 1)"),
+            ("reserved-name.forma", "let _0 = 1; _0"),
         ] {
             let mut sources = SourceDatabase::default();
             let id = sources.add(name, source);
@@ -1654,7 +1654,7 @@ mod tests {
         }
 
         let mut sources = SourceDatabase::default();
-        let id = sources.add("empty-section.xl", "let f = fn(a) { a }; f\\(1)");
+        let id = sources.add("empty-section.forma", "let f = fn(a) { a }; f\\(1)");
         let parsed = parse_registered(&sources, id);
         assert!(parsed.program.is_none());
         assert!(
@@ -1667,7 +1667,7 @@ mod tests {
     #[test]
     fn exposes_all_recovery_diagnostics() {
         let mut sources = SourceDatabase::default();
-        let id = sources.add("broken.xl", "let x = ; let y = ; y");
+        let id = sources.add("broken.forma", "let x = ; let y = ; y");
         let parsed = parse_registered(&sources, id);
         assert!(parsed.program.is_none());
         assert!(parsed.diagnostics.len() >= 2);
@@ -1677,7 +1677,7 @@ mod tests {
     fn recovers_complete_bindings_around_a_damaged_sibling() {
         let mut sources = SourceDatabase::default();
         let id = sources.add(
-            "recover.xl",
+            "recover.forma",
             "let before = 1; let broken = ; let after = 2; after",
         );
         let parsed = parse_registered(&sources, id);
@@ -1719,7 +1719,11 @@ mod tests {
 
     #[test]
     fn lowers_definition_bindings_and_function_contracts() {
-        let program = parse("defs.xl", "decl f: Fn(Int) -> Int; def f = fn(x) { x }; f").unwrap();
+        let program = parse(
+            "defs.forma",
+            "decl f: Fn(Int) -> Int; def f = fn(x) { x }; f",
+        )
+        .unwrap();
         assert_eq!(program.value.body.value.bindings.len(), 2);
         assert_eq!(
             program.value.body.value.bindings[0].value.kind,
@@ -1742,7 +1746,7 @@ mod tests {
     #[test]
     fn lowers_generic_definition_declarations_with_located_parameters() {
         let program = parse(
-            "identity.xl",
+            "identity.forma",
             "decl identity: for(A) Fn(A) -> A; def identity = fn(value) { value }; identity",
         )
         .unwrap();
@@ -1760,7 +1764,7 @@ mod tests {
     #[test]
     fn lowers_located_native_bindings_with_contracts() {
         let program = parse(
-            "native.xl",
+            "native.forma",
             "native map: for(A, B) Fn(Array(A), Fn(A) -> B) -> Array(B); map",
         )
         .unwrap();
@@ -1784,7 +1788,7 @@ mod tests {
     #[test]
     fn retains_decorators_and_lowers_their_rhs_calls() {
         let program = parse(
-            "decorators.xl",
+            "decorators.forma",
             "@outer @factory(1) type T = Int; { @field value: 2 }",
         )
         .unwrap();
@@ -1822,7 +1826,7 @@ mod tests {
     #[test]
     fn lowers_only_immediate_module_manifests() {
         let program = parse(
-            "manifest.xl",
+            "manifest.forma",
             r#"@@manifest {name: "tool", dependencies: {}, enabled: 'True}; 0"#,
         )
         .unwrap();
@@ -1838,7 +1842,10 @@ mod tests {
             "let value = 1; @@manifest {}; 0",
             "@@manifest {}; @@manifest {}; 0",
         ] {
-            assert!(parse("invalid-manifest.xl", invalid).is_err(), "{invalid}");
+            assert!(
+                parse("invalid-manifest.forma", invalid).is_err(),
+                "{invalid}"
+            );
         }
     }
 }

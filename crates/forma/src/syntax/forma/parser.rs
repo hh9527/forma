@@ -12,7 +12,7 @@ enum StringLookahead {
     Interpolation { brace_depth: usize },
 }
 
-include!(concat!(env!("OUT_DIR"), "/xl/generated.rs"));
+include!(concat!(env!("OUT_DIR"), "/forma/generated.rs"));
 
 impl<'a> Parser<'a> {
     pub fn from_token_stream(source_len: usize, tokens: Vec<Token>, spans: Vec<Span>) -> Self {

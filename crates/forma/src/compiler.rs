@@ -1839,25 +1839,25 @@ let decorators = {
     #[test]
     fn allocation_and_stack_quotas_keep_source_origins() {
         let source = "[1, 2]";
-        let function = compile_source("quota.xl", source).unwrap();
+        let function = compile_source("quota.forma", source).unwrap();
         let mut sources = SourceDatabase::default();
-        sources.add("quota.xl", source);
+        sources.add("quota.forma", source);
         let allocation = Vm::new()
             .execute_with_quota(&function, Quota::new(0, 100, 0))
             .unwrap_err()
             .with_sources(&sources);
         assert_eq!(allocation.kind, RuntimeErrorKind::AllocationQuotaExceeded);
-        assert!(allocation.to_string().contains("quota.xl:1:1"));
+        assert!(allocation.to_string().contains("quota.forma:1:1"));
 
         let stack = Vm::new()
             .execute_with_quota(&function, Quota::new(0, 1, u64::MAX))
             .unwrap_err()
             .with_sources(&sources);
         assert_eq!(stack.kind, RuntimeErrorKind::StackLimitExceeded);
-        assert!(stack.to_string().contains("quota.xl:1:"));
+        assert!(stack.to_string().contains("quota.forma:1:"));
 
         let native_source = "validate(Int, \"wrong\")";
-        let native = compile_source("native-quota.xl", native_source).unwrap();
+        let native = compile_source("native-quota.forma", native_source).unwrap();
         let native_error = Vm::new()
             .execute_with_quota(&native, Quota::new(1, 100, 0))
             .unwrap_err();

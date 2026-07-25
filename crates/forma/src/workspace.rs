@@ -221,9 +221,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let directory = std::env::temp_dir().join(format!("xl-workspace-test-{unique}"));
+        let directory = std::env::temp_dir().join(format!("forma-workspace-test-{unique}"));
         std::fs::create_dir_all(&directory).unwrap();
-        let root = directory.join("main.xl");
+        let root = directory.join("main.forma");
         std::fs::write(&root, source).unwrap();
         (directory, root)
     }
@@ -315,8 +315,8 @@ mod tests {
     #[test]
     fn valid_overlay_dependencies_supply_real_import_capabilities() {
         let (directory, root) =
-            fixture("import model from \"./model.xl\"; type FromOverlay = model.Shared; 0");
-        let model = directory.join("model.xl");
+            fixture("import model from \"./model.forma\"; type FromOverlay = model.Shared; 0");
+        let model = directory.join("model.forma");
         std::fs::write(&model, "type Shared = missing; 0").unwrap();
         let workspace = Workspace::new(&root, engine()).unwrap();
         workspace

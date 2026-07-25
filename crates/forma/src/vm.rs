@@ -957,7 +957,7 @@ impl Vm {
         // themselves use the explicit frame stack below.
         let (mut current, prototype) = std::thread::scope(|scope| {
             std::thread::Builder::new()
-                .name("xl-bytecode-linker".into())
+                .name("forma-bytecode-linker".into())
                 .stack_size(16 * 1024 * 1024)
                 .spawn_scoped(scope, || {
                     let mut current = Heap::work();

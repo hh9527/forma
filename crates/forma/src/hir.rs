@@ -546,7 +546,7 @@ mod tests {
     #[test]
     fn resolves_slots_shadowing_parameters_patterns_and_externals() {
         let program = parse(
-            "hir.xl",
+            "hir.forma",
             "decl loop: Fn(Int) -> Int;\
              def loop = fn(n) { if n < 1 { n } else { loop(n - 1) } };\
              let f = fn(x) { let x = x; match ('Ok, x) { ('Ok, y) => y, _ => ext } };\

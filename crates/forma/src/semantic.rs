@@ -119,7 +119,7 @@ impl<T> SemanticFact<T> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum WorkspaceModuleKind {
-    Xl,
+    Forma,
     Json,
     Core,
 }
@@ -515,7 +515,7 @@ impl WorkspaceSnapshot {
                 id: module,
                 name: source_name,
                 path: None,
-                kind: WorkspaceModuleKind::Xl,
+                kind: WorkspaceModuleKind::Forma,
                 state: WorkspaceModuleState::Partial,
                 source: Some(source),
                 imports: Vec::new(),
@@ -798,7 +798,7 @@ impl WorkspaceSnapshot {
     }
 
     fn completion_context(&self, location: Location) -> Option<CompletionContext> {
-        use crate::syntax::xl::lexer::Token;
+        use crate::syntax::forma::lexer::Token;
 
         if location.start != location.end {
             return None;
@@ -810,7 +810,7 @@ impl WorkspaceSnapshot {
         }
         let mut diagnostics = Vec::new();
         let (tokens, spans) =
-            crate::syntax::xl::lexer::tokenize_document(file.text(), &mut diagnostics);
+            crate::syntax::forma::lexer::tokenize_document(file.text(), &mut diagnostics);
         let significant = tokens
             .iter()
             .zip(&spans)
@@ -1347,7 +1347,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("xl-semantic-test-{unique}"));
+        let path = std::env::temp_dir().join(format!("forma-semantic-test-{unique}"));
         fs::create_dir(&path).unwrap();
         path
     }
@@ -1415,7 +1415,7 @@ mod tests {
     #[test]
     fn completion_returns_struct_fields_and_filters_prefixes() {
         let directory = fixture_dir();
-        let main = directory.join("main.xl");
+        let main = directory.join("main.forma");
         fs::write(&main, "let value = {alpha: 1, beta: \"x\"}; value.alpha").unwrap();
         let snapshot = engine().recover_workspace(&main).unwrap();
         let completion = completion_at(&snapshot, "value.alpha").expect("member context");
@@ -1434,10 +1434,10 @@ mod tests {
     #[test]
     fn completion_returns_only_resolved_module_exports() {
         let directory = fixture_dir();
-        let model = directory.join("model.xl");
-        let main = directory.join("main.xl");
+        let model = directory.join("model.forma");
+        let main = directory.join("main.forma");
         fs::write(&model, "{alpha: 1, beta: \"x\"}").unwrap();
-        fs::write(&main, "import model from \"./model.xl\"; model.alpha").unwrap();
+        fs::write(&main, "import model from \"./model.forma\"; model.alpha").unwrap();
         let snapshot = engine().recover_workspace(&main).unwrap();
         let completion = completion_at(&snapshot, "model.alpha").expect("module context");
         assert_eq!(completion.candidates.len(), 1);
@@ -1449,7 +1449,7 @@ mod tests {
     #[test]
     fn completion_does_not_recognize_strings_comments_or_bare_names() {
         for source_text in ["\"value.alpha\"", "1 # value.alpha", "let value = 1; value"] {
-            let snapshot = WorkspaceSnapshot::recover_source("context.xl", source_text);
+            let snapshot = WorkspaceSnapshot::recover_source("context.forma", source_text);
             let source = snapshot.modules()[0].source.unwrap();
             let context =
                 crate::query::QueryContext::current(crate::query::RevisionClock::default());
@@ -1465,9 +1465,9 @@ mod tests {
     #[test]
     fn indexes_workspace_modules_scopes_types_and_recursive_graphs() {
         let directory = fixture_dir();
-        let model = directory.join("model.xl");
+        let model = directory.join("model.forma");
         let data = directory.join("data.json");
-        let main = directory.join("main.xl");
+        let main = directory.join("main.forma");
         fs::write(
             &model,
             "@struct type Node = {children: Array(Node)}; {Node: Node}",
@@ -1476,7 +1476,7 @@ mod tests {
         fs::write(&data, "{\"value\":1}").unwrap();
         fs::write(
             &main,
-            "import model from \"./model.xl\";\n\
+            "import model from \"./model.forma\";\n\
              import data from \"./data.json\";\n\
              let f = fn(x) { let y = x; y };\n\
              let count = 1 + 2;\n\
@@ -1587,7 +1587,7 @@ mod tests {
     #[test]
     fn recovers_hir_and_unavailable_facts_around_damaged_source() {
         let snapshot = WorkspaceSnapshot::recover_source(
-            "damaged.xl",
+            "damaged.forma",
             "let before = 1; let broken = ; let after = missing; after",
         );
         assert!(!snapshot.diagnostics().is_empty());
@@ -1618,18 +1618,18 @@ mod tests {
     #[test]
     fn known_any_is_distinct_from_unavailable_fact_states() {
         let mut sources = SourceDatabase::default();
-        let source = sources.add("any.xl", "let id = fn(x) { x }; id");
+        let source = sources.add("any.forma", "let id = fn(x) { x }; id");
         let parsed = crate::parser::parse_registered(&sources, source);
         let program = parsed.program.unwrap();
         let analysis =
-            crate::types::analyze_program_registered("any.xl", &sources, &program, 1_000_000)
+            crate::types::analyze_program_registered("any.forma", &sources, &program, 1_000_000)
                 .unwrap();
         let snapshot = WorkspaceSnapshot::build(
             sources,
             vec![SemanticModuleInput {
-                key: "any.xl".into(),
+                key: "any.forma".into(),
                 path: None,
-                kind: WorkspaceModuleKind::Xl,
+                kind: WorkspaceModuleKind::Forma,
                 source: Some(source),
                 program: Some(program),
                 analysis: Some(analysis),
@@ -1664,7 +1664,7 @@ mod tests {
     #[test]
     fn recovered_duplicate_slots_are_conflicted_with_one_diagnostic() {
         let snapshot = WorkspaceSnapshot::recover_source(
-            "conflict.xl",
+            "conflict.forma",
             "decl item: Int; decl item: String; 0",
         );
         let slots = snapshot
@@ -1690,7 +1690,7 @@ mod tests {
     #[test]
     fn recovery_snapshot_projects_partial_type_evaluation_facts() {
         let snapshot = WorkspaceSnapshot::recover_source(
-            "partial.xl",
+            "partial.forma",
             "type A = broken(Int);\
              type B = String;\
              type C = Array(B);\

@@ -12,14 +12,14 @@ use async_lsp::{
     AnyEvent, AnyNotification, AnyRequest, ClientSocket, ErrorCode, LspService, RequestId,
     ResponseError,
 };
+use forma::{
+    CancellationToken, CompletionKind, DocumentVersion, Engine, EngineConfig, FactState, Location,
+    PositionEncoding, QueryError, TextEdit, TextPosition, TextRange, Workspace, WorkspaceSnapshot,
+};
 use lsp::notification::Notification as _;
 use lsp::request::Request as _;
 use serde::de::DeserializeOwned;
 use tower_service::Service;
-use xl::{
-    CancellationToken, CompletionKind, DocumentVersion, Engine, EngineConfig, FactState, Location,
-    PositionEncoding, QueryError, TextEdit, TextPosition, TextRange, Workspace, WorkspaceSnapshot,
-};
 
 type RequestFuture =
     Pin<Box<dyn Future<Output = Result<serde_json::Value, ResponseError>> + 'static>>;
@@ -101,7 +101,7 @@ impl LspService for Server {
                 async_lsp::Error::Protocol("exit received before shutdown".to_owned()),
             )),
             Err(error) => {
-                eprintln!("xl-lsp notification error: {error}");
+                eprintln!("forma-lsp notification error: {error}");
                 ControlFlow::Continue(())
             }
         }
@@ -336,7 +336,7 @@ fn initialize(
             ..lsp::ServerCapabilities::default()
         },
         server_info: Some(lsp::ServerInfo {
-            name: "xl-lsp".to_owned(),
+            name: "forma-lsp".to_owned(),
             version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         }),
     })
@@ -532,8 +532,8 @@ async fn publish_diagnostics(state: &Rc<RefCell<State>>, snapshot: &WorkspaceSna
                 Some(lsp::Diagnostic {
                     range: to_lsp_range(snapshot, primary.location, encoding)?,
                     severity: Some(match diagnostic.severity {
-                        xl::source::Severity::Error => lsp::DiagnosticSeverity::ERROR,
-                        xl::source::Severity::Warning => lsp::DiagnosticSeverity::WARNING,
+                        forma::source::Severity::Error => lsp::DiagnosticSeverity::ERROR,
+                        forma::source::Severity::Warning => lsp::DiagnosticSeverity::WARNING,
                     }),
                     message: diagnostic.message.clone(),
                     related_information: Some(
@@ -564,9 +564,9 @@ async fn publish_diagnostics(state: &Rc<RefCell<State>>, snapshot: &WorkspaceSna
 
 async fn definition_at<'a>(
     snapshot: &'a WorkspaceSnapshot,
-    context: &xl::QueryContext,
+    context: &forma::QueryContext,
     location: Location,
-) -> Result<Option<&'a xl::Definition>, ResponseError> {
+) -> Result<Option<&'a forma::Definition>, ResponseError> {
     if let Some(reference) = snapshot
         .query_reference_at(context, location)
         .await
@@ -722,7 +722,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use xl::Quota;
+    use forma::Quota;
 
     fn config() -> EngineConfig {
         EngineConfig {
@@ -736,7 +736,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("xl-lsp-{unique}"));
+        let root = std::env::temp_dir().join(format!("forma-lsp-{unique}"));
         std::fs::create_dir_all(&root).expect("create fixture root");
         let captured = Rc::new(RefCell::new(None));
         let (main_loop, _) = async_lsp::MainLoop::new_server({
@@ -795,7 +795,7 @@ mod tests {
     async fn semantic_fixture(source: &str) -> (PathBuf, Rc<RefCell<State>>, lsp::Url) {
         let (root, state) = fixture();
         initialize_state(&root, &state);
-        let path = root.join("main.xl");
+        let path = root.join("main.forma");
         let uri = lsp::Url::from_file_path(&path).expect("document URI");
         if state.borrow().workspace.is_none() {
             state.borrow_mut().workspace = Some(Rc::new(
@@ -820,7 +820,7 @@ mod tests {
 
     async fn disk_semantic_fixture(source: &str) -> (PathBuf, Rc<RefCell<State>>, lsp::Url) {
         let (root, state) = fixture();
-        let path = root.join("main.xl");
+        let path = root.join("main.forma");
         std::fs::write(&path, source).expect("write source");
         initialize_state(&root, &state);
         let workspace = Rc::new(
@@ -908,7 +908,7 @@ mod tests {
     fn applies_ordered_utf16_changes_transactionally() {
         let (root, state) = fixture();
         initialize_state(&root, &state);
-        let path = root.join("main.xl");
+        let path = root.join("main.forma");
         let uri = lsp::Url::from_file_path(&path).expect("document URI");
         {
             let mut state = state.borrow_mut();
@@ -967,14 +967,14 @@ mod tests {
             .run_until(async {
                 let (root, state) = fixture();
                 initialize_state(&root, &state);
-                let path = root.join("new.xl");
+                let path = root.join("new.forma");
                 let uri = lsp::Url::from_file_path(&path).expect("document URI");
                 let open: AnyNotification = serde_json::from_value(serde_json::json!({
                     "method": "textDocument/didOpen",
                     "params": {
                         "textDocument": {
                             "uri": uri,
-                            "languageId": "xl",
+                            "languageId": "forma",
                             "version": 1,
                             "text": "a😀c"
                         }
@@ -1329,7 +1329,7 @@ mod tests {
             .expect("snapshot")
             .sources()
             .files()
-            .find(|file| file.name.ends_with("main.xl"))
+            .find(|file| file.name.ends_with("main.forma"))
             .expect("main source")
             .text()
             .clone();
@@ -1363,10 +1363,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn lsp_completion_maps_module_exports() {
         let (root, state) = fixture();
-        let model = root.join("model.xl");
-        let main = root.join("main.xl");
+        let model = root.join("model.forma");
+        let main = root.join("main.forma");
         std::fs::write(&model, "{alpha: 1, beta: \"x\"}").expect("write model");
-        let source = "import model from \"./model.xl\"; model.alpha";
+        let source = "import model from \"./model.forma\"; model.alpha";
         std::fs::write(&main, source).expect("write main");
         initialize_state(&root, &state);
         let workspace = Rc::new(
@@ -1386,10 +1386,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn lsp_completion_supports_an_empty_prefix_in_recovered_source() {
         let (root, state) = fixture();
-        let model = root.join("model.xl");
-        let main = root.join("main.xl");
+        let model = root.join("model.forma");
+        let main = root.join("main.forma");
         std::fs::write(&model, "{alpha: 1, beta: \"x\"}").expect("write model");
-        let source = "import model from \"./model.xl\"; model.";
+        let source = "import model from \"./model.forma\"; model.";
         std::fs::write(&main, source).expect("write main");
         initialize_state(&root, &state);
         let workspace = Rc::new(
@@ -1505,7 +1505,7 @@ mod tests {
     async fn diagnostics_publish_current_errors_and_an_empty_clear() {
         let (root, state, main_loop) = fixture_loop();
         initialize_state(&root, &state);
-        let path = root.join("main.xl");
+        let path = root.join("main.forma");
         let workspace = Rc::new(
             Workspace::new(&path, Engine::new(config())).expect("create document workspace"),
         );
@@ -1564,7 +1564,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("xl-lsp-loop-{unique}"));
+        let root = std::env::temp_dir().join(format!("forma-lsp-loop-{unique}"));
         std::fs::create_dir_all(&root).expect("create fixture root");
         let uri = lsp::Url::from_directory_path(&root).expect("fixture URI");
         let mut input = Vec::new();

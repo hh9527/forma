@@ -484,7 +484,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                     Err(error) => {
                         self.inputs.insert(
                             key.clone(),
-                            unavailable_input(key, path.clone(), WorkspaceModuleKind::Xl),
+                            unavailable_input(key, path.clone(), WorkspaceModuleKind::Forma),
                         );
                         let _ = error;
                         return None;
@@ -576,7 +576,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                     target: target_module.id.clone(),
                 });
                 let value = match target_module.format {
-                    ModuleFormat::Xl => self.load_xl(target_module.clone()).await,
+                    ModuleFormat::Forma => self.load_xl(target_module.clone()).await,
                     ModuleFormat::Json => self.load_json(target_module.clone()).await,
                     _ => {
                         let target_key = target_module.id.to_string();
@@ -584,7 +584,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                             unavailable_input(
                                 target_key,
                                 target_path.clone(),
-                                WorkspaceModuleKind::Xl,
+                                WorkspaceModuleKind::Forma,
                             )
                         });
                         None
@@ -663,7 +663,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                 SemanticModuleInput {
                     key: key.clone(),
                     path: Some(path.clone()),
-                    kind: WorkspaceModuleKind::Xl,
+                    kind: WorkspaceModuleKind::Forma,
                     source: Some(source_id),
                     program,
                     analysis: strict.as_ref().map(|(analysis, _)| analysis.clone()),
@@ -853,8 +853,8 @@ pub fn load_module_with_quota_and_debug_sink(
     let root_module = resolver
         .resolve_root(path.as_ref())
         .map_err(|error| ModuleError::new(error.to_string()))?;
-    if root_module.format != ModuleFormat::Xl {
-        return Err(ModuleError::new("root module must have an .xl extension"));
+    if root_module.format != ModuleFormat::Forma {
+        return Err(ModuleError::new("root module must have a .forma extension"));
     }
     let mut main = MainWorld::building();
     let mut sources = SourceDatabase::default();
@@ -996,7 +996,7 @@ impl ModuleLoader {
                             Ok((sourced, root, false, ModuleInterface::default()))
                         })
                 }
-                ModuleFormat::Xl => {
+                ModuleFormat::Forma => {
                     let mut account = QuotaAccount::new(self.module_quota);
                     self.compile_xl(&module_id, &path, BTreeMap::new(), false, &mut account)
                         .and_then(|(analysis, function, externals)| {
@@ -1253,7 +1253,7 @@ impl ModuleLoader {
             SemanticModuleInput {
                 key,
                 path: Some(path.to_owned()),
-                kind: WorkspaceModuleKind::Xl,
+                kind: WorkspaceModuleKind::Forma,
                 source: Some(source_id),
                 program: Some(program),
                 analysis: Some(analysis.clone()),
@@ -1421,7 +1421,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("xl-module-test-{unique}"));
+        let path = std::env::temp_dir().join(format!("forma-module-test-{unique}"));
         fs::create_dir(&path).unwrap();
         path
     }
@@ -1448,7 +1448,7 @@ mod tests {
     fn core_debug_observes_values_without_changing_results() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import debug from "@bim/std/debug";
                let identity = fn(value) { value };
                let data = { text: "line\nnext", items: [1, 'Ok, (2,)] };
@@ -1465,7 +1465,7 @@ mod tests {
         })
         .with_debug_sink(sink.clone());
         let module = engine
-            .load_module(directory.join("main.xl"), BTreeMap::new())
+            .load_module(directory.join("main.forma"), BTreeMap::new())
             .unwrap();
         assert_eq!(
             engine.execute(&module).unwrap().to_string(),
@@ -1485,12 +1485,12 @@ mod tests {
         drop(events);
 
         fs::write(
-            directory.join("bad-label.xl"),
+            directory.join("bad-label.forma"),
             r#"import debug from "@bim/std/debug"; debug.dbg_with(1, 42)"#,
         )
         .unwrap();
         let bad = engine
-            .load_module(directory.join("bad-label.xl"), BTreeMap::new())
+            .load_module(directory.join("bad-label.forma"), BTreeMap::new())
             .unwrap_err();
         assert!(bad.to_string().contains("String"));
         fs::remove_dir_all(directory).unwrap();
@@ -1501,14 +1501,14 @@ mod tests {
         let directory = fixture_dir();
         fs::write(directory.join("data.json"), r#"{"value":42}"#).unwrap();
         fs::write(
-            directory.join("dependency.xl"),
+            directory.join("dependency.forma"),
             r#"import debug from "@bim/std/debug"; debug.dbg_with("tool", 41)"#,
         )
         .unwrap();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import debug from "@bim/std/debug";
-               import dependency from "./dependency.xl";
+               import dependency from "./dependency.forma";
                import data from "./data.json";
                type Observed = debug.dbg(Int);
                debug.dbg(data)"#,
@@ -1521,7 +1521,7 @@ mod tests {
         })
         .with_debug_sink(sink.clone());
         let module = engine
-            .load_module(directory.join("main.xl"), BTreeMap::new())
+            .load_module(directory.join("main.forma"), BTreeMap::new())
             .unwrap();
         {
             let events = sink.events.lock().unwrap();
@@ -1588,7 +1588,7 @@ mod tests {
     fn metadata_only_helpers_are_erased_but_runtime_helpers_are_retained() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("erased.xl"),
+            directory.join("erased.forma"),
             r#"import debug from "@bim/std/debug";
                def observe = fn(value) { debug.dbg_with("metadata", value) };
                type Observed = observe(Int);
@@ -1597,7 +1597,7 @@ mod tests {
         .unwrap();
         let sink = Arc::new(CapturingDebugSink::default());
         let erased = load_module_with_quota_and_debug_sink(
-            directory.join("erased.xl"),
+            directory.join("erased.forma"),
             BTreeMap::new(),
             Quota::with_fuel(100_000),
             sink.clone(),
@@ -1614,7 +1614,7 @@ mod tests {
         assert_eq!(sink.events.lock().unwrap().len(), 1);
 
         fs::write(
-            directory.join("retained.xl"),
+            directory.join("retained.forma"),
             r#"import debug from "@bim/std/debug";
                def observe = fn(value) { debug.dbg_with("observed", value) };
                type Observed = observe(Int);
@@ -1622,7 +1622,7 @@ mod tests {
         )
         .unwrap();
         let retained = load_module_with_quota_and_debug_sink(
-            directory.join("retained.xl"),
+            directory.join("retained.forma"),
             BTreeMap::new(),
             Quota::with_fuel(100_000),
             sink.clone(),
@@ -1640,7 +1640,7 @@ mod tests {
     fn bootstrap_shadow_does_not_consume_the_module_initialization_quota() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import debug from "@bim/std/debug";
                type Observed = debug.dbg(Int);
                0"#,
@@ -1648,7 +1648,7 @@ mod tests {
         .unwrap();
         let sink = Arc::new(CapturingDebugSink::default());
         load_module_with_quota_and_debug_sink(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             BTreeMap::new(),
             Quota::new(1, 1_000, u64::MAX),
             sink.clone(),
@@ -1666,7 +1666,7 @@ mod tests {
     fn derived_codec_normalizes_options_and_pretty_prints_json() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("User.xl"),
+            directory.join("User.forma"),
             r#"import codec from "@bim/std/codec";
                import result from "@bim/std/result";
                @struct type User = {v: Option(String)};
@@ -1678,9 +1678,9 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import data from "./abc.json";
-               import User from "./User.xl";
+               import User from "./User.forma";
                import result from "@bim/std/result";
                import json from "@bim/std/json";
                let user = data |> User.decode |> result.unwrap;
@@ -1695,7 +1695,7 @@ mod tests {
         ];
         for (source, output) in expected {
             fs::write(directory.join("abc.json"), source).unwrap();
-            let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000)
+            let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000)
                 .unwrap_or_else(|error| panic!("failed to load {source}: {error}"));
             assert_eq!(
                 module.execute(100_000).unwrap().to_string(),
@@ -1704,7 +1704,7 @@ mod tests {
         }
 
         fs::write(directory.join("abc.json"), r#"{"v":1}"#).unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let failure = module.execute(100_000).unwrap_err();
         assert!(failure.message.contains("$.v"), "{}", failure.message);
         assert!(failure.message.contains("String"), "{}", failure.message);
@@ -1729,16 +1729,16 @@ mod tests {
             rendered.contains("contract rule declared here"),
             "{rendered}"
         );
-        assert!(rendered.contains("User.xl:3:47:"), "{rendered}");
+        assert!(rendered.contains("User.forma:3:47:"), "{rendered}");
 
         fs::write(
-            directory.join("inspect.xl"),
+            directory.join("inspect.forma"),
             r#"import data from "./abc.json";
-               import User from "./User.xl";
+               import User from "./User.forma";
                data |> User.decode"#,
         )
         .unwrap();
-        let inspected = load_module(directory.join("inspect.xl"), BTreeMap::new(), 100_000)
+        let inspected = load_module(directory.join("inspect.forma"), BTreeMap::new(), 100_000)
             .unwrap()
             .execute(100_000)
             .unwrap();
@@ -1760,7 +1760,7 @@ mod tests {
         let directory = fixture_dir();
         fs::write(directory.join("data.json"), r#"{"v":"plain"}"#).unwrap();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import data from "./data.json";
                import codec from "@bim/std/codec";
                import result from "@bim/std/result";
@@ -1770,18 +1770,18 @@ mod tests {
         )
         .unwrap();
 
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(
             module.execute(100_000).unwrap().to_string(),
             "{v: \"plain\"}"
         );
 
         fs::write(
-            directory.join("legacy.xl"),
+            directory.join("legacy.forma"),
             r#"import result from "@bim/std/result"; result.unwrap('Err("legacy"))"#,
         )
         .unwrap();
-        let legacy = load_module(directory.join("legacy.xl"), BTreeMap::new(), 100_000)
+        let legacy = load_module(directory.join("legacy.forma"), BTreeMap::new(), 100_000)
             .unwrap()
             .execute(100_000)
             .unwrap_err();
@@ -1817,14 +1817,14 @@ mod tests {
             ),
         ];
         for (index, (source, expected)) in cases.into_iter().enumerate() {
-            let path = directory.join(format!("case-{index}.xl"));
+            let path = directory.join(format!("case-{index}.forma"));
             fs::write(&path, source).unwrap();
             let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
             let failure = module.execute(100_000).unwrap_err();
             assert!(failure.message.contains(expected), "{}", failure.message);
         }
 
-        let path = directory.join("compact.xl");
+        let path = directory.join("compact.forma");
         fs::write(
             &path,
             r#"import json from "@bim/std/json";
@@ -1850,18 +1850,18 @@ mod tests {
     fn loads_json_and_xl_modules_with_types() {
         let directory = fixture_dir();
         fs::write(directory.join("user.json"), r#"{"name":"Ada","age":36}"#).unwrap();
-        fs::write(directory.join("answer.xl"), "40 + 2").unwrap();
+        fs::write(directory.join("answer.forma"), "40 + 2").unwrap();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             "import user from \"./user.json\";\
-             import answer from \"./answer.xl\";\
+             import answer from \"./answer.forma\";\
              @struct type User = {name: String, age: Int};\
              let checked: User = user;\
              (checked.name, answer)",
         )
         .unwrap();
 
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(module.dependencies.len(), 3);
         assert_eq!(
             module.execute(100_000).unwrap().to_string(),
@@ -1873,10 +1873,15 @@ mod tests {
     #[test]
     fn rejects_module_cycles() {
         let directory = fixture_dir();
-        fs::write(directory.join("main.xl"), "import a from \"./a.xl\"; a").unwrap();
-        fs::write(directory.join("a.xl"), "import b from \"./b.xl\"; b").unwrap();
-        fs::write(directory.join("b.xl"), "import a from \"./a.xl\"; a").unwrap();
-        let error = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap_err();
+        fs::write(
+            directory.join("main.forma"),
+            "import a from \"./a.forma\"; a",
+        )
+        .unwrap();
+        fs::write(directory.join("a.forma"), "import b from \"./b.forma\"; b").unwrap();
+        fs::write(directory.join("b.forma"), "import a from \"./a.forma\"; a").unwrap();
+        let error =
+            load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap_err();
         assert!(error.message().contains("cycle"));
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1885,26 +1890,30 @@ mod tests {
     fn rejects_unregistered_and_nested_native_declarations_with_locations() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("missing-native.xl"),
+            directory.join("missing-native.forma"),
             "native missing: Fn(Int) -> Int; missing(1)",
         )
         .unwrap();
         let missing = load_module(
-            directory.join("missing-native.xl"),
+            directory.join("missing-native.forma"),
             BTreeMap::new(),
             100_000,
         )
         .unwrap_err();
         assert!(missing.message().contains("not registered"));
-        assert!(missing.to_string().contains("missing-native.xl:1:1"));
+        assert!(missing.to_string().contains("missing-native.forma:1:1"));
 
         fs::write(
-            directory.join("nested-native.xl"),
+            directory.join("nested-native.forma"),
             "let value = { native hidden: Fn(Int) -> Int; 1 }; value",
         )
         .unwrap();
-        let nested =
-            load_module(directory.join("nested-native.xl"), BTreeMap::new(), 100_000).unwrap_err();
+        let nested = load_module(
+            directory.join("nested-native.forma"),
+            BTreeMap::new(),
+            100_000,
+        )
+        .unwrap_err();
         assert!(
             nested
                 .message()
@@ -1917,17 +1926,17 @@ mod tests {
     fn imports_recursive_function_roots_from_the_persistent_world() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("countdown.xl"),
+            directory.join("countdown.forma"),
             "def countdown: Fn(Int) -> Int = fn(n) { if n < 1 { 0 } else { countdown(n - 1) } }; countdown",
         )
         .unwrap();
         fs::write(
-            directory.join("main.xl"),
-            "import countdown from \"./countdown.xl\"; countdown(4)",
+            directory.join("main.forma"),
+            "import countdown from \"./countdown.forma\"; countdown(4)",
         )
         .unwrap();
 
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(module.execute(100_000).unwrap().to_string(), "0");
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1935,10 +1944,10 @@ mod tests {
     #[test]
     fn external_input_is_any_and_available_at_runtime() {
         let directory = fixture_dir();
-        fs::write(directory.join("main.xl"), "input").unwrap();
+        fs::write(directory.join("main.forma"), "input").unwrap();
         let input = parse_json("input", r#"{"value":42}"#).unwrap();
         let module = load_module(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             BTreeMap::from([("input".into(), input)]),
             100_000,
         )
@@ -1959,21 +1968,22 @@ mod tests {
         let directory = fixture_dir();
         fs::write(directory.join("user.json"), r#"{"name":"Ada","age":"old"}"#).unwrap();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             "import user from \"./user.json\";\n\
              @struct type User = {name: String, age: Int};\n\
              let checked: User = user;\n\
              checked",
         )
         .unwrap();
-        let error = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap_err();
+        let error =
+            load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap_err();
         let message = error.message();
         assert!(
             message.contains("user.json:1:21: binding checked has type"),
             "{message}"
         );
         assert!(
-            message.contains("main.xl:2:1: type requirement declared here"),
+            message.contains("main.forma:2:1: type requirement declared here"),
             "{message}"
         );
         fs::remove_dir_all(directory).unwrap();
@@ -1982,16 +1992,16 @@ mod tests {
     #[test]
     fn module_execution_uses_evaluation_fuel_semantics() {
         let directory = fixture_dir();
-        fs::write(directory.join("straight.xl"), "40 + 2").unwrap();
-        let straight = load_module(directory.join("straight.xl"), BTreeMap::new(), 0).unwrap();
+        fs::write(directory.join("straight.forma"), "40 + 2").unwrap();
+        let straight = load_module(directory.join("straight.forma"), BTreeMap::new(), 0).unwrap();
         assert_eq!(straight.execute(0).unwrap().to_string(), "42");
 
         fs::write(
-            directory.join("call.xl"),
+            directory.join("call.forma"),
             "let identity = fn(value) { value }; identity(42)",
         )
         .unwrap();
-        let call = load_module(directory.join("call.xl"), BTreeMap::new(), 0).unwrap();
+        let call = load_module(directory.join("call.forma"), BTreeMap::new(), 0).unwrap();
         assert_eq!(
             call.execute(0).unwrap_err().kind,
             crate::RuntimeErrorKind::FuelExhausted
@@ -2003,7 +2013,7 @@ mod tests {
     fn engine_applies_module_and_session_quotas_at_separate_boundaries() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("typed.xl"),
+            directory.join("typed.forma"),
             "type First = Array(Int); type Second = Array(Int); 0",
         )
         .unwrap();
@@ -2012,17 +2022,17 @@ mod tests {
             session_quota: Quota::new(100, 1_000, u64::MAX),
         });
         let error = module_limited
-            .load_module(directory.join("typed.xl"), BTreeMap::new())
+            .load_module(directory.join("typed.forma"), BTreeMap::new())
             .unwrap_err();
         assert!(error.message().contains("fuel"));
 
-        fs::write(directory.join("value.xl"), "[1]").unwrap();
+        fs::write(directory.join("value.forma"), "[1]").unwrap();
         let session_limited = Engine::new(EngineConfig {
             module_quota: Quota::new(100, 1_000, u64::MAX),
             session_quota: Quota::new(100, 1_000, 0),
         });
         let module = session_limited
-            .load_module(directory.join("value.xl"), BTreeMap::new())
+            .load_module(directory.join("value.forma"), BTreeMap::new())
             .unwrap();
         assert_eq!(
             session_limited.execute(&module).unwrap_err().kind,
@@ -2074,11 +2084,11 @@ mod tests {
     fn sessions_use_fresh_work_worlds_and_leave_frozen_main_unchanged() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import arrays from "@bim/std/array"; arrays.map([1, 2], fn(x) { x + 1 })"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let main_counts = module.runtime.main.heap.counts();
         assert!(main_counts.0 > 0, "core modules must be installed in Main");
 
@@ -2092,7 +2102,7 @@ mod tests {
     fn core_array_module_runs_higher_order_operations_and_nested_callbacks() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import arrays from "@bim/std/array";
                let values = [1, 2, 3];
                let empty: Array(Int) = [];
@@ -2114,7 +2124,7 @@ mod tests {
         )
         .unwrap();
 
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let value = module.execute(100_000).unwrap();
         let Value::Dict(result) = value else {
             panic!("expected Dict result")
@@ -2139,7 +2149,7 @@ mod tests {
     #[test]
     fn generic_core_exports_instantiate_per_member_access_but_not_per_local_use() {
         let directory = fixture_dir();
-        let main = directory.join("main.xl");
+        let main = directory.join("main.forma");
         fs::write(
             &main,
             r#"import arrays from "@bim/std/array";
@@ -2171,19 +2181,19 @@ mod tests {
     fn generic_definition_exports_instantiate_per_member_access() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("identity.xl"),
+            directory.join("identity.forma"),
             r#"decl identity: for(A) Fn(A) -> A;
                def identity = fn(value) { value };
                {identity: identity}"#,
         )
         .unwrap();
         fs::write(
-            directory.join("main.xl"),
-            r#"import generic from "./identity.xl";
+            directory.join("main.forma"),
+            r#"import generic from "./identity.forma";
                (generic.identity(1), generic.identity("x"))"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(
             module.analysis.display(module.analysis.result_type),
             "(Int, String)"
@@ -2196,20 +2206,20 @@ mod tests {
     fn typed_metadata_constructors_cross_module_interfaces() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("constructors.xl"),
+            directory.join("constructors.forma"),
             r#"def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) { Option(Item) };
                {Maybe: Maybe}"#,
         )
         .unwrap();
         fs::write(
-            directory.join("main.xl"),
-            r#"import constructors from "./constructors.xl";
+            directory.join("main.forma"),
+            r#"import constructors from "./constructors.forma";
                type MaybeInt = constructors.Maybe(Int);
                let value: MaybeInt = 'None;
                value"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(
             module.analysis.display(module.analysis.result_type),
             "enum {None, Some(Int)}"
@@ -2225,13 +2235,13 @@ mod tests {
         let data = format!("[{}]", vec!["1"; item_count].join(","));
         fs::write(directory.join("values.json"), data).unwrap();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import arrays from "@bim/std/array";
                import values from "./values.json";
                arrays.map(values, fn(value) { value + 1 })"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
 
         let mut exact = QuotaAccount::new(Quota::new(1_501, 1_000, u64::MAX));
         let arena = Vm::new()
@@ -2286,14 +2296,14 @@ mod tests {
         );
 
         fs::write(
-            directory.join("types.xl"),
+            directory.join("types.forma"),
             r#"import arrays from "@bim/std/array";
                type Pair = Tuple(arrays.map([Int, String], fn(item) { item }));
                let pair: Pair = (1, "one");
                pair"#,
         )
         .unwrap();
-        let types = load_module(directory.join("types.xl"), BTreeMap::new(), 100_000).unwrap();
+        let types = load_module(directory.join("types.forma"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(types.execute(100_000).unwrap().to_string(), "(1, \"one\")");
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2322,27 +2332,30 @@ mod tests {
         };
 
         assert!(
-            analysis_error("length.xl", "arrays.length(1)")
+            analysis_error("length.forma", "arrays.length(1)")
                 .to_string()
                 .contains("cannot unify Int with Array")
         );
         assert!(
-            analysis_error("arity.xl", "arrays.map([1], fn(a, b) { a + b })")
+            analysis_error("arity.forma", "arrays.map([1], fn(a, b) { a + b })")
                 .to_string()
                 .contains("cannot unify")
         );
         assert!(
-            analysis_error("filter.xl", "arrays.filter([1], fn(value) { value })")
+            analysis_error("filter.forma", "arrays.filter([1], fn(value) { value })")
                 .to_string()
                 .contains("cannot unify Int with enum {False, True}")
         );
         assert!(
-            analysis_error("flat-map.xl", "arrays.flat_map([1], fn(value) { value })")
-                .to_string()
-                .contains("cannot unify Int with Array")
+            analysis_error(
+                "flat-map.forma",
+                "arrays.flat_map([1], fn(value) { value })"
+            )
+            .to_string()
+            .contains("cannot unify Int with Array")
         );
-        let callback = run_error("callback.xl", "arrays.map([1], fn(value) { value / 0 })");
-        assert!(callback.to_string().contains("callback.xl:1:"));
+        let callback = run_error("callback.forma", "arrays.map([1], fn(value) { value / 0 })");
+        assert!(callback.to_string().contains("callback.forma:1:"));
         assert!(
             callback
                 .trace
@@ -2351,7 +2364,7 @@ mod tests {
         );
 
         let nested_depth = run_error(
-            "nested-depth.xl",
+            "nested-depth.forma",
             "decl nest: Fn(Int) -> Int;
              def nest = fn(n) {
                  if n < 1 { 0 } else {
@@ -2365,7 +2378,7 @@ mod tests {
             crate::RuntimeErrorKind::CallDepthExceeded
         );
 
-        let unknown_path = directory.join("unknown-core.xl");
+        let unknown_path = directory.join("unknown-core.forma");
         fs::write(
             &unknown_path,
             "import unknown from \"@bim/std/unknown\"; unknown",
@@ -2384,7 +2397,7 @@ mod tests {
     fn core_option_and_result_combinators_are_generic_xl_definitions() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import options from "@bim/std/option";
                import results from "@bim/std/result";
                let ok: Result(Int, String) = 'Ok(3);
@@ -2409,7 +2422,7 @@ mod tests {
                }"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let Value::Dict(result) = module.execute(100_000).unwrap() else {
             panic!("expected combinator results")
         };
@@ -2441,7 +2454,7 @@ mod tests {
     fn typed_metadata_witnesses_flow_through_codec_and_validation_boundaries() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import codec from "@bim/std/codec";
                import result from "@bim/std/result";
                @struct type User = {name: String};
@@ -2474,7 +2487,7 @@ mod tests {
                }"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(
             module
                 .analysis
@@ -2553,22 +2566,27 @@ mod tests {
         );
 
         fs::write(
-            directory.join("wrong-encode.xl"),
+            directory.join("wrong-encode.forma"),
             r#"import codec from "@bim/std/codec";
                @struct type User = {name: String};
                codec.encode(User, {name: 1})"#,
         )
         .unwrap();
-        let error =
-            load_module(directory.join("wrong-encode.xl"), BTreeMap::new(), 100_000).unwrap_err();
+        let error = load_module(
+            directory.join("wrong-encode.forma"),
+            BTreeMap::new(),
+            100_000,
+        )
+        .unwrap_err();
         assert!(error.to_string().contains("cannot unify Int with String"));
 
         fs::write(
-            directory.join("erased.xl"),
+            directory.join("erased.forma"),
             "let metadata: Type = Int; validate(metadata, 1)",
         )
         .unwrap();
-        let error = load_module(directory.join("erased.xl"), BTreeMap::new(), 100_000).unwrap_err();
+        let error =
+            load_module(directory.join("erased.forma"), BTreeMap::new(), 100_000).unwrap_err();
         assert!(error.to_string().contains("TypeOf"));
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2577,7 +2595,7 @@ mod tests {
     fn core_dict_enumerates_constructs_and_merges_in_canonical_order() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import dicts from "@bim/std/dict";
                let source = { z: 3, a: 1, middle: 2 };
                {
@@ -2596,7 +2614,7 @@ mod tests {
         )
         .unwrap();
 
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let Value::Dict(result) = module.execute(100_000).unwrap() else {
             panic!("expected Dict result")
         };
@@ -2628,13 +2646,13 @@ mod tests {
         let directory = fixture_dir();
         fs::write(directory.join("data.json"), r#"{"a":1,"long":2}"#).unwrap();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import dicts from "@bim/std/dict";
                import data from "./data.json";
                dicts.keys(data)"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let requested = 2 * std::mem::size_of::<Value>() as u64 + 5;
         let mut exact = QuotaAccount::new(Quota::new(1, 1_000, requested));
         let arena = Vm::new()
@@ -2669,14 +2687,14 @@ mod tests {
         );
 
         fs::write(
-            directory.join("types.xl"),
+            directory.join("types.forma"),
             r#"import dicts from "@bim/std/dict";
                type Pair = Tuple(dicts.values({ first: Int, second: String }));
                let pair: Pair = (1, "one");
                pair"#,
         )
         .unwrap();
-        let types = load_module(directory.join("types.xl"), BTreeMap::new(), 100_000).unwrap();
+        let types = load_module(directory.join("types.forma"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(types.execute(100_000).unwrap().to_string(), "(1, \"one\")");
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2685,7 +2703,7 @@ mod tests {
     fn core_attributes_normalizes_flattens_and_inspects_arbitrary_values() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import attributes from "@bim/std/attributes";
                let nested = {
                    kind: 'WithAttributes,
@@ -2713,7 +2731,7 @@ mod tests {
         )
         .unwrap();
 
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let Value::Dict(result) = module.execute(100_000).unwrap() else {
             panic!("expected Dict result")
         };
@@ -2750,7 +2768,7 @@ mod tests {
     fn attributed_type_metadata_is_transparent_and_preserved() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import attributes from "@bim/std/attributes";
                import codec from "@bim/std/codec";
                let rename = fn(name) {
@@ -2775,7 +2793,7 @@ mod tests {
         )
         .unwrap();
 
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let Value::Dict(result) = module.execute(100_000).unwrap() else {
             panic!("expected Dict result")
         };
@@ -2835,7 +2853,7 @@ mod tests {
     fn normalized_struct_and_enum_models_preserve_uniform_member_attributes() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import attributes from "@bim/std/attributes";
                let annotate = fn(key, payload) {
                    fn(ctx, value) { attributes.add(value, { marker: (key, payload) }) }
@@ -2880,7 +2898,7 @@ mod tests {
         )
         .unwrap();
 
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let Value::Dict(result) = module.execute(100_000).unwrap() else {
             panic!("expected model result")
         };
@@ -2982,7 +3000,7 @@ mod tests {
     fn enum_validation_rejects_unknown_tags_and_payload_shape_mismatches() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import codec from "@bim/std/codec";
                @enum
                type Choice = { None: 'None, Number: Int };
@@ -2995,7 +3013,7 @@ mod tests {
                }"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let Value::Dict(result) = module.execute(100_000).unwrap() else {
             panic!("expected validation results")
         };
@@ -3010,7 +3028,7 @@ mod tests {
     fn enum_json_codecs_round_trip_external_and_untagged_representations() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import codec from "@bim/std/codec";
                import json from "@bim/std/json";
                import result from "@bim/std/result";
@@ -3034,7 +3052,7 @@ mod tests {
                }"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let Value::Dict(output) = module.execute(100_000).unwrap() else {
             panic!("expected Enum codec results")
         };
@@ -3060,7 +3078,7 @@ mod tests {
     fn untagged_enum_json_codec_rejects_no_match_and_ambiguity() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import codec from "@bim/std/codec";
                import json from "@bim/std/json";
                @json.untagged @enum type Scalar = {Text: String, Count: Int};
@@ -3071,7 +3089,7 @@ mod tests {
                }"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let Value::Dict(output) = module.execute(100_000).unwrap() else {
             panic!("expected failures")
         };
@@ -3101,7 +3119,7 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import data from "./data.json";
                import codec from "@bim/std/codec";
                import json from "@bim/std/json";
@@ -3130,7 +3148,7 @@ mod tests {
                }"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let Value::Dict(output) = module.execute(100_000).unwrap() else {
             panic!("expected vertical model output")
         };
@@ -3193,7 +3211,7 @@ mod tests {
             r#"{"userId":"wrong","city_name":"London","event":"idle","scalar":1,"notes":""}"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let failure = module.execute(100_000).unwrap_err();
         assert!(failure.message.contains("$.userId"));
         assert!(failure.data_location().is_some());
@@ -3204,7 +3222,7 @@ mod tests {
     #[test]
     fn json_schema_maps_composites_and_obeys_allocation_quota() {
         let directory = fixture_dir();
-        let path = directory.join("main.xl");
+        let path = directory.join("main.forma");
         fs::write(
             &path,
             r#"import json from "@bim/std/json";
@@ -3236,7 +3254,7 @@ mod tests {
     fn builtin_bool_and_option_keep_natural_json_codec_and_schema_forms() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import codec from "@bim/std/codec";
                import json from "@bim/std/json";
                import result from "@bim/std/result";
@@ -3250,7 +3268,7 @@ mod tests {
                }"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let output = module.execute(100_000).unwrap().to_string();
         assert!(output.contains("boolean: 'True"), "{output}");
         assert!(output.contains("none: 'None"), "{output}");
@@ -3265,7 +3283,7 @@ mod tests {
     fn recursive_type_metadata_publishes_and_drives_codecs_and_schema_refs() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("Types.xl"),
+            directory.join("Types.forma"),
             r#"import json from "@bim/std/json";
                @struct type Node = {
                    value: Int,
@@ -3277,7 +3295,7 @@ mod tests {
         )
         .unwrap();
         let types_module =
-            load_module(directory.join("Types.xl"), BTreeMap::new(), 100_000).unwrap();
+            load_module(directory.join("Types.forma"), BTreeMap::new(), 100_000).unwrap();
         let node = types_module.analysis.declared_types["Node"];
         let crate::TypeNode::Struct(fields) = types_module.analysis.types.node(node) else {
             panic!("Node must be a Struct in the authoritative type graph");
@@ -3297,8 +3315,8 @@ mod tests {
         assert!(types_module.analysis.types.is_assignable(node, node));
 
         fs::write(
-            directory.join("main.xl"),
-            r#"import Types from "./Types.xl";
+            directory.join("main.forma"),
+            r#"import Types from "./Types.forma";
                import codec from "@bim/std/codec";
                import json from "@bim/std/json";
                import result from "@bim/std/result";
@@ -3318,7 +3336,7 @@ mod tests {
                }"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let output = module.execute(100_000).unwrap().to_string();
         assert!(
             output.contains("children: [{children: [], value: 2}]"),
@@ -3338,28 +3356,28 @@ mod tests {
         )
         .unwrap();
         fs::write(
-            directory.join("bad.xl"),
+            directory.join("bad.forma"),
             r#"import data from "./bad.json";
-               import Types from "./Types.xl";
+               import Types from "./Types.forma";
                import codec from "@bim/std/codec";
                import result from "@bim/std/result";
                codec.decode(Types.Node, data) |> result.unwrap"#,
         )
         .unwrap();
-        let bad = load_module(directory.join("bad.xl"), BTreeMap::new(), 100_000).unwrap();
+        let bad = load_module(directory.join("bad.forma"), BTreeMap::new(), 100_000).unwrap();
         let failure = bad.execute(100_000).unwrap_err();
         assert!(failure.message.contains("$.children[0].value"));
         assert!(failure.data_location().is_some());
         assert!(failure.rule_location().is_some());
 
         fs::write(
-            directory.join("leak.xl"),
-            r#"import Types from "./Types.xl";
+            directory.join("leak.forma"),
+            r#"import Types from "./Types.forma";
                import json from "@bim/std/json";
                json.stringify(Types.Node)"#,
         )
         .unwrap();
-        let leak = load_module(directory.join("leak.xl"), BTreeMap::new(), 100_000).unwrap();
+        let leak = load_module(directory.join("leak.forma"), BTreeMap::new(), 100_000).unwrap();
         assert!(
             leak.execute(100_000)
                 .unwrap_err()
@@ -3373,7 +3391,7 @@ mod tests {
     fn final_program_observes_only_presealed_recursive_type_roots() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import codec from "@bim/std/codec";
                @struct type Forward = {next: Later};
                let premature = codec.decode(Forward, {next: 1});
@@ -3381,7 +3399,7 @@ mod tests {
                premature"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(
             module.execute(100_000).unwrap().to_string(),
             "'Ok({next: 1})"
@@ -3393,7 +3411,7 @@ mod tests {
     fn builtin_bool_option_and_result_are_normalized_enum_metadata() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import attributes from "@bim/std/attributes";
                type Maybe = Option(attributes.add(Int, { marker: "payload" }));
                type Outcome = Result(String, Int);
@@ -3416,7 +3434,7 @@ mod tests {
                }"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let Value::Dict(result) = module.execute(100_000).unwrap() else {
             panic!("expected built-in type results")
         };
@@ -3468,12 +3486,12 @@ mod tests {
     #[test]
     fn builtin_enum_type_constructors_validate_inputs_and_charge_quota() {
         let directory = fixture_dir();
-        let invalid_path = directory.join("invalid.xl");
+        let invalid_path = directory.join("invalid.forma");
         fs::write(&invalid_path, "Option(1)").unwrap();
         let invalid = load_module(&invalid_path, BTreeMap::new(), 100_000).unwrap_err();
         assert!(invalid.message.contains("cannot unify Int with Type"));
 
-        let quota_path = directory.join("quota.xl");
+        let quota_path = directory.join("quota.forma");
         fs::write(&quota_path, "Result(String, Int)").unwrap();
         let module = load_module(&quota_path, BTreeMap::new(), 100_000).unwrap();
         let mut account = QuotaAccount::new(Quota::new(10, 1_000, 0));
@@ -3501,38 +3519,38 @@ mod tests {
             module.execute(100_000).unwrap_err()
         };
         assert!(
-            run_error("context.xl", "struct('Bad, {x: Int})")
+            run_error("context.forma", "struct('Bad, {x: Int})")
                 .message
                 .contains("model context")
         );
         assert!(
-            run_error("empty.xl", "enum('None, {})")
+            run_error("empty.forma", "enum('None, {})")
                 .message
                 .contains("at least one variant")
         );
         assert!(
-            run_error("field.xl", "struct('None, {x: 1})")
+            run_error("field.forma", "struct('None, {x: 1})")
                 .message
                 .contains("Type metadata")
         );
         assert!(
-            run_error("variant.xl", "enum('None, {Bad: 1})")
+            run_error("variant.forma", "enum('None, {Bad: 1})")
                 .message
                 .contains("Type metadata")
         );
         assert!(
-            run_error("empty-union.xl", "union('None, [])")
+            run_error("empty-union.forma", "union('None, [])")
                 .message
                 .contains("at least one variant")
         );
         assert!(
-            run_error("union-variant.xl", "union('None, [1])")
+            run_error("union-variant.forma", "union('None, [1])")
                 .message
                 .contains("Type metadata")
         );
         assert!(
             run_error(
-                "union-wrapper.xl",
+                "union-wrapper.forma",
                 "union('None, [{kind: 'WithAttributes, inner: Int, attributes: []}])",
             )
             .message
@@ -3540,8 +3558,8 @@ mod tests {
         );
 
         for (name, source) in [
-            ("uppercase-struct.xl", "Struct({x: Int})"),
-            ("uppercase-union.xl", "Union([Int, String])"),
+            ("uppercase-struct.forma", "Struct({x: Int})"),
+            ("uppercase-union.forma", "Union([Int, String])"),
         ] {
             let path = directory.join(name);
             fs::write(&path, source).unwrap();
@@ -3552,7 +3570,7 @@ mod tests {
             assert!(error.message.contains("unknown binding"));
         }
 
-        let path = directory.join("quota.xl");
+        let path = directory.join("quota.forma");
         fs::write(&path, "union('None, [Int, String])").unwrap();
         let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
         let mut account = QuotaAccount::new(Quota::new(10, 1_000, 0));
@@ -3573,7 +3591,7 @@ mod tests {
     #[test]
     fn core_attributes_rejects_malformed_wrappers_and_obeys_allocation_quota() {
         let directory = fixture_dir();
-        let path = directory.join("main.xl");
+        let path = directory.join("main.forma");
         fs::write(
             &path,
             r#"import attributes from "@bim/std/attributes";
@@ -3610,7 +3628,7 @@ mod tests {
     fn core_json_decorators_build_flat_standard_attribute_metadata() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import json from "@bim/std/json";
                @json.rename_all('CamelCase)
                @struct
@@ -3627,7 +3645,7 @@ mod tests {
                Model"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let Value::Dict(root) = module.execute(100_000).unwrap() else {
             panic!("expected attributed model")
         };
@@ -3691,7 +3709,7 @@ mod tests {
     fn struct_json_codecs_apply_serde_style_attributes_bidirectionally() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import codec from "@bim/std/codec";
                import json from "@bim/std/json";
                import result from "@bim/std/result";
@@ -3729,7 +3747,7 @@ mod tests {
                { decoded: decoded, encoded: codec.encode(User, decoded) |> result.unwrap }"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let Value::Dict(output) = module.execute(100_000).unwrap() else {
             panic!("expected codec results")
         };
@@ -3748,7 +3766,7 @@ mod tests {
     fn json_skip_serializing_if_calls_promoted_bytecode_and_native_predicates() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import codec from "@bim/std/codec";
                import debug from "@bim/std/debug";
                import json from "@bim/std/json";
@@ -3768,7 +3786,7 @@ mod tests {
         .unwrap();
         let sink = Arc::new(CapturingDebugSink::default());
         let module = load_module_with_quota_and_debug_sink(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             BTreeMap::new(),
             Quota::with_fuel(100_000),
             sink.clone(),
@@ -3791,7 +3809,7 @@ mod tests {
     fn json_skip_serializing_if_rejects_invalid_function_contracts() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("arity.xl"),
+            directory.join("arity.forma"),
             r#"import json from "@bim/std/json";
                def wrong = fn(left, right) { 'False };
                @struct type Model = {
@@ -3800,11 +3818,12 @@ mod tests {
                0"#,
         )
         .unwrap();
-        let arity = load_module(directory.join("arity.xl"), BTreeMap::new(), 100_000).unwrap_err();
+        let arity =
+            load_module(directory.join("arity.forma"), BTreeMap::new(), 100_000).unwrap_err();
         assert!(arity.message().contains("unary Func"), "{arity}");
 
         fs::write(
-            directory.join("result.xl"),
+            directory.join("result.forma"),
             r#"import codec from "@bim/std/codec";
                import json from "@bim/std/json";
                def identity = fn(value) { value };
@@ -3814,7 +3833,7 @@ mod tests {
                codec.encode(Model, {value: 1})"#,
         )
         .unwrap();
-        let module = load_module(directory.join("result.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("result.forma"), BTreeMap::new(), 100_000).unwrap();
         let result = module.execute(100_000).unwrap_err();
         assert_eq!(result.kind, crate::RuntimeErrorKind::TypeMismatch);
         assert!(result.message.contains("must return 'True or 'False"));
@@ -3826,7 +3845,7 @@ mod tests {
         );
 
         fs::write(
-            directory.join("callback.xl"),
+            directory.join("callback.forma"),
             r#"import codec from "@bim/std/codec";
                import json from "@bim/std/json";
                def fails = fn(value) { 1 / 0 };
@@ -3837,7 +3856,7 @@ mod tests {
         )
         .unwrap();
         let callback =
-            load_module(directory.join("callback.xl"), BTreeMap::new(), 100_000).unwrap();
+            load_module(directory.join("callback.forma"), BTreeMap::new(), 100_000).unwrap();
         let failure = callback.execute(100_000).unwrap_err();
         assert_eq!(failure.kind, crate::RuntimeErrorKind::DivisionByZero);
         assert!(
@@ -3859,7 +3878,7 @@ mod tests {
     fn json_skip_predicates_resume_at_nested_paths_and_before_flattening() {
         let directory = fixture_dir();
         fs::write(
-            directory.join("main.xl"),
+            directory.join("main.forma"),
             r#"import codec from "@bim/std/codec";
                import json from "@bim/std/json";
                def is_zero = fn(value) { value == 0 };
@@ -3879,7 +3898,7 @@ mod tests {
                })"#,
         )
         .unwrap();
-        let module = load_module(directory.join("main.xl"), BTreeMap::new(), 100_000).unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(
             module.execute(100_000).unwrap().to_string(),
             "'Ok({items: [{}, {value: 2}]})"
@@ -3892,7 +3911,7 @@ mod tests {
         let directory = fixture_dir();
         let cases = [
             (
-                "collision.xl",
+                "collision.forma",
                 r#"import codec from "@bim/std/codec";
                    import json from "@bim/std/json";
                    @struct type T = {
@@ -3903,7 +3922,7 @@ mod tests {
                 "duplicate external field name",
             ),
             (
-                "flatten-type.xl",
+                "flatten-type.forma",
                 r#"import codec from "@bim/std/codec";
                    import json from "@bim/std/json";
                    @struct type T = {@json.flatten value: Int};
@@ -3911,7 +3930,7 @@ mod tests {
                 "flatten requires Struct metadata",
             ),
             (
-                "flatten-rename.xl",
+                "flatten-rename.forma",
                 r#"import codec from "@bim/std/codec";
                    import json from "@bim/std/json";
                    @struct type Inner = {value: Int};
@@ -3922,7 +3941,7 @@ mod tests {
                 "flatten cannot be combined",
             ),
             (
-                "default.xl",
+                "default.forma",
                 r#"import codec from "@bim/std/codec";
                    import json from "@bim/std/json";
                    @struct type T = {@json.default("wrong") value: Int};
@@ -3957,22 +3976,22 @@ mod tests {
                 .unwrap_err()
         };
         assert!(
-            run_error("rename.xl", "json.rename(1)")
+            run_error("rename.forma", "json.rename(1)")
                 .message
                 .contains("expects a String")
         );
         assert!(
-            run_error("case.xl", "json.rename_all('SnakeCase)")
+            run_error("case.forma", "json.rename_all('SnakeCase)")
                 .message
                 .contains("CamelCase")
         );
         assert!(
-            run_error("skip.xl", "json.skip_serializing_if('Zero)")
+            run_error("skip.forma", "json.skip_serializing_if('Zero)")
                 .message
                 .contains("'Empty")
         );
 
-        let path = directory.join("quota.xl");
+        let path = directory.join("quota.forma");
         fs::write(
             &path,
             "import json from \"@bim/std/json\"; json.rename(\"name\")",
@@ -4009,45 +4028,48 @@ mod tests {
         };
 
         assert!(
-            run_error("keys.xl", "dicts.keys([])")
+            run_error("keys.forma", "dicts.keys([])")
                 .message
                 .contains("Dict")
         );
         assert!(
-            run_error("merge.xl", "dicts.merge({}, [])")
+            run_error("merge.forma", "dicts.merge({}, [])")
                 .message
                 .contains("right Dict")
         );
         assert!(
-            run_error("pairs-array.xl", "dicts.from_pairs({})")
+            run_error("pairs-array.forma", "dicts.from_pairs({})")
                 .message
                 .contains("Array")
         );
         assert!(
-            run_error("pair-shape.xl", "dicts.from_pairs([(\"a\", 1, 2)])")
+            run_error("pair-shape.forma", "dicts.from_pairs([(\"a\", 1, 2)])")
                 .message
                 .contains("two-element Tuple")
         );
         assert!(
-            run_error("pair-key.xl", "dicts.from_pairs([('a, 1)])")
+            run_error("pair-key.forma", "dicts.from_pairs([('a, 1)])")
                 .message
                 .contains("key must be a String")
         );
-        let duplicate = run_error("duplicate.xl", "dicts.from_pairs([(\"a\", 1), (\"a\", 2)])");
+        let duplicate = run_error(
+            "duplicate.forma",
+            "dicts.from_pairs([(\"a\", 1), (\"a\", 2)])",
+        );
         assert!(duplicate.message.contains("duplicate field"));
-        assert!(duplicate.to_string().contains("duplicate.xl:1:"));
+        assert!(duplicate.to_string().contains("duplicate.forma:1:"));
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn diamond_dependencies_reuse_the_same_persistent_root() {
         let directory = fixture_dir();
-        let c = directory.join("c.xl");
-        let a = directory.join("a.xl");
-        let b = directory.join("b.xl");
+        let c = directory.join("c.forma");
+        let a = directory.join("a.forma");
+        let b = directory.join("b.forma");
         fs::write(&c, r#"{value: [1, 2, 3]}"#).unwrap();
-        fs::write(&a, r#"import c from "./c.xl"; c"#).unwrap();
-        fs::write(&b, r#"import c from "./c.xl"; c"#).unwrap();
+        fs::write(&a, r#"import c from "./c.forma"; c"#).unwrap();
+        fs::write(&b, r#"import c from "./c.forma"; c"#).unwrap();
         let mut loader = ModuleLoader {
             resolver: ModuleResolver::for_root(&a).unwrap(),
             cache: HashMap::new(),
@@ -4081,8 +4103,8 @@ mod tests {
     #[test]
     fn recoverable_workspace_blocks_failed_imports_and_keeps_independent_facts() {
         let directory = fixture_dir();
-        let model = directory.join("model.xl");
-        let main = directory.join("main.xl");
+        let model = directory.join("model.forma");
+        let main = directory.join("main.forma");
         fs::write(
             &model,
             "type Broken = missing(Int); type Good = String; {Good: Good}",
@@ -4090,7 +4112,7 @@ mod tests {
         .unwrap();
         fs::write(
             &main,
-            "import model from \"./model.xl\";\
+            "import model from \"./model.forma\";\
              type Local = String;\
              type Uses = model.Good;\
              type Down = Array(Uses);\
@@ -4134,7 +4156,7 @@ mod tests {
         assert!(main.imports.iter().any(|import| import.target == model.id));
         assert_ne!(main.source, model.source);
         let model_path = model.path.as_ref().unwrap();
-        assert_eq!(model.name, "@src/model.xl");
+        assert_eq!(model.name, "@src/model.forma");
         assert_eq!(
             snapshot.sources().get(model.source.unwrap()).name.as_ref(),
             model_path.to_string_lossy()
@@ -4145,7 +4167,7 @@ mod tests {
     #[test]
     fn recoverable_workspace_prefers_complete_analysis() {
         let directory = fixture_dir();
-        let main = directory.join("main.xl");
+        let main = directory.join("main.forma");
         fs::write(&main, "type Item = String; {Item: Item}").unwrap();
         let snapshot = recovery_engine().recover_workspace(&main).unwrap();
         let root = snapshot
@@ -4166,17 +4188,17 @@ mod tests {
     fn recoverable_workspace_links_json_and_core_values() {
         let directory = fixture_dir();
         let data = directory.join("data.json");
-        let model = directory.join("model.xl");
-        let main = directory.join("main.xl");
+        let model = directory.join("model.forma");
+        let main = directory.join("main.forma");
         fs::write(&data, r#"{"kind":"int"}"#).unwrap();
         fs::write(&model, "type Shared = String; {Shared: Shared}").unwrap();
         fs::write(
             &main,
             "import data from \"./data.json\";\
-             import model from \"./model.xl\";\
+             import model from \"./model.forma\";\
              import attributes from \"@bim/std/attributes\";\
              type FromData = if data.kind == \"int\" { Int } else { String };\
-             type FromXl = model.Shared;\
+             type FromForma = model.Shared;\
              type FromCore = attributes.strip(String);\
              type Broken = missing(Int);\
              0",
@@ -4196,7 +4218,7 @@ mod tests {
         };
         for (name, expected) in [
             ("FromData", "Int"),
-            ("FromXl", "String"),
+            ("FromForma", "String"),
             ("FromCore", "String"),
         ] {
             assert_eq!(fact(name).state, crate::FactState::Known, "{name}");
@@ -4224,18 +4246,18 @@ mod tests {
     #[test]
     fn recoverable_workspace_retains_module_cycles_once() {
         let directory = fixture_dir();
-        let main = directory.join("main.xl");
-        let a = directory.join("a.xl");
-        let b = directory.join("b.xl");
-        fs::write(&main, "import a from \"./a.xl\"; a").unwrap();
-        fs::write(&a, "import b from \"./b.xl\"; type A = String; 0").unwrap();
-        fs::write(&b, "import a from \"./a.xl\"; type B = String; 0").unwrap();
+        let main = directory.join("main.forma");
+        let a = directory.join("a.forma");
+        let b = directory.join("b.forma");
+        fs::write(&main, "import a from \"./a.forma\"; a").unwrap();
+        fs::write(&a, "import b from \"./b.forma\"; type A = String; 0").unwrap();
+        fs::write(&b, "import a from \"./a.forma\"; type B = String; 0").unwrap();
         let snapshot = recovery_engine().recover_workspace(&main).unwrap();
         assert_eq!(
             snapshot
                 .modules()
                 .iter()
-                .filter(|module| module.kind == WorkspaceModuleKind::Xl)
+                .filter(|module| module.kind == WorkspaceModuleKind::Forma)
                 .filter(|module| module.state == WorkspaceModuleState::Unavailable)
                 .count(),
             2
@@ -4254,7 +4276,7 @@ mod tests {
     #[test]
     fn core_json_parses_and_decodes_strings_with_blame_results() {
         let directory = fixture_dir();
-        let main = directory.join("main.xl");
+        let main = directory.join("main.forma");
         fs::write(
             &main,
             r#"import json from "@bim/std/json";
@@ -4285,18 +4307,18 @@ mod tests {
         fs::create_dir(&app).unwrap();
         fs::create_dir(&models).unwrap();
         fs::write(
-            directory.join("xl-deps.json"),
+            directory.join("forma-deps.json"),
             r#"{"dependencies":{"models":{"path":"models"}}}"#,
         )
         .unwrap();
-        fs::write(models.join("base.xl"), "{answer: 42}").unwrap();
+        fs::write(models.join("base.forma"), "{answer: 42}").unwrap();
         fs::write(
-            models.join("user.xl"),
-            "import base from \"./base.xl\"; base",
+            models.join("user.forma"),
+            "import base from \"./base.forma\"; base",
         )
         .unwrap();
-        let main = app.join("main.xl");
-        fs::write(&main, "import user from \"models/user.xl\"; user.answer").unwrap();
+        let main = app.join("main.forma");
+        fs::write(&main, "import user from \"models/user.forma\"; user.answer").unwrap();
 
         let engine = recovery_engine();
         let loaded = engine.load_module(&main, BTreeMap::new()).unwrap();
@@ -4307,8 +4329,8 @@ mod tests {
             .iter()
             .map(|module| module.name.as_str())
             .collect::<HashSet<_>>();
-        assert!(names.contains("models/user.xl"));
-        assert!(names.contains("models/base.xl"));
+        assert!(names.contains("models/user.forma"));
+        assert!(names.contains("models/base.forma"));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -4320,26 +4342,26 @@ mod tests {
         fs::create_dir_all(app.join("bin-src")).unwrap();
         fs::create_dir_all(app.join("src")).unwrap();
         fs::create_dir_all(dependency.join("src")).unwrap();
-        let main = app.join("bin-src/tool.xl");
+        let main = app.join("bin-src/tool.forma");
         fs::write(
             &main,
             r#"@@manifest {name: "tool", dependencies: {dep: {path: "../dependency"}}};
-               import answer from "dep/answer.xl";
+               import answer from "dep/answer.forma";
                answer"#,
         )
         .unwrap();
-        fs::write(dependency.join("src/answer.xl"), "42").unwrap();
+        fs::write(dependency.join("src/answer.forma"), "42").unwrap();
 
         let engine = recovery_engine();
         let loaded = engine.load_module(&main, BTreeMap::new()).unwrap();
         assert_eq!(engine.execute(&loaded).unwrap().to_string(), "42");
 
         fs::write(
-            app.join("src/helper.xl"),
+            app.join("src/helper.forma"),
             "@@manifest {name: \"nested\", dependencies: {}}; 1",
         )
         .unwrap();
-        fs::write(&main, "import helper from \"@src/helper.xl\"; helper").unwrap();
+        fs::write(&main, "import helper from \"@src/helper.forma\"; helper").unwrap();
         let error = engine.load_module(&main, BTreeMap::new()).unwrap_err();
         assert!(error.message().contains("only allowed in @main"));
         fs::remove_dir_all(directory).unwrap();

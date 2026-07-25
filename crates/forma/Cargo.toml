@@ -1,5 +1,5 @@
 [package]
-name = "xl"
+name = "forma"
 version.workspace = true
 edition.workspace = true
 
@@ -7,7 +7,7 @@ edition.workspace = true
 path = "src/lib.rs"
 
 [[bin]]
-name = "xl"
+name = "forma"
 path = "src/main.rs"
 
 [dependencies]

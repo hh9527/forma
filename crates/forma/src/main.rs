@@ -1,3 +1,7 @@
+use forma::{
+    DebugEvent, DebugSink, DefinitionKind, Engine, EngineConfig, Location, Quota, TextRange, Value,
+    Vm, WorkspaceSnapshot, WorkspaceTypeId, parse_json,
+};
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
@@ -5,10 +9,6 @@ use std::fs;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use xl::{
-    DebugEvent, DebugSink, DefinitionKind, Engine, EngineConfig, Location, Quota, TextRange, Value,
-    Vm, WorkspaceSnapshot, WorkspaceTypeId, parse_json,
-};
 
 const EVALUATION_FUEL: usize = 1_000_000;
 const STACK_SLOTS: usize = 65_536;
@@ -117,7 +117,7 @@ fn exec_command(arguments: &[String]) -> Result<(), String> {
 }
 
 fn exec_settings(vm: &mut Vm) -> Result<Value, String> {
-    let cache = cache_root().join("xl").join("exec");
+    let cache = cache_root().join("forma").join("exec");
     let platform = vm.make_dict(vec![
         ("arch".into(), Value::string(env::consts::ARCH)),
         ("os".into(), Value::string(env::consts::OS)),
@@ -163,7 +163,7 @@ fn exec_request(vm: &mut Vm, arguments: &[String]) -> Result<Value, String> {
 }
 
 fn cache_root() -> PathBuf {
-    env::var_os("XL_CACHE_HOME")
+    env::var_os("FORMA_CACHE_HOME")
         .or_else(|| env::var_os("XDG_CACHE_HOME"))
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
@@ -549,5 +549,5 @@ fn read_input(path: &str) -> Result<Value, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  xl run <module.xl> [--input <file|->]\n  xl exec --dry-run <module.xl> [-- <arguments>...]\n  xl check <module.xl>\n  xl types <module.xl>\n  xl show <module.xl> [at <source> <line> <column>]".into()
+    "usage:\n  forma run <module.forma> [--input <file|->]\n  forma exec --dry-run <module.forma> [-- <arguments>...]\n  forma check <module.forma>\n  forma types <module.forma>\n  forma show <module.forma> [at <source> <line> <column>]".into()
 }

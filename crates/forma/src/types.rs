@@ -4420,7 +4420,7 @@ mod tests {
         natives: &[(&'static str, usize)],
     ) -> Result<Analysis, FrontendError> {
         let mut sources = SourceDatabase::default();
-        let source_id = sources.add("generic-native.xl", source);
+        let source_id = sources.add("generic-native.forma", source);
         let parsed = parse_registered(&sources, source_id);
         let program = parsed.program.expect("generic native source parses");
         let external_values = natives
@@ -4437,7 +4437,7 @@ mod tests {
             })
             .collect();
         analyze_program_with_bindings(
-            "generic-native.xl",
+            "generic-native.forma",
             &program,
             &mut QuotaAccount::new(Quota::with_fuel(100_000)),
             &external_values,
@@ -4712,7 +4712,7 @@ mod tests {
     #[test]
     fn metadata_values_and_typed_constructors_have_the_type_metatype() {
         let analysis = analyze_source(
-            "metatype.xl",
+            "metatype.forma",
             "def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) { Option(Item) };\
              type MaybeInt = Maybe(Int);\
              (Type, Int, Array(Int), Maybe)",
@@ -4738,14 +4738,14 @@ mod tests {
         ));
 
         let bad_argument = analyze_source(
-            "bad-argument.xl",
+            "bad-argument.forma",
             "def Broken: Fn(Type) -> Type = fn(Item) { Array(1) }; Broken",
         )
         .unwrap_err();
         assert!(bad_argument.message.contains("cannot unify Int with Type"));
 
         let bad_result = analyze_source(
-            "bad-result.xl",
+            "bad-result.forma",
             "def Broken: Fn(Type) -> Type = fn(Item) { 1 }; Broken",
         )
         .unwrap_err();
@@ -4758,7 +4758,8 @@ mod tests {
 
     #[test]
     fn type_validation_uses_the_authoritative_metadata_decoder() {
-        let valid = crate::compile_source("valid-type.xl", "validate(Type, Array(Int))").unwrap();
+        let valid =
+            crate::compile_source("valid-type.forma", "validate(Type, Array(Int))").unwrap();
         assert!(
             Vm::new()
                 .execute(&valid, 100_000)
@@ -4767,9 +4768,11 @@ mod tests {
                 .starts_with("'Ok(")
         );
 
-        let invalid =
-            crate::compile_source("invalid-type.xl", "validate(Type, {kind: 'Array, item: 1})")
-                .unwrap();
+        let invalid = crate::compile_source(
+            "invalid-type.forma",
+            "validate(Type, {kind: 'Array, item: 1})",
+        )
+        .unwrap();
         let output = Vm::new().execute(&invalid, 100_000).unwrap().to_string();
         assert!(output.starts_with("'Err("), "{output}");
         assert!(output.contains("value.item must be a Dict"), "{output}");
@@ -4813,7 +4816,7 @@ mod tests {
     #[test]
     fn records_a_type_fact_for_every_resolved_hir_expression() {
         let analysis = analyze_source(
-            "facts.xl",
+            "facts.forma",
             "let values = [1, 2]; let first = fn(x) { let y = x; y }; first(values)",
         )
         .unwrap();
@@ -4844,7 +4847,7 @@ mod tests {
     #[test]
     fn partial_type_evaluation_continues_independent_and_transitive_work() {
         let partial = analyze_partial_types(
-            "partial.xl",
+            "partial.forma",
             "type A = broken(Int);\
              type B = String;\
              type C = Array(B);\
@@ -4895,7 +4898,7 @@ mod tests {
     #[test]
     fn partial_type_evaluation_shares_one_fuel_account() {
         let partial = analyze_partial_types(
-            "fuel.xl",
+            "fuel.forma",
             "type A = Array(Int); type B = Array(Int); 0",
             Quota::with_fuel(1),
         );
@@ -4916,7 +4919,7 @@ mod tests {
     #[test]
     fn partial_type_evaluation_marks_recursive_components_explicitly() {
         let partial = analyze_partial_types(
-            "recursive.xl",
+            "recursive.forma",
             "@struct type Node = {children: Array(Node)}; 0",
             Quota::with_fuel(100),
         );
@@ -4941,7 +4944,7 @@ mod tests {
             TypeDescriptor::Int.to_value(&mut vm),
         )]);
         let partial = analyze_partial_types_with_bindings(
-            "linked.xl",
+            "linked.forma",
             "type Linked = LinkedType; 0",
             Quota::with_fuel(10),
             &bindings,
@@ -4981,11 +4984,11 @@ mod tests {
     #[test]
     fn type_decorators_share_tool_fuel_and_report_the_decorator_origin() {
         let source = "let same = fn(ctx, rhs) { rhs }; @same type T = Int; 0";
-        let exhausted = analyze_source_with_fuel("decorator.xl", source, 0).unwrap_err();
+        let exhausted = analyze_source_with_fuel("decorator.forma", source, 0).unwrap_err();
         assert!(exhausted.message.contains("fuel"));
 
         let invalid = analyze_source(
-            "decorator.xl",
+            "decorator.forma",
             "let invalid = fn(ctx, rhs) { 1 }; @invalid type T = Int; 0",
         )
         .unwrap_err();
