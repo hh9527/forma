@@ -9,6 +9,7 @@ pub mod json;
 pub mod lexer;
 pub mod lir;
 pub mod module;
+pub mod module_id;
 pub mod parser;
 pub mod query;
 pub mod semantic;
@@ -39,6 +40,10 @@ pub use lexer::{FrontendError, SourceLocation};
 pub use module::{
     Engine, EngineConfig, LoadedModule, ModuleError, load_module, load_module_with_quota,
     load_module_with_quota_and_debug_sink,
+};
+pub use module_id::{
+    ModuleFormat, ModuleResolver, ResolveModuleError, ResolvedModule, ResolvedModuleId,
+    resolve_root_module,
 };
 pub use query::{CancellationToken, QueryContext, QueryError, Revision, RevisionClock};
 pub use semantic::{

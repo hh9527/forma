@@ -202,6 +202,8 @@ def is_ok: for(A, E) Fn(Result(A, E)) -> Bool = fn(result) {
         CoreModuleSpec {
             name: JSON_MODULE,
             source: r#"
+native parse: Fn(String) -> Result(Any, BlameError);
+native decode: for(A) Fn(TypeOf(A), String) -> Result(A, BlameError);
 native stringify: Fn(Any) -> String;
 native stringify_pretty: Fn(Int) -> Fn(Any) -> String;
 native rename: Fn(String) -> Fn(Any, Any) -> Any;
@@ -212,6 +214,8 @@ native schema: Fn(Any) -> Any;
 native default: Fn(Any) -> Fn(Any, Any) -> Any;
 native skip_serializing_if: Fn(Any) -> Fn(Any, Any) -> Any;
 {
+    parse: parse,
+    decode: decode,
     stringify: stringify,
     stringify_pretty: stringify_pretty,
     rename: rename,
@@ -224,6 +228,11 @@ native skip_serializing_if: Fn(Any) -> Fn(Any, Any) -> Any;
 }
 "#,
             functions: vec![
+                ("parse", NativeFunction::core_json(CoreJsonFunction::Parse)),
+                (
+                    "decode",
+                    NativeFunction::core_json(CoreJsonFunction::Decode),
+                ),
                 (
                     "default",
                     NativeFunction::core_json(CoreJsonFunction::Default),

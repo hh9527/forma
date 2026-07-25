@@ -1,5 +1,6 @@
 use crate::ast::Program;
 use crate::hir::{HirDefinitionId, HirProgram, HirResolution};
+use crate::module_id::ResolvedModuleId;
 use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
 use crate::types::{Analysis, PartialAnalysis, TypeGraph, TypeId, TypeNode};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -892,8 +893,8 @@ impl WorkspaceSnapshot {
             .iter()
             .flat_map(|input| input.imports.iter())
             .filter_map(|import| match &import.target {
-                SemanticModuleTarget::Core(name) => Some(name.clone()),
-                SemanticModuleTarget::Path(_) => None,
+                ResolvedModuleId::Core(name) => Some(name.clone()),
+                ResolvedModuleId::Local(_) | ResolvedModuleId::Dependency { .. } => None,
             })
             .collect::<HashSet<_>>();
         for name in core_names.drain() {
@@ -943,7 +944,7 @@ impl WorkspaceSnapshot {
                 .map(|import| WorkspaceImport {
                     name: import.name.clone(),
                     location: import.location,
-                    target: ids[&import.target.key()],
+                    target: ids[&import.target.to_string()],
                 })
                 .collect();
             let result_type = input
@@ -1023,7 +1024,7 @@ impl WorkspaceSnapshot {
             let import_targets = input
                 .imports
                 .iter()
-                .map(|import| (import.name.as_str(), ids[&import.target.key()]))
+                .map(|import| (import.name.as_str(), ids[&import.target.to_string()]))
                 .collect::<HashMap<_, _>>();
             let module = WorkspaceModuleId(index as u32);
             let mut map = Vec::with_capacity(hir.definitions().len());
@@ -1312,25 +1313,10 @@ fn merge_type_node(
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum SemanticModuleTarget {
-    Path(PathBuf),
-    Core(String),
-}
-
-impl SemanticModuleTarget {
-    fn key(&self) -> String {
-        match self {
-            Self::Path(path) => path.to_string_lossy().into_owned(),
-            Self::Core(name) => name.clone(),
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
 pub(crate) struct SemanticImport {
     pub name: String,
     pub location: Location,
-    pub target: SemanticModuleTarget,
+    pub target: ResolvedModuleId,
 }
 
 #[derive(Clone, Debug)]

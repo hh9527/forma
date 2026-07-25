@@ -5910,6 +5910,40 @@ fn codec_node_bytes(node: &CodecNode) -> Result<u64, NativeError> {
     }
 }
 
+fn legacy_value_bytes(value: &Value) -> Result<u64, NativeError> {
+    match value {
+        Value::Int(_) | Value::Float(_) | Value::Func(_) => Ok(0),
+        Value::String(value) => Ok(value.len() as u64),
+        Value::Bytes(value) => Ok(value.len() as u64),
+        Value::Atom(atom) => Ok(atom.name().len() as u64),
+        Value::Array(values) | Value::Tuple(values) => {
+            let own = logical_value_bytes(values.len())?;
+            values.iter().try_fold(own, |total, value| {
+                total
+                    .checked_add(legacy_value_bytes(value)?)
+                    .ok_or_else(|| NativeError::allocation_limit("JSON value size overflowed"))
+            })
+        }
+        Value::Dict(dict) => {
+            let own = logical_value_bytes(dict.values().len())?;
+            dict.shape()
+                .fields()
+                .iter()
+                .zip(dict.values())
+                .try_fold(own, |total, (name, value)| {
+                    total
+                        .checked_add(name.len() as u64)
+                        .and_then(|total| total.checked_add(legacy_value_bytes(value).ok()?))
+                        .ok_or_else(|| NativeError::allocation_limit("JSON value size overflowed"))
+                })
+        }
+        Value::Tagged { tag, payload } => logical_value_bytes(2)?
+            .checked_add(tag.name().len() as u64)
+            .and_then(|total| total.checked_add(legacy_value_bytes(payload).ok()?))
+            .ok_or_else(|| NativeError::allocation_limit("JSON value size overflowed")),
+    }
+}
+
 fn materialize_codec_node(node: CodecNode, current: &mut Heap, background: &Heap) -> RichValue {
     match node {
         CodecNode::Existing(value) => value,
@@ -6089,6 +6123,114 @@ fn run_core_json(
     background: &Heap,
     account: &mut QuotaAccount,
 ) -> Result<VmAction, RuntimeError> {
+    if matches!(
+        operation,
+        CoreJsonFunction::Parse | CoreJsonFunction::Decode
+    ) {
+        let input_index = usize::from(operation == CoreJsonFunction::Decode);
+        let view = HeapView {
+            current,
+            background: Some(background),
+        };
+        let Some(source) = ValueRef {
+            value: arguments[input_index],
+            view,
+        }
+        .as_str() else {
+            return Err(runtime_type_error(
+                "String",
+                &arguments[input_index],
+                &view,
+                function,
+                pc,
+            ));
+        };
+        let parsed = crate::json::parse_json("<json string>", source);
+        let parsed = match parsed {
+            Ok(value) => {
+                let bytes = legacy_value_bytes(&value)
+                    .map_err(|native_error| allocation_error(native_error.message, function, pc))?;
+                charge_allocation(account, bytes, function, pc)?;
+                current
+                    .import_value(Some(background), &value)
+                    .map_err(|heap_error| {
+                        error(
+                            RuntimeErrorKind::TypeMismatch,
+                            heap_error.to_string(),
+                            function,
+                            pc,
+                        )
+                    })?
+            }
+            Err(parse_error) => {
+                let rule = RichValue::new(
+                    current.atom(Some(background), "Json"),
+                    arguments[input_index].loc,
+                );
+                return finish_codec_result(
+                    Err(CodecFailure {
+                        message: parse_error.message,
+                        data: arguments[input_index],
+                        rule,
+                        predicate: None,
+                    }),
+                    arguments[input_index],
+                    return_target,
+                    function,
+                    pc,
+                    current,
+                    background,
+                    account,
+                );
+            }
+        };
+        if operation == CoreJsonFunction::Parse {
+            return finish_codec_result(
+                Ok(CodecNode::Existing(parsed)),
+                arguments[input_index],
+                return_target,
+                function,
+                pc,
+                current,
+                background,
+                account,
+            );
+        }
+        let schema = decode_runtime_type(arguments[0], current, background)
+            .map_err(|message| error(RuntimeErrorKind::TypeMismatch, message, function, pc))?;
+        assert_codec_graph_ready(&schema, current, background).map_err(|graph_error| {
+            match graph_error {
+                CodecGraphError::Pending => error(
+                    RuntimeErrorKind::UninitializedDefinition,
+                    "codec was invoked before recursive type metadata was sealed",
+                    function,
+                    pc,
+                ),
+                CodecGraphError::Invalid(message) => {
+                    error(RuntimeErrorKind::TypeMismatch, message, function, pc)
+                }
+            }
+        })?;
+        let result = transform_codec(
+            &schema,
+            parsed,
+            CodecDirection::Decode,
+            "$",
+            &BTreeMap::new(),
+            current,
+            background,
+        );
+        return finish_codec_result(
+            result,
+            arguments[input_index],
+            return_target,
+            function,
+            pc,
+            current,
+            background,
+            account,
+        );
+    }
     if matches!(
         operation,
         CoreJsonFunction::Rename
@@ -6307,6 +6449,8 @@ fn run_core_json(
             }
         },
         CoreJsonFunction::StringifyPretty
+        | CoreJsonFunction::Parse
+        | CoreJsonFunction::Decode
         | CoreJsonFunction::Rename
         | CoreJsonFunction::RenameDecorator
         | CoreJsonFunction::RenameAll

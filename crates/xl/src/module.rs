@@ -6,10 +6,11 @@ use crate::compiler::{
 use crate::core::module_specs;
 use crate::heap::{Heap, PersistentValue, publish_root, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
+use crate::module_id::{ModuleFormat, ModuleResolver, ResolvedModule, ResolvedModuleId};
 use crate::parser::parse_registered;
 use crate::semantic::{
-    SemanticImport, SemanticModuleInput, SemanticModuleTarget, WorkspaceModuleKind,
-    WorkspaceModuleState, WorkspaceSnapshot,
+    SemanticImport, SemanticModuleInput, WorkspaceModuleKind, WorkspaceModuleState,
+    WorkspaceSnapshot,
 };
 use crate::source::{Diagnostic, SourceDatabase};
 use crate::types::{
@@ -289,7 +290,15 @@ impl Engine {
         &self,
         path: impl AsRef<Path>,
     ) -> Result<WorkspaceSnapshot, ModuleError> {
-        let root = canonicalize(path.as_ref())?;
+        let resolver = ModuleResolver::for_root(path.as_ref())
+            .map_err(|error| ModuleError::new(error.to_string()))?;
+        let root_module = resolver
+            .resolve_root(path.as_ref())
+            .map_err(|error| ModuleError::new(error.to_string()))?;
+        let root = root_module
+            .path()
+            .expect("local root has a path")
+            .to_owned();
         if let Ok(module) = self.load_module(&root, BTreeMap::new()) {
             return Ok(module.workspace);
         }
@@ -301,6 +310,7 @@ impl Engine {
             .collect();
         let mut builder = RecoverableWorkspaceBuilder {
             engine: self,
+            resolver,
             overlays: &BTreeMap::new(),
             query: None,
             sources,
@@ -312,7 +322,7 @@ impl Engine {
             cycle_members: HashSet::new(),
             cycle_reported: false,
         };
-        block_on_recovery(builder.load_xl(&root));
+        block_on_recovery(builder.load_xl(root_module));
         Ok(WorkspaceSnapshot::build(
             builder.sources,
             builder.inputs.into_values().collect(),
@@ -329,11 +339,11 @@ impl Engine {
             .checkpoint()
             .await
             .map_err(|error| ModuleError::new(error.to_string()))?;
-        let root = if overlays.contains_key(path.as_ref()) {
-            path.as_ref().to_owned()
-        } else {
-            canonicalize(path.as_ref())?
-        };
+        let resolver = ModuleResolver::for_root(path.as_ref())
+            .map_err(|error| ModuleError::new(error.to_string()))?;
+        let root_module = resolver
+            .resolve_root(path.as_ref())
+            .map_err(|error| ModuleError::new(error.to_string()))?;
         let mut main = MainWorld::building();
         let mut sources = SourceDatabase::default();
         let core_modules = install_core_modules(&mut main, &mut sources, &self.debug_sink)?
@@ -342,6 +352,7 @@ impl Engine {
             .collect();
         let mut builder = RecoverableWorkspaceBuilder {
             engine: self,
+            resolver,
             overlays,
             query: Some(context),
             sources,
@@ -353,7 +364,7 @@ impl Engine {
             cycle_members: HashSet::new(),
             cycle_reported: false,
         };
-        builder.load_xl(&root).await;
+        builder.load_xl(root_module).await;
         context
             .checkpoint()
             .await
@@ -367,22 +378,23 @@ impl Engine {
 
 struct RecoverableWorkspaceBuilder<'a> {
     engine: &'a Engine,
+    resolver: ModuleResolver,
     overlays: &'a BTreeMap<PathBuf, crate::document::DocumentText>,
     query: Option<&'a crate::query::QueryContext>,
     sources: SourceDatabase,
     core_modules: HashMap<String, (Value, ModuleInterface)>,
     inputs: BTreeMap<String, SemanticModuleInput>,
-    values: HashMap<PathBuf, Value>,
-    interfaces: HashMap<PathBuf, ModuleInterface>,
-    visiting: Vec<PathBuf>,
-    cycle_members: HashSet<PathBuf>,
+    values: HashMap<ResolvedModuleId, Value>,
+    interfaces: HashMap<ResolvedModuleId, ModuleInterface>,
+    visiting: Vec<ResolvedModuleId>,
+    cycle_members: HashSet<ResolvedModuleId>,
     cycle_reported: bool,
 }
 
 impl RecoverableWorkspaceBuilder<'_> {
     fn load_xl<'a>(
         &'a mut self,
-        path: &'a Path,
+        module: ResolvedModule,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<Value>> + 'a>> {
         Box::pin(async move {
             if let Some(context) = self.query
@@ -390,27 +402,33 @@ impl RecoverableWorkspaceBuilder<'_> {
             {
                 return None;
             }
-            if let Some(value) = self.values.get(path) {
+            let module_id = module.id;
+            let path = module_id.path()?.to_owned();
+            if let Some(value) = self.values.get(&module_id) {
                 return Some(value.clone());
             }
-            let key = path.to_string_lossy().into_owned();
+            let key = module_id.to_string();
             if self.inputs.contains_key(&key) {
                 return None;
             }
-            if let Some(index) = self.visiting.iter().position(|candidate| candidate == path) {
+            if let Some(index) = self
+                .visiting
+                .iter()
+                .position(|candidate| candidate == &module_id)
+            {
                 self.cycle_members
                     .extend(self.visiting[index..].iter().cloned());
-                self.cycle_members.insert(path.to_owned());
+                self.cycle_members.insert(module_id.clone());
                 return None;
             }
-            let source = match self.overlays.get(path).cloned() {
+            let source = match self.overlays.get(&path).cloned() {
                 Some(source) => source,
-                None => match fs::read_to_string(path) {
+                None => match fs::read_to_string(&path) {
                     Ok(source) => crate::document::DocumentText::new(source),
                     Err(error) => {
                         self.inputs.insert(
                             key.clone(),
-                            unavailable_input(key, path.to_owned(), WorkspaceModuleKind::Xl),
+                            unavailable_input(key, path.clone(), WorkspaceModuleKind::Xl),
                         );
                         let _ = error;
                         return None;
@@ -435,7 +453,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                 })
                 .collect::<Vec<_>>();
 
-            self.visiting.push(path.to_owned());
+            self.visiting.push(module_id.clone());
             let mut semantic_imports = Vec::new();
             let mut external_values = BTreeMap::new();
             let mut external_interfaces = BTreeMap::new();
@@ -446,7 +464,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                     semantic_imports.push(SemanticImport {
                         name: name.clone(),
                         location,
-                        target: SemanticModuleTarget::Core(target.clone()),
+                        target: ResolvedModuleId::core(target.clone()),
                     });
                     if let Some((value, interface)) = self.core_modules.get(&target) {
                         external_values.insert(name.clone(), value.clone());
@@ -475,24 +493,28 @@ impl RecoverableWorkspaceBuilder<'_> {
                     continue;
                 }
 
-                let joined = path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join(&target);
-                let target_path = fs::canonicalize(&joined).unwrap_or(joined);
+                let target_module = match self.resolver.resolve_import(&module_id, &target) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        unavailable_imports.insert(name.clone());
+                        diagnostics.push(Diagnostic::error(error.to_string(), location));
+                        continue;
+                    }
+                };
+                let target_path = target_module
+                    .path()
+                    .expect("local import resolves to a local source")
+                    .to_owned();
                 semantic_imports.push(SemanticImport {
                     name: name.clone(),
                     location,
-                    target: SemanticModuleTarget::Path(target_path.clone()),
+                    target: target_module.id.clone(),
                 });
-                let value = match target_path
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                {
-                    Some("xl") => self.load_xl(&target_path).await,
-                    Some("json") => self.load_json(&target_path).await,
+                let value = match target_module.format {
+                    ModuleFormat::Xl => self.load_xl(target_module.clone()).await,
+                    ModuleFormat::Json => self.load_json(target_module.clone()).await,
                     _ => {
-                        let target_key = target_path.to_string_lossy().into_owned();
+                        let target_key = target_module.id.to_string();
                         self.inputs.entry(target_key.clone()).or_insert_with(|| {
                             unavailable_input(
                                 target_key,
@@ -504,13 +526,13 @@ impl RecoverableWorkspaceBuilder<'_> {
                     }
                 };
                 if let Some(value) = value {
-                    if let Some(interface) = self.interfaces.get(&target_path) {
+                    if let Some(interface) = self.interfaces.get(&target_module.id) {
                         external_interfaces.insert(name.clone(), interface.clone());
                     }
                     external_values.insert(name, value);
                 } else {
                     unavailable_imports.insert(name);
-                    if self.cycle_members.contains(&target_path) {
+                    if self.cycle_members.contains(&target_module.id) {
                         if !self.cycle_reported {
                             diagnostics.push(Diagnostic::error(
                                 format!("module cycle reaches {}", target_path.display()),
@@ -546,7 +568,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                     query: self.query,
                 },
             );
-            let strict = if self.cycle_members.contains(path) {
+            let strict = if self.cycle_members.contains(&module_id) {
                 None
             } else {
                 program.as_ref().and_then(|program| {
@@ -562,7 +584,7 @@ impl RecoverableWorkspaceBuilder<'_> {
             let strict_value = strict.as_ref().map(|(_, value)| value);
             let state = if strict_value.is_some() {
                 WorkspaceModuleState::Known
-            } else if self.cycle_members.contains(path)
+            } else if self.cycle_members.contains(&module_id)
                 || partial.hir.definitions().is_empty() && partial.hir.expressions().is_empty()
             {
                 WorkspaceModuleState::Unavailable
@@ -573,7 +595,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                 key.clone(),
                 SemanticModuleInput {
                     key: key.clone(),
-                    path: Some(path.to_owned()),
+                    path: Some(path.clone()),
                     kind: WorkspaceModuleKind::Xl,
                     source: Some(source_id),
                     program,
@@ -591,8 +613,8 @@ impl RecoverableWorkspaceBuilder<'_> {
                     .expect("strict module has analysis")
                     .module_interface
                     .clone();
-                self.interfaces.insert(path.to_owned(), interface);
-                self.values.insert(path.to_owned(), value.clone());
+                self.interfaces.insert(module_id.clone(), interface);
+                self.values.insert(module_id, value.clone());
                 Some(value)
             } else {
                 None
@@ -600,27 +622,29 @@ impl RecoverableWorkspaceBuilder<'_> {
         })
     }
 
-    async fn load_json(&mut self, path: &Path) -> Option<Value> {
+    async fn load_json(&mut self, module: ResolvedModule) -> Option<Value> {
         if let Some(context) = self.query
             && context.checkpoint().await.is_err()
         {
             return None;
         }
-        if let Some(value) = self.values.get(path) {
+        let module_id = module.id;
+        let path = module_id.path()?.to_owned();
+        if let Some(value) = self.values.get(&module_id) {
             return Some(value.clone());
         }
-        let key = path.to_string_lossy().into_owned();
+        let key = module_id.to_string();
         if self.inputs.contains_key(&key) {
             return None;
         }
-        let source = match self.overlays.get(path).cloned() {
+        let source = match self.overlays.get(&path).cloned() {
             Some(source) => source,
-            None => match fs::read_to_string(path) {
+            None => match fs::read_to_string(&path) {
                 Ok(source) => crate::document::DocumentText::new(source),
                 Err(_) => {
                     self.inputs.insert(
                         key.clone(),
-                        unavailable_input(key, path.to_owned(), WorkspaceModuleKind::Json),
+                        unavailable_input(key, path.clone(), WorkspaceModuleKind::Json),
                     );
                     return None;
                 }
@@ -633,7 +657,7 @@ impl RecoverableWorkspaceBuilder<'_> {
             key.clone(),
             SemanticModuleInput {
                 key,
-                path: Some(path.to_owned()),
+                path: Some(path),
                 kind: WorkspaceModuleKind::Json,
                 source: Some(source_id),
                 program: None,
@@ -649,7 +673,7 @@ impl RecoverableWorkspaceBuilder<'_> {
             },
         );
         if let Some(value) = &value {
-            self.values.insert(path.to_owned(), value.clone());
+            self.values.insert(module_id, value.clone());
         }
         value
     }
@@ -755,14 +779,19 @@ pub fn load_module_with_quota_and_debug_sink(
     module_quota: Quota,
     debug_sink: Arc<dyn DebugSink>,
 ) -> Result<LoadedModule, ModuleError> {
-    let root = canonicalize(path.as_ref())?;
-    if root.extension().and_then(|extension| extension.to_str()) != Some("xl") {
+    let resolver = ModuleResolver::for_root(path.as_ref())
+        .map_err(|error| ModuleError::new(error.to_string()))?;
+    let root_module = resolver
+        .resolve_root(path.as_ref())
+        .map_err(|error| ModuleError::new(error.to_string()))?;
+    if root_module.format != ModuleFormat::Xl {
         return Err(ModuleError::new("root module must have an .xl extension"));
     }
     let mut main = MainWorld::building();
     let mut sources = SourceDatabase::default();
     let core_modules = install_core_modules(&mut main, &mut sources, &debug_sink)?;
     let mut loader = ModuleLoader {
+        resolver,
         cache: HashMap::new(),
         core_modules,
         main,
@@ -773,14 +802,15 @@ pub fn load_module_with_quota_and_debug_sink(
         sources,
         semantic_inputs: BTreeMap::new(),
     };
-    loader.load_root(root, external_bindings)
+    loader.load_root(root_module, external_bindings)
 }
 
 struct ModuleLoader {
-    cache: HashMap<PathBuf, ModuleState>,
+    resolver: ModuleResolver,
+    cache: HashMap<ResolvedModuleId, ModuleState>,
     core_modules: HashMap<&'static str, (Value, PersistentValue, ModuleInterface)>,
     main: MainWorld,
-    visiting: Vec<PathBuf>,
+    visiting: Vec<ResolvedModuleId>,
     dependencies: BTreeSet<PathBuf>,
     module_quota: Quota,
     debug_sink: Arc<dyn DebugSink>,
@@ -801,13 +831,15 @@ enum ModuleState {
 impl ModuleLoader {
     fn load_root(
         &mut self,
-        path: PathBuf,
+        module: ResolvedModule,
         external_bindings: BTreeMap<String, Value>,
     ) -> Result<LoadedModule, ModuleError> {
-        self.enter(&path)?;
+        let module_id = module.id;
+        let path = module_id.path().expect("local root has a path").to_owned();
+        self.enter(&module_id)?;
         let mut account = QuotaAccount::new(self.module_quota);
-        let result = self.compile_xl(&path, external_bindings, true, &mut account);
-        self.leave(&path);
+        let result = self.compile_xl(&module_id, &path, external_bindings, true, &mut account);
+        self.leave(&module_id);
         let (analysis, function, externals) = result?;
         let workspace = WorkspaceSnapshot::build(
             self.sources.clone(),
@@ -825,16 +857,30 @@ impl ModuleLoader {
         })
     }
 
+    #[cfg(test)]
     fn load_value(&mut self, path: &Path) -> Result<SourcedValue, ModuleError> {
-        let path = canonicalize(path)?;
-        if let Some(ModuleState::Ready { root, sourced, .. }) = self.cache.get(&path) {
+        let module = self
+            .resolver
+            .resolve_root(path)
+            .map_err(|error| ModuleError::new(error.to_string()))?;
+        self.load_resolved_value(module)
+    }
+
+    fn load_resolved_value(&mut self, module: ResolvedModule) -> Result<SourcedValue, ModuleError> {
+        let format = module.format;
+        let module_id = module.id;
+        let path = module_id
+            .path()
+            .expect("local module has a local path")
+            .to_owned();
+        if let Some(ModuleState::Ready { root, sourced, .. }) = self.cache.get(&module_id) {
             let _persistent_root = root;
             return Ok(sourced.clone());
         }
-        self.enter(&path)?;
+        self.enter(&module_id)?;
         let result: Result<(SourcedValue, PersistentValue, bool, ModuleInterface), ModuleError> =
-            match path.extension().and_then(|extension| extension.to_str()) {
-                Some("json") => {
+            match format {
+                ModuleFormat::Json => {
                     let source = read(&path)?;
                     let source_id = self.sources.add(path.display().to_string(), source);
                     let parsed = parse_json_registered(&self.sources, source_id);
@@ -857,10 +903,11 @@ impl ModuleLoader {
                                 .map_err(|error| ModuleError::new(error.to_string()))?;
                             let root = publish_root(&mut self.main.heap, &local, local_root)
                                 .map_err(|error| ModuleError::new(error.to_string()))?;
+                            let key = module_id.to_string();
                             self.semantic_inputs.insert(
-                                path.to_string_lossy().into_owned(),
+                                key.clone(),
                                 SemanticModuleInput {
-                                    key: path.to_string_lossy().into_owned(),
+                                    key,
                                     path: Some(path.clone()),
                                     kind: WorkspaceModuleKind::Json,
                                     source: Some(source_id),
@@ -875,9 +922,9 @@ impl ModuleLoader {
                             Ok((sourced, root, false, ModuleInterface::default()))
                         })
                 }
-                Some("xl") => {
+                ModuleFormat::Xl => {
                     let mut account = QuotaAccount::new(self.module_quota);
-                    self.compile_xl(&path, BTreeMap::new(), false, &mut account)
+                    self.compile_xl(&module_id, &path, BTreeMap::new(), false, &mut account)
                         .and_then(|(analysis, function, externals)| {
                             let arena = Vm::new()
                                 .with_debug_sink(Arc::clone(&self.debug_sink))
@@ -910,19 +957,16 @@ impl ModuleLoader {
                             ))
                         })
                 }
-                Some(extension) => Err(ModuleError::new(format!(
-                    "unsupported module extension .{extension}: {}",
-                    path.display()
-                ))),
-                None => Err(ModuleError::new(format!(
-                    "module path has no extension: {}",
-                    path.display()
+                format => Err(ModuleError::new(format!(
+                    "unsupported module format {}: {}",
+                    format.name(),
+                    module_id
                 ))),
             };
-        self.leave(&path);
+        self.leave(&module_id);
         let (sourced, root, opaque, interface) = result?;
         self.cache.insert(
-            path,
+            module_id,
             ModuleState::Ready {
                 root,
                 sourced: sourced.clone(),
@@ -935,6 +979,7 @@ impl ModuleLoader {
 
     fn compile_xl(
         &mut self,
+        module_id: &ResolvedModuleId,
         path: &Path,
         mut external_bindings: BTreeMap<String, Value>,
         is_root: bool,
@@ -979,23 +1024,23 @@ impl ModuleLoader {
                 semantic_imports.push(SemanticImport {
                     name: binding.value.name.value.clone(),
                     location: binding.value.name.location,
-                    target: SemanticModuleTarget::Core(relative.clone()),
+                    target: ResolvedModuleId::core(relative.clone()),
                 });
                 external_roots.insert(binding.value.name.value.clone(), root);
                 external_interfaces.insert(binding.value.name.value.clone(), interface);
                 external_bindings.insert(binding.value.name.value.clone(), value);
                 continue;
             }
-            let imported = path
-                .parent()
-                .expect("canonical module path has a parent")
-                .join(relative);
-            let sourced = self.load_value(&imported)?;
-            let imported = canonicalize(&imported)?;
+            let imported = self
+                .resolver
+                .resolve_import(module_id, relative)
+                .map_err(|error| ModuleError::new(error.to_string()))?;
+            let imported_id = imported.id.clone();
+            let sourced = self.load_resolved_value(imported)?;
             semantic_imports.push(SemanticImport {
                 name: binding.value.name.value.clone(),
                 location: binding.value.name.location,
-                target: SemanticModuleTarget::Path(imported.clone()),
+                target: imported_id.clone(),
             });
             let ModuleState::Ready {
                 root,
@@ -1004,7 +1049,7 @@ impl ModuleLoader {
                 ..
             } = self
                 .cache
-                .get(&imported)
+                .get(&imported_id)
                 .expect("loaded module has a ready cache entry");
             external_roots.insert(binding.value.name.value.clone(), *root);
             external_interfaces.insert(binding.value.name.value.clone(), interface.clone());
@@ -1123,10 +1168,11 @@ impl ModuleLoader {
             )
         }
         .map_err(|error| ModuleError::new(error.to_string()))?;
+        let key = module_id.to_string();
         self.semantic_inputs.insert(
-            path.to_string_lossy().into_owned(),
+            key.clone(),
             SemanticModuleInput {
-                key: path.to_string_lossy().into_owned(),
+                key,
                 path: Some(path.to_owned()),
                 kind: WorkspaceModuleKind::Xl,
                 source: Some(source_id),
@@ -1151,26 +1197,32 @@ impl ModuleLoader {
             .ok_or_else(|| ModuleError::new(format!("unknown core module {name:?}")))
     }
 
-    fn enter(&mut self, path: &Path) -> Result<(), ModuleError> {
-        if let Some(index) = self.visiting.iter().position(|candidate| candidate == path) {
+    fn enter(&mut self, module_id: &ResolvedModuleId) -> Result<(), ModuleError> {
+        if let Some(index) = self
+            .visiting
+            .iter()
+            .position(|candidate| candidate == module_id)
+        {
             let mut cycle = self.visiting[index..]
                 .iter()
-                .map(|item| item.display().to_string())
+                .map(ToString::to_string)
                 .collect::<Vec<_>>();
-            cycle.push(path.display().to_string());
+            cycle.push(module_id.to_string());
             return Err(ModuleError::new(format!(
                 "module import cycle: {}",
                 cycle.join(" -> ")
             )));
         }
-        self.visiting.push(path.to_owned());
-        self.dependencies.insert(path.to_owned());
+        self.visiting.push(module_id.clone());
+        if let Some(path) = module_id.path() {
+            self.dependencies.insert(path.to_owned());
+        }
         Ok(())
     }
 
-    fn leave(&mut self, path: &Path) {
+    fn leave(&mut self, module_id: &ResolvedModuleId) {
         let popped = self.visiting.pop();
-        debug_assert_eq!(popped.as_deref(), Some(path));
+        debug_assert_eq!(popped.as_ref(), Some(module_id));
     }
 }
 
@@ -1268,15 +1320,16 @@ fn expression_has_import(expression: &Expr) -> bool {
     }
 }
 
-fn canonicalize(path: &Path) -> Result<PathBuf, ModuleError> {
-    fs::canonicalize(path).map_err(|error| {
-        ModuleError::new(format!("cannot resolve module {}: {error}", path.display()))
-    })
-}
-
 fn read(path: &Path) -> Result<String, ModuleError> {
     fs::read_to_string(path).map_err(|error| {
         ModuleError::new(format!("cannot read module {}: {error}", path.display()))
+    })
+}
+
+#[cfg(test)]
+fn canonicalize(path: &Path) -> Result<PathBuf, ModuleError> {
+    fs::canonicalize(path).map_err(|error| {
+        ModuleError::new(format!("cannot resolve module {}: {error}", path.display()))
     })
 }
 
@@ -1911,6 +1964,7 @@ mod tests {
         let data = directory.join("data.json");
         fs::write(&data, r#"{"name":"Ada","items":[1,2,3]}"#).unwrap();
         let mut loader = ModuleLoader {
+            resolver: ModuleResolver::for_root(&data).unwrap(),
             cache: HashMap::new(),
             core_modules: HashMap::new(),
             main: MainWorld::building(),
@@ -1924,11 +1978,12 @@ mod tests {
 
         let first = loader.load_value(&data).unwrap();
         let counts = loader.main.heap.counts();
-        let first_root = match loader.cache.get(&canonicalize(&data).unwrap()).unwrap() {
+        let data_id = loader.resolver.resolve_root(&data).unwrap().id;
+        let first_root = match loader.cache.get(&data_id).unwrap() {
             ModuleState::Ready { root, .. } => *root,
         };
         let second = loader.load_value(&data).unwrap();
-        let second_root = match loader.cache.get(&canonicalize(&data).unwrap()).unwrap() {
+        let second_root = match loader.cache.get(&data_id).unwrap() {
             ModuleState::Ready { root, .. } => *root,
         };
 
@@ -3917,6 +3972,7 @@ mod tests {
         fs::write(&a, r#"import c from "./c.xl"; c"#).unwrap();
         fs::write(&b, r#"import c from "./c.xl"; c"#).unwrap();
         let mut loader = ModuleLoader {
+            resolver: ModuleResolver::for_root(&a).unwrap(),
             cache: HashMap::new(),
             core_modules: HashMap::new(),
             main: MainWorld::building(),
@@ -3931,7 +3987,11 @@ mod tests {
         loader.load_value(&a).unwrap();
         let counts_after_a = loader.main.heap.counts();
         loader.load_value(&b).unwrap();
-        let root = |path: &Path| match loader.cache.get(&canonicalize(path).unwrap()).unwrap() {
+        let root = |path: &Path| match loader
+            .cache
+            .get(&loader.resolver.resolve_root(path).unwrap().id)
+            .unwrap()
+        {
             ModuleState::Ready { root, .. } => *root,
         };
 
@@ -4107,6 +4167,71 @@ mod tests {
                 .count(),
             1
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn core_json_parses_and_decodes_strings_with_blame_results() {
+        let directory = fixture_dir();
+        let main = directory.join("main.xl");
+        fs::write(
+            &main,
+            r#"import json from "core:json";
+               import result from "core:result";
+               {
+                   parsed: result.unwrap(json.parse("{\"answer\": 42}")),
+                   decoded: result.unwrap(json.decode(Int, "42")),
+                   failed: json.parse("{")
+               }"#,
+        )
+        .unwrap();
+        let engine = recovery_engine();
+        let module = engine.load_module(&main, BTreeMap::new()).unwrap();
+        let output = engine.execute(&module).unwrap().to_string();
+        assert!(output.contains("parsed: {answer: 42}"), "{output}");
+        assert!(output.contains("decoded: 42"), "{output}");
+        assert!(output.contains("failed: 'Err("), "{output}");
+        assert!(output.contains("data: \"{\""), "{output}");
+        assert!(output.contains("rule: 'Json"), "{output}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn dependency_imports_preserve_identity_across_relative_edges() {
+        let directory = fixture_dir();
+        let app = directory.join("app");
+        let models = directory.join("models");
+        fs::create_dir(&app).unwrap();
+        fs::create_dir(&models).unwrap();
+        fs::write(
+            directory.join("xl-deps.toml"),
+            "[dependencies]\nmodels = { path = \"models\" }\n",
+        )
+        .unwrap();
+        fs::write(models.join("base.xl"), "{answer: 42}").unwrap();
+        fs::write(
+            models.join("user.xl"),
+            "import base from \"./base.xl\"; base",
+        )
+        .unwrap();
+        let main = app.join("main.xl");
+        fs::write(
+            &main,
+            "import user from \"deps://models/user.xl\"; user.answer",
+        )
+        .unwrap();
+
+        let engine = recovery_engine();
+        let loaded = engine.load_module(&main, BTreeMap::new()).unwrap();
+        assert_eq!(engine.execute(&loaded).unwrap().to_string(), "42");
+        let names = loaded
+            .workspace
+            .modules()
+            .iter()
+            .map(|module| module.name.as_str())
+            .collect::<HashSet<_>>();
+        assert!(names.contains("deps://models/user.xl"));
+        assert!(names.contains("deps://models/base.xl"));
         fs::remove_dir_all(directory).unwrap();
     }
 }
