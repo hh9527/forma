@@ -105,7 +105,7 @@ platform, cache and install prefixes, environment, arguments, and working
 directory, and the function returns a fully concrete execution plan. It can
 select multiple artifacts, for example installing a platform-specific
 interpreter separately from a platform-independent runtime; derive stable
-download and installation locations with `hash.sha256`; and construct search
+installation locations with `hash.sha256`; and construct search
 paths, library paths, and environment variables.
 
 Command-line rewriting belongs to the same pure computation. A gcc or rustc
@@ -166,8 +166,6 @@ fn(settings, request) {
     let platform = "\{settings.platform.os}-\{settings.platform.arch}";
     let toolchain_url = "https://example.invalid/gcc-\{platform}.tar.zst";
     let sysroot_url = "https://example.invalid/sysroot-\{platform}.tar.zst";
-    let toolchain_cache = "\{settings.cache_prefix}/\{hash.sha256(toolchain_url)}";
-    let sysroot_cache = "\{settings.cache_prefix}/\{hash.sha256(sysroot_url)}";
     let toolchain = "\{settings.install_prefix}/\{hash.sha256("gcc:\{toolchain_url}:unpack-v1")}";
     let sysroot = "\{settings.install_prefix}/\{hash.sha256("sysroot:\{sysroot_url}:unpack-v1")}";
     let args: Array(String) = arrays.flat_map([
@@ -180,21 +178,21 @@ fn(settings, request) {
     ], fn(part) { part });
 
     {
-        downloads: [
-            {url: toolchain_url, cache: toolchain_cache},
-            {url: sysroot_url, cache: sysroot_cache},
+        install: [
+            {Unpack: {dest: toolchain, ty: "TarGzip", src: toolchain_url, strip: 1, digest: 'None}},
+            {Unpack: {dest: sysroot, ty: "TarGzip", src: sysroot_url, strip: 1, digest: 'None}},
         ],
-        installs: [
-            {name: "gcc", source: toolchain_cache, path: toolchain},
-            {name: "sysroot", source: sysroot_cache, path: sysroot},
-        ],
-        command: "\{toolchain}/bin/gcc",
+        bin: "\{toolchain}/bin/gcc",
         args: args,
         env: {FORMA_SYSROOT: sysroot},
         cwd: request.cwd,
     }
 }
 ```
+
+`Unpack` carries its own `src`, so the protocol needs no separate download
+action. The effect layer can fetch, cache, and verify the artifact from `src`
+and its optional `digest`, then unpack it into the already determined `dest`.
 
 Today, `forma exec --dry-run` only validates and prints the plan; it does not
 download, install, or start a process. Even before the effect layer exists,
