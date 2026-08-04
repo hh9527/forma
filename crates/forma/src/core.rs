@@ -8,6 +8,7 @@ pub(crate) const ARRAY_MODULE: &str = "@bim/std/array";
 pub(crate) const ATTRIBUTES_MODULE: &str = "@bim/std/attributes";
 pub(crate) const DICT_MODULE: &str = "@bim/std/dict";
 pub(crate) const DEBUG_MODULE: &str = "@bim/std/debug";
+pub(crate) const BUILD_MODULE: &str = "@bim/std/build";
 pub(crate) const EXEC_MODULE: &str = "@bim/std/exec";
 pub(crate) const CODEC_MODULE: &str = "@bim/std/codec";
 pub(crate) const OPTION_MODULE: &str = "@bim/std/option";
@@ -143,12 +144,17 @@ native fold: for(A, B) Fn(Dict(A), B, Fn(B, String, A) -> B) -> B;
             source: r#"
 native length: Fn(String) -> Int;
 native join: Fn(Array(String), String) -> String;
+native join_lines: Fn(Array(String)) -> String;
 native split: Fn(String, String) -> Array(String);
+native lines: Fn(String) -> Array(String);
 native starts_with: Fn(String, String) -> Bool;
 native ends_with: Fn(String, String) -> Bool;
 native contains: Fn(String, String) -> Bool;
 native replace: Fn(String, String, String) -> String;
-{ length: length, join: join, split: split, starts_with: starts_with, ends_with: ends_with, contains: contains, replace: replace }
+native indent: Fn(String, Int) -> String;
+native ensure_trailing_newline: Fn(String) -> String;
+native trim_margin: Fn(String, String) -> String;
+{ length: length, join: join, join_lines: join_lines, split: split, lines: lines, starts_with: starts_with, ends_with: ends_with, contains: contains, replace: replace, indent: indent, ensure_trailing_newline: ensure_trailing_newline, trim_margin: trim_margin }
 "#,
             functions: vec![
                 (
@@ -164,12 +170,32 @@ native replace: Fn(String, String, String) -> String;
                     NativeFunction::core_string(CoreStringFunction::Join),
                 ),
                 (
+                    "join_lines",
+                    NativeFunction::core_string(CoreStringFunction::JoinLines),
+                ),
+                (
                     "length",
                     NativeFunction::core_string(CoreStringFunction::Length),
                 ),
                 (
+                    "lines",
+                    NativeFunction::core_string(CoreStringFunction::Lines),
+                ),
+                (
                     "replace",
                     NativeFunction::core_string(CoreStringFunction::Replace),
+                ),
+                (
+                    "indent",
+                    NativeFunction::core_string(CoreStringFunction::Indent),
+                ),
+                (
+                    "ensure_trailing_newline",
+                    NativeFunction::core_string(CoreStringFunction::EnsureTrailingNewline),
+                ),
+                (
+                    "trim_margin",
+                    NativeFunction::core_string(CoreStringFunction::TrimMargin),
                 ),
                 (
                     "split",
@@ -233,6 +259,27 @@ native dbg_with: for(A) Fn(String, A) -> A;
                     NativeFunction::core_debug(CoreDebugFunction::DbgWith),
                 ),
             ],
+        },
+        CoreModuleSpec {
+            name: BUILD_MODULE,
+            source: r#"
+@struct type TextFile = {
+    path: String,
+    content: String,
+};
+@enum type Artifact = {
+    TextFile: TextFile,
+};
+@struct type OutputPlan = {
+    files: Array(Artifact),
+};
+{
+    TextFile: TextFile,
+    Artifact: Artifact,
+    OutputPlan: OutputPlan,
+}
+"#,
+            functions: vec![],
         },
         CoreModuleSpec {
             name: EXEC_MODULE,

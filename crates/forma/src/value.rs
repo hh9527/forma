@@ -156,11 +156,16 @@ pub(crate) enum CoreDictFunction {
 pub(crate) enum CoreStringFunction {
     Length,
     Join,
+    JoinLines,
     Split,
+    Lines,
     StartsWith,
     EndsWith,
     Contains,
     Replace,
+    Indent,
+    EnsureTrailingNewline,
+    TrimMargin,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -399,18 +404,29 @@ impl CoreStringFunction {
         match self {
             Self::Length => "@bim/std/string.length",
             Self::Join => "@bim/std/string.join",
+            Self::JoinLines => "@bim/std/string.join_lines",
             Self::Split => "@bim/std/string.split",
+            Self::Lines => "@bim/std/string.lines",
             Self::StartsWith => "@bim/std/string.starts_with",
             Self::EndsWith => "@bim/std/string.ends_with",
             Self::Contains => "@bim/std/string.contains",
             Self::Replace => "@bim/std/string.replace",
+            Self::Indent => "@bim/std/string.indent",
+            Self::EnsureTrailingNewline => "@bim/std/string.ensure_trailing_newline",
+            Self::TrimMargin => "@bim/std/string.trim_margin",
         }
     }
 
     pub(crate) const fn arity(self) -> usize {
         match self {
-            Self::Length => 1,
-            Self::Join | Self::Split | Self::StartsWith | Self::EndsWith | Self::Contains => 2,
+            Self::Length | Self::JoinLines | Self::Lines | Self::EnsureTrailingNewline => 1,
+            Self::Join
+            | Self::Split
+            | Self::StartsWith
+            | Self::EndsWith
+            | Self::Contains
+            | Self::Indent
+            | Self::TrimMargin => 2,
             Self::Replace => 3,
         }
     }

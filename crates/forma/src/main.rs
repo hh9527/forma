@@ -47,6 +47,7 @@ fn run_cli(arguments: Vec<String>) -> Result<(), String> {
     match command {
         "run" => run_command(&arguments[1..]),
         "exec" => exec_command(&arguments[1..]),
+        "build" => build_command(&arguments[1..]),
         "check" => check_command(&arguments[1..]),
         "types" => types_command(&arguments[1..]),
         "show" => show_command(&arguments[1..]),
@@ -108,6 +109,137 @@ fn exec_command(arguments: &[String]) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     println!("{}", canonical_exec_json(&plan)?);
     Ok(())
+}
+
+fn build_command(arguments: &[String]) -> Result<(), String> {
+    let [dry_run, module_path] = arguments else {
+        return Err(format!("build currently requires --dry-run\n{}", usage()));
+    };
+    if dry_run != "--dry-run" {
+        return Err(format!("build currently requires --dry-run\n{}", usage()));
+    }
+    let engine = engine();
+    let module = engine
+        .load_module(module_path, BTreeMap::new())
+        .map_err(|error| error.to_string())?;
+    let entry = engine.execute(&module).map_err(|error| error.to_string())?;
+    let plan = engine
+        .invoke(&module, &entry, &[])
+        .map_err(|error| error.to_string())?;
+    println!("{}", canonical_build_json(&plan)?);
+    Ok(())
+}
+
+fn canonical_build_json(value: &Value) -> Result<String, String> {
+    fn expect_dict<'a>(
+        value: &'a Value,
+        path: &str,
+        fields: &[&str],
+    ) -> Result<&'a forma::Dict, String> {
+        let Value::Dict(dict) = value else {
+            return Err(format!(
+                "{path} must be a Dict, found {}",
+                value.type_name()
+            ));
+        };
+        if !dict
+            .shape()
+            .fields()
+            .iter()
+            .map(String::as_str)
+            .eq(fields.iter().copied())
+        {
+            return Err(format!("{path} has an invalid field shape"));
+        }
+        Ok(dict)
+    }
+
+    fn expect_string<'a>(value: &'a Value, path: &str) -> Result<&'a str, String> {
+        let Value::String(value) = value else {
+            return Err(format!(
+                "{path} must be a String, found {}",
+                value.type_name()
+            ));
+        };
+        Ok(value)
+    }
+
+    fn write_string(output: &mut String, value: &str) {
+        output.push('"');
+        for character in value.chars() {
+            match character {
+                '"' => output.push_str("\\\""),
+                '\\' => output.push_str("\\\\"),
+                '\n' => output.push_str("\\n"),
+                '\r' => output.push_str("\\r"),
+                '\t' => output.push_str("\\t"),
+                character if character.is_control() => {
+                    write!(output, "\\u{:04x}", u32::from(character)).unwrap();
+                }
+                character => output.push(character),
+            }
+        }
+        output.push('"');
+    }
+
+    fn validate_path(path: &str, location: &str) -> Result<(), String> {
+        if path.is_empty()
+            || path.starts_with('/')
+            || path.contains('\\')
+            || path
+                .split('/')
+                .any(|component| matches!(component, "" | "." | ".."))
+        {
+            return Err(format!(
+                "{location} must be a normalized relative path using / separators"
+            ));
+        }
+        Ok(())
+    }
+
+    let plan = expect_dict(value, "OutputPlan", &["files"])?;
+    let Value::Array(files) = plan.get("files").expect("field checked") else {
+        return Err("OutputPlan.files must be an Array".into());
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    let mut output = String::from("{\"files\":[");
+    for (index, artifact) in files.iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        let Value::Tagged { tag, payload } = artifact else {
+            return Err(format!(
+                "OutputPlan.files[{index}] must be an Artifact Tagged value"
+            ));
+        };
+        if tag.name() != "TextFile" {
+            return Err(format!(
+                "OutputPlan.files[{index}] has unknown Artifact variant {:?}",
+                tag.name()
+            ));
+        }
+        let location = format!("OutputPlan.files[{index}].TextFile");
+        let file = expect_dict(payload, &location, &["content", "path"])?;
+        let content = expect_string(
+            file.get("content").expect("field checked"),
+            &format!("{location}.content"),
+        )?;
+        let path = expect_string(
+            file.get("path").expect("field checked"),
+            &format!("{location}.path"),
+        )?;
+        validate_path(path, &format!("{location}.path"))?;
+        if !seen.insert(path) {
+            return Err(format!("OutputPlan contains duplicate path {path:?}"));
+        }
+        output.push_str("{\"TextFile\":{\"content\":");
+        write_string(&mut output, content);
+        output.push_str(",\"path\":");
+        write_string(&mut output, path);
+        output.push_str("}}");
+    }
+    output.push_str("]}");
+    Ok(output)
 }
 
 fn exec_settings(vm: &mut Vm) -> Result<Value, String> {
@@ -664,5 +796,5 @@ fn read_input(path: &str) -> Result<Value, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  forma run <module.forma> [--input <file|->]\n  forma exec --dry-run <module.forma> [-- <arguments>...]\n  forma check <module.forma>\n  forma types <module.forma>\n  forma show <module.forma> [at <source> <line> <column>]".into()
+    "usage:\n  forma run <module.forma> [--input <file|->]\n  forma exec --dry-run <module.forma> [-- <arguments>...]\n  forma build --dry-run <module.forma>\n  forma check <module.forma>\n  forma types <module.forma>\n  forma show <module.forma> [at <source> <line> <column>]".into()
 }

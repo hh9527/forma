@@ -329,6 +329,88 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
 }
 
 #[test]
+fn build_dry_run_validates_and_prints_text_artifacts_without_writing() {
+    let directory = fixture_dir();
+    let main = directory.join("build.forma");
+    fs::write(
+        &main,
+        r####"import build from "@bim/std/build";
+import strings from "@bim/std/string";
+type OutputPlan = build.OutputPlan;
+let main: Fn() -> OutputPlan = fn() {
+    {
+        files: [
+            'TextFile({
+                path: "generated/app.conf",
+                content: strings.trim_margin(r"|server {
+                    |    listen 8080;
+                    |}", "|") |> strings.ensure_trailing_newline,
+            }),
+            'TextFile({path: "generated/name.txt", content: `Forma\n`}),
+        ],
+    }
+};
+main"####,
+    )
+    .unwrap();
+
+    let output = forma()
+        .args(["build", "--dry-run", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout.matches("TextFile").count(), 2, "{stdout}");
+    assert!(
+        stdout.contains(r#""path":"generated/app.conf""#),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(r#"server {\n    listen 8080;\n}\n"#),
+        "{stdout}"
+    );
+    assert!(!directory.join("generated").exists());
+
+    let repeated = forma()
+        .args(["build", "--dry-run", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(repeated.stdout, stdout.as_bytes());
+
+    for (name, source, expected) in [
+        (
+            "escape.forma",
+            "fn() { {files: ['TextFile({path: \"../outside\", content: \"x\"})]} }",
+            "normalized relative path",
+        ),
+        (
+            "duplicate.forma",
+            "fn() { {files: ['TextFile({path: \"a\", content: \"x\"}), 'TextFile({path: \"a\", content: \"y\"})]} }",
+            "duplicate path",
+        ),
+    ] {
+        let path = directory.join(name);
+        fs::write(&path, source).unwrap();
+        let output = forma()
+            .args(["build", "--dry-run", path.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn show_observes_deterministic_workspace_and_position_queries() {
     let directory = fixture_dir();
     let main = directory.join("main.forma");

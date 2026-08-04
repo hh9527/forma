@@ -224,6 +224,14 @@ isolation. A future host only needs to consume the concrete plan and perform
 its effects. Build rules and Kubernetes reconciliation can use the same
 boundary: **pure functions produce plans; the host performs effects**.
 
+The same boundary now covers generated text. A module returning
+`Fn() -> build.OutputPlan` can declare ordered `TextFile` artifacts, while
+`forma build --dry-run` validates normalized relative paths, rejects duplicate
+targets, and prints canonical JSON without writing anything. Raw Strings and
+concat handle source text; `@bim/std/string` provides line splitting/joining,
+indentation, explicit margin trimming, and trailing-newline normalization.
+There is no separate template language or implicit layout state.
+
 The standard library supports that pure side directly. Generic Array
 operations compose and short-circuit typed collections; String operations are
 UTF-8 safe; lexical path operations use deterministic `/` semantics rather
@@ -270,7 +278,7 @@ Forma is experimental. Today it has no effect system, package acquisition
 beyond path dependencies, traits, or type narrowing. Static
 inference explicitly reports when it does not know instead of guessing. These
 are deliberate boundaries: the project is testing the "types as metadata"
-hypothesis deeply before expanding its scope. Sixty-eight RFCs record the tradeoffs
+hypothesis deeply before expanding its scope. Sixty-nine RFCs record the tradeoffs
 at each step, including the rejected alternatives.
 
 The intended use cases follow from those boundaries: **expressing build rules,

@@ -2371,6 +2371,13 @@ name = "rustc"
                    ends: strings.ends_with("forma", "ma"),
                    contains: strings.contains("forma", "orm"),
                    replaced: strings.replace("a-b-a", "a", "xy"),
+                   lines: strings.lines("a\r\nb\n"),
+                   joined_lines: strings.join_lines(["a", "形", "c"]),
+                   indented: strings.indent("a\n\nb", 2),
+                   trailing: strings.ensure_trailing_newline("a"),
+                   margin: strings.trim_margin(r"  |a
+    |b
+unchanged", "|"),
                    normalized: paths.normalize("/a/./b/../../../../c"),
                    relative: paths.normalize("../../a/../b"),
                    joined_path: paths.join(["/tool", "bin", "../lib", "gcc"]),
@@ -2407,6 +2414,23 @@ name = "rustc"
         assert_eq!(result.get("ends").unwrap().to_string(), "'True");
         assert_eq!(result.get("contains").unwrap().to_string(), "'True");
         assert_eq!(result.get("replaced").unwrap().to_string(), r#""xy-b-xy""#);
+        assert_eq!(
+            result.get("lines").unwrap().to_string(),
+            r#"["a", "b", ""]"#
+        );
+        assert_eq!(
+            result.get("joined_lines").unwrap().to_string(),
+            "\"a\\n形\\nc\""
+        );
+        assert_eq!(
+            result.get("indented").unwrap().to_string(),
+            "\"  a\\n\\n  b\""
+        );
+        assert_eq!(result.get("trailing").unwrap().to_string(), "\"a\\n\"");
+        assert_eq!(
+            result.get("margin").unwrap().to_string(),
+            "\"a\\nb\\nunchanged\""
+        );
         assert_eq!(result.get("normalized").unwrap().to_string(), r#""/c""#);
         assert_eq!(result.get("relative").unwrap().to_string(), r#""../../b""#);
         assert_eq!(
@@ -2423,6 +2447,23 @@ name = "rustc"
             result.get("file_name").unwrap().to_string(),
             r#"'Some("c")"#
         );
+
+        for (source, expected) in [
+            (
+                "import strings from \"@bim/std/string\"; strings.indent(\"x\", -1)",
+                "indentation width must be non-negative",
+            ),
+            (
+                "import strings from \"@bim/std/string\"; strings.trim_margin(\"x\", \"\")",
+                "margin marker must not be empty",
+            ),
+        ] {
+            fs::write(directory.join("invalid.forma"), source).unwrap();
+            let module =
+                load_module(directory.join("invalid.forma"), BTreeMap::new(), 100_000).unwrap();
+            let error = module.execute(100_000).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 

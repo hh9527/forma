@@ -2857,7 +2857,7 @@ fn run_core_string(
             })?;
             RichValue::new(RuntimeValue::Int(length), call_loc)
         }
-        CoreStringFunction::Join => {
+        CoreStringFunction::Join | CoreStringFunction::JoinLines => {
             let RuntimeValue::Array(handle) = arguments[0].value else {
                 let view = HeapView {
                     current,
@@ -2871,7 +2871,11 @@ fn run_core_string(
                     pc,
                 ));
             };
-            let separator = argument(1)?;
+            let separator = if operation == CoreStringFunction::Join {
+                argument(1)?
+            } else {
+                "\n".to_owned()
+            };
             let view = HeapView {
                 current,
                 background: Some(background),
@@ -2898,10 +2902,17 @@ fn run_core_string(
             charge_allocation(account, output.len() as u64, function, pc)?;
             RichValue::new(current.string(Some(background), &output), call_loc)
         }
-        CoreStringFunction::Split => {
+        CoreStringFunction::Split | CoreStringFunction::Lines => {
             let source = argument(0)?;
-            let separator = argument(1)?;
-            let pieces = source.split(&separator).collect::<Vec<_>>();
+            let pieces = if operation == CoreStringFunction::Lines {
+                source
+                    .split('\n')
+                    .map(|line| line.strip_suffix('\r').unwrap_or(line))
+                    .collect::<Vec<_>>()
+            } else {
+                let separator = argument(1)?;
+                source.split(&separator).collect::<Vec<_>>()
+            };
             let text_bytes = pieces.iter().try_fold(0u64, |total, piece| {
                 total.checked_add(piece.len() as u64).ok_or_else(|| {
                     allocation_error("String split allocation size overflowed", function, pc)
@@ -2948,6 +2959,85 @@ fn run_core_string(
         }
         CoreStringFunction::Replace => {
             let output = argument(0)?.replace(&argument(1)?, &argument(2)?);
+            charge_allocation(account, output.len() as u64, function, pc)?;
+            RichValue::new(current.string(Some(background), &output), call_loc)
+        }
+        CoreStringFunction::Indent => {
+            let source = argument(0)?;
+            let RuntimeValue::Int(width) = arguments[1].value else {
+                let view = HeapView {
+                    current,
+                    background: Some(background),
+                };
+                return Err(runtime_type_error(
+                    "Int",
+                    &arguments[1],
+                    &view,
+                    function,
+                    pc,
+                ));
+            };
+            let width = usize::try_from(width).map_err(|_| {
+                error(
+                    RuntimeErrorKind::TypeMismatch,
+                    "String indentation width must be non-negative",
+                    function,
+                    pc,
+                )
+            })?;
+            let indented_lines = source
+                .split_inclusive('\n')
+                .filter(|line| !line.trim_matches(['\r', '\n']).is_empty())
+                .count();
+            let output_bytes = width
+                .checked_mul(indented_lines)
+                .and_then(|added| source.len().checked_add(added))
+                .and_then(|bytes| u64::try_from(bytes).ok())
+                .ok_or_else(|| {
+                    allocation_error("String indentation size overflowed", function, pc)
+                })?;
+            charge_allocation(account, output_bytes, function, pc)?;
+            let prefix = " ".repeat(width);
+            let mut output = String::with_capacity(output_bytes as usize);
+            for line in source.split_inclusive('\n') {
+                if !line.trim_matches(['\r', '\n']).is_empty() {
+                    output.push_str(&prefix);
+                }
+                output.push_str(line);
+            }
+            RichValue::new(current.string(Some(background), &output), call_loc)
+        }
+        CoreStringFunction::EnsureTrailingNewline => {
+            let mut output = argument(0)?;
+            if !output.ends_with('\n') {
+                output.push('\n');
+            }
+            charge_allocation(account, output.len() as u64, function, pc)?;
+            RichValue::new(current.string(Some(background), &output), call_loc)
+        }
+        CoreStringFunction::TrimMargin => {
+            let source = argument(0)?;
+            let margin = argument(1)?;
+            if margin.is_empty() {
+                return Err(error(
+                    RuntimeErrorKind::TypeMismatch,
+                    "String margin marker must not be empty",
+                    function,
+                    pc,
+                ));
+            }
+            let mut output = String::new();
+            for line in source.split_inclusive('\n') {
+                let content_end = line.trim_end_matches(['\r', '\n']).len();
+                let content = &line[..content_end];
+                let newline = &line[content_end..];
+                let marker = content
+                    .bytes()
+                    .take_while(|byte| matches!(byte, b' ' | b'\t'))
+                    .count();
+                output.push_str(content[marker..].strip_prefix(&margin).unwrap_or(content));
+                output.push_str(newline);
+            }
             charge_allocation(account, output.len() as u64, function, pc)?;
             RichValue::new(current.string(Some(background), &output), call_loc)
         }
