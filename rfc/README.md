@@ -90,3 +90,4 @@ semantics from an earlier RFC.
 69. Deterministic output plans.
 70. Never and directional checking.
 71. Constraint-preserving structural inference.
+72. Self-constrained closure inference.
