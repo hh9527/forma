@@ -95,3 +95,4 @@ semantics from an earlier RFC.
 74. Intrinsic expression type constraints.
 75. Deterministic branch joins.
 76. Partial closure contracts.
+77. Explicit generic type application.
