@@ -91,3 +91,4 @@ semantics from an earlier RFC.
 70. Never and directional checking.
 71. Constraint-preserving structural inference.
 72. Self-constrained closure inference.
+73. Delayed monomorphic local inference.
