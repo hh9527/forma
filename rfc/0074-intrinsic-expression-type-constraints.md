@@ -1,6 +1,6 @@
 # RFC 0074: Intrinsic expression type constraints
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0052, RFC 0070, RFC 0072, RFC 0073
 
 ## Summary
@@ -163,6 +163,28 @@ hover. Completed expressions publish only resolved Forma types.
 - explicit generic type application;
 - monomorphic recursive SCC inference;
 - overloads, traits, and numeric abstractions.
+
+## Implementation result
+
+Implemented in the RFC 0074 change set.
+
+`GenericInference` now retains a set of numeric-constrained inference
+variables. Binding one of those variables validates the resolved target
+immediately; binding it to another variable transfers the domain. The domain
+accepts `Int`, `Float`, and the explicit dynamic or unreachable boundaries
+`Any` and `Never`, but is never interned as source-visible type metadata.
+
+Unary negation, arithmetic, and less-than create one shared numeric obligation
+for their operands and numeric result. Expected result types participate before
+operand completion, so literal and contextual evidence are order-independent.
+Equality remains heterogeneous and returns normalized `Bool`. Conditions are
+checked against that same normalized `Bool` descriptor.
+
+Focused tests cover condition-driven closure inference, Int and Float evidence,
+operand order, expected results, unary negation, comparison and equality,
+invalid and mixed operands, unresolved numeric ambiguity, and explicit `Any`.
+The final workspace run passed 243 Forma tests with one manual parser benchmark
+ignored, 12 CLI tests, and 19 LSP tests.
 
 ## Rejected alternatives
 

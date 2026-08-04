@@ -3192,6 +3192,7 @@ struct GenericInference<'a> {
     next_variable: u32,
     closure_inference_depth: usize,
     delayed_initializer_depth: usize,
+    numeric_variables: HashSet<InferenceVariableId>,
     substitutions: HashMap<InferenceVariableId, TypeDescriptor>,
     records: HashMap<crate::Location, TypeDescriptor>,
 }
@@ -3211,6 +3212,7 @@ impl<'a> GenericInference<'a> {
             next_variable: 0,
             closure_inference_depth: 0,
             delayed_initializer_depth: 0,
+            numeric_variables: HashSet::new(),
             substitutions: HashMap::new(),
             records: HashMap::new(),
         }
@@ -3385,6 +3387,58 @@ impl<'a> GenericInference<'a> {
         }
     }
 
+    fn require_numeric(&mut self, ty: &TypeDescriptor) -> Result<(), String> {
+        match self.resolve(ty) {
+            TypeDescriptor::Inference(variable) => {
+                self.numeric_variables.insert(variable);
+                Ok(())
+            }
+            TypeDescriptor::Int
+            | TypeDescriptor::Float
+            | TypeDescriptor::Any
+            | TypeDescriptor::Never => Ok(()),
+            ty => Err(format!(
+                "numeric operator requires Int or Float, found {}",
+                ty.display_name()
+            )),
+        }
+    }
+
+    fn bind_inference_variable(
+        &mut self,
+        variable: InferenceVariableId,
+        ty: &TypeDescriptor,
+    ) -> Result<(), String> {
+        let ty = self.resolve(ty);
+        if self.occurs(variable, &ty) {
+            return Err(format!("infinite type for ?{}", variable.0));
+        }
+        if self.numeric_variables.contains(&variable) {
+            match &ty {
+                TypeDescriptor::Inference(target) => {
+                    self.numeric_variables.insert(*target);
+                }
+                TypeDescriptor::Int
+                | TypeDescriptor::Float
+                | TypeDescriptor::Any
+                | TypeDescriptor::Never => {}
+                _ => {
+                    return Err(format!(
+                        "numeric operator requires Int or Float, found {}",
+                        ty.display_name()
+                    ));
+                }
+            }
+        }
+        if let TypeDescriptor::Inference(target) = ty
+            && self.numeric_variables.contains(&target)
+        {
+            self.numeric_variables.insert(variable);
+        }
+        self.substitutions.insert(variable, ty);
+        Ok(())
+    }
+
     fn unify(&mut self, left: &TypeDescriptor, right: &TypeDescriptor) -> Result<(), String> {
         if let Some(query) = &self.query {
             query.check().map_err(|error| error.to_string())?;
@@ -3421,11 +3475,7 @@ impl<'a> GenericInference<'a> {
             }
             (TypeDescriptor::Inference(variable), ty)
             | (ty, TypeDescriptor::Inference(variable)) => {
-                if self.occurs(*variable, ty) {
-                    return Err(format!("infinite type for ?{}", variable.0));
-                }
-                self.substitutions.insert(*variable, ty.clone());
-                Ok(())
+                self.bind_inference_variable(*variable, ty)
             }
             (TypeDescriptor::Any, _) | (_, TypeDescriptor::Any) => Ok(()),
             (TypeDescriptor::TypeOf(_), TypeDescriptor::Type) => Ok(()),
@@ -3762,36 +3812,48 @@ impl<'a> GenericInference<'a> {
                     }
                 }
             }
-            ExprKind::Unary { operand, .. } => self.infer(operand, environment, expected)?,
+            ExprKind::Unary { operand, .. } => {
+                let numeric = self.fresh_variable();
+                self.require_numeric(&numeric)?;
+                if let Some(expected) = expected {
+                    self.check(&numeric, expected)?;
+                }
+                let operand = self.infer(operand, environment, Some(&numeric))?;
+                self.require_numeric(&operand)?;
+                self.resolve(&numeric)
+            }
             ExprKind::Binary {
                 operator,
                 left,
                 right,
-            } => {
-                let left = self.infer(left, environment, None)?;
-                match operator.value {
-                    BinaryOperator::Equal => {
-                        self.infer(right, environment, None)?;
-                        TypeDescriptor::Union(vec![
-                            TypeDescriptor::Atom(Atom::builtin(BuiltinAtom::True)),
-                            TypeDescriptor::Atom(Atom::builtin(BuiltinAtom::False)),
-                        ])
-                    }
-                    BinaryOperator::LessThan => {
-                        let right = self.infer(right, environment, Some(&left))?;
-                        self.unify(&left, &right)?;
-                        TypeDescriptor::Union(vec![
-                            TypeDescriptor::Atom(Atom::builtin(BuiltinAtom::True)),
-                            TypeDescriptor::Atom(Atom::builtin(BuiltinAtom::False)),
-                        ])
-                    }
-                    _ => {
-                        let right = self.infer(right, environment, Some(&left))?;
-                        self.unify(&left, &right)?;
-                        self.resolve(&left)
-                    }
+            } => match operator.value {
+                BinaryOperator::Equal => {
+                    self.infer(left, environment, None)?;
+                    self.infer(right, environment, None)?;
+                    normalized_bool_descriptor()
                 }
-            }
+                BinaryOperator::LessThan => {
+                    let numeric = self.fresh_variable();
+                    self.require_numeric(&numeric)?;
+                    let left = self.infer(left, environment, Some(&numeric))?;
+                    let right = self.infer(right, environment, Some(&numeric))?;
+                    self.require_numeric(&left)?;
+                    self.require_numeric(&right)?;
+                    normalized_bool_descriptor()
+                }
+                _ => {
+                    let numeric = self.fresh_variable();
+                    self.require_numeric(&numeric)?;
+                    if let Some(expected) = expected {
+                        self.check(&numeric, expected)?;
+                    }
+                    let left = self.infer(left, environment, Some(&numeric))?;
+                    let right = self.infer(right, environment, Some(&numeric))?;
+                    self.require_numeric(&left)?;
+                    self.require_numeric(&right)?;
+                    self.resolve(&numeric)
+                }
+            },
             ExprKind::Field { receiver, field } => {
                 if let ExprKind::Variable(module) = &receiver.value
                     && let Some(scheme) = self
@@ -3938,7 +4000,8 @@ impl<'a> GenericInference<'a> {
                 then_branch,
                 else_branch,
             } => {
-                self.infer(condition, environment, None)?;
+                let bool_type = normalized_bool_descriptor();
+                self.infer(condition, environment, Some(&bool_type))?;
                 let then_type = self.infer_block(then_branch, environment, expected)?;
                 let else_type = self.infer_block(else_branch, environment, expected)?;
                 if !contains_type_variable(&then_type)
@@ -5145,6 +5208,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(related.display(related.result_type), "Fn(Int, Int) -> Int");
+    }
+
+    #[test]
+    fn intrinsic_expression_constraints_infer_booleans_and_numeric_families() {
+        let condition = analyze_with_natives(
+            "let select = fn(condition, value) {\
+                 if condition { value } else { value }\
+             }; let selected = select('True, 1); select",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            condition.display(condition.result_type),
+            "Fn(enum {False, True}, Int) -> Int"
+        );
+
+        for (source, expected) in [
+            ("let add = fn(value) { value + 1 }; add", "Fn(Int) -> Int"),
+            ("let add = fn(value) { 1 + value }; add", "Fn(Int) -> Int"),
+            (
+                "let scale = fn(value) { value * 1.5 }; scale",
+                "Fn(Float) -> Float",
+            ),
+            ("let negative: Float = -1.5; negative", "Float"),
+            (
+                "let before = fn(value) { value < 1 }; before",
+                "Fn(Int) -> enum {False, True}",
+            ),
+        ] {
+            let analysis = analyze_with_natives(source, &[]).unwrap();
+            assert_eq!(analysis.display(analysis.result_type), expected);
+        }
+
+        let equality = analyze_with_natives("1 == \"1\"", &[]).unwrap();
+        assert_eq!(equality.display(equality.result_type), "enum {False, True}");
+    }
+
+    #[test]
+    fn intrinsic_expression_constraints_reject_invalid_or_ambiguous_numerics() {
+        for source in ["-\"text\"", "1 + 1.5", "\"a\" < \"b\""] {
+            let error = analyze_with_natives(source, &[]).unwrap_err();
+            assert!(
+                error.message.contains("Int or Float") || error.message.contains("cannot unify"),
+                "{}",
+                error.message
+            );
+        }
+
+        let ambiguous =
+            analyze_with_natives("let negate = fn(value) { -value }; negate", &[]).unwrap_err();
+        assert!(
+            ambiguous
+                .message
+                .contains("cannot infer monomorphic binding")
+        );
+
+        let dynamic = analyze_with_natives(
+            "let negate: Fn(Any) -> Any = fn(value) { -value }; negate",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(dynamic.display(dynamic.result_type), "Fn(Any) -> Any");
     }
 
     #[test]
