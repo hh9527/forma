@@ -1722,6 +1722,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
     );
     let mut checked_environment = static_environment.clone();
     let type_metadata_expected = TypeDescriptor::Type;
+    let mut delayed_bindings = Vec::new();
     for binding in &program.value.body.value.bindings {
         if matches!(
             binding.value.kind,
@@ -1738,21 +1739,46 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 .as_ref()
                 .and_then(|_| binding_types.get(&binding.value.name.value))
         };
-        let inferred = inference
-            .infer(&binding.value.value, &checked_environment, expected)
-            .map_err(|message| {
-                FrontendError::from_diagnostic(
-                    sources,
-                    Diagnostic::error(message, binding.value.value.location),
-                )
-            })?;
+        let is_delayed = expected.is_none()
+            && matches!(binding.value.kind, BindingKind::Let | BindingKind::Def)
+            && !definition_contracts.contains_key(&binding.value.name.value);
+        let first_owned_variable = inference.next_variable;
+        if is_delayed {
+            inference.delayed_initializer_depth += 1;
+        }
+        let mut initializer_environment;
+        let environment = if is_delayed && binding.value.kind == BindingKind::Def {
+            initializer_environment = checked_environment.clone();
+            initializer_environment.remove(&binding.value.name.value);
+            &initializer_environment
+        } else {
+            &checked_environment
+        };
+        let inferred = inference.infer(&binding.value.value, environment, expected);
+        if is_delayed {
+            inference.delayed_initializer_depth -= 1;
+        }
+        let inferred = inferred.map_err(|message| {
+            FrontendError::from_diagnostic(
+                sources,
+                Diagnostic::error(message, binding.value.value.location),
+            )
+        })?;
         if binding.value.kind == BindingKind::Type {
             continue;
         }
         if matches!(binding.value.kind, BindingKind::Let | BindingKind::Def) {
             let checked = expected.cloned().unwrap_or(inferred);
             checked_environment.insert(binding.value.name.value.clone(), checked.clone());
-            binding_types.insert(binding.value.name.value.clone(), checked);
+            binding_types.insert(binding.value.name.value.clone(), checked.clone());
+            if is_delayed {
+                delayed_bindings.push((
+                    binding.value.name.value.clone(),
+                    binding.value.value.location,
+                    checked,
+                    first_owned_variable,
+                ));
+            }
         }
     }
     let result_type = inference
@@ -1763,6 +1789,29 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 Diagnostic::error(message, program.value.body.value.result.location),
             )
         })?;
+    for (name, location, descriptor, first_owned_variable) in delayed_bindings {
+        if let Some(query) = &inference.query {
+            query.check().map_err(|error| {
+                FrontendError::from_diagnostic(
+                    sources,
+                    Diagnostic::error(error.to_string(), location),
+                )
+            })?;
+        }
+        let resolved = inference.resolve(&descriptor);
+        if contains_inference_variable_at_or_after(&resolved, first_owned_variable) {
+            return Err(FrontendError::from_diagnostic(
+                sources,
+                Diagnostic::error(
+                    format!(
+                        "cannot infer monomorphic binding {name:?}: unresolved {}",
+                        resolved.display_name()
+                    ),
+                    location,
+                ),
+            ));
+        }
+    }
     expression_descriptors.extend(
         inference
             .records
@@ -1780,9 +1829,12 @@ pub(crate) fn analyze_program_with_bindings_observed(
         .collect();
     let binding_types: BTreeMap<String, TypeId> = binding_types
         .into_iter()
-        .map(|(name, descriptor)| (name, types.intern_descriptor(&descriptor)))
+        .map(|(name, descriptor)| {
+            let descriptor = inference.resolve(&descriptor);
+            (name, types.intern_descriptor(&descriptor))
+        })
         .collect();
-    let result_type = types.intern_descriptor(&result_type);
+    let result_type = types.intern_descriptor(&inference.resolve(&result_type));
     let expression_types: BTreeMap<HirExpressionId, TypeId> = hir
         .expressions()
         .iter()
@@ -3139,6 +3191,7 @@ struct GenericInference<'a> {
     query: Option<crate::query::QueryContext>,
     next_variable: u32,
     closure_inference_depth: usize,
+    delayed_initializer_depth: usize,
     substitutions: HashMap<InferenceVariableId, TypeDescriptor>,
     records: HashMap<crate::Location, TypeDescriptor>,
 }
@@ -3157,6 +3210,7 @@ impl<'a> GenericInference<'a> {
             query,
             next_variable: 0,
             closure_inference_depth: 0,
+            delayed_initializer_depth: 0,
             substitutions: HashMap::new(),
             records: HashMap::new(),
         }
@@ -3639,6 +3693,8 @@ impl<'a> GenericInference<'a> {
                 }
                 let item = if let Some(expected) = item_expected {
                     expected
+                } else if items.is_empty() && self.delayed_initializer_depth > 0 {
+                    self.fresh_variable()
                 } else {
                     common_type(item_types).unwrap_or(TypeDescriptor::Any)
                 };
@@ -3818,6 +3874,7 @@ impl<'a> GenericInference<'a> {
                             result
                         };
                         if contains_type_variable(&result)
+                            && self.delayed_initializer_depth == 0
                             && !(self.closure_inference_depth > 0 && unresolved_argument_evidence)
                         {
                             return Err(format!(
@@ -3867,7 +3924,10 @@ impl<'a> GenericInference<'a> {
                     parameters: parameter_types,
                     result: Box::new(result),
                 };
-                if expected.is_none() && contains_type_variable(&function) {
+                if expected.is_none()
+                    && self.delayed_initializer_depth == 0
+                    && contains_type_variable(&function)
+                {
                     self.default_inference_variables_to_any(&function);
                 }
                 self.resolve(&function)
@@ -3937,24 +3997,53 @@ impl<'a> GenericInference<'a> {
         expected: Option<&TypeDescriptor>,
     ) -> Result<TypeDescriptor, String> {
         let mut environment = environment.clone();
+        let mut delayed = Vec::new();
         for binding in &block.value.bindings {
-            let expected = binding
+            let binding_expected = binding
                 .value
                 .annotation
                 .as_ref()
                 .and_then(|annotation| self.local_annotations.get(&annotation.location));
-            let inferred = self.infer(&binding.value.value, &environment, expected)?;
+            let is_delayed = binding_expected.is_none()
+                && matches!(binding.value.kind, BindingKind::Let | BindingKind::Def);
+            let first_owned_variable = self.next_variable;
+            if is_delayed {
+                self.delayed_initializer_depth += 1;
+            }
+            let inferred = self.infer(&binding.value.value, &environment, binding_expected);
+            if is_delayed {
+                self.delayed_initializer_depth -= 1;
+            }
+            let inferred = inferred?;
             if matches!(
                 binding.value.kind,
                 BindingKind::Let | BindingKind::Def | BindingKind::Import
             ) {
-                environment.insert(
-                    binding.value.name.value.clone(),
-                    expected.cloned().unwrap_or(inferred),
-                );
+                let descriptor = binding_expected.cloned().unwrap_or(inferred);
+                environment.insert(binding.value.name.value.clone(), descriptor.clone());
+                if is_delayed {
+                    delayed.push((
+                        binding.value.name.value.clone(),
+                        descriptor,
+                        first_owned_variable,
+                    ));
+                }
             }
         }
-        self.infer(&block.value.result, &environment, expected)
+        let result = self.infer(&block.value.result, &environment, expected)?;
+        for (name, descriptor, first_owned_variable) in delayed {
+            if let Some(query) = &self.query {
+                query.check().map_err(|error| error.to_string())?;
+            }
+            let resolved = self.resolve(&descriptor);
+            if contains_inference_variable_at_or_after(&resolved, first_owned_variable) {
+                return Err(format!(
+                    "cannot infer monomorphic binding {name:?}: unresolved {}",
+                    resolved.display_name()
+                ));
+            }
+        }
+        Ok(self.resolve(&result))
     }
 }
 
@@ -3976,6 +4065,35 @@ fn contains_type_variable(ty: &TypeDescriptor) -> bool {
             .any(|payload| contains_type_variable(payload)),
         TypeDescriptor::Function { parameters, result } => {
             parameters.iter().any(contains_type_variable) || contains_type_variable(result)
+        }
+        _ => false,
+    }
+}
+
+fn contains_inference_variable_at_or_after(ty: &TypeDescriptor, first: u32) -> bool {
+    match ty {
+        TypeDescriptor::Inference(variable) => variable.0 >= first,
+        TypeDescriptor::Array(item) | TypeDescriptor::Dict(item) | TypeDescriptor::TypeOf(item) => {
+            contains_inference_variable_at_or_after(item, first)
+        }
+        TypeDescriptor::Tagged { payload, .. } => {
+            contains_inference_variable_at_or_after(payload, first)
+        }
+        TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => items
+            .iter()
+            .any(|item| contains_inference_variable_at_or_after(item, first)),
+        TypeDescriptor::Struct(fields) => fields
+            .values()
+            .any(|field| contains_inference_variable_at_or_after(field, first)),
+        TypeDescriptor::Enum(variants) => variants
+            .values()
+            .flatten()
+            .any(|payload| contains_inference_variable_at_or_after(payload, first)),
+        TypeDescriptor::Function { parameters, result } => {
+            parameters
+                .iter()
+                .any(|parameter| contains_inference_variable_at_or_after(parameter, first))
+                || contains_inference_variable_at_or_after(result, first)
         }
         _ => false,
     }
@@ -5030,32 +5148,82 @@ mod tests {
     }
 
     #[test]
-    fn closure_local_inference_keeps_conservative_fallbacks_until_delayed_solving() {
-        let identity =
-            analyze_with_natives("let identity = fn(value) { value }; identity", &[]).unwrap();
-        assert_eq!(identity.display(identity.result_type), "Fn(Any) -> Any");
-
-        let singleton =
-            analyze_with_natives("let singleton = fn(value) { [value] }; singleton", &[]).unwrap();
-        assert_eq!(
-            singleton.display(singleton.result_type),
-            "Fn(Any) -> Array<Any>"
-        );
-
-        let never = analyze_with_natives(
-            "native stop: Fn() -> Never;\
-             let discard = fn(value) { stop() }; discard",
-            &[("stop", 0)],
-        )
-        .unwrap();
-        assert_eq!(never.display(never.result_type), "Fn(Any) -> Never");
-
-        let expected = analyze_with_natives(
-            "def identity: Fn(Int) -> Int = fn(value) { value }; identity",
+    fn delayed_bindings_are_solved_monomorphically_by_later_uses() {
+        let direct = analyze_with_natives(
+            "let identity = fn(value) { value }; let number = identity(1); identity",
             &[],
         )
         .unwrap();
-        assert_eq!(expected.display(expected.result_type), "Fn(Int) -> Int");
+        assert_eq!(direct.display(direct.result_type), "Fn(Int) -> Int");
+        assert_eq!(direct.display(direct.binding_types["number"]), "Int");
+
+        let alias = analyze_with_natives(
+            "let identity = fn(value) { value }; let alias = identity;\
+             let number = alias(1); identity",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(alias.display(alias.result_type), "Fn(Int) -> Int");
+
+        let callback = analyze_with_natives(
+            "native map: for(A, B) Fn(Array(A), Fn(A) -> B) -> Array(B);\
+             let identity = fn(value) { value };\
+             let mapped = map([1, 2], identity); identity",
+            &[("map", 2)],
+        )
+        .unwrap();
+        assert_eq!(callback.display(callback.result_type), "Fn(Int) -> Int");
+
+        let field = analyze_with_natives(
+            "let holder = {apply: fn(value) { value }};\
+             let number = holder.apply(1); holder.apply",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(field.display(field.result_type), "Fn(Int) -> Int");
+
+        let empty = analyze_with_natives(
+            "native append: for(A) Fn(Array(A), A) -> Array(A);\
+             let values = []; let appended = append(values, 1); values",
+            &[("append", 2)],
+        )
+        .unwrap();
+        assert_eq!(empty.display(empty.result_type), "Array<Int>");
+    }
+
+    #[test]
+    fn delayed_bindings_reject_conflicts_and_underconstrained_results() {
+        let conflict = analyze_with_natives(
+            "let identity = fn(value) { value };\
+             let number = identity(1); identity(\"text\")",
+            &[],
+        )
+        .unwrap_err();
+        assert!(conflict.message.contains("cannot unify String with Int"));
+
+        for source in [
+            "let identity = fn(value) { value }; identity",
+            "let values = []; values",
+            "{ let identity = fn(value) { value }; identity }",
+        ] {
+            let error = analyze_with_natives(source, &[]).unwrap_err();
+            assert!(
+                error.message.contains("cannot infer monomorphic binding"),
+                "{}",
+                error.message
+            );
+        }
+
+        let explicit = analyze_with_natives(
+            "let identity: Fn(Any) -> Any = fn(value) { value }; identity",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(explicit.display(explicit.result_type), "Fn(Any) -> Any");
+
+        let recursive =
+            analyze_with_natives("def recurse = fn(value) { recurse(value) }; recurse", &[]);
+        assert!(recursive.is_err());
     }
 
     #[test]

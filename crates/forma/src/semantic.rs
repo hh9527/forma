@@ -1488,7 +1488,7 @@ mod tests {
             &main,
             "import model from \"./model.forma\";\n\
              import data from \"./data.json\";\n\
-             let f = fn(x) { let y = x; y };\n\
+             let f: Fn(Any) -> Any = fn(x) { let y = x; y };\n\
              let count = 1 + 2;\n\
              {model: model, data: data, f: f, count: count}",
         )
@@ -1628,7 +1628,7 @@ mod tests {
     #[test]
     fn known_any_is_distinct_from_unavailable_fact_states() {
         let mut sources = SourceDatabase::default();
-        let source = sources.add("any.forma", "let id = fn(x) { x }; id");
+        let source = sources.add("any.forma", "let id: Fn(Any) -> Any = fn(x) { x }; id");
         let parsed = crate::parser::parse_registered(&sources, source);
         let program = parsed.program.unwrap();
         let analysis =

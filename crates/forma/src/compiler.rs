@@ -1626,7 +1626,7 @@ mod tests {
     #[test]
     fn decorators_transform_type_and_field_rhs_with_syntax_context() {
         let value = run(r#"
-let choose = fn(ctx, rhs) {
+let choose: Fn(Any, Any) -> Any = fn(ctx, rhs) {
     if ctx.kind == 'Type {
         if ctx.name == "Alias" { rhs } else { 'Bad }
     } else {
@@ -1637,9 +1637,9 @@ let choose = fn(ctx, rhs) {
 type Alias = Int;
 let typed: Alias = 7;
 
-let outer = fn(ctx, rhs) { if ctx.name == "value" { rhs * 10 } else { 0 } };
+let outer: Fn(Any, Int) -> Int = fn(ctx, rhs) { if ctx.name == "value" { rhs * 10 } else { 0 } };
 let decorators = {
-    add: fn(amount) { fn(ctx, rhs) { if ctx.kind == 'Field { rhs + amount } else { 0 } } },
+    add: fn(amount) { let decorate: Fn(Any, Int) -> Int = fn(ctx, rhs) { if ctx.kind == 'Field { rhs + amount } else { 0 } }; decorate },
 };
 {
     @outer
@@ -1666,7 +1666,7 @@ let decorators = {
     #[test]
     fn compares_functions_by_opaque_identity() {
         let value = run(
-            "let f = fn(x) { x }; let same = f == f; let distinct = f == fn(x) { x }; (same, distinct)",
+            "let f: Fn(Any) -> Any = fn(x) { x }; let same = f == f; let distinct = f == fn(x) { x }; (same, distinct)",
         )
         .unwrap();
         let Value::Tuple(values) = value else {
@@ -1738,7 +1738,7 @@ let decorators = {
         assert!(matches!(matched, Value::Int(0)));
 
         let higher_order = run(
-            "let iterate = fn(step, n) { if n < 1 { 0 } else { step(step, n - 1) } }; iterate(iterate, 1500)",
+            "let iterate: Fn(Any, Int) -> Int = fn(step, n) { if n < 1 { 0 } else { step(step, n - 1) } }; iterate(iterate, 1500)",
         )
         .unwrap();
         assert!(matches!(higher_order, Value::Int(0)));
@@ -1922,7 +1922,7 @@ let decorators = {
         assert_eq!(metadata.get("kind").unwrap().to_string(), "'Array");
 
         let reevaluated = run("let second = fn(first, second) { second }; \
-             let make = fn() { fn(value) { value } }; \
+             let make: Fn() -> Fn(Any) -> Any = fn() { fn(value) { value } }; \
              let section = second\\(_, make()); \
              section(1) == section(2)")
         .unwrap();

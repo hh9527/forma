@@ -1,6 +1,6 @@
 # RFC 0073: Delayed monomorphic local inference
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0052, RFC 0070, RFC 0071, RFC 0072
 
 ## Summary
@@ -288,6 +288,29 @@ monomorphic; this RFC does not synthesize a quantified `TypeScheme` for them.
 - explicit type application;
 - subtyping, narrowing, and traits.
 
+## Implementation result
+
+Implemented in the RFC 0073 change set.
+
+`GenericInference` now marks unannotated binding initializers as delayed.
+Closure parameters and empty Array elements created in that region retain their
+inference identities, and later lexical uses constrain those same monotypes.
+Generic calls may also retain an unresolved result while such an initializer is
+being checked.
+
+Completion checks only variables created by the initializer. This ownership
+rule is important for aliases such as `let y = x`: a nested binding may carry an
+outer obligation without prematurely completing it. Top-level binding
+descriptors, result descriptors, and expression records are resolved before
+they are interned or published.
+
+Existing tests that intentionally cross dynamic boundaries now state their
+`Any` contracts explicitly. This includes decorator contexts, debug and
+function-identity callbacks, and helpers used at both metadata and runtime
+types. Direct calls, aliases, higher-order callbacks, Struct fields, empty
+Arrays, conflicts, underconstrained nested blocks, explicit `Any`, and
+unannotated recursion are covered by focused tests.
+
 ## Rejected alternatives
 
 ### Generalize unresolved local variables
@@ -313,4 +336,3 @@ before interface publication.
 Recursive inference needs a separate dependency analysis and raises
 polymorphic-recursion and diagnostic-order questions. Explicit contracts are a
 clear boundary while ordinary forward local uses are addressed.
-

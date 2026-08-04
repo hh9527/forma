@@ -1483,7 +1483,7 @@ mod tests {
         fs::write(
             directory.join("main.forma"),
             r#"import debug from "@bim/std/debug";
-               let identity = fn(value) { value };
+               let identity: Fn(Any) -> Any = fn(value) { value };
                let data = { text: "line\nnext", items: [1, 'Ok, (2,)] };
                let observed = debug.dbg_with("loaded\nvalue", data);
                let seen_identity = debug.dbg(identity);
@@ -1623,7 +1623,7 @@ mod tests {
         fs::write(
             directory.join("erased.forma"),
             r#"import debug from "@bim/std/debug";
-               def observe = fn(value) { debug.dbg_with("metadata", value) };
+               def observe: Fn(Any) -> Any = fn(value) { debug.dbg_with("metadata", value) };
                type Observed = observe(Int);
                0"#,
         )
@@ -1649,7 +1649,7 @@ mod tests {
         fs::write(
             directory.join("retained.forma"),
             r#"import debug from "@bim/std/debug";
-               def observe = fn(value) { debug.dbg_with("observed", value) };
+               def observe: Fn(Any) -> Any = fn(value) { debug.dbg_with("observed", value) };
                type Observed = observe(Int);
                observe(1)"#,
         )
@@ -3299,11 +3299,11 @@ unchanged", "|"),
             r#"import attributes from "@bim/std/attributes";
                import codec from "@bim/std/codec";
                let rename = fn(name) {
-                   fn(ctx, value) {
+                   let decorate: Fn(Any, Any) -> Any = fn(ctx, value) {
                        attributes.add(value, { "@bim/std/json.rename": name })
-                   }
+                   }; decorate
                };
-               let model = fn(ctx, value) {
+               let model: Fn(Any, Any) -> Any = fn(ctx, value) {
                    attributes.add(struct(ctx, value), { "vendor:acme.model": ctx.name })
                };
                @model
@@ -3383,7 +3383,8 @@ unchanged", "|"),
             directory.join("main.forma"),
             r#"import attributes from "@bim/std/attributes";
                let annotate = fn(key, payload) {
-                   fn(ctx, value) { attributes.add(value, { marker: (key, payload) }) }
+                   let decorate: Fn(Any, Any) -> Any = fn(ctx, value) { attributes.add(value, { marker: (key, payload) }) };
+                   decorate
                };
 
                @annotate("model", 1)
@@ -4298,7 +4299,7 @@ unchanged", "|"),
                import debug from "@bim/std/debug";
                import json from "@bim/std/json";
                let zero = 0;
-               def is_zero = fn(value) { value == zero };
+               def is_zero: Fn(Int) -> Bool = fn(value) { value == zero };
                @struct type Model = {
                    @json.skip_serializing_if(is_zero) omitted: Int,
                    @json.skip_serializing_if(is_zero) retained: Int,
@@ -4338,7 +4339,7 @@ unchanged", "|"),
         fs::write(
             directory.join("arity.forma"),
             r#"import json from "@bim/std/json";
-               def wrong = fn(left, right) { 'False };
+               def wrong: Fn(Any, Any) -> Bool = fn(left, right) { 'False };
                @struct type Model = {
                    @json.skip_serializing_if(wrong) value: Int,
                };
@@ -4353,7 +4354,7 @@ unchanged", "|"),
             directory.join("result.forma"),
             r#"import codec from "@bim/std/codec";
                import json from "@bim/std/json";
-               def identity = fn(value) { value };
+               def identity: Fn(Any) -> Any = fn(value) { value };
                @struct type Model = {
                    @json.skip_serializing_if(identity) value: Int,
                };
@@ -4375,7 +4376,7 @@ unchanged", "|"),
             directory.join("callback.forma"),
             r#"import codec from "@bim/std/codec";
                import json from "@bim/std/json";
-               def fails = fn(value) { 1 / 0 };
+               def fails: Fn(Any) -> Int = fn(value) { 1 / 0 };
                @struct type Model = {
                    @json.skip_serializing_if(fails) value: Int,
                };
@@ -4408,8 +4409,8 @@ unchanged", "|"),
             directory.join("main.forma"),
             r#"import codec from "@bim/std/codec";
                import json from "@bim/std/json";
-               def is_zero = fn(value) { value == 0 };
-               def always = fn(value) { 'True };
+               def is_zero: Fn(Int) -> Bool = fn(value) { value == 0 };
+               def always: Fn(Any) -> Bool = fn(value) { 'True };
                @struct type Item = {
                    @json.skip_serializing_if(is_zero) value: Int,
                };
