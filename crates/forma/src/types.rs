@@ -40,6 +40,7 @@ pub enum TypeNode {
     Pending,
     Ref(TypeId),
     Any,
+    Never,
     Type,
     TypeOf(TypeId),
     Int,
@@ -107,6 +108,7 @@ impl TypeGraph {
         let node = match descriptor {
             TypeDescriptor::Bound(_) | TypeDescriptor::Inference(_) => TypeNode::Any,
             TypeDescriptor::Any => TypeNode::Any,
+            TypeDescriptor::Never => TypeNode::Never,
             TypeDescriptor::Type => TypeNode::Type,
             TypeDescriptor::TypeOf(instance) => TypeNode::TypeOf(self.intern_descriptor(instance)),
             TypeDescriptor::Int => TypeNode::Int,
@@ -239,6 +241,10 @@ impl TypeGraph {
             "Any" => {
                 require(&["kind"])?;
                 TypeNode::Any
+            }
+            "Never" => {
+                require(&["kind"])?;
+                TypeNode::Never
             }
             "Type" => {
                 require(&["kind"])?;
@@ -418,6 +424,7 @@ impl TypeGraph {
             TypeNode::Pending => "<pending>".into(),
             TypeNode::Ref(target) => self.display_with(*target, active),
             TypeNode::Any => "Any".into(),
+            TypeNode::Never => "Never".into(),
             TypeNode::Type => "Type".into(),
             TypeNode::TypeOf(instance) => {
                 format!("TypeOf({})", self.display_with(*instance, active))
@@ -490,6 +497,7 @@ impl TypeGraph {
         match (self.node(actual), self.node(expected)) {
             (TypeNode::Ref(actual), _) => self.assignable_with(*actual, expected, visited),
             (_, TypeNode::Ref(expected)) => self.assignable_with(actual, *expected, visited),
+            (TypeNode::Never, _) => true,
             (TypeNode::Any, _) | (_, TypeNode::Any) => true,
             (TypeNode::TypeOf(_), TypeNode::Type) => true,
             (TypeNode::TypeOf(a), TypeNode::TypeOf(e)) => self.assignable_with(*a, *e, visited),
@@ -586,6 +594,7 @@ pub enum TypeDescriptor {
     Bound(TypeParameterId),
     Inference(InferenceVariableId),
     Any,
+    Never,
     Type,
     TypeOf(Box<TypeDescriptor>),
     Int,
@@ -618,6 +627,7 @@ impl TypeDescriptor {
             ],
             Self::Inference(_) => panic!("inference variables are not runtime type metadata"),
             Self::Any => vec![kind_entry("Any")],
+            Self::Never => vec![kind_entry("Never")],
             Self::Type => vec![kind_entry("Type")],
             Self::TypeOf(instance) => {
                 vec![
@@ -718,6 +728,7 @@ impl TypeDescriptor {
             Self::Bound(parameter) => format!("T{}", parameter.0),
             Self::Inference(variable) => format!("?{}", variable.0),
             Self::Any => "Any".into(),
+            Self::Never => "Never".into(),
             Self::Type => "Type".into(),
             Self::TypeOf(instance) => format!("TypeOf({})", instance.display_name()),
             Self::Int => "Int".into(),
@@ -1710,6 +1721,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
         account.query_context(),
     );
     let mut checked_environment = static_environment.clone();
+    let type_metadata_expected = TypeDescriptor::Type;
     for binding in &program.value.body.value.bindings {
         if matches!(
             binding.value.kind,
@@ -1718,7 +1730,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
             continue;
         }
         let expected = if binding.value.kind == BindingKind::Type {
-            binding_types.get(&binding.value.name.value)
+            Some(&type_metadata_expected)
         } else {
             binding
                 .value
@@ -2126,6 +2138,7 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
     for (name, descriptor) in [
         ("Type", TypeDescriptor::Type),
         ("Any", TypeDescriptor::Any),
+        ("Never", TypeDescriptor::Never),
         ("Int", TypeDescriptor::Int),
         ("Float", TypeDescriptor::Float),
         ("String", TypeDescriptor::String),
@@ -2169,6 +2182,7 @@ fn core_static_prelude() -> HashMap<String, TypeDescriptor> {
     for (name, instance) in [
         ("Type", TypeDescriptor::Type),
         ("Any", TypeDescriptor::Any),
+        ("Never", TypeDescriptor::Never),
         ("Int", TypeDescriptor::Int),
         ("Float", TypeDescriptor::Float),
         ("String", TypeDescriptor::String),
@@ -2538,6 +2552,10 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
             require(&["kind"])?;
             TypeDescriptor::Any
         }
+        "Never" => {
+            require(&["kind"])?;
+            TypeDescriptor::Never
+        }
         "Type" => {
             require(&["kind"])?;
             TypeDescriptor::Type
@@ -2741,6 +2759,7 @@ fn validate_value_ref(
 ) -> Result<(), String> {
     match descriptor {
         TypeDescriptor::Any => Ok(()),
+        TypeDescriptor::Never => Err(format!("{path} cannot have type Never")),
         TypeDescriptor::Type => decode_type_ref(value, path).map(|_| ()),
         TypeDescriptor::TypeOf(expected) => {
             let actual = decode_type_ref(value, path)?;
@@ -2910,6 +2929,10 @@ fn decode_type(value: &Value, path: &str) -> Result<TypeDescriptor, String> {
         "Any" => {
             require_fields(metadata, path, &["kind"])?;
             TypeDescriptor::Any
+        }
+        "Never" => {
+            require_fields(metadata, path, &["kind"])?;
+            TypeDescriptor::Never
         }
         "Type" => {
             require_fields(metadata, path, &["kind"])?;
@@ -3440,6 +3463,24 @@ impl<'a> GenericInference<'a> {
         }
     }
 
+    fn check(&mut self, actual: &TypeDescriptor, expected: &TypeDescriptor) -> Result<(), String> {
+        let actual = self.resolve(actual);
+        let expected = self.resolve(expected);
+        if matches!(actual, TypeDescriptor::Never) {
+            return Ok(());
+        }
+        if !contains_type_variable(&actual) && !contains_type_variable(&expected) {
+            return assignable(&actual, &expected).then_some(()).ok_or_else(|| {
+                format!(
+                    "cannot unify {} with {}",
+                    actual.display_name(),
+                    expected.display_name()
+                )
+            });
+        }
+        self.unify(&actual, &expected)
+    }
+
     fn default_inference_variables_to_any(&mut self, ty: &TypeDescriptor) {
         match self.resolve(ty) {
             TypeDescriptor::Inference(variable) => {
@@ -3657,7 +3698,7 @@ impl<'a> GenericInference<'a> {
                             payload: Box::new(payload),
                         };
                         if let Some(expected) = expected {
-                            self.unify(&result, expected)?;
+                            self.check(&result, expected)?;
                         }
                         self.resolve(&result)
                     }
@@ -3680,7 +3721,7 @@ impl<'a> GenericInference<'a> {
                             if matches!(self.resolve(&argument_type), TypeDescriptor::Any) {
                                 self.default_inference_variables_to_any(parameter);
                             }
-                            self.unify(&argument_type, parameter)?;
+                            self.check(&argument_type, parameter)?;
                         }
                         if partial_tagged_evidence {
                             for parameter in &parameters {
@@ -3688,7 +3729,7 @@ impl<'a> GenericInference<'a> {
                             }
                         }
                         if let Some(expected) = expected {
-                            self.unify(&result, expected)?;
+                            self.check(&result, expected)?;
                         }
                         let result = self.resolve(&result);
                         let result = if matches!(result, TypeDescriptor::TypeOf(_))
@@ -3787,7 +3828,7 @@ impl<'a> GenericInference<'a> {
             }
         };
         if let Some(expected) = expected {
-            self.unify(&inferred, expected)?;
+            self.check(&inferred, expected)?;
         }
         let inferred = self.resolve(&inferred);
         self.records.insert(expression.location, inferred.clone());
@@ -4124,6 +4165,7 @@ fn interpolation_type_supported(descriptor: &TypeDescriptor) -> bool {
     match descriptor {
         TypeDescriptor::Bound(_) | TypeDescriptor::Inference(_) => false,
         TypeDescriptor::Any
+        | TypeDescriptor::Never
         | TypeDescriptor::Int
         | TypeDescriptor::String
         | TypeDescriptor::Atom(_) => true,
@@ -4316,6 +4358,9 @@ fn erase_type_witnesses(descriptor: &TypeDescriptor) -> TypeDescriptor {
 }
 
 fn union_or_single(mut types: Vec<TypeDescriptor>) -> TypeDescriptor {
+    if types.iter().any(|ty| !matches!(ty, TypeDescriptor::Never)) {
+        types.retain(|ty| !matches!(ty, TypeDescriptor::Never));
+    }
     let mut unique = Vec::new();
     for item in types.drain(..) {
         if !unique.contains(&item) {
@@ -4332,6 +4377,7 @@ fn union_or_single(mut types: Vec<TypeDescriptor>) -> TypeDescriptor {
 
 fn assignable(actual: &TypeDescriptor, expected: &TypeDescriptor) -> bool {
     match (actual, expected) {
+        (TypeDescriptor::Never, _) => true,
         (TypeDescriptor::Any, _) | (_, TypeDescriptor::Any) => true,
         (TypeDescriptor::TypeOf(_), TypeDescriptor::Type) => true,
         (TypeDescriptor::TypeOf(actual), TypeDescriptor::TypeOf(expected)) => {
@@ -4754,6 +4800,61 @@ mod tests {
     }
 
     #[test]
+    fn never_checks_directionally_without_constraining_generic_evidence() {
+        let inferred = analyze_with_natives(
+            "native stop: Fn() -> Never;\
+             native choose: for(A) Fn(A, A) -> A;\
+             (choose(stop(), 1), choose(1, stop()))",
+            &[("stop", 0), ("choose", 2)],
+        )
+        .unwrap();
+        assert_eq!(inferred.display(inferred.result_type), "(Int, Int)");
+
+        let missing = analyze_with_natives(
+            "native stop: Fn() -> Never;\
+             native choose: for(A) Fn(A, A) -> A;\
+             choose(stop(), stop())",
+            &[("stop", 0), ("choose", 2)],
+        )
+        .unwrap_err();
+        assert!(missing.message.contains("cannot infer generic result type"));
+
+        let expected = analyze_with_natives(
+            "native stop: Fn() -> Never;\
+             native choose: for(A) Fn(A, A) -> A;\
+             let value: String = choose(stop(), stop()); value",
+            &[("stop", 0), ("choose", 2)],
+        )
+        .unwrap();
+        assert_eq!(expected.display(expected.result_type), "String");
+    }
+
+    #[test]
+    fn never_is_bottom_for_expected_types_and_branch_results() {
+        let analysis = analyze_with_natives(
+            "native stop: Fn() -> Never;\
+             let value: Int = stop();\
+             let branch = if 'True { 1 } else { stop() };\
+             let all_never = if 'True { stop() } else { stop() };\
+             (value, branch, all_never, Never)",
+            &[("stop", 0)],
+        )
+        .unwrap();
+        assert_eq!(
+            analysis.display(analysis.result_type),
+            "(Int, Int, Never, TypeOf(Never))"
+        );
+
+        let reverse = analyze_with_natives(
+            "native produce: Fn() -> Int;\
+             let impossible: Never = produce(); impossible",
+            &[("produce", 0)],
+        )
+        .unwrap_err();
+        assert!(reverse.message.contains("Int") && reverse.message.contains("Never"));
+    }
+
+    #[test]
     fn ordinary_expressions_use_bidirectional_checking_without_schemes() {
         let analysis = analyze_with_natives(
             "let values: Array(Int) = if 'True { [] } else { [1] };\
@@ -4846,6 +4947,10 @@ mod tests {
         let metatype = TypeDescriptor::Type;
         let value = metatype.to_value(&mut Vm::new());
         assert_eq!(TypeDescriptor::from_value(&value).unwrap(), metatype);
+
+        let never = TypeDescriptor::Never;
+        let value = never.to_value(&mut Vm::new());
+        assert_eq!(TypeDescriptor::from_value(&value).unwrap(), never);
 
         let witness = TypeDescriptor::TypeOf(Box::new(TypeDescriptor::Array(Box::new(
             TypeDescriptor::Int,

@@ -1,6 +1,6 @@
 # RFC 0070: Never and directional checking
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0052
 
 ## Summary
@@ -332,3 +332,31 @@ Native contracts already provide a producer for static tests and embedding
 interfaces. Runtime failure semantics, diagnostics, and whether termination is
 an effect deserve independent design.
 
+## Implementation result
+
+`Never` is now a normalized built-in TypeMetadata value and a distinct node in
+the module and workspace type graphs. Both metadata decoders, persistent graph
+publication, display, validation, semantic facts, and module interfaces retain
+it without erasing it to `Any`.
+
+The authoritative inference checker now uses a directional checking operation
+for expression expectations and call arguments. An actual `Never` succeeds
+without adding substitutions, while resolved non-bottom types are accepted
+only in the actual-to-expected direction. Equality unification remains the
+solver for structural generic obligations.
+
+Branch result normalization removes `Never` when another reachable result type
+exists and retains it when all results are `Never`. Tests verify asymmetric
+assignment, `TypeOf(Never)`, metadata round-tripping, mixed and all-bottom
+branches, generic calls with bottom arguments, underconstrained all-bottom
+evidence, and expected-result solving.
+
+Directional checking exposed a pre-existing bootstrap dependency in type
+declarations: a provisional `Type` RHS had been symmetrically unified with the
+declaration's already evaluated precise `TypeOf(T)` witness. Type declaration
+expressions are now checked against `Type`, matching RFC 0051, while their
+published binding still retains `TypeOf(T)`.
+
+The final workspace run passed 235 Forma tests with one manual parser benchmark
+ignored, 12 CLI tests, and 19 LSP tests. Strict Clippy, formatting, and
+whitespace validation pass.

@@ -233,6 +233,7 @@ pub enum WorkspaceTypeNode {
     Pending,
     Ref(WorkspaceTypeId),
     Any,
+    Never,
     Type,
     TypeOf(WorkspaceTypeId),
     Int,
@@ -318,6 +319,7 @@ impl WorkspaceTypeGraph {
             WorkspaceTypeNode::Pending => "<pending>".into(),
             WorkspaceTypeNode::Ref(target) => self.display_with(*target, active),
             WorkspaceTypeNode::Any => "Any".into(),
+            WorkspaceTypeNode::Never => "Never".into(),
             WorkspaceTypeNode::Type => "Type".into(),
             WorkspaceTypeNode::TypeOf(instance) => {
                 format!("TypeOf({})", self.display_with(*instance, active))
@@ -1270,6 +1272,7 @@ fn merge_type_node(
         TypeNode::Pending => WorkspaceTypeNode::Pending,
         TypeNode::Ref(child) => WorkspaceTypeNode::Ref(map(*child, target, mapped)),
         TypeNode::Any => WorkspaceTypeNode::Any,
+        TypeNode::Never => WorkspaceTypeNode::Never,
         TypeNode::Type => WorkspaceTypeNode::Type,
         TypeNode::TypeOf(instance) => WorkspaceTypeNode::TypeOf(map(*instance, target, mapped)),
         TypeNode::Int => WorkspaceTypeNode::Int,
