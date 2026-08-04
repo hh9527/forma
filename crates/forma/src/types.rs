@@ -1,6 +1,6 @@
 use crate::ast::{
     BinaryOperator, BindingKind, Block, Expr, ExprKind, Pattern, PatternKind, Program,
-    StringPartKind,
+    StringPartKind, located,
 };
 use crate::compiler::compile_expression_with_bindings;
 use crate::heap::{Handle, Heap, PersistentValue};
@@ -1723,11 +1723,93 @@ pub(crate) fn analyze_program_with_bindings_observed(
     let mut checked_environment = static_environment.clone();
     let type_metadata_expected = TypeDescriptor::Type;
     let mut delayed_bindings = Vec::new();
+    let mut recursive_skeletons = HashMap::new();
+    let uncontracted_definition_names = program
+        .value
+        .body
+        .value
+        .bindings
+        .iter()
+        .filter(|binding| {
+            binding.value.kind == BindingKind::Def
+                && binding.value.annotation.is_none()
+                && !definition_contracts.contains_key(&binding.value.name.value)
+        })
+        .map(|binding| binding.value.name.value.clone())
+        .collect::<HashSet<_>>();
+    for binding in &program.value.body.value.bindings {
+        if binding.value.kind != BindingKind::Def
+            || binding.value.annotation.is_some()
+            || definition_contracts.contains_key(&binding.value.name.value)
+        {
+            continue;
+        }
+        let first_owned_variable = inference.next_variable;
+        if let Some(skeleton) = inference.recursive_closure_skeleton(&binding.value.value) {
+            checked_environment.insert(binding.value.name.value.clone(), skeleton.clone());
+            recursive_skeletons.insert(
+                binding.value.name.value.clone(),
+                (skeleton.clone(), first_owned_variable),
+            );
+            delayed_bindings.push((
+                binding.value.name.value.clone(),
+                binding.value.value.location,
+                skeleton,
+                first_owned_variable,
+            ));
+        }
+    }
+    let recursive_variables = recursive_skeletons
+        .values()
+        .filter_map(|(skeleton, _)| GenericInference::recursive_result_variable(skeleton))
+        .collect::<HashSet<_>>();
+    for binding in &program.value.body.value.bindings {
+        let Some((skeleton, _)) = recursive_skeletons.get(&binding.value.name.value) else {
+            continue;
+        };
+        inference.delayed_initializer_depth += 1;
+        inference.recursive_body_inference_depth += 1;
+        let recursive_expected = GenericInference::recursive_expected(skeleton);
+        let inferred = inference.infer(
+            &binding.value.value,
+            &checked_environment,
+            Some(&recursive_expected),
+        );
+        inference.recursive_body_inference_depth -= 1;
+        inference.delayed_initializer_depth -= 1;
+        let inferred = inferred.map_err(|message| {
+            FrontendError::from_diagnostic(
+                sources,
+                Diagnostic::error(message, binding.value.value.location),
+            )
+        })?;
+        if let (
+            Some(variable),
+            TypeDescriptor::Function {
+                result: inferred_result,
+                ..
+            },
+        ) = (
+            GenericInference::recursive_result_variable(skeleton),
+            inferred,
+        ) {
+            inference
+                .recursive_equations
+                .insert(variable, *inferred_result);
+        }
+        binding_types.insert(binding.value.name.value.clone(), skeleton.clone());
+    }
+    inference
+        .solve_recursive_equations(&recursive_variables)
+        .map_err(|message| frontend_error(source_name, message))?;
     for binding in &program.value.body.value.bindings {
         if matches!(
             binding.value.kind,
             BindingKind::Decl | BindingKind::Native | BindingKind::Import
         ) {
+            continue;
+        }
+        if recursive_skeletons.contains_key(&binding.value.name.value) {
             continue;
         }
         let expected = if binding.value.kind == BindingKind::Type {
@@ -1738,16 +1820,44 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 .annotation
                 .as_ref()
                 .and_then(|_| binding_types.get(&binding.value.name.value))
+                .or_else(|| {
+                    recursive_skeletons
+                        .get(&binding.value.name.value)
+                        .map(|(skeleton, _)| skeleton)
+                })
         };
-        let is_delayed = expected.is_none()
+        let is_recursive = recursive_skeletons.contains_key(&binding.value.name.value);
+        if binding.value.kind == BindingKind::Def
+            && binding.value.annotation.is_none()
+            && !is_recursive
+            && expression_references_names(
+                &binding.value.value,
+                &uncontracted_definition_names,
+                &HashSet::new(),
+            )
+        {
+            return Err(FrontendError::from_diagnostic(
+                sources,
+                Diagnostic::error(
+                    format!(
+                        "recursive definition {:?} requires a closure value or explicit contract",
+                        binding.value.name.value
+                    ),
+                    binding.value.value.location,
+                ),
+            ));
+        }
+        let is_delayed = (expected.is_none() || is_recursive)
             && matches!(binding.value.kind, BindingKind::Let | BindingKind::Def)
             && !definition_contracts.contains_key(&binding.value.name.value);
-        let first_owned_variable = inference.next_variable;
+        let first_owned_variable = recursive_skeletons
+            .get(&binding.value.name.value)
+            .map_or(inference.next_variable, |(_, first)| *first);
         if is_delayed {
             inference.delayed_initializer_depth += 1;
         }
         let mut initializer_environment;
-        let environment = if is_delayed && binding.value.kind == BindingKind::Def {
+        let environment = if is_delayed && binding.value.kind == BindingKind::Def && !is_recursive {
             initializer_environment = checked_environment.clone();
             initializer_environment.remove(&binding.value.name.value);
             &initializer_environment
@@ -1771,7 +1881,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
             let checked = expected.cloned().unwrap_or(inferred);
             checked_environment.insert(binding.value.name.value.clone(), checked.clone());
             binding_types.insert(binding.value.name.value.clone(), checked.clone());
-            if is_delayed {
+            if is_delayed && !is_recursive {
                 delayed_bindings.push((
                     binding.value.name.value.clone(),
                     binding.value.value.location,
@@ -3262,7 +3372,9 @@ struct GenericInference<'a> {
     next_variable: u32,
     closure_inference_depth: usize,
     delayed_initializer_depth: usize,
+    recursive_body_inference_depth: usize,
     numeric_variables: HashSet<InferenceVariableId>,
+    recursive_equations: HashMap<InferenceVariableId, TypeDescriptor>,
     substitutions: HashMap<InferenceVariableId, TypeDescriptor>,
     records: HashMap<crate::Location, TypeDescriptor>,
 }
@@ -3282,7 +3394,9 @@ impl<'a> GenericInference<'a> {
             next_variable: 0,
             closure_inference_depth: 0,
             delayed_initializer_depth: 0,
+            recursive_body_inference_depth: 0,
             numeric_variables: HashSet::new(),
+            recursive_equations: HashMap::new(),
             substitutions: HashMap::new(),
             records: HashMap::new(),
         }
@@ -3312,6 +3426,114 @@ impl<'a> GenericInference<'a> {
         let variable = InferenceVariableId(self.next_variable);
         self.next_variable += 1;
         TypeDescriptor::Inference(variable)
+    }
+
+    fn recursive_closure_skeleton(&mut self, expression: &Expr) -> Option<TypeDescriptor> {
+        let ExprKind::Closure {
+            parameters,
+            result_annotation,
+            ..
+        } = &expression.value
+        else {
+            return None;
+        };
+        let parameters = parameters
+            .iter()
+            .map(|parameter| {
+                parameter
+                    .annotation
+                    .as_ref()
+                    .and_then(|annotation| self.local_annotations.get(&annotation.location))
+                    .cloned()
+                    .unwrap_or_else(|| self.fresh_variable())
+            })
+            .collect();
+        let result = result_annotation
+            .as_ref()
+            .and_then(|annotation| self.local_annotations.get(&annotation.location))
+            .cloned()
+            .unwrap_or_else(|| self.fresh_variable());
+        Some(TypeDescriptor::Function {
+            parameters,
+            result: Box::new(result),
+        })
+    }
+
+    fn recursive_result_variable(descriptor: &TypeDescriptor) -> Option<InferenceVariableId> {
+        match descriptor {
+            TypeDescriptor::Function { result, .. } => match result.as_ref() {
+                TypeDescriptor::Inference(variable) => Some(*variable),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn recursive_expected(descriptor: &TypeDescriptor) -> TypeDescriptor {
+        match descriptor {
+            TypeDescriptor::Function { parameters, .. } => TypeDescriptor::Function {
+                parameters: parameters.clone(),
+                result: Box::new(TypeDescriptor::Any),
+            },
+            descriptor => descriptor.clone(),
+        }
+    }
+
+    fn recursive_approximation(
+        &self,
+        descriptor: &TypeDescriptor,
+        variables: &HashSet<InferenceVariableId>,
+        approximations: &HashMap<InferenceVariableId, TypeDescriptor>,
+    ) -> Option<TypeDescriptor> {
+        match descriptor {
+            TypeDescriptor::Inference(variable) if variables.contains(variable) => {
+                approximations.get(variable).cloned()
+            }
+            TypeDescriptor::Union(variants) => {
+                let resolved = variants
+                    .iter()
+                    .filter_map(|variant| {
+                        self.recursive_approximation(variant, variables, approximations)
+                    })
+                    .collect::<Vec<_>>();
+                (!resolved.is_empty()).then(|| canonical_union(resolved))
+            }
+            descriptor => {
+                let resolved = self.resolve(descriptor);
+                (!contains_any_inference_variable(&resolved, variables)).then_some(resolved)
+            }
+        }
+    }
+
+    fn solve_recursive_equations(
+        &mut self,
+        variables: &HashSet<InferenceVariableId>,
+    ) -> Result<(), String> {
+        let mut approximations = HashMap::new();
+        for _ in 0..=variables.len() {
+            let mut changed = false;
+            let mut next = approximations.clone();
+            for variable in variables {
+                let Some(equation) = self.recursive_equations.get(variable) else {
+                    continue;
+                };
+                if let Some(value) =
+                    self.recursive_approximation(equation, variables, &approximations)
+                    && next.get(variable) != Some(&value)
+                {
+                    next.insert(*variable, value);
+                    changed = true;
+                }
+            }
+            approximations = next;
+            if !changed {
+                break;
+            }
+        }
+        for (variable, approximation) in approximations {
+            self.bind_inference_variable(variable, &approximation)?;
+        }
+        Ok(())
     }
 
     fn instantiate_with(
@@ -4086,7 +4308,9 @@ impl<'a> GenericInference<'a> {
                 for (parameter, ty) in parameters.iter().zip(&parameter_types) {
                     closure_environment.insert(parameter.name.value.clone(), ty.clone());
                 }
-                let surrounding_result = expected.as_ref().map(|(_, result)| result.as_ref());
+                let surrounding_result = (self.recursive_body_inference_depth == 0)
+                    .then(|| expected.as_ref().map(|(_, result)| result.as_ref()))
+                    .flatten();
                 let local_result = result_annotation.as_ref().and_then(|annotation| {
                     self.local_annotations.get(&annotation.location).cloned()
                 });
@@ -4154,7 +4378,10 @@ impl<'a> GenericInference<'a> {
                 }
             }
         };
-        if let Some(expected) = expected {
+        if let Some(expected) = expected
+            && !(self.recursive_body_inference_depth > 0
+                && matches!(expression.value, ExprKind::Closure { .. }))
+        {
             self.check(&inferred, expected)?;
         }
         let inferred = self.resolve(&inferred);
@@ -4170,15 +4397,99 @@ impl<'a> GenericInference<'a> {
     ) -> Result<TypeDescriptor, String> {
         let mut environment = environment.clone();
         let mut delayed = Vec::new();
+        let mut recursive_skeletons = HashMap::new();
+        let uncontracted_definition_names = block
+            .value
+            .bindings
+            .iter()
+            .filter(|binding| {
+                binding.value.kind == BindingKind::Def && binding.value.annotation.is_none()
+            })
+            .map(|binding| binding.value.name.value.clone())
+            .collect::<HashSet<_>>();
         for binding in &block.value.bindings {
-            let binding_expected = binding
+            if binding.value.kind != BindingKind::Def || binding.value.annotation.is_some() {
+                continue;
+            }
+            let first_owned_variable = self.next_variable;
+            if let Some(skeleton) = self.recursive_closure_skeleton(&binding.value.value) {
+                environment.insert(binding.value.name.value.clone(), skeleton.clone());
+                recursive_skeletons.insert(
+                    binding.value.name.value.clone(),
+                    (skeleton.clone(), first_owned_variable),
+                );
+                delayed.push((
+                    binding.value.name.value.clone(),
+                    skeleton,
+                    first_owned_variable,
+                ));
+            }
+        }
+        let recursive_variables = recursive_skeletons
+            .values()
+            .filter_map(|(skeleton, _)| Self::recursive_result_variable(skeleton))
+            .collect::<HashSet<_>>();
+        for binding in &block.value.bindings {
+            let Some((skeleton, _)) = recursive_skeletons.get(&binding.value.name.value) else {
+                continue;
+            };
+            self.delayed_initializer_depth += 1;
+            self.recursive_body_inference_depth += 1;
+            let recursive_expected = Self::recursive_expected(skeleton);
+            let inferred = self.infer(
+                &binding.value.value,
+                &environment,
+                Some(&recursive_expected),
+            );
+            self.recursive_body_inference_depth -= 1;
+            self.delayed_initializer_depth -= 1;
+            let inferred = inferred?;
+            if let (
+                Some(variable),
+                TypeDescriptor::Function {
+                    result: inferred_result,
+                    ..
+                },
+            ) = (Self::recursive_result_variable(skeleton), inferred)
+            {
+                self.recursive_equations.insert(variable, *inferred_result);
+            }
+        }
+        self.solve_recursive_equations(&recursive_variables)?;
+        for binding in &block.value.bindings {
+            if recursive_skeletons.contains_key(&binding.value.name.value) {
+                continue;
+            }
+            let annotated_expected = binding
                 .value
                 .annotation
                 .as_ref()
                 .and_then(|annotation| self.local_annotations.get(&annotation.location));
-            let is_delayed = binding_expected.is_none()
+            let binding_expected = annotated_expected.or_else(|| {
+                recursive_skeletons
+                    .get(&binding.value.name.value)
+                    .map(|(skeleton, _)| skeleton)
+            });
+            let is_recursive = recursive_skeletons.contains_key(&binding.value.name.value);
+            if binding.value.kind == BindingKind::Def
+                && binding.value.annotation.is_none()
+                && !is_recursive
+                && expression_references_names(
+                    &binding.value.value,
+                    &uncontracted_definition_names,
+                    &HashSet::new(),
+                )
+            {
+                return Err(format!(
+                    "recursive definition {:?} requires a closure value or explicit contract",
+                    binding.value.name.value
+                ));
+            }
+            let is_delayed = (annotated_expected.is_none() || is_recursive)
                 && matches!(binding.value.kind, BindingKind::Let | BindingKind::Def);
-            let first_owned_variable = self.next_variable;
+            let first_owned_variable = recursive_skeletons
+                .get(&binding.value.name.value)
+                .map_or(self.next_variable, |(_, first)| *first);
             if is_delayed {
                 self.delayed_initializer_depth += 1;
             }
@@ -4193,7 +4504,7 @@ impl<'a> GenericInference<'a> {
             ) {
                 let descriptor = binding_expected.cloned().unwrap_or(inferred);
                 environment.insert(binding.value.name.value.clone(), descriptor.clone());
-                if is_delayed {
+                if is_delayed && !is_recursive {
                     delayed.push((
                         binding.value.name.value.clone(),
                         descriptor,
@@ -4242,6 +4553,108 @@ fn contains_type_variable(ty: &TypeDescriptor) -> bool {
     }
 }
 
+fn expression_references_names(
+    expression: &Expr,
+    names: &HashSet<String>,
+    bound: &HashSet<String>,
+) -> bool {
+    match &expression.value {
+        ExprKind::Variable(name) => names.contains(&name.value) && !bound.contains(&name.value),
+        ExprKind::InterpolatedString(parts) => parts.iter().any(|part| match &part.value {
+            StringPartKind::Text(_) => false,
+            StringPartKind::Expression(expression) => {
+                expression_references_names(expression, names, bound)
+            }
+        }),
+        ExprKind::Array(items) | ExprKind::Tuple(items) => items
+            .iter()
+            .any(|item| expression_references_names(item, names, bound)),
+        ExprKind::Dict(fields) => fields
+            .iter()
+            .any(|field| expression_references_names(&field.value.value, names, bound)),
+        ExprKind::Block(block) => {
+            let mut block_bound = bound.clone();
+            for binding in &block.value.bindings {
+                if expression_references_names(&binding.value.value, names, &block_bound) {
+                    return true;
+                }
+                block_bound.insert(binding.value.name.value.clone());
+            }
+            expression_references_names(&block.value.result, names, &block_bound)
+        }
+        ExprKind::Unary { operand, .. }
+        | ExprKind::Field {
+            receiver: operand, ..
+        } => expression_references_names(operand, names, bound),
+        ExprKind::Binary { left, right, .. } => {
+            expression_references_names(left, names, bound)
+                || expression_references_names(right, names, bound)
+        }
+        ExprKind::Call { callee, arguments } | ExprKind::TypeApply { callee, arguments } => {
+            expression_references_names(callee, names, bound)
+                || arguments
+                    .iter()
+                    .any(|argument| expression_references_names(argument, names, bound))
+        }
+        ExprKind::Closure {
+            parameters,
+            result_annotation,
+            body,
+        } => {
+            if parameters.iter().any(|parameter| {
+                parameter
+                    .annotation
+                    .as_ref()
+                    .is_some_and(|annotation| expression_references_names(annotation, names, bound))
+            }) || result_annotation
+                .as_ref()
+                .is_some_and(|annotation| expression_references_names(annotation, names, bound))
+            {
+                return true;
+            }
+            let mut closure_bound = bound.clone();
+            closure_bound.extend(
+                parameters
+                    .iter()
+                    .map(|parameter| parameter.name.value.clone()),
+            );
+            expression_references_names(
+                &located(ExprKind::Block(body.clone()), body.location),
+                names,
+                &closure_bound,
+            )
+        }
+        ExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            expression_references_names(condition, names, bound)
+                || expression_references_names(
+                    &located(ExprKind::Block(then_branch.clone()), then_branch.location),
+                    names,
+                    bound,
+                )
+                || expression_references_names(
+                    &located(ExprKind::Block(else_branch.clone()), else_branch.location),
+                    names,
+                    bound,
+                )
+        }
+        ExprKind::Match { value, arms } => {
+            expression_references_names(value, names, bound)
+                || arms
+                    .iter()
+                    .any(|arm| expression_references_names(&arm.value.value, names, bound))
+        }
+        ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::String(_)
+        | ExprKind::Bytes(_)
+        | ExprKind::Atom(_) => false,
+    }
+}
+
 fn contains_inference_variable_at_or_after(ty: &TypeDescriptor, first: u32) -> bool {
     match ty {
         TypeDescriptor::Inference(variable) => variable.0 >= first,
@@ -4266,6 +4679,38 @@ fn contains_inference_variable_at_or_after(ty: &TypeDescriptor, first: u32) -> b
                 .iter()
                 .any(|parameter| contains_inference_variable_at_or_after(parameter, first))
                 || contains_inference_variable_at_or_after(result, first)
+        }
+        _ => false,
+    }
+}
+
+fn contains_any_inference_variable(
+    ty: &TypeDescriptor,
+    variables: &HashSet<InferenceVariableId>,
+) -> bool {
+    match ty {
+        TypeDescriptor::Inference(variable) => variables.contains(variable),
+        TypeDescriptor::Array(item) | TypeDescriptor::Dict(item) | TypeDescriptor::TypeOf(item) => {
+            contains_any_inference_variable(item, variables)
+        }
+        TypeDescriptor::Tagged { payload, .. } => {
+            contains_any_inference_variable(payload, variables)
+        }
+        TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => items
+            .iter()
+            .any(|item| contains_any_inference_variable(item, variables)),
+        TypeDescriptor::Struct(fields) => fields
+            .values()
+            .any(|field| contains_any_inference_variable(field, variables)),
+        TypeDescriptor::Enum(variants) => variants
+            .values()
+            .flatten()
+            .any(|payload| contains_any_inference_variable(payload, variables)),
+        TypeDescriptor::Function { parameters, result } => {
+            parameters
+                .iter()
+                .any(|parameter| contains_any_inference_variable(parameter, variables))
+                || contains_any_inference_variable(result, variables)
         }
         _ => false,
     }
@@ -5686,6 +6131,75 @@ mod tests {
         )
         .unwrap_err();
         assert!(invalid.message.contains("type argument is invalid"));
+    }
+
+    #[test]
+    fn monomorphic_recursive_closures_infer_direct_mutual_and_nested_types() {
+        let direct = analyze_with_natives(
+            "def countdown = fn(value) {\
+                 if value < 1 { 0 } else { countdown(value - 1) }\
+             }; countdown",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(direct.display(direct.result_type), "Fn(Int) -> Int");
+
+        let mutual = analyze_with_natives(
+            "def even = fn(value) {\
+                 if value < 1 { 'True } else { odd(value - 1) }\
+             };\
+             def odd = fn(value) {\
+                 if value < 1 { 'False } else { even(value - 1) }\
+             }; (even, odd)",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            mutual.display(mutual.result_type),
+            "(Fn(Int) -> 'False | 'True, Fn(Int) -> 'False | 'True)"
+        );
+
+        let nested = analyze_with_natives(
+            "{ def sum = fn(value) {\
+                 if value < 1 { 0 } else { value + sum(value - 1) }\
+             }; sum }",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(nested.display(nested.result_type), "Fn(Int) -> Int");
+    }
+
+    #[test]
+    fn recursive_inference_uses_partial_and_later_evidence_but_stays_monomorphic() {
+        let partial = analyze_with_natives(
+            "def countdown = fn(value: Int) -> Int {\
+                 if value < 1 { 0 } else { countdown(value - 1) }\
+             }; countdown",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(partial.display(partial.result_type), "Fn(Int) -> Int");
+
+        let later = analyze_with_natives(
+            "def bounce = fn(value) {\
+                 if 'True { value } else { bounce(value) }\
+             }; let number = bounce(1); bounce",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(later.display(later.result_type), "Fn(Int) -> Int");
+
+        let conflict = analyze_with_natives(
+            "def bounce = fn(value) {\
+                 if 'True { value } else { bounce(value) }\
+             }; let number = bounce(1); bounce(\"x\")",
+            &[],
+        )
+        .unwrap_err();
+        assert!(conflict.message.contains("cannot unify String with Int"));
+
+        let non_closure = analyze_with_natives("def value = value; value", &[]).unwrap_err();
+        assert!(non_closure.message.contains("requires a closure value"));
     }
 
     #[test]

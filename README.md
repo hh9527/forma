@@ -278,7 +278,7 @@ Forma is experimental. Today it has no effect system, package acquisition
 beyond path dependencies, traits, or type narrowing. Static
 inference explicitly reports when it does not know instead of guessing. These
 are deliberate boundaries: the project is testing the "types as metadata"
-hypothesis deeply before expanding its scope. Seventy-seven RFCs record the tradeoffs
+hypothesis deeply before expanding its scope. Seventy-eight RFCs record the tradeoffs
 at each step, including the rejected alternatives.
 
 The intended use cases follow from those boundaries: **expressing build rules,

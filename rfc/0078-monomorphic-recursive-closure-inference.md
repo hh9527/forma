@@ -1,6 +1,6 @@
 # RFC 0078: Monomorphic recursive closure inference
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0050, RFC 0052, RFC 0073, RFC 0074, RFC 0075, RFC 0076
 
 ## Summary
@@ -57,15 +57,16 @@ Within each lexical block, eligible definitions are visible to every eligible
 definition body in that block for type inference, matching the runtime's
 single-assignment recursive definition slots.
 
-The checker records reference edges among those definitions and computes
-strongly connected components. A component of more than one definition, or a
-single definition with a self-edge, is recursive. Acyclic definitions continue
-to use the same skeleton representation but complete under RFC 0073's ordinary
-block rules.
+The checker solves the constraints induced by those definitions as one
+deterministic block-local system. An implementation may partition that system
+into strongly connected components, but this is an optimization rather than an
+observable requirement: definitions without connecting references share no
+variables and therefore solve independently either way.
 
-Components are processed in deterministic source/dependency order. Every
-member of one component shares one substitution state, but no type variable is
-generalized or instantiated between calls.
+Every recursively connected set shares one substitution state, but no type
+variable is generalized or instantiated between calls. Acyclic definitions
+continue to use the same skeleton representation and complete under RFC 0073's
+ordinary block rules.
 
 ## Function skeletons
 
@@ -147,7 +148,7 @@ skeletons nor partial substitutions.
 2. infer mutually recursive closures in one lexical block;
 3. share exact parameter and result identities across recursive calls;
 4. combine body, partial annotation, and later-use evidence;
-5. compute deterministic recursive components;
+5. solve recursive constraints deterministically regardless of source order;
 6. reject underconstrained or conflicting components;
 7. prevent bootstrap `Any` from supplying evidence;
 8. keep runtime recursive slots and bytecode unchanged;
@@ -166,11 +167,12 @@ skeletons nor partial substitutions.
 ## Implementation plan
 
 1. identify uncontracted closure-valued `def` bindings per block;
-2. collect definition-reference edges and deterministic SCCs;
+2. collect the block-local constraints induced by definition references;
 3. allocate one annotated-or-fresh function skeleton per eligible definition;
-4. seed the block environment before checking component bodies;
+4. seed the block environment before checking definition bodies;
 5. check each closure against its exact skeleton;
-6. retain RFC 0073 delayed completion for all owned variables;
+6. solve recursive result equations to a least fixed point, then retain RFC
+   0073 delayed completion for all other owned variables;
 7. remove conservative self slots from recursive evidence;
 8. resolve binding and expression facts only after component completion;
 9. add direct, mutual, nested, partial annotation, later use, conflict,
@@ -223,3 +225,26 @@ allow conflicting calls to avoid one monomorphic solution.
 Explicit contracts remain the escape hatch, but operator and branch constraints
 now make common monomorphic recursion both decidable and useful. Rejecting all
 of it would discard evidence the checker already has.
+
+## Implementation result
+
+Implemented in the HIR analyzer, type checker, and compiler. Each lexical block
+predeclares uncontracted closure-valued `def` bindings with shared monomorphic
+function skeletons before analyzing their bodies. Direct and mutual forward
+references therefore observe the same parameter and result variables at both
+analysis and runtime compilation stages.
+
+Recursive result constraints are represented as finite join equations and
+solved by deterministic least-fixed-point iteration. Recursive references
+initially contribute no branch evidence; concrete base branches widen the
+approximation until it stabilizes. Evidence-free recursion consequently stays
+unresolved instead of collapsing to `Any` or `Never`.
+
+The implementation solves every eligible equation in a lexical block together
+rather than materializing an explicit SCC graph. This preserves the specified
+semantics because disconnected equations share no inference variables, while
+keeping SCC partitioning available as a future performance optimization.
+
+Coverage includes direct, mutual, nested, partially annotated, later-constrained,
+conflicting, and non-closure recursion, plus runtime execution. Full workspace
+tests and strict Clippy checks pass.

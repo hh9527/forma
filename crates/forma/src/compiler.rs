@@ -566,6 +566,9 @@ impl<'a> Compiler<'a> {
             }
             if binding.value.kind == BindingKind::Decl
                 || binding.value.kind == BindingKind::Def && binding.value.annotation.is_some()
+                || binding.value.kind == BindingKind::Def
+                    && matches!(binding.value.value.value, ExprKind::Closure { .. })
+                    && !declared.contains_key(name)
             {
                 if declared.contains_key(name) {
                     return Err(
@@ -587,7 +590,13 @@ impl<'a> Compiler<'a> {
                     .value
                     .annotation
                     .as_ref()
-                    .and_then(function_contract_arity);
+                    .and_then(function_contract_arity)
+                    .or_else(|| match &binding.value.value.value {
+                        ExprKind::Closure { parameters, .. } => {
+                            u32::try_from(parameters.len()).ok()
+                        }
+                        _ => None,
+                    });
                 declared.insert(name.clone(), (link, binding.location, arity));
             }
         }
@@ -1727,6 +1736,27 @@ let decorators = {
         let annotated =
             run("def increment: Fn(Int) -> Int = fn(value) { value + 1 }; increment(41)").unwrap();
         assert!(matches!(annotated, Value::Int(42)));
+    }
+
+    #[test]
+    fn executes_inferred_direct_and_mutual_recursive_definitions() {
+        let direct = run("def countdown = fn(value) {\
+                 if value < 1 { 0 } else { countdown(value - 1) }\
+             }; countdown(4)")
+        .unwrap();
+        assert!(matches!(direct, Value::Int(0)));
+
+        let mutual = run("def even = fn(value) {\
+                 if value < 1 { 'True } else { odd(value - 1) }\
+             };\
+             def odd = fn(value) {\
+                 if value < 1 { 'False } else { even(value - 1) }\
+             }; even(4)")
+        .unwrap();
+        assert!(matches!(
+            mutual,
+            Value::Atom(Atom::Builtin(BuiltinAtom::True))
+        ));
     }
 
     #[test]

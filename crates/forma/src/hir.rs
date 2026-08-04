@@ -302,6 +302,9 @@ impl Resolver {
                 binding.value.kind,
                 BindingKind::Decl | BindingKind::Native | BindingKind::Type
             ) || binding.value.kind == BindingKind::Def && binding.value.annotation.is_some()
+                || binding.value.kind == BindingKind::Def
+                    && matches!(binding.value.value.value, ExprKind::Closure { .. })
+                    && resolve_name(scopes, &binding.value.name.value).is_none()
             {
                 self.define(
                     binding,
@@ -327,7 +330,10 @@ impl Resolver {
                 BindingKind::Def => {
                     let definition =
                         if let Some(id) = resolve_name(scopes, &binding.value.name.value) {
-                            if binding.value.annotation.is_none() {
+                            if binding.value.annotation.is_none()
+                                && self.hir.definitions[id.index()].location
+                                    != binding.value.name.location
+                            {
                                 self.hir.definitions[id.index()]
                                     .additional_locations
                                     .push(binding.value.name.location);
