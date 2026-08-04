@@ -1,6 +1,6 @@
 # RFC 0076: Partial closure contracts
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0050, RFC 0051, RFC 0052, RFC 0072, RFC 0073
 
 ## Summary
@@ -156,6 +156,28 @@ annotation node becomes a runtime definition.
 - named and default parameters;
 - effect annotations;
 - generic lambda binders.
+
+## Implementation result
+
+Implemented in the RFC 0076 change set.
+
+The lossless grammar and AST now retain a `ClosureParameter` name plus optional
+annotation and an optional closure result annotation. Parser recovery reports
+damaged parameter annotations normally. HIR indexes annotation references in
+the definition environment before introducing runtime parameters, while call
+sections synthesize ordinary unannotated parameters.
+
+The existing nested-annotation tool stage evaluates closure annotations under
+the shared quota and stores their descriptors by source location. Closure
+inference merges each local descriptor with any surrounding function
+expectation, creates variables only for omitted positions, and checks the body
+against the local or surrounding result descriptor. The compiler extracts only
+parameter names, so runtime slots, captures, arity, and bytecode are unchanged.
+
+Tests cover parameter-only, result-only, partial `Any`, nested, surrounding,
+conflicting, and invalid metadata contracts plus direct execution and erasure.
+The final workspace run passed 248 Forma tests with one manual parser benchmark
+ignored, 12 CLI tests, and 19 LSP tests.
 
 ## Rejected alternatives
 

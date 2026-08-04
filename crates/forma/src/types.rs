@@ -2012,10 +2012,49 @@ fn collect_nested_annotation_types(
                 )?;
             }
         }
-        ExprKind::Block(block) | ExprKind::Closure { body: block, .. } => {
+        ExprKind::Block(block) => {
             collect_block_annotation_types(
                 source_name,
                 block,
+                bindings,
+                account,
+                sources,
+                debug_sink,
+                annotations,
+            )?;
+        }
+        ExprKind::Closure {
+            parameters,
+            result_annotation,
+            body,
+        } => {
+            for annotation in parameters
+                .iter()
+                .filter_map(|parameter| parameter.annotation.as_ref())
+                .chain(result_annotation.as_deref())
+            {
+                let metadata = evaluate_tool_expression(
+                    source_name,
+                    annotation,
+                    bindings,
+                    account,
+                    sources,
+                    debug_sink,
+                )?;
+                let descriptor = TypeDescriptor::from_value(&metadata).map_err(|message| {
+                    FrontendError::from_diagnostic(
+                        sources,
+                        Diagnostic::error(
+                            format!("closure annotation is invalid: {message}"),
+                            annotation.location,
+                        ),
+                    )
+                })?;
+                annotations.insert(annotation.location, descriptor);
+            }
+            collect_block_annotation_types(
+                source_name,
+                body,
                 bindings,
                 account,
                 sources,
@@ -3937,7 +3976,11 @@ impl<'a> GenericInference<'a> {
                     }
                 }
             }
-            ExprKind::Closure { parameters, body } => {
+            ExprKind::Closure {
+                parameters,
+                result_annotation,
+                body,
+            } => {
                 let expected = match expected.map(|ty| self.resolve(ty)) {
                     Some(TypeDescriptor::Function {
                         parameters: expected_parameters,
@@ -3948,14 +3991,34 @@ impl<'a> GenericInference<'a> {
                     _ => None,
                 };
                 let mut closure_environment = environment.clone();
-                let parameter_types = expected
-                    .as_ref()
-                    .map(|(parameters, _)| parameters.clone())
-                    .unwrap_or_else(|| parameters.iter().map(|_| self.fresh_variable()).collect());
-                for (parameter, ty) in parameters.iter().zip(&parameter_types) {
-                    closure_environment.insert(parameter.value.clone(), ty.clone());
+                let mut parameter_types = Vec::with_capacity(parameters.len());
+                for (index, parameter) in parameters.iter().enumerate() {
+                    let surrounding = expected
+                        .as_ref()
+                        .and_then(|(parameters, _)| parameters.get(index));
+                    let local = parameter.annotation.as_ref().and_then(|annotation| {
+                        self.local_annotations.get(&annotation.location).cloned()
+                    });
+                    if let (Some(local), Some(surrounding)) = (&local, surrounding) {
+                        self.check(local, surrounding)?;
+                    }
+                    parameter_types.push(
+                        local
+                            .or_else(|| surrounding.cloned())
+                            .unwrap_or_else(|| self.fresh_variable()),
+                    );
                 }
-                let result_expected = expected.as_ref().map(|(_, result)| result.as_ref());
+                for (parameter, ty) in parameters.iter().zip(&parameter_types) {
+                    closure_environment.insert(parameter.name.value.clone(), ty.clone());
+                }
+                let surrounding_result = expected.as_ref().map(|(_, result)| result.as_ref());
+                let local_result = result_annotation.as_ref().and_then(|annotation| {
+                    self.local_annotations.get(&annotation.location).cloned()
+                });
+                if let (Some(local), Some(surrounding)) = (&local_result, surrounding_result) {
+                    self.check(local, surrounding)?;
+                }
+                let result_expected = local_result.as_ref().or(surrounding_result);
                 let inferring_unannotated = expected.is_none();
                 if inferring_unannotated {
                     self.closure_inference_depth += 1;
@@ -3964,10 +4027,10 @@ impl<'a> GenericInference<'a> {
                 if inferring_unannotated {
                     self.closure_inference_depth -= 1;
                 }
-                let result = result?;
+                let inferred_result = result?;
                 let function = TypeDescriptor::Function {
                     parameters: parameter_types,
-                    result: Box::new(result),
+                    result: Box::new(local_result.unwrap_or(inferred_result)),
                 };
                 if expected.is_none()
                     && self.delayed_initializer_depth == 0
@@ -4258,10 +4321,21 @@ fn infer_expr_with(
                 _ => TypeDescriptor::Any,
             }
         }
-        ExprKind::Closure { parameters, body } => {
+        ExprKind::Closure {
+            parameters,
+            result_annotation,
+            body,
+        } => {
+            for annotation in parameters
+                .iter()
+                .filter_map(|parameter| parameter.annotation.as_ref())
+                .chain(result_annotation.as_deref())
+            {
+                infer_expr_with(annotation, environment, record);
+            }
             let mut closure_environment = environment.clone();
             for parameter in parameters {
-                closure_environment.insert(parameter.value.clone(), TypeDescriptor::Any);
+                closure_environment.insert(parameter.name.value.clone(), TypeDescriptor::Any);
             }
             TypeDescriptor::Function {
                 parameters: vec![TypeDescriptor::Any; parameters.len()],
@@ -4347,10 +4421,21 @@ fn check_interpolations(
                 check_interpolations(argument, environment, sources)?;
             }
         }
-        ExprKind::Closure { parameters, body } => {
+        ExprKind::Closure {
+            parameters,
+            result_annotation,
+            body,
+        } => {
+            for annotation in parameters
+                .iter()
+                .filter_map(|parameter| parameter.annotation.as_ref())
+                .chain(result_annotation.as_deref())
+            {
+                check_interpolations(annotation, environment, sources)?;
+            }
             let mut closure_environment = environment.clone();
             for parameter in parameters {
-                closure_environment.insert(parameter.value.clone(), TypeDescriptor::Any);
+                closure_environment.insert(parameter.name.value.clone(), TypeDescriptor::Any);
             }
             check_block_interpolations(body, &closure_environment, sources)?;
         }
@@ -5342,6 +5427,54 @@ mod tests {
         )
         .unwrap();
         assert_eq!(never.display(never.result_type), "Int");
+    }
+
+    #[test]
+    fn partial_closure_contracts_constrain_only_annotated_positions() {
+        for (source, expected) in [
+            (
+                "let add = fn(value: Int, other) { value + other }; add",
+                "Fn(Int, Int) -> Int",
+            ),
+            (
+                "let add = fn(value) -> Int { value + 1 }; add",
+                "Fn(Int) -> Int",
+            ),
+            (
+                "let decorate = fn(ctx: Any, value) -> Int { value + 1 }; decorate",
+                "Fn(Any, Int) -> Int",
+            ),
+            (
+                "let outer = fn(value: Int) {\
+                     fn(other: Int) -> Int { value + other }\
+                 }; outer",
+                "Fn(Int) -> Fn(Int) -> Int",
+            ),
+        ] {
+            let analysis = analyze_with_natives(source, &[]).unwrap();
+            assert_eq!(analysis.display(analysis.result_type), expected);
+        }
+
+        let compatible = analyze_with_natives(
+            "let increment: Fn(Int) -> Int = fn(value: Int) -> Int { value + 1 }; increment",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(compatible.display(compatible.result_type), "Fn(Int) -> Int");
+    }
+
+    #[test]
+    fn partial_closure_contracts_reject_conflicts_and_invalid_metadata() {
+        let conflict = analyze_with_natives(
+            "let value: Fn(String) -> String = fn(value: Int) -> Int { value }; value",
+            &[],
+        )
+        .unwrap_err();
+        assert!(conflict.message.contains("cannot unify"));
+
+        let invalid =
+            analyze_with_natives("let value = fn(item: 1) { item }; value", &[]).unwrap_err();
+        assert!(invalid.message.contains("closure annotation is invalid"));
     }
 
     #[test]

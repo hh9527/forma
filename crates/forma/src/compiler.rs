@@ -873,8 +873,14 @@ impl<'a> Compiler<'a> {
                 );
                 Ok(base)
             }
-            ExprKind::Closure { parameters, body } => {
-                self.compile_closure(parameters, body, expression.location)
+            ExprKind::Closure {
+                parameters, body, ..
+            } => {
+                let parameters = parameters
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect::<Vec<_>>();
+                self.compile_closure(&parameters, body, expression.location)
             }
             ExprKind::If {
                 condition,
@@ -1469,10 +1475,12 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
                 free_expr(argument, bound, free);
             }
         }
-        ExprKind::Closure { parameters, body } => {
+        ExprKind::Closure {
+            parameters, body, ..
+        } => {
             let mut closure_bound = parameters
                 .iter()
-                .map(|parameter| parameter.value.clone())
+                .map(|parameter| parameter.name.value.clone())
                 .collect::<HashSet<_>>();
             let mut closure_free = BTreeSet::new();
             free_block(body, &mut closure_bound, &mut closure_free);
@@ -1867,6 +1875,12 @@ let decorators = {
     #[test]
     fn captures_values_and_calls_closures() {
         let value = run("let base = 40; let add = fn(value) { base + value }; add(2)").unwrap();
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn executes_partially_annotated_closures_without_runtime_annotation_work() {
+        let value = run("(fn(value: Int) -> Int { value + 1 })(41)").unwrap();
         assert!(matches!(value, Value::Int(42)));
     }
 

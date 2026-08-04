@@ -456,13 +456,25 @@ impl Resolver {
                 }
                 None
             }
-            ExprKind::Closure { parameters, body } => {
+            ExprKind::Closure {
+                parameters,
+                result_annotation,
+                body,
+            } => {
+                for parameter in parameters {
+                    if let Some(annotation) = &parameter.annotation {
+                        self.index_expr(annotation, scopes);
+                    }
+                }
+                if let Some(annotation) = result_annotation {
+                    self.index_expr(annotation, scopes);
+                }
                 scopes.push(Scope::new());
                 for parameter in parameters {
                     self.define_name(
-                        &parameter.value,
+                        &parameter.name.value,
                         HirDefinitionKind::Parameter,
-                        parameter.location,
+                        parameter.name.location,
                         scopes.last_mut().expect("closure has a scope"),
                         false,
                     );

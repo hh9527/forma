@@ -1,7 +1,7 @@
 use crate::ast::{
-    BinaryOperator, Binding, BindingData, BindingKind, Block, BlockKind, Decorator, DecoratorKind,
-    DictFieldKind, Expr, ExprKind, Identifier, MatchArm, MatchArmKind, Pattern, PatternKind,
-    Program, ProgramKind, StringPartKind, UnaryOperator, located,
+    BinaryOperator, Binding, BindingData, BindingKind, Block, BlockKind, ClosureParameter,
+    Decorator, DecoratorKind, DictFieldKind, Expr, ExprKind, Identifier, MatchArm, MatchArmKind,
+    Pattern, PatternKind, Program, ProgramKind, StringPartKind, UnaryOperator, located,
 };
 use crate::lexer::{FrontendError, SourceLocation};
 use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
@@ -629,8 +629,21 @@ impl<'a> Lowerer<'a> {
                     .find(|child| self.rule(**child) == Some(Rule::Block))
                     .copied()
                     .ok_or_else(|| self.error(node, "closure has no body"))?;
+                let result_annotation =
+                    self.token_children(node, Token::Arrow)
+                        .next()
+                        .and_then(|arrow| {
+                            rules.iter().copied().find(|child| {
+                                self.is_expression(*child)
+                                    && self.cst.span(*child).start > self.cst.span(arrow).start
+                                    && self.cst.span(*child).end <= self.cst.span(block).start
+                            })
+                        });
                 ExprKind::Closure {
-                    parameters: self.parameters(parameters),
+                    parameters: self.parameters(parameters)?,
+                    result_annotation: result_annotation
+                        .map(|annotation| self.expression(annotation).map(Box::new))
+                        .transpose()?,
                     body: self.block_body(block)?,
                 }
             }
@@ -901,9 +914,28 @@ impl<'a> Lowerer<'a> {
         Ok(located(inner, self.location(node)))
     }
 
-    fn parameters(&self, node: NodeRef) -> Vec<Identifier> {
-        self.token_children(node, Token::Identifier)
-            .map(|child| self.identifier(child))
+    fn parameters(&self, node: NodeRef) -> Result<Vec<ClosureParameter>, Diagnostic> {
+        self.children(node)
+            .filter(|child| self.rule(*child) == Some(Rule::Parameter))
+            .map(|parameter| {
+                let name = self
+                    .token_children(parameter, Token::Identifier)
+                    .next()
+                    .map(|name| self.identifier(name))
+                    .ok_or_else(|| self.error(parameter, "closure parameter has no name"))?;
+                let annotation = self
+                    .token_children(parameter, Token::Colon)
+                    .next()
+                    .and_then(|colon| {
+                        self.children(parameter).find(|child| {
+                            self.is_expression(*child)
+                                && self.cst.span(*child).start > self.cst.span(colon).start
+                        })
+                    })
+                    .map(|annotation| self.expression(annotation))
+                    .transpose()?;
+                Ok(ClosureParameter { name, annotation })
+            })
             .collect()
     }
 
@@ -1500,7 +1532,10 @@ fn elaborate_call_section(
     let parameters = parameter_locations
         .iter()
         .enumerate()
-        .map(|(index, location)| located(placeholder_parameter(index), *location))
+        .map(|(index, location)| ClosureParameter {
+            name: located(placeholder_parameter(index), *location),
+            annotation: None,
+        })
         .collect::<Vec<_>>();
     let mut next_bare = 0usize;
     let arguments = arguments
@@ -1527,6 +1562,7 @@ fn elaborate_call_section(
     Ok(located(
         ExprKind::Closure {
             parameters,
+            result_annotation: None,
             body: located(
                 BlockKind {
                     bindings: Vec::new(),

@@ -12,6 +12,12 @@ pub type Decorator = Located<DecoratorKind>;
 pub type StringPart = Located<StringPartKind>;
 
 #[derive(Clone, Debug)]
+pub struct ClosureParameter {
+    pub name: Identifier,
+    pub annotation: Option<Expr>,
+}
+
+#[derive(Clone, Debug)]
 pub struct ProgramKind {
     pub manifest: Option<Expr>,
     pub body: Block,
@@ -81,7 +87,8 @@ pub enum ExprKind {
         arguments: Vec<Expr>,
     },
     Closure {
-        parameters: Vec<Identifier>,
+        parameters: Vec<ClosureParameter>,
+        result_annotation: Option<Box<Expr>>,
         body: Block,
     },
     If {
