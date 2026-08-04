@@ -60,6 +60,8 @@ pub enum Token {
     Int,
     Float,
     DoubleQuote,
+    Backtick,
+    RawString,
     StringText,
     EscapeSequence,
     UnknownEscapeSequence,
@@ -154,6 +156,10 @@ enum NormalToken {
     Float,
     #[token("\"")]
     DoubleQuote,
+    #[token("`")]
+    Backtick,
+    #[regex(r##"r#*\""##, scan_raw_string, priority = 5)]
+    RawString,
     #[regex(r#"b\"([^\"\\]|\\.)*\""#)]
     Bytes,
     #[regex(r"'[A-Za-z_][A-Za-z0-9_]*")]
@@ -175,9 +181,10 @@ enum NormalToken {
 enum StringToken {
     #[token("\"")]
     DoubleQuote,
-    #[token("\\{", priority = 5)]
-    InterpolationStart,
-    #[regex(r#"\\[nrt"\\]"#, priority = 4)]
+    #[regex(
+        r#"\\(0|[nrt"\\]|x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f]{1,6}\}|\r?\n[ \t\r\n]*)"#,
+        priority = 4
+    )]
     EscapeSequence,
     #[regex(r#"\\[^\r\n]"#, priority = 3)]
     UnknownEscapeSequence,
@@ -187,11 +194,32 @@ enum StringToken {
     StringText,
 }
 
+#[derive(Logos, Debug, PartialEq, Copy, Clone)]
+#[logos(error = LexerError, extras = LexerState)]
+enum ConcatToken {
+    #[token("`")]
+    Backtick,
+    #[token("\\{", priority = 5)]
+    InterpolationStart,
+    #[regex(
+        r#"\\(0|[nrt`\\]|x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f]{1,6}\}|\r?\n[ \t\r\n]*)"#,
+        priority = 4
+    )]
+    EscapeSequence,
+    #[regex(r#"\\[^\r\n]"#, priority = 3)]
+    UnknownEscapeSequence,
+    #[token("\\", priority = 1)]
+    UnterminatedEscapeSequence,
+    #[regex(r#"[^`\\]+"#)]
+    StringText,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Context {
     Root,
     Interpolation { brace_depth: usize },
     String,
+    Concat,
 }
 
 #[derive(Debug)]
@@ -210,6 +238,21 @@ impl Default for LexerState {
 enum ActiveLexer<'source> {
     Normal(Lexer<'source, NormalToken>),
     String(Lexer<'source, StringToken>),
+    Concat(Lexer<'source, ConcatToken>),
+}
+
+fn scan_raw_string(lexer: &mut Lexer<'_, NormalToken>) -> bool {
+    let hashes = lexer.slice().len().saturating_sub(2);
+    if hashes > 255 {
+        return true;
+    }
+    let terminator = format!("\"{}", "#".repeat(hashes));
+    if let Some(index) = lexer.remainder().find(&terminator) {
+        lexer.bump(index + terminator.len());
+    } else {
+        lexer.bump(lexer.remainder().len());
+    }
+    true
 }
 
 pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<Span>) {
@@ -224,10 +267,13 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
                     break;
                 };
                 let span = lexer.span();
-                let (token, error) = match result {
+                let (token, mut error) = match result {
                     Ok(token) => (token.into(), false),
                     Err(_) => (Token::Error, true),
                 };
+                if token == Token::RawString && raw_string_error(lexer.slice()).is_some() {
+                    error = true;
+                }
                 let context = *lexer
                     .extras
                     .contexts
@@ -237,6 +283,10 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
                     (Context::Root | Context::Interpolation { .. }, Token::DoubleQuote) => {
                         lexer.extras.contexts.push(Context::String);
                         ActiveLexer::String(lexer.morph())
+                    }
+                    (Context::Root | Context::Interpolation { .. }, Token::Backtick) => {
+                        lexer.extras.contexts.push(Context::Concat);
+                        ActiveLexer::Concat(lexer.morph())
                     }
                     (Context::Interpolation { brace_depth }, Token::LBrace) => {
                         *lexer
@@ -250,7 +300,11 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
                     }
                     (Context::Interpolation { brace_depth: 0 }, Token::RBrace) => {
                         lexer.extras.contexts.pop();
-                        ActiveLexer::String(lexer.morph())
+                        match lexer.extras.contexts.last() {
+                            Some(Context::String) => ActiveLexer::String(lexer.morph()),
+                            Some(Context::Concat) => ActiveLexer::Concat(lexer.morph()),
+                            _ => unreachable!("interpolation belongs to a text context"),
+                        }
                     }
                     (Context::Interpolation { brace_depth }, Token::RBrace) => {
                         *lexer
@@ -280,6 +334,24 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
                         lexer.extras.contexts.pop();
                         ActiveLexer::Normal(lexer.morph())
                     }
+                    _ => ActiveLexer::String(lexer),
+                };
+                (token, span, error, next)
+            }
+            ActiveLexer::Concat(mut lexer) => {
+                let Some(result) = lexer.next() else {
+                    break;
+                };
+                let span = lexer.span();
+                let (token, error) = match result {
+                    Ok(token) => (token.into(), false),
+                    Err(_) => (Token::Error, true),
+                };
+                let next = match token {
+                    Token::Backtick => {
+                        lexer.extras.contexts.pop();
+                        ActiveLexer::Normal(lexer.morph())
+                    }
                     Token::InterpolationStart => {
                         lexer
                             .extras
@@ -287,7 +359,7 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
                             .push(Context::Interpolation { brace_depth: 0 });
                         ActiveLexer::Normal(lexer.morph())
                     }
-                    _ => ActiveLexer::String(lexer),
+                    _ => ActiveLexer::Concat(lexer),
                 };
                 (token, span, error, next)
             }
@@ -297,6 +369,9 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
             let message = match token {
                 Token::UnknownEscapeSequence => "unsupported string escape",
                 Token::UnterminatedEscapeSequence => "unterminated string escape",
+                Token::RawString => {
+                    raw_string_error(&source[span.clone()]).unwrap_or("invalid raw String")
+                }
                 _ => "invalid token",
             };
             diags.push(
@@ -332,7 +407,7 @@ fn tokenize_fragments<'a>(
         pending.push_str(fragment);
         let mut local_diags = Vec::new();
         let (local_tokens, local_spans) = tokenize(&pending, &mut local_diags);
-        let commit = stable_root_prefix(&local_tokens);
+        let commit = stable_root_prefix(&local_tokens, &local_spans, &pending);
         if commit == 0 {
             continue;
         }
@@ -380,10 +455,15 @@ fn tokenize_fragments<'a>(
     (tokens, spans)
 }
 
-fn stable_root_prefix(tokens: &[Token]) -> usize {
+fn stable_root_prefix(tokens: &[Token], spans: &[Span], source: &str) -> usize {
     let mut contexts = vec![Context::Root];
     let mut root_boundaries = Vec::new();
     for (index, token) in tokens.iter().copied().enumerate() {
+        if token == Token::RawString
+            && raw_string_error(&source[spans[index].clone()]) == Some("unterminated raw String")
+        {
+            break;
+        }
         let context = *contexts.last().expect("lexer has a root context");
         match (context, token) {
             (Context::Root | Context::Interpolation { .. }, Token::DoubleQuote) => {
@@ -392,7 +472,13 @@ fn stable_root_prefix(tokens: &[Token]) -> usize {
             (Context::String, Token::DoubleQuote) => {
                 contexts.pop();
             }
-            (Context::String, Token::InterpolationStart) => {
+            (Context::Root | Context::Interpolation { .. }, Token::Backtick) => {
+                contexts.push(Context::Concat);
+            }
+            (Context::Concat, Token::Backtick) => {
+                contexts.pop();
+            }
+            (Context::Concat, Token::InterpolationStart) => {
                 contexts.push(Context::Interpolation { brace_depth: 0 });
             }
             (Context::Interpolation { brace_depth }, Token::LBrace) => {
@@ -415,6 +501,15 @@ fn stable_root_prefix(tokens: &[Token]) -> usize {
         }
     }
     root_boundaries.last().copied().unwrap_or(0)
+}
+
+fn raw_string_error(text: &str) -> Option<&'static str> {
+    let hashes = text[1..].bytes().take_while(|byte| *byte == b'#').count();
+    if hashes > 255 {
+        return Some("raw String delimiter exceeds 255 # characters");
+    }
+    let terminator = format!("\"{}", "#".repeat(hashes));
+    (!text.ends_with(&terminator)).then_some("unterminated raw String")
 }
 
 impl From<NormalToken> for Token {
@@ -458,6 +553,8 @@ impl From<NormalToken> for Token {
             NormalToken::Int => Self::Int,
             NormalToken::Float => Self::Float,
             NormalToken::DoubleQuote => Self::DoubleQuote,
+            NormalToken::Backtick => Self::Backtick,
+            NormalToken::RawString => Self::RawString,
             NormalToken::Bytes => Self::Bytes,
             NormalToken::Atom => Self::Atom,
             NormalToken::Placeholder => Self::Placeholder,
@@ -473,11 +570,23 @@ impl From<StringToken> for Token {
     fn from(token: StringToken) -> Self {
         match token {
             StringToken::DoubleQuote => Self::DoubleQuote,
-            StringToken::InterpolationStart => Self::InterpolationStart,
             StringToken::EscapeSequence => Self::EscapeSequence,
             StringToken::UnknownEscapeSequence => Self::UnknownEscapeSequence,
             StringToken::UnterminatedEscapeSequence => Self::UnterminatedEscapeSequence,
             StringToken::StringText => Self::StringText,
+        }
+    }
+}
+
+impl From<ConcatToken> for Token {
+    fn from(token: ConcatToken) -> Self {
+        match token {
+            ConcatToken::Backtick => Self::Backtick,
+            ConcatToken::InterpolationStart => Self::InterpolationStart,
+            ConcatToken::EscapeSequence => Self::EscapeSequence,
+            ConcatToken::UnknownEscapeSequence => Self::UnknownEscapeSequence,
+            ConcatToken::UnterminatedEscapeSequence => Self::UnterminatedEscapeSequence,
+            ConcatToken::StringText => Self::StringText,
         }
     }
 }
@@ -513,7 +622,10 @@ mod tests {
     fn chunk_bridge_matches_contiguous_lexing() {
         let samples = [
             "#!/usr/bin/env -S forma run\nlet identifier = 123.456 # comment\nidentifier",
-            r#"b\"bytes\" \"text \{name} tail\""#,
+            r#"b\"bytes\" `text \{name} tail`"#,
+            r####"r##"raw "quotes", \slashes and `ticks`"##"####,
+            r#"`first \
+                second \{name}`"#,
             "_12 |> transform\\(_1, 2)",
             "let 中 = \"emoji 😀 and escape \\n\"; 中",
         ];
@@ -555,18 +667,18 @@ mod tests {
     #[test]
     fn recognizes_structured_string_slices_without_payloads() {
         let mut diagnostics = Vec::new();
-        let (tokens, spans) = tokenize(r#""hi, \{name}\n""#, &mut diagnostics);
+        let (tokens, spans) = tokenize(r#"`hi, \{name}\n`"#, &mut diagnostics);
         assert!(diagnostics.is_empty());
         assert_eq!(
             tokens,
             vec![
-                Token::DoubleQuote,
+                Token::Backtick,
                 Token::StringText,
                 Token::InterpolationStart,
                 Token::Identifier,
                 Token::RBrace,
                 Token::EscapeSequence,
-                Token::DoubleQuote,
+                Token::Backtick,
             ]
         );
         assert_eq!(spans[1], 1..5);
@@ -624,5 +736,19 @@ mod tests {
         assert_eq!(tokens.last(), Some(&Token::UnterminatedEscapeSequence));
         assert_eq!(spans.last(), Some(&(2..3)));
         assert_eq!(diagnostics.len(), 1);
+    }
+
+    #[test]
+    fn diagnoses_raw_string_delimiter_boundaries() {
+        let too_many = format!("r{}\"value\"{}", "#".repeat(256), "#".repeat(256));
+        let mut diagnostics = Vec::new();
+        let (tokens, _) = tokenize(&too_many, &mut diagnostics);
+        assert_eq!(tokens[0], Token::RawString);
+        assert!(diagnostics[0].message.contains("255"));
+
+        let mut diagnostics = Vec::new();
+        let (tokens, _) = tokenize("r##\"unfinished\"#", &mut diagnostics);
+        assert_eq!(tokens, [Token::RawString]);
+        assert!(diagnostics[0].message.contains("unterminated raw String"));
     }
 }

@@ -96,7 +96,7 @@ fn run_evaluates_structured_string_interpolation() {
     let directory = fixture_dir();
     fs::write(
         directory.join("interpolation.forma"),
-        r#"let name = "Ada"; let count = 2; "hi, \{name} x\{count}""#,
+        r#"let name = "Ada"; let count = 2; `hi, \{name} x\{count}`"#,
     )
     .unwrap();
 
@@ -158,19 +158,19 @@ type ExecSettings = exec.ExecSettings;
 type ExecRequest = exec.ExecRequest;
 type ExecEnv = exec.ExecEnv;
 let main: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
-    let platform = "\{settings.platform.os}-\{settings.platform.arch}";
-    let compiler_url = "https://example.invalid/gcc-\{platform}.tar.gz";
-    let sysroot_url = "https://example.invalid/sysroot-\{platform}.tar.gz";
-    let compiler = "\{settings.install_prefix}/\{hash.sha256(compiler_url)}";
-    let sysroot = "\{settings.install_prefix}/\{hash.sha256(sysroot_url)}";
+    let platform = `\{settings.platform.os}-\{settings.platform.arch}`;
+    let compiler_url = `https://example.invalid/gcc-\{platform}.tar.gz`;
+    let sysroot_url = `https://example.invalid/sysroot-\{platform}.tar.gz`;
+    let compiler = `\{settings.install_prefix}/\{hash.sha256(compiler_url)}`;
+    let sysroot = `\{settings.install_prefix}/\{hash.sha256(sysroot_url)}`;
     {
         install: [
             'Unpack({dest: compiler, ty: 'TarGzip, src: compiler_url, strip: 1, digest: 'None}),
             'Unpack({dest: sysroot, ty: 'TarGzip, src: sysroot_url, strip: 1, digest: 'None}),
         ],
         cwd: 'Some(request.cwd),
-        bin: "\{compiler}/bin/gcc",
-        args: arrays.flat_map([["--sysroot=\{sysroot}"], request.args], fn(part) { part }),
+        bin: `\{compiler}/bin/gcc`,
+        args: arrays.flat_map([[`--sysroot=\{sysroot}`], request.args], fn(part) { part }),
         env: {VISIBLE: request.env.FORMA_EXEC_TEST},
     }
 };

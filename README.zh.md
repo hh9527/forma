@@ -38,6 +38,18 @@ type MaybeInt = Maybe(Int);
 
 ## 这些理念长出了什么
 
+**文本是否求值，一眼可见。** 双引号和 raw 形式是纯 String，执行表达式的 concat 使用反引号：
+
+```forma
+let literal = "ordinary\nString";
+let raw = r##"quotes " and \slashes stay unchanged"##;
+let message = `hello \{name}`;
+let continued = "first \
+    second"; # "first second"
+```
+
+raw String 最多接受 255 个成对的 `#`；转义 String 和 concat 文本支持 Rust 风格的 ASCII 与 Unicode scalar escape。普通数据与表达式因此在源码中明确分开，同时仍适合承载嵌入源码和多行文本。
+
 **Serde，但没有宏。** 装饰器是普通函数，属性是普通数据，codec 是元数据的普通解释器：
 
 ```forma
@@ -112,16 +124,16 @@ type ExecRequest = exec.ExecRequest;
 type ExecEnv = exec.ExecEnv;
 
 let main: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
-    let platform = "\{settings.platform.os}-\{settings.platform.arch}";
-    let toolchain_url = "https://example.invalid/gcc-\{platform}.tar.gz";
-    let sysroot_url = "https://example.invalid/sysroot-\{platform}.tar.gz";
-    let toolchain = "\{settings.install_prefix}/\{hash.sha256("gcc:\{toolchain_url}:unpack-v1")}";
-    let sysroot = "\{settings.install_prefix}/\{hash.sha256("sysroot:\{sysroot_url}:unpack-v1")}";
+    let platform = `\{settings.platform.os}-\{settings.platform.arch}`;
+    let toolchain_url = `https://example.invalid/gcc-\{platform}.tar.gz`;
+    let sysroot_url = `https://example.invalid/sysroot-\{platform}.tar.gz`;
+    let toolchain = `\{settings.install_prefix}/\{hash.sha256(`gcc:\{toolchain_url}:unpack-v1`)}`;
+    let sysroot = `\{settings.install_prefix}/\{hash.sha256(`sysroot:\{sysroot_url}:unpack-v1`)}`;
     let args: Array(String) = arrays.flat_map([
         [
-            "--sysroot=\{sysroot}",
-            "-isystem\{sysroot}/usr/include",
-            "-ffile-prefix-map=\{request.cwd}=.",
+            `--sysroot=\{sysroot}`,
+            `-isystem\{sysroot}/usr/include`,
+            `-ffile-prefix-map=\{request.cwd}=.`,
         ],
         request.args,
     ], fn(part) { part });
@@ -131,7 +143,7 @@ let main: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
             'Unpack({dest: toolchain, ty: 'TarGzip, src: toolchain_url, strip: 1, digest: 'None}),
             'Unpack({dest: sysroot, ty: 'TarGzip, src: sysroot_url, strip: 1, digest: 'None}),
         ],
-        bin: "\{toolchain}/bin/gcc",
+        bin: `\{toolchain}/bin/gcc`,
         args: args,
         env: {FORMA_SYSROOT: sysroot},
         cwd: 'Some(request.cwd),
@@ -162,7 +174,7 @@ Forma 的取舍不是消除复杂度，而是尽量把领域复杂度放进库�
 
 ## 诚实的边界
 
-Forma 是实验品。它今天没有效果系统、没有包获取（只有路径依赖）、没有 trait、没有类型收窄。静态推断宁可显式说"不知道"，也不猜测。这些不是疏忽，是刻意：先把"类型即元数据"这一个假设验证到根，再谈扩张。67 份 RFC 记录了每一步的取舍——包括每个被拒绝的替代方案。
+Forma 是实验品。它今天没有效果系统、没有包获取（只有路径依赖）、没有 trait、没有类型收窄。静态推断宁可显式说"不知道"，也不猜测。这些不是疏忽，是刻意：先把"类型即元数据"这一个假设验证到根，再谈扩张。68 份 RFC 记录了每一步的取舍——包括每个被拒绝的替代方案。
 
 Forma 面向的场景也由此变得清晰：**构建规则的表达、K8s operator 的持续调谐、可复用的配置包**——宿主需要确定地执行外部提供的逻辑，并在失败时解释数据与规则来自何处。
 

@@ -5,7 +5,7 @@ token Comma=',' Colon=':' Semicolon=';' Dot='.' At='@';
 token Plus='+' Minus='-' Star='*' Slash='/' Less='<' EqualEqual='==' Equal='=';
 token Arrow='->' FatArrow='=>' Pipe='|>';
 token Int='<integer>' Float='<float>' Bytes='<bytes>';
-token DoubleQuote='"' StringText='<string text>' EscapeSequence='<escape>';
+token DoubleQuote='"' Backtick='`' RawString='<raw string>' StringText='<string text>' EscapeSequence='<escape>';
 token UnknownEscapeSequence='<unknown escape>' UnterminatedEscapeSequence='<unterminated escape>';
 token InterpolationStart='<interpolation start>';
 token Atom='<atom>' Placeholder='_' IndexedPlaceholder='<indexed placeholder>' Identifier='<identifier>';
@@ -44,6 +44,7 @@ primary:
   Int @int_expr
 | Float @float_expr
 | string_literal @string_expr
+| concat_expression @string_expr
 | Bytes @bytes_expr
 | Atom @atom_expr
 | Identifier @variable_expr
@@ -83,7 +84,14 @@ pattern:
 | ?t Atom @atom_pattern
 | '(' [pattern (?1 ',' pattern)* [',']] ')' @tuple_pattern
 ;
-string_literal: DoubleQuote string_part* DoubleQuote;
+string_literal: DoubleQuote string_text_part* DoubleQuote | RawString;
+concat_expression: Backtick string_part* Backtick;
+string_text_part^:
+  StringText
+| EscapeSequence
+| UnknownEscapeSequence
+| UnterminatedEscapeSequence
+;
 string_part^:
   StringText
 | EscapeSequence

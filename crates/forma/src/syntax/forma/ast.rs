@@ -345,6 +345,7 @@ impl<'tree> StringLiteral<'tree> {
                         | Token::EscapeSequence
                         | Token::UnknownEscapeSequence
                         | Token::UnterminatedEscapeSequence
+                        | Token::RawString
                 )
             ) || child.rule() == Some(Rule::Interpolation)
         })

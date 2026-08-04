@@ -4953,7 +4953,7 @@ mod tests {
 
     #[test]
     fn checks_interpolation_inside_nested_binding_annotations() {
-        let error = analyze_source("test", r#"let outer = { let x: "\{[1]}" = "x"; x }; outer"#)
+        let error = analyze_source("test", r#"let outer = { let x: `\{[1]}` = "x"; x }; outer"#)
             .unwrap_err();
         assert!(error.message.contains("does not support Array<Int>"));
     }

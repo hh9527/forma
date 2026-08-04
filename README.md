@@ -65,6 +65,22 @@ without mutating the shared world.
 
 ## What follows from these ideas
 
+**Text makes evaluation visible.** Double-quoted and raw forms are inert
+Strings; evaluated concatenation uses backticks:
+
+```forma
+let literal = "ordinary\nString";
+let raw = r##"quotes " and \slashes stay unchanged"##;
+let message = `hello \{name}`;
+let continued = "first \
+    second"; # "first second"
+```
+
+Raw Strings accept up to 255 matching `#` delimiters. Escaped Strings and
+concat text support Rust-style ASCII and Unicode scalar escapes. This keeps
+plain data visibly separate from expressions while making embedded source and
+multiline text practical.
+
 **Serde, without macros.** Decorators are ordinary functions, attributes are
 ordinary data, and codecs are ordinary interpreters of metadata:
 
@@ -168,16 +184,16 @@ type ExecRequest = exec.ExecRequest;
 type ExecEnv = exec.ExecEnv;
 
 let main: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
-    let platform = "\{settings.platform.os}-\{settings.platform.arch}";
-    let toolchain_url = "https://example.invalid/gcc-\{platform}.tar.gz";
-    let sysroot_url = "https://example.invalid/sysroot-\{platform}.tar.gz";
-    let toolchain = "\{settings.install_prefix}/\{hash.sha256("gcc:\{toolchain_url}:unpack-v1")}";
-    let sysroot = "\{settings.install_prefix}/\{hash.sha256("sysroot:\{sysroot_url}:unpack-v1")}";
+    let platform = `\{settings.platform.os}-\{settings.platform.arch}`;
+    let toolchain_url = `https://example.invalid/gcc-\{platform}.tar.gz`;
+    let sysroot_url = `https://example.invalid/sysroot-\{platform}.tar.gz`;
+    let toolchain = `\{settings.install_prefix}/\{hash.sha256(`gcc:\{toolchain_url}:unpack-v1`)}`;
+    let sysroot = `\{settings.install_prefix}/\{hash.sha256(`sysroot:\{sysroot_url}:unpack-v1`)}`;
     let args: Array(String) = arrays.flat_map([
         [
-            "--sysroot=\{sysroot}",
-            "-isystem\{sysroot}/usr/include",
-            "-ffile-prefix-map=\{request.cwd}=.",
+            `--sysroot=\{sysroot}`,
+            `-isystem\{sysroot}/usr/include`,
+            `-ffile-prefix-map=\{request.cwd}=.`,
         ],
         request.args,
     ], fn(part) { part });
@@ -187,7 +203,7 @@ let main: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
             'Unpack({dest: toolchain, ty: 'TarGzip, src: toolchain_url, strip: 1, digest: 'None}),
             'Unpack({dest: sysroot, ty: 'TarGzip, src: sysroot_url, strip: 1, digest: 'None}),
         ],
-        bin: "\{toolchain}/bin/gcc",
+        bin: `\{toolchain}/bin/gcc`,
         args: args,
         env: {FORMA_SYSROOT: sysroot},
         cwd: 'Some(request.cwd),
@@ -254,7 +270,7 @@ Forma is experimental. Today it has no effect system, package acquisition
 beyond path dependencies, traits, or type narrowing. Static
 inference explicitly reports when it does not know instead of guessing. These
 are deliberate boundaries: the project is testing the "types as metadata"
-hypothesis deeply before expanding its scope. Sixty-seven RFCs record the tradeoffs
+hypothesis deeply before expanding its scope. Sixty-eight RFCs record the tradeoffs
 at each step, including the rejected alternatives.
 
 The intended use cases follow from those boundaries: **expressing build rules,

@@ -1935,27 +1935,38 @@ let decorators = {
     #[test]
     fn interpolates_strings_ints_and_atoms() {
         let value = run(
-            r#"let name = "Ada"; let count = 3; let state = 'Ok; "hi, \{name} count=\{count} state=\{state}""#,
+            r#"let name = "Ada"; let count = 3; let state = 'Ok; `hi, \{name} count=\{count} state=\{state}`"#,
         )
         .unwrap();
         assert!(
             matches!(&value, Value::String(text) if text.as_ref() == "hi, Ada count=3 state=Ok")
         );
 
-        let nested = run(r#""value=\{if 'True { "yes" } else { "no" }}""#).unwrap();
+        let nested = run(r#"`value=\{if 'True { "yes" } else { "no" }}`"#).unwrap();
         assert!(matches!(&nested, Value::String(text) if text.as_ref() == "value=yes"));
     }
 
     #[test]
+    fn evaluates_escaped_raw_and_continued_strings() {
+        let value = run(r####"("A=\x41, shape=\u{5f62}, first \
+                second", r##"raw \n "quote" and #"##)"####)
+        .unwrap();
+        assert_eq!(
+            value.to_string(),
+            "(\"A=A, shape=形, first second\", \"raw \\\\n \\\"quote\\\" and #\")"
+        );
+    }
+
+    #[test]
     fn checks_known_and_dynamic_unsupported_interpolation_values() {
-        let static_error = run(r#""items=\{[1, 2]}""#).unwrap_err();
+        let static_error = run(r#"`items=\{[1, 2]}`"#).unwrap_err();
         assert!(
             static_error
                 .to_string()
                 .contains("does not support Array<Int>")
         );
 
-        let dynamic_error = run(r#"def render = fn(x) { "x=\{x}" }; render([1])"#).unwrap_err();
+        let dynamic_error = run(r#"def render = fn(x) { `x=\{x}` }; render([1])"#).unwrap_err();
         assert!(matches!(
             dynamic_error,
             ExecutionError::Runtime(RuntimeError {
@@ -2035,7 +2046,7 @@ let decorators = {
         assert!(field.to_string().contains("test:2:1"));
 
         let interpolation =
-            run("def render = fn(value) {\n  \"value=\\{value}\"\n};\nrender([1])").unwrap_err();
+            run("def render = fn(value) {\n  `value=\\{value}`\n};\nrender([1])").unwrap_err();
         assert!(interpolation.to_string().contains("test:2:3"));
     }
 

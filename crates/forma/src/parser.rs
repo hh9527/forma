@@ -1237,16 +1237,18 @@ impl<'a> Lowerer<'a> {
     }
 
     fn string_expression(&self, node: NodeRef) -> Result<Expr, Diagnostic> {
-        let literal = self
+        let text_node = self
             .rule_children(node)
-            .find(|child| self.rule(*child) == Some(Rule::StringLiteral))
-            .ok_or_else(|| self.error(node, "string expression has no literal"))?;
+            .find(|child| {
+                matches!(
+                    self.rule(*child),
+                    Some(Rule::StringLiteral | Rule::ConcatExpression)
+                )
+            })
+            .ok_or_else(|| self.error(node, "string expression has no text"))?;
         let mut components = Vec::new();
-        self.collect_string_components(literal, &mut components);
-        let has_interpolation = components
-            .iter()
-            .any(|component| self.rule(*component) == Some(Rule::Interpolation));
-        if !has_interpolation {
+        self.collect_string_components(text_node, &mut components);
+        if self.rule(text_node) == Some(Rule::StringLiteral) {
             return Ok(located(
                 ExprKind::String(self.decode_string_components(&components)?),
                 self.location(node),
@@ -1279,21 +1281,15 @@ impl<'a> Lowerer<'a> {
     fn plain_string(&self, node: NodeRef, context: &str) -> Result<String, Diagnostic> {
         let mut components = Vec::new();
         self.collect_string_components(node, &mut components);
-        if let Some(interpolation) = components
-            .iter()
-            .find(|component| self.rule(**component) == Some(Rule::Interpolation))
-        {
-            return Err(self.error(
-                *interpolation,
-                format!("interpolation is not allowed in {context}"),
-            ));
-        }
+        let _ = context;
         self.decode_string_components(&components)
     }
 
     fn collect_string_components(&self, node: NodeRef, output: &mut Vec<NodeRef>) {
         match self.cst.get(node) {
-            Node::Token(Token::StringText | Token::EscapeSequence, _) => output.push(node),
+            Node::Token(Token::StringText | Token::EscapeSequence | Token::RawString, _) => {
+                output.push(node)
+            }
             Node::Rule(Rule::Interpolation, _) => output.push(node),
             Node::Token(..) => {}
             Node::Rule(..) => {
@@ -1315,25 +1311,59 @@ impl<'a> Lowerer<'a> {
     fn decode_string_component(&self, node: NodeRef) -> Result<String, Diagnostic> {
         match self.cst.get(node) {
             Node::Token(Token::StringText, _) => Ok(self.text(node).into_owned()),
-            Node::Token(Token::EscapeSequence, _) => {
-                let escaped = self.text(node)[1..]
-                    .chars()
-                    .next()
-                    .expect("escape token includes a character");
-                let decoded = match escaped {
-                    'n' => '\n',
-                    'r' => '\r',
-                    't' => '\t',
-                    '"' => '"',
-                    '\\' => '\\',
-                    other => {
-                        return Err(self.error(node, format!("unsupported escape \\{other}")));
-                    }
-                };
-                Ok(decoded.to_string())
-            }
+            Node::Token(Token::EscapeSequence, _) => self.decode_escape(node),
+            Node::Token(Token::RawString, _) => self.decode_raw_string(node),
             _ => Err(self.error(node, "expected string text or escape")),
         }
+    }
+
+    fn decode_escape(&self, node: NodeRef) -> Result<String, Diagnostic> {
+        let text = self.text(node);
+        let escaped = &text[1..];
+        if escaped.starts_with(['\n', '\r']) {
+            return Ok(String::new());
+        }
+        let decoded = match escaped {
+            "0" => "\0".to_owned(),
+            "n" => "\n".to_owned(),
+            "r" => "\r".to_owned(),
+            "t" => "\t".to_owned(),
+            "\"" => "\"".to_owned(),
+            "`" => "`".to_owned(),
+            "\\" => "\\".to_owned(),
+            value if value.starts_with('x') => {
+                let byte = u8::from_str_radix(&value[1..], 16)
+                    .map_err(|_| self.error(node, "invalid ASCII string escape"))?;
+                if !byte.is_ascii() {
+                    return Err(self.error(node, "\\x string escape must be ASCII"));
+                }
+                char::from(byte).to_string()
+            }
+            value if value.starts_with("u{") => {
+                let digits = &value[2..value.len() - 1];
+                let scalar = u32::from_str_radix(digits, 16)
+                    .ok()
+                    .and_then(char::from_u32)
+                    .ok_or_else(|| self.error(node, "invalid Unicode scalar escape"))?;
+                scalar.to_string()
+            }
+            _ => return Err(self.error(node, format!("unsupported escape \\{escaped}"))),
+        };
+        Ok(decoded)
+    }
+
+    fn decode_raw_string(&self, node: NodeRef) -> Result<String, Diagnostic> {
+        let text = self.text(node);
+        let hashes = text[1..].bytes().take_while(|byte| *byte == b'#').count();
+        if hashes > 255 {
+            return Err(self.error(node, "raw String delimiter exceeds 255 # characters"));
+        }
+        let opener = hashes + 2;
+        let terminator = format!("\"{}", "#".repeat(hashes));
+        if text.len() < opener + terminator.len() || !text.ends_with(&terminator) {
+            return Err(self.error(node, "unterminated raw String"));
+        }
+        Ok(text[opener..text.len() - terminator.len()].to_owned())
     }
 
     fn decode_xl_string(&self, node: NodeRef) -> Result<String, Diagnostic> {
@@ -1703,7 +1733,7 @@ mod tests {
 
     #[test]
     fn lowers_interpolation_with_located_text_and_expression_parts() {
-        let program = parse("test", r#"let name = "Ada"; "hi, \{name}""#).unwrap();
+        let program = parse("test", r#"let name = "Ada"; `hi, \{name}`"#).unwrap();
         let ExprKind::InterpolatedString(parts) = &program.value.body.value.result.value else {
             panic!("expected interpolated string");
         };
@@ -1805,12 +1835,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_interpolation_in_plain_string_contexts() {
-        let error = parse("test", r#"match "x" { "\{1}" => 1 }"#).unwrap_err();
-        assert!(error.message.contains("not allowed in string pattern"));
-
-        let key_error = parse("test", r#"{"\{"x"}": 1}"#).unwrap_err();
-        assert!(key_error.message.contains("not allowed in Dict field name"));
+    fn separates_strings_from_concat_only_contexts() {
+        let string_error = parse("test", r#""\{1}""#).unwrap_err();
+        assert!(string_error.message.contains("unsupported string escape"));
+        assert!(parse("test", r#"match "x" { `\{1}` => 1 }"#).is_err());
+        assert!(parse("test", r#"{`\{"x"}`: 1}"#).is_err());
     }
 
     #[test]
@@ -1821,6 +1850,12 @@ mod tests {
 
         let unterminated = parse("test", r#""unfinished"#).unwrap_err();
         assert!(unterminated.message.contains("expected"));
+
+        let non_ascii = parse("test", r#""\xff""#).unwrap_err();
+        assert!(non_ascii.message.contains("must be ASCII"));
+
+        let invalid_scalar = parse("test", r#""\u{d800}""#).unwrap_err();
+        assert!(invalid_scalar.message.contains("Unicode scalar"));
     }
 
     #[test]
@@ -1838,7 +1873,7 @@ mod tests {
         for invalid in [
             "@@other {}; 0",
             "@@manifest {name: value}; 0",
-            "@@manifest {name: \"tool-\\{value}\"}; 0",
+            "@@manifest {name: `tool-\\{value}`}; 0",
             "let value = 1; @@manifest {}; 0",
             "@@manifest {}; @@manifest {}; 0",
         ] {

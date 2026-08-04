@@ -195,7 +195,7 @@ fn(settings, request) { {args: request.args} }"#;
 
     #[test]
     fn cst_preserves_string_quotes_text_escapes_and_interpolation() {
-        let source = r#""hi\n \{name}""#;
+        let source = r#"`hi\n \{name}`"#;
         let mut sources = crate::source::SourceDatabase::default();
         let id = sources.add("strings.forma", source);
         let parsed = parse(id, source);
@@ -208,16 +208,36 @@ fn(settings, request) { {args: request.args} }"#;
         assert_eq!(
             tokens,
             vec![
-                Token::DoubleQuote,
+                Token::Backtick,
                 Token::StringText,
                 Token::EscapeSequence,
                 Token::StringText,
                 Token::InterpolationStart,
                 Token::Identifier,
                 Token::RBrace,
-                Token::DoubleQuote,
+                Token::Backtick,
             ]
         );
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+    }
+
+    #[test]
+    fn cst_preserves_raw_strings_and_explicit_continuations() {
+        let source = r####"(r##"raw "quotes" and \slashes"##, "first \
+    second")"####;
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("strings.forma", source);
+        let parsed = parse(id, source);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        let tokens = parsed
+            .syntax
+            .children(NodeRef::ROOT)
+            .flat_map(|node| collect_tokens(&parsed.syntax, node))
+            .collect::<Vec<_>>();
+        assert!(tokens.contains(&Token::RawString));
+        assert!(tokens.contains(&Token::EscapeSequence));
         let mut reconstructed = String::new();
         reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
         assert_eq!(reconstructed, source);

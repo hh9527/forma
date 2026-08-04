@@ -3042,12 +3042,12 @@ name = "rustc"
                let source: Dict(Int) = {z: 3, a: 1, middle: 2};
                let empty: Dict(Int) = {};
                {
-                   mapped: dicts.map_values(source, fn(value) { "v\{value}" }),
+                   mapped: dicts.map_values(source, fn(value) { `v\{value}` }),
                    filtered: dicts.filter(source, fn(value) { 1 < value }),
                    folded: dicts.fold(source, "", fn(total, key, value) {
-                       "\{total}\{key}=\{value};"
+                       `\{total}\{key}=\{value};`
                    }),
-                   empty_mapped: dicts.map_values(empty, fn(value) { "v\{value}" }),
+                   empty_mapped: dicts.map_values(empty, fn(value) { `v\{value}` }),
                    empty_filtered: dicts.filter(empty, fn(value) { 0 < value }),
                    empty_folded: dicts.fold(empty, 42, fn(total, key, value) {
                        total + value
