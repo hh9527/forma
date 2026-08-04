@@ -121,6 +121,7 @@ impl<T> SemanticFact<T> {
 pub enum WorkspaceModuleKind {
     Forma,
     Json,
+    Toml,
     Core,
 }
 

@@ -13,6 +13,7 @@ use crate::semantic::{
     WorkspaceSnapshot,
 };
 use crate::source::{Diagnostic, SourceDatabase};
+use crate::toml::parse_toml_registered;
 use crate::types::{
     Analysis, ModuleInterface, PartialAnalysisControl, analyze_partial_types_recovered_with_query,
     analyze_program_with_bindings_observed,
@@ -578,6 +579,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                 let value = match target_module.format {
                     ModuleFormat::Forma => self.load_xl(target_module.clone()).await,
                     ModuleFormat::Json => self.load_json(target_module.clone()).await,
+                    ModuleFormat::Toml => self.load_toml(target_module.clone()).await,
                     _ => {
                         let target_key = target_module.id.to_string();
                         self.inputs.entry(target_key.clone()).or_insert_with(|| {
@@ -728,6 +730,64 @@ impl RecoverableWorkspaceBuilder<'_> {
                 key,
                 path: Some(path),
                 kind: WorkspaceModuleKind::Json,
+                source: Some(source_id),
+                program: None,
+                analysis: None,
+                partial: None,
+                state: if value.is_some() {
+                    WorkspaceModuleState::Known
+                } else {
+                    WorkspaceModuleState::Unavailable
+                },
+                imports: Vec::new(),
+                diagnostics: parsed.diagnostics,
+            },
+        );
+        if let Some(value) = &value {
+            self.values.insert(module_id, value.clone());
+        }
+        value
+    }
+
+    async fn load_toml(&mut self, module: ResolvedModule) -> Option<Value> {
+        if let Some(context) = self.query
+            && context.checkpoint().await.is_err()
+        {
+            return None;
+        }
+        let path = module.path()?.to_owned();
+        let module_id = module.id;
+        if let Some(value) = self.values.get(&module_id) {
+            return Some(value.clone());
+        }
+        let key = module_id.to_string();
+        if self.inputs.contains_key(&key) {
+            return None;
+        }
+        let source = match self.overlays.get(&path).cloned() {
+            Some(source) => source,
+            None => match fs::read_to_string(&path) {
+                Ok(source) => crate::document::DocumentText::new(source),
+                Err(_) => {
+                    self.inputs.insert(
+                        key.clone(),
+                        unavailable_input(key, path.clone(), WorkspaceModuleKind::Toml),
+                    );
+                    return None;
+                }
+            },
+        };
+        let source_id = self
+            .sources
+            .add_document(path.display().to_string(), source);
+        let parsed = parse_toml_registered(&self.sources, source_id);
+        let value = parsed.value.map(|sourced| sourced.value);
+        self.inputs.insert(
+            key.clone(),
+            SemanticModuleInput {
+                key,
+                path: Some(path),
+                kind: WorkspaceModuleKind::Toml,
                 source: Some(source_id),
                 program: None,
                 analysis: None,
@@ -954,16 +1014,20 @@ impl ModuleLoader {
         self.dependencies.insert(path.clone());
         let result: Result<(SourcedValue, PersistentValue, bool, ModuleInterface), ModuleError> =
             match format {
-                ModuleFormat::Json => {
+                ModuleFormat::Json | ModuleFormat::Toml => {
                     let source = read(&path)?;
                     let source_id = self.sources.add(path.display().to_string(), source);
-                    let parsed = parse_json_registered(&self.sources, source_id);
-                    parsed
-                        .value
+                    let (value, diagnostics, kind) = if format == ModuleFormat::Json {
+                        let parsed = parse_json_registered(&self.sources, source_id);
+                        (parsed.value, parsed.diagnostics, WorkspaceModuleKind::Json)
+                    } else {
+                        let parsed = parse_toml_registered(&self.sources, source_id);
+                        (parsed.value, parsed.diagnostics, WorkspaceModuleKind::Toml)
+                    };
+                    value
                         .ok_or_else(|| {
                             ModuleError::new(
-                                parsed
-                                    .diagnostics
+                                diagnostics
                                     .iter()
                                     .map(|diagnostic| self.sources.render(diagnostic))
                                     .collect::<Vec<_>>()
@@ -983,7 +1047,7 @@ impl ModuleLoader {
                                 SemanticModuleInput {
                                     key,
                                     path: Some(path.clone()),
-                                    kind: WorkspaceModuleKind::Json,
+                                    kind,
                                     source: Some(source_id),
                                     program: None,
                                     analysis: None,
@@ -1867,6 +1931,125 @@ mod tests {
             module.execute(100_000).unwrap().to_string(),
             "(\"Ada\", 42)"
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn loads_toml_modules_with_temporal_tags_and_reuses_resolved_identity() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("config.toml"),
+            r#"title = "Forma"
+released = 2026-08-04
+[environment]
+PATH = "/bin"
+[[tools]]
+name = "forma"
+[[tools]]
+name = "rustc"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import config from "./config.toml";
+               import same from "./sub/../config.toml";
+               import toml from "@bim/std/toml";
+               type TomlDate = toml.DateTime;
+               @struct type Tool = {name: String};
+               @struct type Config = {
+                   title: String,
+                   released: TomlDate,
+                   environment: Dict(String),
+                   tools: Array(Tool),
+               };
+               let checked: Config = config;
+               (checked.released, checked.tools, same.title)"#,
+        )
+        .unwrap();
+
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(module.dependencies.len(), 2);
+        assert_eq!(
+            module.execute(100_000).unwrap().to_string(),
+            "('LocalDate(\"2026-08-04\"), [{name: \"forma\"}, {name: \"rustc\"}], \"Forma\")"
+        );
+        let toml = module
+            .workspace
+            .module_by_path(&canonicalize(&directory.join("config.toml")).unwrap())
+            .unwrap();
+        assert_eq!(toml.kind, WorkspaceModuleKind::Toml);
+        assert_eq!(toml.state, WorkspaceModuleState::Known);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn toml_annotation_errors_label_data_and_type_declaration() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("user.toml"),
+            "name = \"Ada\"\nage = \"old\"\n",
+        )
+        .unwrap();
+        fs::write(
+            directory.join("main.forma"),
+            "import user from \"./user.toml\";\n\
+             @struct type User = {name: String, age: Int};\n\
+             let checked: User = user;\n\
+             checked",
+        )
+        .unwrap();
+        let error =
+            load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap_err();
+        let message = error.message();
+        assert!(
+            message.contains("user.toml:2:7: binding checked has type"),
+            "{message}"
+        );
+        assert!(
+            message.contains("main.forma:2:1: type requirement declared here"),
+            "{message}"
+        );
+
+        fs::write(
+            directory.join("main.forma"),
+            r#"import codec from "@bim/std/codec";
+               import result from "@bim/std/result";
+               import user from "./user.toml";
+               @struct type User = {name: String, age: Int};
+               codec.decode(User, user) |> result.unwrap"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        let error = module.execute(100_000).unwrap_err();
+        let rendered = error.with_sources(&module.sources).to_string();
+        assert!(rendered.contains("user.toml:2:7:"), "{rendered}");
+        assert!(rendered.contains("main.forma:4:"), "{rendered}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recoverable_workspace_retains_invalid_toml_source_and_diagnostics() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        let config = directory.join("config.toml");
+        fs::write(&config, "name = \"first\"\nname = \"second\"\n").unwrap();
+        fs::write(&main, "import config from \"./config.toml\"; config").unwrap();
+
+        let snapshot = recovery_engine().recover_workspace(&main).unwrap();
+        let config = snapshot
+            .module_by_path(&canonicalize(&config).unwrap())
+            .unwrap();
+        assert_eq!(config.kind, WorkspaceModuleKind::Toml);
+        assert_eq!(config.state, WorkspaceModuleState::Unavailable);
+        let source = config.source.expect("invalid TOML source is retained");
+        assert!(snapshot.diagnostics().iter().any(|diagnostic| {
+            diagnostic.message.contains("duplicate TOML key")
+                && diagnostic
+                    .labels
+                    .first()
+                    .is_some_and(|label| label.location.source == source)
+        }));
         fs::remove_dir_all(directory).unwrap();
     }
 

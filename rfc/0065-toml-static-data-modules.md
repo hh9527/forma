@@ -1,6 +1,6 @@
 # RFC 0065: TOML static data modules
 
-- Status: Accepted
+- Status: Implemented
 - Depends on: RFC 0022, RFC 0056, RFC 0057, RFC 0061
 
 ## Summary
@@ -174,3 +174,33 @@ leaving richer operations to ordinary libraries.
 Records make component access convenient but prematurely choose a shared time
 model and allocate a much larger value for every scalar. A pure parser function
 can produce records later without changing the import representation.
+
+## Implementation result
+
+Forma now compiles a dedicated TOML grammar with Lelwel and tokenizes it with
+Logos. The lossless CST retains whitespace, comments, quoted forms, and
+multiline content. Its crop bridge is tested at every UTF-8 split boundary and
+commits only complete top-level statements, so `DocumentText` is not flattened
+for parsing.
+
+The semantic lowerer builds an unpublished table tree that distinguishes
+implicit and explicit tables, sealed inline tables, ordinary arrays, and
+arrays of tables. Dotted keys and headers converge there; duplicate keys,
+scalar/table collisions, repeated headers, invalid array-table conversions,
+and inline-table extension fail with the original definition as a secondary
+label. Successful trees materialize once into canonical immutable Dicts while
+recording key, container, element, and scalar provenance.
+
+Strings, radix and decimal integers, floats, Booleans, arrays, inline tables,
+tables, and arrays of tables lower into the shared value model. Numeric
+underscore placement, leading zeroes, Unicode escapes, multiline folding, and
+checked i64 bounds are covered. The four temporal categories validate calendar,
+clock, fraction, and offset components and lower to canonical Tagged String
+values; zero offsets become `Z` and fractional digits remain exact.
+
+`ModuleFormat::Toml` is enabled in both strict and recoverable loaders. Aliased
+paths share one resolved identity and persistent value. Workspace snapshots
+distinguish TOML modules, retain invalid source and diagnostics, and publish no
+guessed value. Imported provenance produces the same two-sided data/rule
+diagnostics as JSON. The declaration-only `@bim/std/toml` module exports the
+complete `DateTime` Enum metadata used by typed schemas.

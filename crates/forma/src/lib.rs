@@ -16,6 +16,7 @@ pub mod semantic;
 mod sha256;
 pub mod source;
 pub mod syntax;
+pub mod toml;
 pub mod types;
 pub mod value;
 pub mod vm;
@@ -58,6 +59,7 @@ pub use source::{
     Diagnostic, Label, Loc, Located, Location, Origin, SourceDatabase, SourceId, TextRange,
     WithOrigin,
 };
+pub use toml::{TomlParse, parse_toml_registered};
 pub use types::{
     Analysis, ModuleInterface, PartialAnalysis, SemanticDependencyGraph, SemanticDependencyNode,
     TypeGraph, TypeId, TypeNode, TypeParameter, TypeParameterId, TypeScheme, analyze_partial_types,

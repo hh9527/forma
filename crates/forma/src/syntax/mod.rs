@@ -1,5 +1,6 @@
 pub mod forma;
 pub mod json;
+pub mod toml;
 
 use crate::source::Diagnostic;
 

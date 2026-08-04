@@ -16,6 +16,7 @@ pub(crate) const JSON_MODULE: &str = "@bim/std/json";
 pub(crate) const HASH_MODULE: &str = "@bim/std/hash";
 pub(crate) const STRING_MODULE: &str = "@bim/std/string";
 pub(crate) const PATH_MODULE: &str = "@bim/std/path";
+pub(crate) const TOML_MODULE: &str = "@bim/std/toml";
 
 pub(crate) struct CoreModuleSpec {
     pub(crate) name: &'static str,
@@ -204,6 +205,19 @@ native file_name: Fn(String) -> Option(String);
                     NativeFunction::core_path(CorePathFunction::Parent),
                 ),
             ],
+        },
+        CoreModuleSpec {
+            name: TOML_MODULE,
+            source: r#"
+@enum type DateTime = {
+    OffsetDateTime: String,
+    LocalDateTime: String,
+    LocalDate: String,
+    LocalTime: String,
+};
+{DateTime: DateTime}
+"#,
+            functions: vec![],
         },
         CoreModuleSpec {
             name: DEBUG_MODULE,
