@@ -89,3 +89,4 @@ semantics from an earlier RFC.
 68. String literals and concat expressions.
 69. Deterministic output plans.
 70. Never and directional checking.
+71. Constraint-preserving structural inference.
