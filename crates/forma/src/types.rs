@@ -3469,6 +3469,62 @@ impl<'a> GenericInference<'a> {
         if matches!(actual, TypeDescriptor::Never) {
             return Ok(());
         }
+        match (&actual, &expected) {
+            (TypeDescriptor::Array(actual), TypeDescriptor::Array(expected))
+            | (TypeDescriptor::Dict(actual), TypeDescriptor::Dict(expected))
+            | (TypeDescriptor::TypeOf(actual), TypeDescriptor::TypeOf(expected)) => {
+                return self.check(actual, expected);
+            }
+            (
+                TypeDescriptor::Tagged {
+                    tag: actual_tag,
+                    payload: actual,
+                },
+                TypeDescriptor::Tagged {
+                    tag: expected_tag,
+                    payload: expected,
+                },
+            ) if actual_tag == expected_tag => return self.check(actual, expected),
+            (TypeDescriptor::Tuple(actual), TypeDescriptor::Tuple(expected))
+                if actual.len() == expected.len() =>
+            {
+                for (actual, expected) in actual.iter().zip(expected) {
+                    self.check(actual, expected)?;
+                }
+                return Ok(());
+            }
+            (TypeDescriptor::Struct(actual), TypeDescriptor::Struct(expected))
+                if actual.keys().eq(expected.keys()) =>
+            {
+                for (name, actual) in actual {
+                    self.check(actual, &expected[name])?;
+                }
+                return Ok(());
+            }
+            (TypeDescriptor::Struct(actual), TypeDescriptor::Dict(expected)) => {
+                for actual in actual.values() {
+                    self.check(actual, expected)?;
+                }
+                return Ok(());
+            }
+            (
+                TypeDescriptor::Function {
+                    parameters: actual_parameters,
+                    result: actual_result,
+                },
+                TypeDescriptor::Function {
+                    parameters: expected_parameters,
+                    result: expected_result,
+                },
+            ) if actual_parameters.len() == expected_parameters.len() => {
+                for (actual, expected) in actual_parameters.iter().zip(expected_parameters) {
+                    self.check(actual, expected)?;
+                }
+                self.check(actual_result, expected_result)?;
+                return Ok(());
+            }
+            _ => {}
+        }
         if !contains_type_variable(&actual) && !contains_type_variable(&expected) {
             return assignable(&actual, &expected).then_some(()).ok_or_else(|| {
                 format!(
@@ -3553,7 +3609,10 @@ impl<'a> GenericInference<'a> {
             ExprKind::Atom(name) => TypeDescriptor::Atom(atom_from_name(name)),
             ExprKind::Array(items) => {
                 let item_expected = match expected.map(|ty| self.resolve(ty)) {
-                    Some(TypeDescriptor::Array(item)) if !contains_type_variable(&item) => {
+                    Some(TypeDescriptor::Array(item))
+                        if items.is_empty()
+                            || !matches!(self.resolve(&item), TypeDescriptor::Inference(_)) =>
+                    {
                         Some(*item)
                     }
                     _ => None,
@@ -4852,6 +4911,60 @@ mod tests {
         )
         .unwrap_err();
         assert!(reverse.message.contains("Int") && reverse.message.contains("Never"));
+    }
+
+    #[test]
+    fn nested_structural_expectations_preserve_generic_constraints() {
+        let inferred = analyze_with_natives(
+            "native concat: for(A) Fn(Array(Array(A))) -> Array(A);\
+             (concat([[1], [], [2]]), concat([[], [1]]), concat([[1], []]))",
+            &[("concat", 1)],
+        )
+        .unwrap();
+        assert_eq!(
+            inferred.display(inferred.result_type),
+            "(Array<Int>, Array<Int>, Array<Int>)"
+        );
+
+        let expected = analyze_with_natives(
+            "native concat: for(A) Fn(Array(Array(A))) -> Array(A);\
+             let values: Array(String) = concat([[], []]); values",
+            &[("concat", 1)],
+        )
+        .unwrap();
+        assert_eq!(expected.display(expected.result_type), "Array<String>");
+
+        let missing = analyze_with_natives(
+            "native concat: for(A) Fn(Array(Array(A))) -> Array(A);\
+             concat([[], []])",
+            &[("concat", 1)],
+        )
+        .unwrap_err();
+        assert!(missing.message.contains("cannot infer generic result type"));
+    }
+
+    #[test]
+    fn structural_constraints_ignore_never_and_preserve_metadata_widening() {
+        let analysis = analyze_with_natives(
+            "native stop: Fn() -> Never;\
+             native concat: for(A) Fn(Array(Array(A))) -> Array(A);\
+             native identity: for(A) Fn(Array(A)) -> Array(A);\
+             (concat([[stop()], [1]]), identity([Int, String]))",
+            &[("stop", 0), ("concat", 1), ("identity", 1)],
+        )
+        .unwrap();
+        assert_eq!(
+            analysis.display(analysis.result_type),
+            "(Array<Int>, Array<Type>)"
+        );
+
+        let conflict = analyze_with_natives(
+            "native concat: for(A) Fn(Array(Array(A))) -> Array(A);\
+             concat([[1], [\"x\"]])",
+            &[("concat", 1)],
+        )
+        .unwrap_err();
+        assert!(conflict.message.contains("String") && conflict.message.contains("Int"));
     }
 
     #[test]

@@ -2350,9 +2350,8 @@ name = "rustc"
             r#"import arrays from "@bim/std/array";
                import paths from "@bim/std/path";
                import strings from "@bim/std/string";
-               let nested: Array(Array(Int)) = [[1, 2], [], [3]];
                {
-                   concat: arrays.concat(nested),
+                   concat: arrays.concat([[1, 2], [], [3]]),
                    any: arrays.any([1, 0], fn(value) {
                        if 0 < value { 'True } else { value / 0 < 1 }
                    }),

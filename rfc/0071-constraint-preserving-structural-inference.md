@@ -1,6 +1,6 @@
 # RFC 0071: Constraint-preserving structural inference
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0052, RFC 0070
 
 ## Summary
@@ -217,3 +217,25 @@ This makes order observable and rejects common widening such as heterogeneous
 TypeMetadata arrays. All reachable siblings must contribute before the final
 solution is fixed.
 
+## Implementation result
+
+Expected Array structure now propagates through nested literals even when its
+item contains inference variables. An empty nested Array retains a naked item
+obligation, while a non-empty literal first synthesizes its common item type;
+this preserves sibling-order independence and existing heterogeneous
+TypeMetadata widening.
+
+Directional checking now recursively traverses Array, Dict, TypeOf, Tagged,
+Tuple, Struct, Struct-to-Dict, and Function shapes. This makes RFC 0070's
+`Never` rule structural: `Array(Never)` satisfies `Array(?A)` without solving
+`A = Never`.
+
+The active standard-library regression now calls `arrays.concat([[1, 2], [],
+[3]])` directly, without the `Array(Array(Int))` workaround recorded by RFC
+0063. Focused tests cover both sibling orders, mixed and all-empty inputs,
+expected-result solving, conflicting evidence, nested `Never`, and
+heterogeneous TypeMetadata Arrays.
+
+The final workspace run passed 237 Forma tests with one manual parser benchmark
+ignored, 12 CLI tests, and 19 LSP tests. Strict Clippy, formatting, and
+whitespace validation pass.
