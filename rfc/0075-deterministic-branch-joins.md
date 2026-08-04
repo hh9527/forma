@@ -1,6 +1,6 @@
 # RFC 0075: Deterministic branch joins
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0052, RFC 0070, RFC 0071, RFC 0073, RFC 0074
 
 ## Summary
@@ -145,6 +145,25 @@ order.
 - local closure annotations;
 - explicit generic type application;
 - recursive SCC inference.
+
+## Implementation result
+
+Implemented in the RFC 0075 change set.
+
+`if` and `match` now use one pure descriptor join. It handles equality,
+`Never`, explicit `Any`, TypeMetadata widening, and asymmetric existing
+assignability without touching substitutions. All remaining alternatives enter
+one canonical Union path.
+
+Union resolution recursively flattens members, lets `Any` dominate, removes
+reachable `Never` and structural duplicates, and sorts descriptors by stable
+display and structural keys. Delayed variables therefore normalize again after
+their substitutions become available, without sibling branches solving them.
+
+Tests cover reversed `if` and `match` order, TypeMetadata witnesses, nested and
+duplicate alternatives, delayed closure variables, explicit `Any`, and
+`Never`. The final workspace run passed 245 Forma tests with one manual parser
+benchmark ignored, 12 CLI tests, and 19 LSP tests; strict Clippy passed.
 
 ## Rejected alternatives
 

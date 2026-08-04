@@ -3340,14 +3340,7 @@ impl<'a> GenericInference<'a> {
                     .iter()
                     .map(|variant| self.resolve(variant))
                     .collect::<Vec<_>>();
-                if variants
-                    .iter()
-                    .any(|variant| matches!(variant, TypeDescriptor::Any))
-                {
-                    TypeDescriptor::Any
-                } else {
-                    union_or_single(variants)
-                }
+                canonical_union(variants)
             }
             TypeDescriptor::Function { parameters, result } => TypeDescriptor::Function {
                 parameters: parameters
@@ -3570,16 +3563,6 @@ impl<'a> GenericInference<'a> {
                 left.display_name(),
                 right.display_name()
             )),
-        }
-    }
-
-    fn try_unify(&mut self, left: &TypeDescriptor, right: &TypeDescriptor) -> bool {
-        let substitutions = self.substitutions.clone();
-        if self.unify(left, right).is_ok() {
-            true
-        } else {
-            self.substitutions = substitutions;
-            false
         }
     }
 
@@ -4004,14 +3987,7 @@ impl<'a> GenericInference<'a> {
                 self.infer(condition, environment, Some(&bool_type))?;
                 let then_type = self.infer_block(then_branch, environment, expected)?;
                 let else_type = self.infer_block(else_branch, environment, expected)?;
-                if !contains_type_variable(&then_type)
-                    && !contains_type_variable(&else_type)
-                    && self.try_unify(&then_type, &else_type)
-                {
-                    self.resolve(&then_type)
-                } else {
-                    union_or_single(vec![then_type, else_type])
-                }
+                join_types(self.resolve(&then_type), self.resolve(&else_type))
             }
             ExprKind::Match { value, arms } => {
                 let value_type = self.infer(value, environment, None)?;
@@ -4029,17 +4005,12 @@ impl<'a> GenericInference<'a> {
                     arm_types.push(self.infer(&arm.value.value, &arm_environment, expected)?);
                 }
                 if let Some(first) = arm_types.first().cloned() {
-                    let substitutions = self.substitutions.clone();
-                    let unified = !contains_type_variable(&first)
-                        && arm_types.iter().skip(1).all(|arm| {
-                            !contains_type_variable(arm) && self.unify(&first, arm).is_ok()
-                        });
-                    if unified {
-                        self.resolve(&first)
-                    } else {
-                        self.substitutions = substitutions;
-                        union_or_single(arm_types)
-                    }
+                    arm_types
+                        .into_iter()
+                        .skip(1)
+                        .fold(self.resolve(&first), |joined, arm| {
+                            join_types(joined, self.resolve(&arm))
+                        })
                 } else {
                     TypeDescriptor::Any
                 }
@@ -4303,14 +4274,14 @@ fn infer_expr_with(
             else_branch,
         } => {
             infer_expr_with(condition, environment, record);
-            union_or_single(vec![
+            canonical_union(vec![
                 infer_block_with(then_branch, environment, record),
                 infer_block_with(else_branch, environment, record),
             ])
         }
         ExprKind::Match { value, arms } => {
             infer_expr_with(value, environment, record);
-            union_or_single(
+            canonical_union(
                 arms.iter()
                     .map(|arm| {
                         let mut arm_environment = environment.clone();
@@ -4633,21 +4604,62 @@ fn erase_type_witnesses(descriptor: &TypeDescriptor) -> TypeDescriptor {
     }
 }
 
-fn union_or_single(mut types: Vec<TypeDescriptor>) -> TypeDescriptor {
-    if types.iter().any(|ty| !matches!(ty, TypeDescriptor::Never)) {
-        types.retain(|ty| !matches!(ty, TypeDescriptor::Never));
+fn join_types(left: TypeDescriptor, right: TypeDescriptor) -> TypeDescriptor {
+    if left == right {
+        return left;
     }
-    let mut unique = Vec::new();
-    for item in types.drain(..) {
-        if !unique.contains(&item) {
-            unique.push(item);
+    if matches!(left, TypeDescriptor::Never) {
+        return right;
+    }
+    if matches!(right, TypeDescriptor::Never) {
+        return left;
+    }
+    if matches!(left, TypeDescriptor::Any) || matches!(right, TypeDescriptor::Any) {
+        return TypeDescriptor::Any;
+    }
+    if assignable(&left, &TypeDescriptor::Type) && assignable(&right, &TypeDescriptor::Type) {
+        return TypeDescriptor::Type;
+    }
+    let left_to_right = assignable(&left, &right);
+    let right_to_left = assignable(&right, &left);
+    match (left_to_right, right_to_left) {
+        (true, false) => right,
+        (false, true) => left,
+        _ => canonical_union(vec![left, right]),
+    }
+}
+
+fn canonical_union(types: Vec<TypeDescriptor>) -> TypeDescriptor {
+    fn flatten(ty: TypeDescriptor, flattened: &mut Vec<TypeDescriptor>) {
+        match ty {
+            TypeDescriptor::Union(variants) => {
+                for variant in variants {
+                    flatten(variant, flattened);
+                }
+            }
+            ty => flattened.push(ty),
         }
     }
-    types = unique;
-    if types.len() == 1 {
-        types.pop().expect("one type")
-    } else {
-        TypeDescriptor::Union(types)
+
+    let mut flattened = Vec::new();
+    for ty in types {
+        flatten(ty, &mut flattened);
+    }
+    if flattened.iter().any(|ty| matches!(ty, TypeDescriptor::Any)) {
+        return TypeDescriptor::Any;
+    }
+    if flattened
+        .iter()
+        .any(|ty| !matches!(ty, TypeDescriptor::Never))
+    {
+        flattened.retain(|ty| !matches!(ty, TypeDescriptor::Never));
+    }
+    flattened.sort_by_cached_key(|ty| (ty.display_name(), format!("{ty:?}")));
+    flattened.dedup();
+    match flattened.len() {
+        0 => TypeDescriptor::Never,
+        1 => flattened.pop().expect("one canonical Union member"),
+        _ => TypeDescriptor::Union(flattened),
     }
 }
 
@@ -5270,6 +5282,66 @@ mod tests {
         )
         .unwrap();
         assert_eq!(dynamic.display(dynamic.result_type), "Fn(Any) -> Any");
+    }
+
+    #[test]
+    fn branch_joins_are_canonical_pure_and_order_independent() {
+        let left = analyze_with_natives("if 'True { 1 } else { \"x\" }", &[]).unwrap();
+        let right = analyze_with_natives("if 'True { \"x\" } else { 1 }", &[]).unwrap();
+        assert_eq!(
+            left.display(left.result_type),
+            right.display(right.result_type)
+        );
+        assert_eq!(left.display(left.result_type), "Int | String");
+
+        let metadata = analyze_with_natives("if 'True { Int } else { String }", &[]).unwrap();
+        let reversed = analyze_with_natives("if 'True { String } else { Int }", &[]).unwrap();
+        assert_eq!(metadata.display(metadata.result_type), "Type");
+        assert_eq!(reversed.display(reversed.result_type), "Type");
+
+        let nested = analyze_with_natives(
+            "if 'True { if 'False { 1 } else { \"x\" } } else { 1 }",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(nested.display(nested.result_type), "Int | String");
+
+        let delayed = analyze_with_natives(
+            "let choose = fn(flag, value) {\
+                 if flag { value } else { 1 }\
+             }; let selected = choose('True, 2); choose",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            delayed.display(delayed.result_type),
+            "Fn(enum {False, True}, Int) -> Int"
+        );
+
+        let dynamic =
+            analyze_with_natives("let value: Any = 1; if 'True { value } else { 1 }", &[]).unwrap();
+        assert_eq!(dynamic.display(dynamic.result_type), "Any");
+    }
+
+    #[test]
+    fn match_joins_are_stable_across_arm_order_and_absorb_never() {
+        let first =
+            analyze_with_natives("match 'True { 'True => 1, other => \"x\" }", &[]).unwrap();
+        let reversed =
+            analyze_with_natives("match 'True { other => \"x\", 'True => 1 }", &[]).unwrap();
+        assert_eq!(
+            first.display(first.result_type),
+            reversed.display(reversed.result_type)
+        );
+        assert_eq!(first.display(first.result_type), "Int | String");
+
+        let never = analyze_with_natives(
+            "native stop: Fn() -> Never;\
+             if 'True { stop() } else { 1 }",
+            &[("stop", 0)],
+        )
+        .unwrap();
+        assert_eq!(never.display(never.result_type), "Int");
     }
 
     #[test]
