@@ -18,6 +18,7 @@ use crate::types::{
     Analysis, ModuleInterface, PartialAnalysisControl, analyze_partial_types_recovered_with_query,
     analyze_program_with_bindings_observed,
 };
+use crate::yaml::parse_yaml_registered;
 use crate::{
     BytecodeFunction, Closure, DebugSink, DiscardDebugSink, Prototype, Quota, QuotaAccount, Value,
     Vm,
@@ -27,6 +28,49 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+struct StaticDataParse {
+    value: Option<SourcedValue>,
+    diagnostics: Vec<Diagnostic>,
+    kind: WorkspaceModuleKind,
+}
+
+fn static_data_kind(format: ModuleFormat) -> Option<WorkspaceModuleKind> {
+    match format {
+        ModuleFormat::Json => Some(WorkspaceModuleKind::Json),
+        ModuleFormat::Toml => Some(WorkspaceModuleKind::Toml),
+        ModuleFormat::Yaml => Some(WorkspaceModuleKind::Yaml),
+        _ => None,
+    }
+}
+
+fn parse_static_data_registered(
+    format: ModuleFormat,
+    sources: &SourceDatabase,
+    source_id: crate::SourceId,
+) -> Option<StaticDataParse> {
+    let kind = static_data_kind(format)?;
+    let (value, diagnostics) = match format {
+        ModuleFormat::Json => {
+            let parsed = parse_json_registered(sources, source_id);
+            (parsed.value, parsed.diagnostics)
+        }
+        ModuleFormat::Toml => {
+            let parsed = parse_toml_registered(sources, source_id);
+            (parsed.value, parsed.diagnostics)
+        }
+        ModuleFormat::Yaml => {
+            let parsed = parse_yaml_registered(sources, source_id);
+            (parsed.value, parsed.diagnostics)
+        }
+        _ => unreachable!("kind exists only for static data formats"),
+    };
+    Some(StaticDataParse {
+        value,
+        diagnostics,
+        kind,
+    })
+}
 
 #[derive(Debug)]
 pub struct ModuleError {
@@ -578,18 +622,8 @@ impl RecoverableWorkspaceBuilder<'_> {
                 });
                 let value = match target_module.format {
                     ModuleFormat::Forma => self.load_xl(target_module.clone()).await,
-                    ModuleFormat::Json => self.load_json(target_module.clone()).await,
-                    ModuleFormat::Toml => self.load_toml(target_module.clone()).await,
-                    _ => {
-                        let target_key = target_module.id.to_string();
-                        self.inputs.entry(target_key.clone()).or_insert_with(|| {
-                            unavailable_input(
-                                target_key,
-                                target_path.clone(),
-                                WorkspaceModuleKind::Forma,
-                            )
-                        });
-                        None
+                    ModuleFormat::Json | ModuleFormat::Toml | ModuleFormat::Yaml => {
+                        self.load_static_data(target_module.clone()).await
                     }
                 };
                 if let Some(value) = value {
@@ -691,7 +725,7 @@ impl RecoverableWorkspaceBuilder<'_> {
         })
     }
 
-    async fn load_json(&mut self, module: ResolvedModule) -> Option<Value> {
+    async fn load_static_data(&mut self, module: ResolvedModule) -> Option<Value> {
         if let Some(context) = self.query
             && context.checkpoint().await.is_err()
         {
@@ -711,10 +745,9 @@ impl RecoverableWorkspaceBuilder<'_> {
             None => match fs::read_to_string(&path) {
                 Ok(source) => crate::document::DocumentText::new(source),
                 Err(_) => {
-                    self.inputs.insert(
-                        key.clone(),
-                        unavailable_input(key, path.clone(), WorkspaceModuleKind::Json),
-                    );
+                    let kind = static_data_kind(module.format)?;
+                    self.inputs
+                        .insert(key.clone(), unavailable_input(key, path.clone(), kind));
                     return None;
                 }
             },
@@ -722,72 +755,14 @@ impl RecoverableWorkspaceBuilder<'_> {
         let source_id = self
             .sources
             .add_document(path.display().to_string(), source);
-        let parsed = parse_json_registered(&self.sources, source_id);
+        let parsed = parse_static_data_registered(module.format, &self.sources, source_id)?;
         let value = parsed.value.map(|sourced| sourced.value);
         self.inputs.insert(
             key.clone(),
             SemanticModuleInput {
                 key,
                 path: Some(path),
-                kind: WorkspaceModuleKind::Json,
-                source: Some(source_id),
-                program: None,
-                analysis: None,
-                partial: None,
-                state: if value.is_some() {
-                    WorkspaceModuleState::Known
-                } else {
-                    WorkspaceModuleState::Unavailable
-                },
-                imports: Vec::new(),
-                diagnostics: parsed.diagnostics,
-            },
-        );
-        if let Some(value) = &value {
-            self.values.insert(module_id, value.clone());
-        }
-        value
-    }
-
-    async fn load_toml(&mut self, module: ResolvedModule) -> Option<Value> {
-        if let Some(context) = self.query
-            && context.checkpoint().await.is_err()
-        {
-            return None;
-        }
-        let path = module.path()?.to_owned();
-        let module_id = module.id;
-        if let Some(value) = self.values.get(&module_id) {
-            return Some(value.clone());
-        }
-        let key = module_id.to_string();
-        if self.inputs.contains_key(&key) {
-            return None;
-        }
-        let source = match self.overlays.get(&path).cloned() {
-            Some(source) => source,
-            None => match fs::read_to_string(&path) {
-                Ok(source) => crate::document::DocumentText::new(source),
-                Err(_) => {
-                    self.inputs.insert(
-                        key.clone(),
-                        unavailable_input(key, path.clone(), WorkspaceModuleKind::Toml),
-                    );
-                    return None;
-                }
-            },
-        };
-        let source_id = self
-            .sources
-            .add_document(path.display().to_string(), source);
-        let parsed = parse_toml_registered(&self.sources, source_id);
-        let value = parsed.value.map(|sourced| sourced.value);
-        self.inputs.insert(
-            key.clone(),
-            SemanticModuleInput {
-                key,
-                path: Some(path),
-                kind: WorkspaceModuleKind::Toml,
+                kind: parsed.kind,
                 source: Some(source_id),
                 program: None,
                 analysis: None,
@@ -1014,16 +989,15 @@ impl ModuleLoader {
         self.dependencies.insert(path.clone());
         let result: Result<(SourcedValue, PersistentValue, bool, ModuleInterface), ModuleError> =
             match format {
-                ModuleFormat::Json | ModuleFormat::Toml => {
+                ModuleFormat::Json | ModuleFormat::Toml | ModuleFormat::Yaml => {
                     let source = read(&path)?;
                     let source_id = self.sources.add(path.display().to_string(), source);
-                    let (value, diagnostics, kind) = if format == ModuleFormat::Json {
-                        let parsed = parse_json_registered(&self.sources, source_id);
-                        (parsed.value, parsed.diagnostics, WorkspaceModuleKind::Json)
-                    } else {
-                        let parsed = parse_toml_registered(&self.sources, source_id);
-                        (parsed.value, parsed.diagnostics, WorkspaceModuleKind::Toml)
-                    };
+                    let StaticDataParse {
+                        value,
+                        diagnostics,
+                        kind,
+                    } = parse_static_data_registered(format, &self.sources, source_id)
+                        .expect("static data format has a frontend");
                     value
                         .ok_or_else(|| {
                             ModuleError::new(
@@ -1095,11 +1069,6 @@ impl ModuleLoader {
                             ))
                         })
                 }
-                format => Err(ModuleError::new(format!(
-                    "unsupported module format {}: {}",
-                    format.name(),
-                    module_id
-                ))),
             };
         self.leave(&module_id);
         let (sourced, root, opaque, interface) = result?;
@@ -2050,6 +2019,50 @@ name = "rustc"
                     .first()
                     .is_some_and(|label| label.location.source == source)
         }));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn loads_yaml_modules_and_retains_invalid_workspace_source() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        let config = directory.join("config.yaml");
+        fs::write(
+            &config,
+            "name: Forma\nfeatures:\n  - static data\n  - provenance\nlegacy: yes\n",
+        )
+        .unwrap();
+        fs::write(
+            &main,
+            "import config from \"./config.yaml\"; (config.name, config.features, config.legacy)",
+        )
+        .unwrap();
+
+        let module = load_module(&main, BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            module.execute(100_000).unwrap().to_string(),
+            "(\"Forma\", [\"static data\", \"provenance\"], \"yes\")"
+        );
+        let yaml = module
+            .workspace
+            .module_by_path(&canonicalize(&config).unwrap())
+            .unwrap();
+        assert_eq!(yaml.kind, WorkspaceModuleKind::Yaml);
+        assert_eq!(yaml.state, WorkspaceModuleState::Known);
+
+        fs::write(&config, "name: first\nname: second\n").unwrap();
+        let snapshot = recovery_engine().recover_workspace(&main).unwrap();
+        let yaml = snapshot
+            .module_by_path(&canonicalize(&config).unwrap())
+            .unwrap();
+        assert_eq!(yaml.kind, WorkspaceModuleKind::Yaml);
+        assert_eq!(yaml.state, WorkspaceModuleState::Unavailable);
+        assert!(
+            snapshot
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("duplicate YAML key"))
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

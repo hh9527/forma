@@ -122,6 +122,7 @@ pub enum WorkspaceModuleKind {
     Forma,
     Json,
     Toml,
+    Yaml,
     Core,
 }
 

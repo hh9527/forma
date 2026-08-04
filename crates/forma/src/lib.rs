@@ -21,6 +21,7 @@ pub mod types;
 pub mod value;
 pub mod vm;
 pub mod workspace;
+pub mod yaml;
 
 pub use bytecode::{
     BytecodeFunction, DebugOriginRange, FuncByteCode, Instruction, LinkingTable, Opcode,
@@ -75,3 +76,4 @@ pub use vm::{
     RuntimeErrorKind, RuntimeFrame, ValueKind, ValueRef, Vm,
 };
 pub use workspace::{Workspace, WorkspaceError};
+pub use yaml::{YamlParse, parse_yaml_registered};

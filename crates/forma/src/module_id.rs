@@ -45,7 +45,7 @@ impl ModuleFormat {
     }
 
     pub const fn is_supported(self) -> bool {
-        matches!(self, Self::Forma | Self::Json | Self::Toml)
+        matches!(self, Self::Forma | Self::Json | Self::Toml | Self::Yaml)
     }
 }
 

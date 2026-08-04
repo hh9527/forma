@@ -310,9 +310,11 @@ impl<'a> TomlLowerer<'a> {
         if literal {
             validate_string_controls(&body, multiline)
                 .map_err(|message| self.error(node, message))?;
-            return Ok(body);
+            return Ok(normalize_multiline_newlines(body, multiline));
         }
-        decode_basic_string(&body, multiline).map_err(|message| self.error(node, message))
+        decode_basic_string(&body, multiline)
+            .map(|value| normalize_multiline_newlines(value, multiline))
+            .map_err(|message| self.error(node, message))
     }
 
     fn is_value(&self, node: NodeRef) -> bool {
@@ -570,10 +572,14 @@ fn parse_number(text: &str) -> Result<Value, &'static str> {
     let radix_prefixed = unsigned_prefix.starts_with("0x")
         || unsigned_prefix.starts_with("0o")
         || unsigned_prefix.starts_with("0b");
+    if radix_prefixed && text.starts_with(['+', '-']) {
+        return Err("TOML radix integers cannot have a sign");
+    }
     if !radix_prefixed && normalized.contains(['.', 'e', 'E']) {
         if invalid_leading_zero(&normalized) {
             return Err("invalid leading zero in TOML Float");
         }
+        validate_float_syntax(&normalized)?;
         return normalized
             .parse::<f64>()
             .map(Value::Float)
@@ -603,6 +609,36 @@ fn parse_number(text: &str) -> Result<Value, &'static str> {
     i64::try_from(signed)
         .map(Value::Int)
         .map_err(|_| "TOML integer is outside the i64 range")
+}
+
+fn validate_float_syntax(value: &str) -> Result<(), &'static str> {
+    let unsigned = value.trim_start_matches(['+', '-']);
+    let (mantissa, exponent) = unsigned
+        .split_once(['e', 'E'])
+        .map_or((unsigned, None), |(mantissa, exponent)| {
+            (mantissa, Some(exponent))
+        });
+    if unsigned.matches(['e', 'E']).count() > 1 {
+        return Err("invalid TOML Float");
+    }
+    if let Some((whole, fraction)) = mantissa.split_once('.') {
+        if whole.is_empty()
+            || fraction.is_empty()
+            || !whole.bytes().all(|byte| byte.is_ascii_digit())
+            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Err("invalid TOML Float");
+        }
+    } else if mantissa.is_empty() || !mantissa.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("invalid TOML Float");
+    }
+    if let Some(exponent) = exponent {
+        let digits = exponent.trim_start_matches(['+', '-']);
+        if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err("invalid TOML Float exponent");
+        }
+    }
+    Ok(())
 }
 
 fn validate_numeric_underscores(value: &str) -> Result<(), &'static str> {
@@ -825,6 +861,14 @@ fn decode_basic_string(value: &str, multiline: bool) -> Result<String, &'static 
     Ok(output)
 }
 
+fn normalize_multiline_newlines(value: String, multiline: bool) -> String {
+    if multiline && value.contains('\r') {
+        value.replace("\r\n", "\n")
+    } else {
+        value
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -899,5 +943,29 @@ name = "two"
             "{:?}",
             implicit_header.diagnostics
         );
+    }
+
+    #[test]
+    fn covers_toml_1_0_string_and_numeric_boundaries() {
+        let parsed = parse(
+            "four = \"\"\"one\"\"\"\"\nfive = '''two'''''\r\nlines = \"\"\"a\r\nb\"\"\"\r\nempty = \"\"\nquoted.key = 1\n\"quoted.key\" = 2\n",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        assert_eq!(
+            parsed.value.unwrap().value.to_string(),
+            "{empty: \"\", five: \"two''\", four: \"one\\\"\", lines: \"a\\nb\", quoted: {key: 1}, quoted.key: 2}"
+        );
+
+        for source in [
+            "value = +0x1\n",
+            "value = -0o7\n",
+            "value = 1.\n",
+            "value = 1.e2\n",
+            "value = 1e\n",
+            "value = 1e+\n",
+        ] {
+            let parsed = parse(source);
+            assert!(parsed.value.is_none(), "accepted invalid TOML: {source}");
+        }
     }
 }

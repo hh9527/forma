@@ -79,7 +79,12 @@ fn scan_string(lexer: &mut Lexer<'_, LexToken>, quote: u8, escaped: bool) -> boo
     let mut index = if multiline { 2 } else { 0 };
     while index < remainder.len() {
         if multiline && remainder[index..].starts_with(&[quote, quote, quote]) {
-            lexer.bump(index + 3);
+            let quote_count = remainder[index..]
+                .iter()
+                .take_while(|byte| **byte == quote)
+                .count()
+                .min(5);
+            lexer.bump(index + quote_count);
             return true;
         }
         if !multiline && remainder[index] == quote {
@@ -288,7 +293,12 @@ fn stable_statement_boundary(source: &str) -> usize {
             ScanMode::MultilineBasic => {
                 if bytes[index..].starts_with(b"\"\"\"") {
                     mode = ScanMode::Normal;
-                    index += 2;
+                    index += bytes[index..]
+                        .iter()
+                        .take_while(|byte| **byte == b'"')
+                        .count()
+                        .min(5)
+                        - 1;
                 } else if bytes[index] == b'\\' {
                     index += usize::from(index + 1 < bytes.len());
                 }
@@ -296,7 +306,12 @@ fn stable_statement_boundary(source: &str) -> usize {
             ScanMode::MultilineLiteral => {
                 if bytes[index..].starts_with(b"'''") {
                     mode = ScanMode::Normal;
-                    index += 2;
+                    index += bytes[index..]
+                        .iter()
+                        .take_while(|byte| **byte == b'\'')
+                        .count()
+                        .min(5)
+                        - 1;
                 }
             }
         }

@@ -215,11 +215,14 @@ than the host filesystem; and homogeneous Dict combinators preserve
 `Dict<T>` through value mapping and filtering. These are ordinary imported
 functions with explicit contracts, not launcher magic.
 
-JSON and TOML files can enter the same immutable module graph as source code.
+JSON, TOML, and YAML files can enter the same immutable module graph as source code.
 TOML tables become ordinary Dicts, while its four temporal scalar categories
 remain distinct as validated Tagged String values through
-`@bim/std/toml.DateTime`. Codec failures retain both the external data location
-and the Forma type declaration that imposed the requirement.
+`@bim/std/toml.DateTime`. YAML follows the 1.2 Core Schema conservatively:
+legacy implicit Booleans and timestamps remain Strings, mapping keys must be
+Strings, and custom tags and merge keys are rejected. Codec failures retain
+both the external data location and the Forma type declaration that imposed
+the requirement.
 
 **A conservative language server.** Hover information comes from the same
 metadata used by runtime validation. Completion does not invent structure
@@ -248,10 +251,10 @@ keeping the language core small and consistent.
 ## Honest boundaries
 
 Forma is experimental. Today it has no effect system, package acquisition
-beyond path dependencies, a YAML parser, traits, or type narrowing. Static
+beyond path dependencies, traits, or type narrowing. Static
 inference explicitly reports when it does not know instead of guessing. These
 are deliberate boundaries: the project is testing the "types as metadata"
-hypothesis deeply before expanding its scope. Sixty-five RFCs record the tradeoffs
+hypothesis deeply before expanding its scope. Sixty-seven RFCs record the tradeoffs
 at each step, including the rejected alternatives.
 
 The intended use cases follow from those boundaries: **expressing build rules,

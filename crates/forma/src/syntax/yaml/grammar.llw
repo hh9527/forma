@@ -1,0 +1,4 @@
+token Line='<line>';
+start document;
+
+document: Line*;

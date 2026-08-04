@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 fn main() {
     let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR is set"));
-    for language in ["forma", "json", "toml"] {
+    for language in ["forma", "json", "toml", "yaml"] {
         let directory = output.join(language);
         std::fs::create_dir_all(&directory).expect("create parser output directory");
         let grammar = format!("src/syntax/{language}/grammar.llw");
