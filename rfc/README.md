@@ -80,3 +80,4 @@ semantics from an earlier RFC.
 59. Crate-relative module resolution.
 60. Rename XL to Forma.
 61. Homogeneous Dict TypeMetadata.
+62. Typed executable effect protocol.
