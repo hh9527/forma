@@ -96,3 +96,4 @@ semantics from an earlier RFC.
 75. Deterministic branch joins.
 76. Partial closure contracts.
 77. Explicit generic type application.
+78. Monomorphic recursive closure inference.
