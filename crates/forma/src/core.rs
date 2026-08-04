@@ -7,6 +7,7 @@ pub(crate) const ARRAY_MODULE: &str = "@bim/std/array";
 pub(crate) const ATTRIBUTES_MODULE: &str = "@bim/std/attributes";
 pub(crate) const DICT_MODULE: &str = "@bim/std/dict";
 pub(crate) const DEBUG_MODULE: &str = "@bim/std/debug";
+pub(crate) const EXEC_MODULE: &str = "@bim/std/exec";
 pub(crate) const CODEC_MODULE: &str = "@bim/std/codec";
 pub(crate) const OPTION_MODULE: &str = "@bim/std/option";
 pub(crate) const RESULT_MODULE: &str = "@bim/std/result";
@@ -124,6 +125,55 @@ native dbg_with: for(A) Fn(String, A) -> A;
                     NativeFunction::core_debug(CoreDebugFunction::DbgWith),
                 ),
             ],
+        },
+        CoreModuleSpec {
+            name: EXEC_MODULE,
+            source: r#"
+@struct type Platform = {
+    os: String,
+    arch: String,
+};
+@struct type ExecSettings = {
+    platform: Platform,
+    install_prefix: String,
+};
+@struct type ExecRequest = {
+    args: Array(String),
+    env: Dict(String),
+    cwd: String,
+};
+@enum type UnpackType = {
+    TarGzip: 'None,
+    Tar: 'None,
+};
+@struct type UnpackOpt = {
+    dest: String,
+    ty: UnpackType,
+    src: String,
+    strip: Int,
+    digest: Option(String),
+};
+@enum type Install = {
+    Unpack: UnpackOpt,
+};
+@struct type ExecEnv = {
+    install: Array(Install),
+    cwd: Option(String),
+    bin: String,
+    args: Array(String),
+    env: Dict(String),
+};
+{
+    Platform: Platform,
+    ExecSettings: ExecSettings,
+    ExecRequest: ExecRequest,
+    UnpackType: UnpackType,
+    UnpackOpt: UnpackOpt,
+    Install: Install,
+    ExecEnv: ExecEnv,
+}
+"#,
+            functions: vec![],
         },
         CoreModuleSpec {
             name: CODEC_MODULE,

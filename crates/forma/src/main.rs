@@ -106,13 +106,7 @@ fn exec_command(arguments: &[String]) -> Result<(), String> {
     let plan = engine
         .invoke(&module, &entry, &[settings, request])
         .map_err(|error| error.to_string())?;
-    let Value::Dict(_) = plan else {
-        return Err(format!(
-            "exec entry must return a Dict, found {}",
-            plan.type_name()
-        ));
-    };
-    println!("{}", canonical_json(&plan)?);
+    println!("{}", canonical_exec_json(&plan)?);
     Ok(())
 }
 
@@ -123,10 +117,6 @@ fn exec_settings(vm: &mut Vm) -> Result<Value, String> {
         ("os".into(), Value::string(env::consts::OS)),
     ])?;
     vm.make_dict(vec![
-        (
-            "cache_prefix".into(),
-            Value::string(path_string(&cache.join("downloads"))?),
-        ),
         (
             "install_prefix".into(),
             Value::string(path_string(&cache.join("installs"))?),
@@ -176,52 +166,38 @@ fn path_string(path: &Path) -> Result<String, String> {
         .ok_or_else(|| format!("path is not UTF-8: {}", path.display()))
 }
 
-fn canonical_json(value: &Value) -> Result<String, String> {
-    fn write_value(output: &mut String, value: &Value) -> Result<(), String> {
-        match value {
-            Value::Int(value) => write!(output, "{value}").unwrap(),
-            Value::Float(value) if value.is_finite() => write!(output, "{value}").unwrap(),
-            Value::Float(_) => return Err("Exec contains a non-finite Float".into()),
-            Value::String(value) => write_string(output, value),
-            Value::Atom(atom) if atom.name() == "None" => output.push_str("null"),
-            Value::Atom(atom) if atom.name() == "True" => output.push_str("true"),
-            Value::Atom(atom) if atom.name() == "False" => output.push_str("false"),
-            Value::Array(values) => {
-                output.push('[');
-                for (index, value) in values.iter().enumerate() {
-                    if index > 0 {
-                        output.push(',');
-                    }
-                    write_value(output, value)?;
-                }
-                output.push(']');
-            }
-            Value::Dict(value) => {
-                output.push('{');
-                for (index, (name, value)) in value
-                    .shape()
-                    .fields()
-                    .iter()
-                    .zip(value.values())
-                    .enumerate()
-                {
-                    if index > 0 {
-                        output.push(',');
-                    }
-                    write_string(output, name);
-                    output.push(':');
-                    write_value(output, value)?;
-                }
-                output.push('}');
-            }
-            _ => {
-                return Err(format!(
-                    "Exec contains a non-JSON {} value",
-                    value.type_name()
-                ));
-            }
+fn canonical_exec_json(value: &Value) -> Result<String, String> {
+    fn expect_dict<'a>(
+        value: &'a Value,
+        path: &str,
+        fields: &[&str],
+    ) -> Result<&'a forma::Dict, String> {
+        let Value::Dict(dict) = value else {
+            return Err(format!(
+                "{path} must be a Dict, found {}",
+                value.type_name()
+            ));
+        };
+        if !dict
+            .shape()
+            .fields()
+            .iter()
+            .map(String::as_str)
+            .eq(fields.iter().copied())
+        {
+            return Err(format!("{path} has an invalid field shape"));
         }
-        Ok(())
+        Ok(dict)
+    }
+
+    fn expect_string<'a>(value: &'a Value, path: &str) -> Result<&'a str, String> {
+        let Value::String(value) = value else {
+            return Err(format!(
+                "{path} must be a String, found {}",
+                value.type_name()
+            ));
+        };
+        Ok(value)
     }
 
     fn write_string(output: &mut String, value: &str) {
@@ -242,8 +218,147 @@ fn canonical_json(value: &Value) -> Result<String, String> {
         output.push('"');
     }
 
+    fn write_option_string(output: &mut String, value: &Value, path: &str) -> Result<(), String> {
+        match value {
+            Value::Atom(atom) if atom.name() == "None" => output.push_str("null"),
+            Value::Tagged { tag, payload } if tag.name() == "Some" => {
+                write_string(output, expect_string(payload, path)?);
+            }
+            _ => return Err(format!("{path} must be Option(String)")),
+        }
+        Ok(())
+    }
+
+    fn write_string_array(output: &mut String, value: &Value, path: &str) -> Result<(), String> {
+        let Value::Array(values) = value else {
+            return Err(format!(
+                "{path} must be an Array, found {}",
+                value.type_name()
+            ));
+        };
+        output.push('[');
+        for (index, value) in values.iter().enumerate() {
+            if index > 0 {
+                output.push(',');
+            }
+            write_string(output, expect_string(value, &format!("{path}[{index}]"))?);
+        }
+        output.push(']');
+        Ok(())
+    }
+
+    fn write_environment(output: &mut String, value: &Value, path: &str) -> Result<(), String> {
+        let Value::Dict(environment) = value else {
+            return Err(format!(
+                "{path} must be a Dict, found {}",
+                value.type_name()
+            ));
+        };
+        output.push('{');
+        for (index, (name, value)) in environment
+            .shape()
+            .fields()
+            .iter()
+            .zip(environment.values())
+            .enumerate()
+        {
+            if index > 0 {
+                output.push(',');
+            }
+            write_string(output, name);
+            output.push(':');
+            write_string(output, expect_string(value, &format!("{path}.{name}"))?);
+        }
+        output.push('}');
+        Ok(())
+    }
+
+    fn write_unpack(output: &mut String, value: &Value, path: &str) -> Result<(), String> {
+        let Value::Tagged { tag, payload } = value else {
+            return Err(format!("{path} must be an Install Tagged value"));
+        };
+        if tag.name() != "Unpack" {
+            return Err(format!(
+                "{path} has unknown Install variant {:?}",
+                tag.name()
+            ));
+        }
+        let path = format!("{path}.Unpack");
+        let unpack = expect_dict(payload, &path, &["dest", "digest", "src", "strip", "ty"])?;
+        let dest = expect_string(
+            unpack.get("dest").expect("field checked"),
+            &format!("{path}.dest"),
+        )?;
+        let src = expect_string(
+            unpack.get("src").expect("field checked"),
+            &format!("{path}.src"),
+        )?;
+        let Value::Int(strip) = unpack.get("strip").expect("field checked") else {
+            return Err(format!("{path}.strip must be an Int"));
+        };
+        let Value::Atom(ty) = unpack.get("ty").expect("field checked") else {
+            return Err(format!("{path}.ty must be an UnpackType Atom"));
+        };
+        if !matches!(ty.name(), "TarGzip" | "Tar") {
+            return Err(format!(
+                "{path}.ty has unknown UnpackType variant {:?}",
+                ty.name()
+            ));
+        }
+
+        output.push_str("{\"Unpack\":{");
+        output.push_str("\"dest\":");
+        write_string(output, dest);
+        output.push_str(",\"digest\":");
+        write_option_string(
+            output,
+            unpack.get("digest").expect("field checked"),
+            &format!("{path}.digest"),
+        )?;
+        output.push_str(",\"src\":");
+        write_string(output, src);
+        write!(output, ",\"strip\":{strip},\"ty\":").unwrap();
+        write_string(output, ty.name());
+        output.push_str("}}");
+        Ok(())
+    }
+
+    let plan = expect_dict(value, "ExecEnv", &["args", "bin", "cwd", "env", "install"])?;
     let mut output = String::new();
-    write_value(&mut output, value)?;
+    output.push_str("{\"args\":");
+    write_string_array(
+        &mut output,
+        plan.get("args").expect("field checked"),
+        "ExecEnv.args",
+    )?;
+    output.push_str(",\"bin\":");
+    write_string(
+        &mut output,
+        expect_string(plan.get("bin").expect("field checked"), "ExecEnv.bin")?,
+    );
+    output.push_str(",\"cwd\":");
+    write_option_string(
+        &mut output,
+        plan.get("cwd").expect("field checked"),
+        "ExecEnv.cwd",
+    )?;
+    output.push_str(",\"env\":");
+    write_environment(
+        &mut output,
+        plan.get("env").expect("field checked"),
+        "ExecEnv.env",
+    )?;
+    output.push_str(",\"install\":[");
+    let Value::Array(installs) = plan.get("install").expect("field checked") else {
+        return Err("ExecEnv.install must be an Array".into());
+    };
+    for (index, install) in installs.iter().enumerate() {
+        if index > 0 {
+            output.push(',');
+        }
+        write_unpack(&mut output, install, &format!("ExecEnv.install[{index}]"))?;
+    }
+    output.push_str("]}");
     Ok(output)
 }
 

@@ -151,25 +151,36 @@ fn exec_dry_run_invokes_explicit_pure_entry() {
     fs::write(
         &main,
         r#"#!/usr/bin/env -S forma exec --dry-run
+import arrays from "@bim/std/array";
+import exec from "@bim/std/exec";
 import hash from "@bim/std/hash";
-let captured = "python3";
-fn(settings, request) {
+type ExecSettings = exec.ExecSettings;
+type ExecRequest = exec.ExecRequest;
+type ExecEnv = exec.ExecEnv;
+let main: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
+    let platform = "\{settings.platform.os}-\{settings.platform.arch}";
+    let compiler_url = "https://example.invalid/gcc-\{platform}.tar.gz";
+    let sysroot_url = "https://example.invalid/sysroot-\{platform}.tar.gz";
+    let compiler = "\{settings.install_prefix}/\{hash.sha256(compiler_url)}";
+    let sysroot = "\{settings.install_prefix}/\{hash.sha256(sysroot_url)}";
     {
-        command: captured,
-        args: request.args,
-        env_value: request.env.XL_EXEC_TEST,
-        cwd: request.cwd,
-        os: settings.platform.os,
-        cache: "\{settings.cache_prefix}/\{hash.sha256("abc")}",
-        install: settings.install_prefix,
+        install: [
+            'Unpack({dest: compiler, ty: 'TarGzip, src: compiler_url, strip: 1, digest: 'None}),
+            'Unpack({dest: sysroot, ty: 'TarGzip, src: sysroot_url, strip: 1, digest: 'None}),
+        ],
+        cwd: 'Some(request.cwd),
+        bin: "\{compiler}/bin/gcc",
+        args: arrays.flat_map([["--sysroot=\{sysroot}"], request.args], fn(part) { part }),
+        env: {VISIBLE: request.env.FORMA_EXEC_TEST},
     }
-}"#,
+};
+main"#,
     )
     .unwrap();
 
     let output = forma()
         .env("FORMA_CACHE_HOME", &cache)
-        .env("XL_EXEC_TEST", "visible")
+        .env("FORMA_EXEC_TEST", "visible")
         .args([
             "exec",
             "--dry-run",
@@ -186,24 +197,28 @@ fn(settings, request) {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(stdout.contains(r#""args":["one","two words"]"#), "{stdout}");
-    assert!(stdout.contains(r#""command":"python3""#), "{stdout}");
-    assert!(stdout.contains(r#""env_value":"visible""#), "{stdout}");
     assert!(
-        stdout.contains("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+        stdout.contains(r#""args":["--sysroot="#) && stdout.contains(r#"","one","two words"]"#),
         "{stdout}"
     );
     assert!(
-        stdout.contains(&format!(
-            r#""install":"{}/forma/exec/installs""#,
-            cache.display()
-        )),
+        stdout.contains(r#""bin":"#) && stdout.contains("/bin/gcc"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(r#""env":{"VISIBLE":"visible"}"#),
+        "{stdout}"
+    );
+    assert_eq!(stdout.matches(r#""Unpack""#).count(), 2, "{stdout}");
+    assert!(stdout.contains(r#""ty":"TarGzip""#), "{stdout}");
+    assert!(
+        stdout.contains(&format!("{}/forma/exec/installs/", cache.display())),
         "{stdout}"
     );
     assert!(!cache.exists());
     let repeated = forma()
         .env("FORMA_CACHE_HOME", &cache)
-        .env("XL_EXEC_TEST", "visible")
+        .env("FORMA_EXEC_TEST", "visible")
         .args([
             "exec",
             "--dry-run",
@@ -217,6 +232,17 @@ fn(settings, request) {
     assert!(repeated.status.success());
     assert_eq!(repeated.stdout, stdout.as_bytes());
     assert!(!cache.exists());
+
+    let shown = forma()
+        .args(["show", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(shown.status.success());
+    assert!(
+        String::from_utf8_lossy(&shown.stdout).contains("Dict<String>"),
+        "{}",
+        String::from_utf8_lossy(&shown.stdout)
+    );
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -254,16 +280,51 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
         .output()
         .unwrap();
     assert!(!not_dict.status.success());
-    assert!(String::from_utf8_lossy(&not_dict.stderr).contains("must return a Dict"));
+    assert!(String::from_utf8_lossy(&not_dict.stderr).contains("ExecEnv must be a Dict"));
 
-    let non_json = directory.join("non-json.forma");
-    fs::write(&non_json, "fn(settings, request) { {bad: 'Named} }").unwrap();
-    let non_json = forma()
-        .args(["exec", "--dry-run", non_json.to_str().unwrap()])
+    let malformed = directory.join("malformed.forma");
+    fs::write(
+        &malformed,
+        "fn(settings, request) { {install: ['Copy({})], cwd: 'None, bin: \"x\", args: [], env: {}} }",
+    )
+    .unwrap();
+    let malformed = forma()
+        .args(["exec", "--dry-run", malformed.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(!non_json.status.success());
-    assert!(String::from_utf8_lossy(&non_json.stderr).contains("non-JSON Atom"));
+    assert!(!malformed.status.success());
+    assert!(
+        String::from_utf8_lossy(&malformed.stderr)
+            .contains("ExecEnv.install[0] has unknown Install variant")
+    );
+
+    let bad_env = directory.join("bad-env.forma");
+    fs::write(
+        &bad_env,
+        "fn(settings, request) { {install: [], cwd: 'None, bin: \"x\", args: [], env: {BAD: 1}} }",
+    )
+    .unwrap();
+    let bad_env = forma()
+        .args(["exec", "--dry-run", bad_env.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!bad_env.status.success());
+    assert!(bad_env.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&bad_env.stderr).contains("ExecEnv.env.BAD must be a String"));
+
+    let bad_cwd = directory.join("bad-cwd.forma");
+    fs::write(
+        &bad_cwd,
+        "fn(settings, request) { {install: [], cwd: 'Some(1), bin: \"x\", args: [], env: {}} }",
+    )
+    .unwrap();
+    let bad_cwd = forma()
+        .args(["exec", "--dry-run", bad_cwd.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!bad_cwd.status.success());
+    assert!(bad_cwd.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&bad_cwd.stderr).contains("ExecEnv.cwd must be a String"));
     fs::remove_dir_all(directory).unwrap();
 }
 

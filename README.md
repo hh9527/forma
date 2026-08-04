@@ -100,8 +100,8 @@ diagnostic structure separate from the value model.
 
 **Executable plans.** Forma can express a more capable form of DotSlash. An
 entry module is an ordinary pure function,
-`Fn(ExecSettings, ExecRequest) -> Exec`: the host explicitly supplies the
-platform, cache and install prefixes, environment, arguments, and working
+`Fn(ExecSettings, ExecRequest) -> ExecEnv`: the host explicitly supplies the
+platform, install prefix, environment, arguments, and working
 directory, and the function returns a fully concrete execution plan. It can
 select multiple artifacts, for example installing a platform-specific
 interpreter separately from a platform-independent runtime; derive stable
@@ -111,11 +111,11 @@ paths, library paths, and environment variables.
 Command-line rewriting belongs to the same pure computation. A gcc or rustc
 launcher can add a sysroot and platform-specific search paths, inject
 `source-prefix-map`, and rewrite user-supplied source arguments after artifact
-locations are known. The returned `Exec` already contains the final command,
+locations are known. The returned `ExecEnv` already contains the final binary,
 arguments, environment, and paths. The host expands no templates, substitutes
 no variables, and reinterprets no policy. There is no special context module
 or launcher syntax here, only explicit parameters, ordinary functions, and
-JSON-compatible data; the connection between the closed world and the effectful
+typed data; the connection between the closed world and the effectful
 host stays narrow.
 
 The effect boundary can be expressed as a set of ordinary Forma types.
@@ -160,12 +160,17 @@ For example, a reproducible gcc launch plan can be written in full:
 #!/usr/bin/env -S forma exec --dry-run
 
 import arrays from "@bim/std/array";
+import exec from "@bim/std/exec";
 import hash from "@bim/std/hash";
 
-fn(settings, request) {
+type ExecSettings = exec.ExecSettings;
+type ExecRequest = exec.ExecRequest;
+type ExecEnv = exec.ExecEnv;
+
+let main: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
     let platform = "\{settings.platform.os}-\{settings.platform.arch}";
-    let toolchain_url = "https://example.invalid/gcc-\{platform}.tar.zst";
-    let sysroot_url = "https://example.invalid/sysroot-\{platform}.tar.zst";
+    let toolchain_url = "https://example.invalid/gcc-\{platform}.tar.gz";
+    let sysroot_url = "https://example.invalid/sysroot-\{platform}.tar.gz";
     let toolchain = "\{settings.install_prefix}/\{hash.sha256("gcc:\{toolchain_url}:unpack-v1")}";
     let sysroot = "\{settings.install_prefix}/\{hash.sha256("sysroot:\{sysroot_url}:unpack-v1")}";
     let args: Array(String) = arrays.flat_map([
@@ -179,15 +184,17 @@ fn(settings, request) {
 
     {
         install: [
-            {Unpack: {dest: toolchain, ty: "TarGzip", src: toolchain_url, strip: 1, digest: 'None}},
-            {Unpack: {dest: sysroot, ty: "TarGzip", src: sysroot_url, strip: 1, digest: 'None}},
+            'Unpack({dest: toolchain, ty: 'TarGzip, src: toolchain_url, strip: 1, digest: 'None}),
+            'Unpack({dest: sysroot, ty: 'TarGzip, src: sysroot_url, strip: 1, digest: 'None}),
         ],
         bin: "\{toolchain}/bin/gcc",
         args: args,
         env: {FORMA_SYSROOT: sysroot},
-        cwd: request.cwd,
+        cwd: 'Some(request.cwd),
     }
-}
+};
+
+main
 ```
 
 `Unpack` carries its own `src`, so the protocol needs no separate download
@@ -231,7 +238,7 @@ Forma is experimental. Today it has no effect system, package acquisition
 beyond path dependencies, YAML/TOML parsers, traits, or type narrowing. Static
 inference explicitly reports when it does not know instead of guessing. These
 are deliberate boundaries: the project is testing the "types as metadata"
-hypothesis deeply before expanding its scope. Sixty RFCs record the tradeoffs
+hypothesis deeply before expanding its scope. Sixty-two RFCs record the tradeoffs
 at each step, including the rejected alternatives.
 
 The intended use cases follow from those boundaries: **expressing build rules,
@@ -252,7 +259,7 @@ cargo run -p forma-lsp -- --help
 ## Documentation
 
 - [VISION.md](VISION.md): design thesis
-- [rfc/](rfc/): sixty design documents, each with rejected alternatives and
+- [rfc/](rfc/): sixty-two design documents, each with rejected alternatives and
   acceptance criteria
 - [README.zh.md](README.zh.md): 中文
 

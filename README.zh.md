@@ -63,9 +63,9 @@ user.json:1:21: expected Int
 
 错误同时标出数据位置和规则位置。Forma 的 `BlameError` 直接保留这两类来源，不需要为 codec 另建一套与值模型分离的诊断结构。
 
-**可执行的计划。** Forma 可以表达一种能力更丰富的 DotSlash：入口模块是普通的纯函数 `Fn(ExecSettings, ExecRequest) -> Exec`，宿主显式传入平台、缓存前缀、环境、参数和工作目录，函数返回已经完全确定的执行计划。它可以选择多个工件，例如把平台相关的解释器与平台无关的运行时分别安装；可以用 `hash.sha256` 计算稳定的安装位置；也可以构造搜索路径、库路径和环境变量。
+**可执行的计划。** Forma 可以表达一种能力更丰富的 DotSlash：入口模块是普通的纯函数 `Fn(ExecSettings, ExecRequest) -> ExecEnv`，宿主显式传入平台、安装前缀、环境、参数和工作目录，函数返回已经完全确定的执行计划。它可以选择多个工件，例如把平台相关的解释器与平台无关的运行时分别安装；可以用 `hash.sha256` 计算稳定的安装位置；也可以构造搜索路径、库路径和环境变量。
 
-命令行改写同样属于这段纯计算。一个 gcc 或 rustc 启动器可以根据计算出的安装位置补充 sysroot 和平台相关搜索路径，注入 `source-prefix-map`，再改写用户传入的源文件参数。返回的 `Exec` 已经包含最终的 command、args、env 和路径：宿主不展开模板、不替换变量，也不重新解释策略。这里没有特殊的上下文模块或启动器语法，只有显式参数、普通函数和可 JSON 化的数据；内外世界的连接点因此很薄。
+命令行改写同样属于这段纯计算。一个 gcc 或 rustc 启动器可以根据计算出的安装位置补充 sysroot 和平台相关搜索路径，注入 `source-prefix-map`，再改写用户传入的源文件参数。返回的 `ExecEnv` 已经包含最终的 bin、args、env 和路径：宿主不展开模板、不替换变量，也不重新解释策略。这里没有特殊的上下文模块或启动器语法，只有显式参数、普通函数和类型化数据；内外世界的连接点因此很薄。
 
 效果边界可以由一组普通的 Forma 类型表达。安装方式是可扩展的枚举，`ExecEnv` 则只包含效果层需要消费的最终值：
 
@@ -104,12 +104,17 @@ user.json:1:21: expected Int
 #!/usr/bin/env -S forma exec --dry-run
 
 import arrays from "@bim/std/array";
+import exec from "@bim/std/exec";
 import hash from "@bim/std/hash";
 
-fn(settings, request) {
+type ExecSettings = exec.ExecSettings;
+type ExecRequest = exec.ExecRequest;
+type ExecEnv = exec.ExecEnv;
+
+let main: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
     let platform = "\{settings.platform.os}-\{settings.platform.arch}";
-    let toolchain_url = "https://example.invalid/gcc-\{platform}.tar.zst";
-    let sysroot_url = "https://example.invalid/sysroot-\{platform}.tar.zst";
+    let toolchain_url = "https://example.invalid/gcc-\{platform}.tar.gz";
+    let sysroot_url = "https://example.invalid/sysroot-\{platform}.tar.gz";
     let toolchain = "\{settings.install_prefix}/\{hash.sha256("gcc:\{toolchain_url}:unpack-v1")}";
     let sysroot = "\{settings.install_prefix}/\{hash.sha256("sysroot:\{sysroot_url}:unpack-v1")}";
     let args: Array(String) = arrays.flat_map([
@@ -123,15 +128,17 @@ fn(settings, request) {
 
     {
         install: [
-            {Unpack: {dest: toolchain, ty: "TarGzip", src: toolchain_url, strip: 1, digest: 'None}},
-            {Unpack: {dest: sysroot, ty: "TarGzip", src: sysroot_url, strip: 1, digest: 'None}},
+            'Unpack({dest: toolchain, ty: 'TarGzip, src: toolchain_url, strip: 1, digest: 'None}),
+            'Unpack({dest: sysroot, ty: 'TarGzip, src: sysroot_url, strip: 1, digest: 'None}),
         ],
         bin: "\{toolchain}/bin/gcc",
         args: args,
         env: {FORMA_SYSROOT: sysroot},
-        cwd: request.cwd,
+        cwd: 'Some(request.cwd),
     }
-}
+};
+
+main
 ```
 
 `Unpack` 自己携带 `src`，因此协议不需要单独的 download 动作。效果层可以根据 `src` 和可选的 `digest` 自行获取、缓存并校验工件，最后解包到已经确定的 `dest`。
@@ -151,7 +158,7 @@ Forma 的取舍不是消除复杂度，而是尽量把领域复杂度放进库�
 
 ## 诚实的边界
 
-Forma 是实验品。它今天没有效果系统、没有包获取（只有路径依赖）、没有 YAML/TOML 解析器、没有 trait、没有类型收窄。静态推断宁可显式说"不知道"，也不猜测。这些不是疏忽，是刻意：先把"类型即元数据"这一个假设验证到根，再谈扩张。60 份 RFC 记录了每一步的取舍——包括每个被拒绝的替代方案。
+Forma 是实验品。它今天没有效果系统、没有包获取（只有路径依赖）、没有 YAML/TOML 解析器、没有 trait、没有类型收窄。静态推断宁可显式说"不知道"，也不猜测。这些不是疏忽，是刻意：先把"类型即元数据"这一个假设验证到根，再谈扩张。62 份 RFC 记录了每一步的取舍——包括每个被拒绝的替代方案。
 
 Forma 面向的场景也由此变得清晰：**构建规则的表达、K8s operator 的持续调谐、可复用的配置包**——宿主需要确定地执行外部提供的逻辑，并在失败时解释数据与规则来自何处。
 
@@ -167,7 +174,7 @@ cargo run -p forma-lsp -- --help
 ## 文档
 
 - [VISION.md](VISION.md)：设计命题
-- [rfc/](rfc/)：60 份设计文档，每份含被拒方案与验收标准
+- [rfc/](rfc/)：62 份设计文档，每份含被拒方案与验收标准
 - [README.md](README.md)：English
 
 ## 验证

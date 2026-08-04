@@ -1,6 +1,6 @@
 # RFC 0062: Typed executable effect protocol
 
-- Status: Accepted
+- Status: Implemented
 - Depends on: RFC 0054, RFC 0058, RFC 0061
 
 ## Summary
@@ -76,7 +76,11 @@ contract explicit:
 ```forma
 import exec from "@bim/std/exec";
 
-let main: Fn(exec.ExecSettings, exec.ExecRequest) -> exec.ExecEnv =
+type ExecSettings = exec.ExecSettings;
+type ExecRequest = exec.ExecRequest;
+type ExecEnv = exec.ExecEnv;
+
+let main: Fn(ExecSettings, ExecRequest) -> ExecEnv =
     fn(settings, request) {
         # Pure plan computation.
     };
@@ -246,3 +250,29 @@ and allows inconsistent intermediate paths.
 
 Invocation-dependent module identity harms caching and makes the entry harder
 to test as an ordinary function. Explicit parameters keep the boundary local.
+
+## Implementation result
+
+`@bim/std/exec` now exports the complete declaration-only protocol as ordinary
+Struct, Enum, Array, Option, and Dict TypeMetadata. Executable modules can
+alias those exported metadata values and annotate their entry as
+`Fn(ExecSettings, ExecRequest) -> ExecEnv`; workspace observation retains the
+full contract including `Dict<String>`.
+
+The CLI no longer supplies `cache_prefix` and no longer accepts an arbitrary
+JSON-compatible Dict. After pure entry invocation it validates the exact
+ExecEnv shape, both Option fields, String arrays and dictionaries, Install
+variants, and every Unpack field. Errors contain the failing protocol path and
+validation completes before stdout is written.
+
+Validated Tagged and Atom values are serialized directly to the natural codec
+JSON representation. Integration coverage constructs two platform-dependent
+Unpack actions, hashes deterministic installation destinations, prepends a
+sysroot argument, observes a typed environment snapshot, checks canonical
+repeatability, and confirms that no cache directory is created. Negative
+fixtures cover the outer result, unknown Install variants, non-String env
+values, and malformed Options.
+
+The bilingual README example is the same checked protocol shape exercised by
+the CLI test. Effectful exec, acquisition, caching, digest verification,
+unpacking, and process creation remain deferred.
