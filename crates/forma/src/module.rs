@@ -2147,6 +2147,118 @@ mod tests {
     }
 
     #[test]
+    fn homogeneous_dict_metadata_preserves_types_through_core_codecs_and_schema() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        fs::write(
+            &main,
+            r#"import codec from "@bim/std/codec";
+               import dicts from "@bim/std/dict";
+               import json from "@bim/std/json";
+               import result from "@bim/std/result";
+               type Env = Dict(String);
+               let env: Env = {PATH: "/bin", HOME: "/tmp"};
+               let decoded = codec.decode(Env, {SHELL: "/bin/sh"}) |> result.unwrap;
+               {
+                   env: env,
+                   decoded: decoded,
+                   values: dicts.values(env),
+                   built: dicts.from_pairs([("A", "one"), ("B", "two")]),
+                   encoded: codec.encode(Env, decoded) |> result.unwrap,
+                   schema: json.schema(Env),
+               }"#,
+        )
+        .unwrap();
+
+        let module = load_module(&main, BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            module.analysis.display(module.analysis.result_type),
+            "{built: Any, decoded: Dict<String>, encoded: Any, env: Dict<String>, schema: Any, values: Any}"
+        );
+        let Value::Dict(output) = module.execute(100_000).unwrap() else {
+            panic!("expected Dict output")
+        };
+        assert_eq!(
+            output.get("values").unwrap().to_string(),
+            "[\"/tmp\", \"/bin\"]"
+        );
+        assert_eq!(
+            output.get("built").unwrap().to_string(),
+            "{A: \"one\", B: \"two\"}"
+        );
+        assert_eq!(
+            output.get("encoded").unwrap().to_string(),
+            "{SHELL: \"/bin/sh\"}"
+        );
+        let Value::Dict(schema) = output.get("schema").unwrap() else {
+            panic!("expected schema Dict")
+        };
+        assert_eq!(schema.get("type").unwrap().to_string(), "\"object\"");
+        assert_eq!(
+            schema.get("additionalProperties").unwrap().to_string(),
+            "{type: \"string\"}"
+        );
+
+        fs::write(
+            &main,
+            r#"type Env = Dict(String);
+               let env: Env = {GOOD: "yes", BAD: 1};
+               env"#,
+        )
+        .unwrap();
+        let error = load_module(&main, BTreeMap::new(), 100_000).unwrap_err();
+        assert!(error.to_string().contains("BAD"), "{error}");
+        assert!(error.to_string().contains("Int"), "{error}");
+        assert!(error.to_string().contains("String"), "{error}");
+
+        fs::write(
+            &main,
+            r#"@struct type Fixed = {a: String};
+               let dynamic: Dict(String) = {a: "value"};
+               let fixed: Fixed = dynamic;
+               fixed"#,
+        )
+        .unwrap();
+        let error = load_module(&main, BTreeMap::new(), 100_000).unwrap_err();
+        assert!(error.to_string().contains("not assignable"), "{error}");
+        assert!(error.to_string().contains("Dict<String>"), "{error}");
+
+        fs::write(
+            &main,
+            r#"@struct type Fixed = {a: String};
+               let read: Fn(Fixed) -> String = fn(value) { value.a };
+               let dynamic: Dict(String) = {a: "value"};
+               read(dynamic)"#,
+        )
+        .unwrap();
+        let error = load_module(&main, BTreeMap::new(), 100_000).unwrap_err();
+        assert!(
+            error.to_string().contains("cannot unify Dict<String>"),
+            "{error}"
+        );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recursive_dict_metadata_reuses_existing_schema_links() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import json from "@bim/std/json";
+               @struct type Node = {children: Dict(Node)};
+               json.schema(Node)"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        let schema = module.execute(100_000).unwrap().to_string();
+        assert!(schema.contains("additionalProperties"), "{schema}");
+        assert!(schema.contains("$defs"), "{schema}");
+        assert!(schema.contains("$ref"), "{schema}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn generic_core_exports_instantiate_per_member_access_but_not_per_local_use() {
         let directory = fixture_dir();
         let main = directory.join("main.forma");

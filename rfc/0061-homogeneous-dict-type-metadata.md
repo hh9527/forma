@@ -1,7 +1,22 @@
 # RFC 0061: Homogeneous Dict TypeMetadata
 
-- Status: Accepted
+- Status: Implemented
 - Depends on: RFC 0016, RFC 0022, RFC 0033, RFC 0035, RFC 0051, RFC 0055
+
+## Amendment: existing heterogeneous Dict combinators
+
+Implementation validation found that RFC 0016 deliberately permits
+heterogeneous runtime Dict values in `values`, `pairs`, `from_pairs`, and
+`merge`. Replacing their `Any` contracts with `Dict(A)` contracts rejects
+previously valid programs: one type parameter cannot describe both a
+heterogeneous Struct-shaped Dict and a homogeneous Dict without overloads,
+row types, or a type-level value-union operation.
+
+RFC 0061 therefore preserves the existing `@bim/std/dict` contracts and
+runtime behavior. Precise homogeneous overloads are deferred until Forma can
+express them without removing the heterogeneous operations. This amendment
+does not change `Dict(T)` annotations, assignability, validation, codecs,
+schema, or tooling.
 
 ## Summary
 
@@ -89,9 +104,9 @@ new mutable map representation and no conversion of Struct-shaped runtime
 values: Struct and Dict are type descriptions over the same immutable Dict
 value kind.
 
-## Generic core Dict functions
+## Core Dict functions
 
-The built-in Dict module exposes typed contracts:
+The initially proposed generic contracts were:
 
 ```forma
 native keys: for(A) Fn(Dict(A)) -> Array(String);
@@ -101,9 +116,11 @@ native from_pairs: for(A) Fn(Array(Tuple(String, A))) -> Dict(A);
 native merge: for(A) Fn(Dict(A), Dict(A)) -> Dict(A);
 ```
 
-Exact Struct arguments may flow into these functions through Struct-to-Dict
-assignability. Their results are open Dict values because enumeration,
-construction, and merge do not preserve a statically closed field set.
+They cannot preserve RFC 0016's heterogeneous behavior with the type
+constructors currently available. The existing `Any` contracts remain
+authoritative as specified by the amendment above. `Dict(T)` values can still
+flow through these operations, but their result type is not yet preserved by
+the static interface.
 
 ## Codec behavior
 
@@ -161,7 +178,7 @@ type states the value type but provides no finite key vocabulary.
    variable checks, erasure, and runtime validation.
 4. Contextually check Dict literals against expected `Dict(T)` while retaining
    exact Struct inference without that expectation.
-5. Type the existing `@bim/std/dict` functions.
+5. Preserve the existing heterogeneous `@bim/std/dict` behavior and contracts.
 6. Add Dict codec planning, bidirectional traversal, allocation accounting,
    recursive links, and JSON Schema generation.
 7. Add vertical runtime, static analysis, schema, `show at`, and workspace/LSP
@@ -176,7 +193,8 @@ type states the value type but provides no finite key vocabulary.
 5. unannotated literals retain exact Struct fields and completion behavior;
 6. Struct-to-Dict assignment accepts homogeneous fields and rejects an
    incompatible field; Dict-to-Struct assignment is rejected;
-7. core Dict combinators preserve their generic item types;
+7. existing heterogeneous core Dict operations remain valid and precise
+   homogeneous overloads are recorded as deferred;
 8. validate, encode, and decode traverse arbitrary keys with precise paths and
    BlameError locations;
 9. JSON Schema uses object `additionalProperties` with the item schema;
@@ -210,3 +228,29 @@ boundaries and directly prevents typed executable requests.
 
 The need exists in ordinary functions, annotations, generic combinators, and
 tooling. A privileged codec node would violate the first-class metadata model.
+
+## Implementation result
+
+`Dict(Item)` is implemented as canonical first-class metadata in the runtime,
+static, persistent, and workspace type graphs. The prelude constructor carries
+a TypeOf-preserving generic scheme. Display, hover, `forma show`, substitution,
+unification, assignability, variable erasure, runtime validation, and recursive
+up-links all retain the item type.
+
+Bidirectional checking keeps unannotated Dict literals as exact Structs and
+contextually checks their values when `Dict(T)` is expected. Struct-to-Dict
+assignment validates every known field; Dict-to-Struct assignment remains
+invalid. Local composite annotation diagnostics now use the structural
+incompatibility path to point at the incompatible nested expression.
+
+The shared codec graph decodes and encodes every dynamic key through the item
+codec. JSON Schema emits an object with the item schema in
+`additionalProperties`; recursive Dict items reuse the existing `$defs/$ref`
+machinery. Vertical tests cover metadata witnesses, workspace display,
+annotation failures, assignment direction, codec round trips, schema output,
+and recursive graphs.
+
+The attempted generic replacement of the RFC 0016 Dict combinator contracts
+was reverted as specified by the amendment: existing heterogeneous operations
+and their tests remain unchanged. Precise homogeneous overloads remain
+deferred.

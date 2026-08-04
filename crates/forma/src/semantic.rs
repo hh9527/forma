@@ -239,6 +239,7 @@ pub enum WorkspaceTypeNode {
     Bytes,
     Atom(String),
     Array(WorkspaceTypeId),
+    Dict(WorkspaceTypeId),
     Tagged {
         tag: String,
         payload: WorkspaceTypeId,
@@ -326,6 +327,9 @@ impl WorkspaceTypeGraph {
             WorkspaceTypeNode::Atom(atom) => format!("'{atom}"),
             WorkspaceTypeNode::Array(item) => {
                 format!("Array<{}>", self.display_with(*item, active))
+            }
+            WorkspaceTypeNode::Dict(item) => {
+                format!("Dict<{}>", self.display_with(*item, active))
             }
             WorkspaceTypeNode::Tagged { tag, payload } => {
                 format!("'{tag}({})", self.display_with(*payload, active))
@@ -1272,6 +1276,7 @@ fn merge_type_node(
         TypeNode::Bytes => WorkspaceTypeNode::Bytes,
         TypeNode::Atom(atom) => WorkspaceTypeNode::Atom(atom.name().into()),
         TypeNode::Array(child) => WorkspaceTypeNode::Array(map(*child, target, mapped)),
+        TypeNode::Dict(child) => WorkspaceTypeNode::Dict(map(*child, target, mapped)),
         TypeNode::Tagged { tag, payload } => WorkspaceTypeNode::Tagged {
             tag: tag.name().into(),
             payload: map(*payload, target, mapped),

@@ -118,9 +118,9 @@ or launcher syntax here, only explicit parameters, ordinary functions, and
 JSON-compatible data; the connection between the closed world and the effectful
 host stays narrow.
 
-The effect boundary is converging on a set of ordinary Forma types. Installation
-methods form an extensible enum, while `ExecEnv` contains only the final values
-consumed by the effect layer:
+The effect boundary can be expressed as a set of ordinary Forma types.
+Installation methods form an extensible enum, while `ExecEnv` contains only
+the final values consumed by the effect layer:
 
 ```forma
 @enum type UnpackType = {
@@ -149,10 +149,10 @@ consumed by the effect layer:
 };
 ```
 
-`Dict(String)` is the string-dictionary metadata type required by the target
-protocol and has not yet been added to TypeMetadata. The rest already uses the
-existing Struct, Enum, Array, and Option model. The protocol remains data; it
-adds no special installation statement or command-line rewriting syntax.
+`Dict(String)` describes dynamic keys whose values are all Strings, unlike a
+Struct with a fixed field set. The complete protocol uses existing
+TypeMetadata and remains ordinary data; it adds no special installation
+statement or command-line rewriting syntax.
 
 For example, a reproducible gcc launch plan can be written in full:
 

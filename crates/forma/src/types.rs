@@ -48,6 +48,7 @@ pub enum TypeNode {
     Bytes,
     Atom(Atom),
     Array(TypeId),
+    Dict(TypeId),
     Tagged {
         tag: Atom,
         payload: TypeId,
@@ -114,6 +115,7 @@ impl TypeGraph {
             TypeDescriptor::Bytes => TypeNode::Bytes,
             TypeDescriptor::Atom(atom) => TypeNode::Atom(atom.clone()),
             TypeDescriptor::Array(item) => TypeNode::Array(self.intern_descriptor(item)),
+            TypeDescriptor::Dict(item) => TypeNode::Dict(self.intern_descriptor(item)),
             TypeDescriptor::Tagged { tag, payload } => TypeNode::Tagged {
                 tag: tag.clone(),
                 payload: self.intern_descriptor(payload),
@@ -284,6 +286,15 @@ impl TypeGraph {
                 )?;
                 TypeNode::Array(item)
             }
+            "Dict" => {
+                require(&["item", "kind"])?;
+                let item = self.decode_persistent(
+                    value.dict_get("item").expect("field exists"),
+                    &format!("{path}.item"),
+                    links,
+                )?;
+                TypeNode::Dict(item)
+            }
             "Tagged" => {
                 require(&["kind", "payload", "tag"])?;
                 let tag = value
@@ -417,6 +428,7 @@ impl TypeGraph {
             TypeNode::Bytes => "Bytes".into(),
             TypeNode::Atom(atom) => format!("'{}", atom.name()),
             TypeNode::Array(item) => format!("Array<{}>", self.display_with(*item, active)),
+            TypeNode::Dict(item) => format!("Dict<{}>", self.display_with(*item, active)),
             TypeNode::Tagged { tag, payload } => {
                 format!("'{}({})", tag.name(), self.display_with(*payload, active))
             }
@@ -482,6 +494,10 @@ impl TypeGraph {
             (TypeNode::TypeOf(_), TypeNode::Type) => true,
             (TypeNode::TypeOf(a), TypeNode::TypeOf(e)) => self.assignable_with(*a, *e, visited),
             (TypeNode::Array(a), TypeNode::Array(e)) => self.assignable_with(*a, *e, visited),
+            (TypeNode::Dict(a), TypeNode::Dict(e)) => self.assignable_with(*a, *e, visited),
+            (TypeNode::Struct(fields), TypeNode::Dict(expected)) => fields
+                .values()
+                .all(|actual| self.assignable_with(*actual, *expected, visited)),
             (
                 TypeNode::Tagged {
                     tag: a_tag,
@@ -578,6 +594,7 @@ pub enum TypeDescriptor {
     Bytes,
     Atom(Atom),
     Array(Box<TypeDescriptor>),
+    Dict(Box<TypeDescriptor>),
     Tagged {
         tag: Atom,
         payload: Box<TypeDescriptor>,
@@ -614,6 +631,7 @@ impl TypeDescriptor {
             Self::Bytes => vec![kind_entry("Bytes")],
             Self::Atom(tag) => vec![kind_entry("Atom"), ("tag".into(), Value::Atom(tag.clone()))],
             Self::Array(item) => vec![kind_entry("Array"), ("item".into(), item.to_value(vm))],
+            Self::Dict(item) => vec![kind_entry("Dict"), ("item".into(), item.to_value(vm))],
             Self::Tagged { tag, payload } => vec![
                 kind_entry("Tagged"),
                 ("tag".into(), Value::Atom(tag.clone())),
@@ -708,6 +726,7 @@ impl TypeDescriptor {
             Self::Bytes => "Bytes".into(),
             Self::Atom(atom) => format!("'{}", atom.name()),
             Self::Array(item) => format!("Array<{}>", item.display_name()),
+            Self::Dict(item) => format!("Dict<{}>", item.display_name()),
             Self::Tagged { tag, payload } => {
                 format!("'{}({})", tag.name(), payload.display_name())
             }
@@ -1547,7 +1566,8 @@ pub(crate) fn analyze_program_with_bindings_observed(
                                             .or_else(|| provenance.values.get(&Vec::new()))
                                     })
                                     .cloned(),
-                                _ => Some(binding.value.value.location),
+                                _ => expression_location_at_path(&binding.value.value, &path)
+                                    .or(Some(binding.value.value.location)),
                             }
                             .unwrap_or(binding.location);
                             let rule_span = match &annotation.value {
@@ -2123,6 +2143,7 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
         NativeFunction::core_builtin_type(CoreBuiltinTypeFunction::Result),
         NativeFunction::new("Atom", 1, native_atom_type),
         NativeFunction::new("Array", 1, native_array_type),
+        NativeFunction::new("Dict", 1, native_dict_type),
         NativeFunction::new("TypeOf", 1, native_type_of_type),
         NativeFunction::new("Tagged", 2, native_tagged_type),
         NativeFunction::new("Tuple", 1, native_tuple_type),
@@ -2163,6 +2184,10 @@ fn core_static_prelude() -> HashMap<String, TypeDescriptor> {
     );
     prelude.insert(
         "Array".into(),
+        function(vec![metadata.clone()], metadata.clone()),
+    );
+    prelude.insert(
+        "Dict".into(),
         function(vec![metadata.clone()], metadata.clone()),
     );
     prelude.insert(
@@ -2231,6 +2256,13 @@ fn core_static_schemes() -> HashMap<String, TypeScheme> {
             scheme(function(
                 vec![witness(bound(0))],
                 witness(TypeDescriptor::Array(Box::new(bound(0)))),
+            )),
+        ),
+        (
+            "Dict".into(),
+            scheme(function(
+                vec![witness(bound(0))],
+                witness(TypeDescriptor::Dict(Box::new(bound(0)))),
             )),
         ),
         (
@@ -2338,6 +2370,15 @@ fn native_array_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeErro
         decode_native_type(value)?;
     }
     write_native_type_record(context, "Array", &[("item", item)])
+}
+
+fn native_dict_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+    let item = context.argument(0)?;
+    let value = context.value(item)?;
+    if !value.is_hidden_up_link() {
+        decode_native_type(value)?;
+    }
+    write_native_type_record(context, "Dict", &[("item", item)])
 }
 
 fn native_type_of_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
@@ -2542,6 +2583,13 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
                 .ok_or_else(|| format!("{path}.item is missing"))?;
             TypeDescriptor::Array(Box::new(decode_type_ref(item, &format!("{path}.item"))?))
         }
+        "Dict" => {
+            require(&["item", "kind"])?;
+            let item = value
+                .dict_get("item")
+                .ok_or_else(|| format!("{path}.item is missing"))?;
+            TypeDescriptor::Dict(Box::new(decode_type_ref(item, &format!("{path}.item"))?))
+        }
         "Tagged" => {
             require(&["kind", "payload", "tag"])?;
             let tag = value
@@ -2725,6 +2773,19 @@ fn validate_value_ref(
             }
             Ok(())
         }
+        TypeDescriptor::Dict(item) => {
+            let Some(names) = value.dict_fields() else {
+                return Err(format!("{path} must be a Dict"));
+            };
+            for name in names {
+                validate_value_ref(
+                    item,
+                    value.dict_get(name).expect("Dict field exists"),
+                    &format!("{path}.{name}"),
+                )?;
+            }
+            Ok(())
+        }
         TypeDescriptor::Tagged { tag, payload } => {
             let Some((actual_tag, actual_payload)) = value.tagged_parts() else {
                 return Err(format!("{path} must be a Tagged value"));
@@ -2887,6 +2948,13 @@ fn decode_type(value: &Value, path: &str) -> Result<TypeDescriptor, String> {
         "Array" => {
             require_fields(metadata, path, &["item", "kind"])?;
             TypeDescriptor::Array(Box::new(decode_type(
+                metadata.get("item").expect("required field"),
+                &format!("{path}.item"),
+            )?))
+        }
+        "Dict" => {
+            require_fields(metadata, path, &["item", "kind"])?;
+            TypeDescriptor::Dict(Box::new(decode_type(
                 metadata.get("item").expect("required field"),
                 &format!("{path}.item"),
             )?))
@@ -3091,6 +3159,9 @@ impl<'a> GenericInference<'a> {
             TypeDescriptor::Array(item) => {
                 TypeDescriptor::Array(Box::new(self.instantiate_with(item, variables)))
             }
+            TypeDescriptor::Dict(item) => {
+                TypeDescriptor::Dict(Box::new(self.instantiate_with(item, variables)))
+            }
             TypeDescriptor::TypeOf(instance) => {
                 TypeDescriptor::TypeOf(Box::new(self.instantiate_with(instance, variables)))
             }
@@ -3147,6 +3218,7 @@ impl<'a> GenericInference<'a> {
                 .get(variable)
                 .map_or_else(|| ty.clone(), |ty| self.resolve(ty)),
             TypeDescriptor::Array(item) => TypeDescriptor::Array(Box::new(self.resolve(item))),
+            TypeDescriptor::Dict(item) => TypeDescriptor::Dict(Box::new(self.resolve(item))),
             TypeDescriptor::TypeOf(instance) => {
                 TypeDescriptor::TypeOf(Box::new(self.resolve(instance)))
             }
@@ -3197,6 +3269,7 @@ impl<'a> GenericInference<'a> {
         match self.resolve(ty) {
             TypeDescriptor::Inference(candidate) => candidate == variable,
             TypeDescriptor::Array(item) => self.occurs(variable, &item),
+            TypeDescriptor::Dict(item) => self.occurs(variable, &item),
             TypeDescriptor::TypeOf(instance) => self.occurs(variable, &instance),
             TypeDescriptor::Tagged { payload, .. } => self.occurs(variable, &payload),
             TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
@@ -3225,6 +3298,22 @@ impl<'a> GenericInference<'a> {
         }
         let left = self.resolve(left);
         let right = self.resolve(right);
+        if let (TypeDescriptor::Struct(fields), TypeDescriptor::Dict(item)) = (&left, &right) {
+            for field in fields.values() {
+                self.unify(field, item)?;
+            }
+            return Ok(());
+        }
+        if matches!(
+            (&left, &right),
+            (TypeDescriptor::Dict(_), TypeDescriptor::Struct(_))
+        ) {
+            return Err(format!(
+                "cannot unify {} with {}",
+                left.display_name(),
+                right.display_name()
+            ));
+        }
         if !contains_type_variable(&left)
             && !contains_type_variable(&right)
             && (assignable(&left, &right) || assignable(&right, &left))
@@ -3251,6 +3340,7 @@ impl<'a> GenericInference<'a> {
                 self.unify(left, right)
             }
             (TypeDescriptor::Array(left), TypeDescriptor::Array(right)) => self.unify(left, right),
+            (TypeDescriptor::Dict(left), TypeDescriptor::Dict(right)) => self.unify(left, right),
             (
                 TypeDescriptor::Tagged {
                     tag: left_tag,
@@ -3355,7 +3445,9 @@ impl<'a> GenericInference<'a> {
             TypeDescriptor::Inference(variable) => {
                 self.substitutions.insert(variable, TypeDescriptor::Any);
             }
-            TypeDescriptor::Array(item) | TypeDescriptor::TypeOf(item) => {
+            TypeDescriptor::Array(item)
+            | TypeDescriptor::Dict(item)
+            | TypeDescriptor::TypeOf(item) => {
                 self.default_inference_variables_to_any(&item);
             }
             TypeDescriptor::Tagged { payload, .. } => {
@@ -3465,27 +3557,37 @@ impl<'a> GenericInference<'a> {
                     }
                     metadata_expected
                 } else {
-                    let expected_fields = match expected.map(|ty| self.resolve(ty)) {
-                        Some(TypeDescriptor::Struct(fields)) => fields,
-                        _ => BTreeMap::new(),
-                    };
-                    TypeDescriptor::Struct(
-                        fields
-                            .iter()
-                            .map(|field| {
-                                let name = field.value.name.value.clone();
-                                Ok((
-                                    name.clone(),
-                                    self.infer(
-                                        &field.value.value,
-                                        environment,
-                                        expected_fields.get(&name),
-                                    )
-                                    .map_err(|message| format!("field {name}: {message}"))?,
-                                ))
-                            })
-                            .collect::<Result<_, String>>()?,
-                    )
+                    if let Some(TypeDescriptor::Dict(item)) = expected.map(|ty| self.resolve(ty)) {
+                        for field in fields {
+                            self.infer(&field.value.value, environment, Some(&item))
+                                .map_err(|message| {
+                                    format!("field {}: {message}", field.value.name.value)
+                                })?;
+                        }
+                        TypeDescriptor::Dict(item)
+                    } else {
+                        let expected_fields = match expected.map(|ty| self.resolve(ty)) {
+                            Some(TypeDescriptor::Struct(fields)) => fields,
+                            _ => BTreeMap::new(),
+                        };
+                        TypeDescriptor::Struct(
+                            fields
+                                .iter()
+                                .map(|field| {
+                                    let name = field.value.name.value.clone();
+                                    Ok((
+                                        name.clone(),
+                                        self.infer(
+                                            &field.value.value,
+                                            environment,
+                                            expected_fields.get(&name),
+                                        )
+                                        .map_err(|message| format!("field {name}: {message}"))?,
+                                    ))
+                                })
+                                .collect::<Result<_, String>>()?,
+                        )
+                    }
                 }
             }
             ExprKind::Unary { operand, .. } => self.infer(operand, environment, expected)?,
@@ -3725,6 +3827,7 @@ fn contains_type_variable(ty: &TypeDescriptor) -> bool {
         TypeDescriptor::Inference(_) => true,
         TypeDescriptor::Bound(_) => false,
         TypeDescriptor::Array(item) => contains_type_variable(item),
+        TypeDescriptor::Dict(item) => contains_type_variable(item),
         TypeDescriptor::TypeOf(instance) => contains_type_variable(instance),
         TypeDescriptor::Tagged { payload, .. } => contains_type_variable(payload),
         TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
@@ -3747,6 +3850,7 @@ fn contains_metatype(ty: &TypeDescriptor) -> bool {
         TypeDescriptor::Type => true,
         TypeDescriptor::TypeOf(instance) => contains_metatype(instance),
         TypeDescriptor::Array(item) => contains_metatype(item),
+        TypeDescriptor::Dict(item) => contains_metatype(item),
         TypeDescriptor::Tagged { payload, .. } => contains_metatype(payload),
         TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
             items.iter().any(contains_metatype)
@@ -4032,6 +4136,7 @@ fn interpolation_type_supported(descriptor: &TypeDescriptor) -> bool {
         | TypeDescriptor::TypeOf(_)
         | TypeDescriptor::Bytes
         | TypeDescriptor::Array(_)
+        | TypeDescriptor::Dict(_)
         | TypeDescriptor::Tagged { .. }
         | TypeDescriptor::Tuple(_)
         | TypeDescriptor::Struct(_)
@@ -4127,6 +4232,7 @@ fn erase_type_variables(descriptor: &TypeDescriptor) -> TypeDescriptor {
     match descriptor {
         TypeDescriptor::Bound(_) | TypeDescriptor::Inference(_) => TypeDescriptor::Any,
         TypeDescriptor::Array(item) => TypeDescriptor::Array(Box::new(erase_type_variables(item))),
+        TypeDescriptor::Dict(item) => TypeDescriptor::Dict(Box::new(erase_type_variables(item))),
         TypeDescriptor::TypeOf(instance) => {
             TypeDescriptor::TypeOf(Box::new(erase_type_variables(instance)))
         }
@@ -4171,6 +4277,7 @@ fn erase_type_witnesses(descriptor: &TypeDescriptor) -> TypeDescriptor {
     match descriptor {
         TypeDescriptor::TypeOf(_) => TypeDescriptor::Type,
         TypeDescriptor::Array(item) => TypeDescriptor::Array(Box::new(erase_type_witnesses(item))),
+        TypeDescriptor::Dict(item) => TypeDescriptor::Dict(Box::new(erase_type_witnesses(item))),
         TypeDescriptor::Tagged { tag, payload } => TypeDescriptor::Tagged {
             tag: tag.clone(),
             payload: Box::new(erase_type_witnesses(payload)),
@@ -4259,6 +4366,12 @@ fn assignable(actual: &TypeDescriptor, expected: &TypeDescriptor) -> bool {
         }
         (TypeDescriptor::Array(actual), TypeDescriptor::Array(expected)) => {
             assignable(actual, expected)
+        }
+        (TypeDescriptor::Dict(actual), TypeDescriptor::Dict(expected)) => {
+            assignable(actual, expected)
+        }
+        (TypeDescriptor::Struct(actual), TypeDescriptor::Dict(expected)) => {
+            actual.values().all(|actual| assignable(actual, expected))
         }
         (
             TypeDescriptor::Tagged {
@@ -4370,6 +4483,19 @@ fn incompatibility_path(actual: &TypeDescriptor, expected: &TypeDescriptor) -> O
             (TypeDescriptor::Array(actual), TypeDescriptor::Array(expected)) => {
                 visit(actual, expected, path)
             }
+            (TypeDescriptor::Dict(actual), TypeDescriptor::Dict(expected)) => {
+                visit(actual, expected, path)
+            }
+            (TypeDescriptor::Struct(actual), TypeDescriptor::Dict(expected)) => {
+                for (name, actual) in actual {
+                    path.push(ValuePathSegment::Key(name.clone()));
+                    if visit(actual, expected, path) {
+                        return true;
+                    }
+                    path.pop();
+                }
+                false
+            }
             (
                 TypeDescriptor::Tagged {
                     tag: actual_tag,
@@ -4385,6 +4511,25 @@ fn incompatibility_path(actual: &TypeDescriptor, expected: &TypeDescriptor) -> O
     }
     let mut path = Vec::new();
     visit(actual, expected, &mut path).then_some(path)
+}
+
+fn expression_location_at_path(
+    expression: &Expr,
+    path: &[ValuePathSegment],
+) -> Option<crate::Location> {
+    let mut expression = expression;
+    for segment in path {
+        expression = match (segment, &expression.value) {
+            (ValuePathSegment::Key(name), ExprKind::Dict(fields)) => fields
+                .iter()
+                .find(|field| field.value.name.value == *name)
+                .map(|field| &field.value.value)?,
+            (ValuePathSegment::Index(index), ExprKind::Array(items))
+            | (ValuePathSegment::Index(index), ExprKind::Tuple(items)) => items.get(*index)?,
+            _ => return None,
+        };
+    }
+    Some(expression.location)
 }
 
 fn atom_from_name(name: &str) -> Atom {

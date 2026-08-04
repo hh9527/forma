@@ -3550,6 +3550,7 @@ enum CodecKind {
     Bytes,
     Atom(String),
     Array(Box<CodecType>),
+    Dict(Box<CodecType>),
     Tagged {
         tag: String,
         payload: Box<CodecType>,
@@ -3914,7 +3915,9 @@ fn assert_codec_graph_ready(
                     .map_err(CodecGraphError::Invalid)?;
                 visit(&resolved, current, background, visited)
             }
-            CodecKind::Array(item) => visit(item, current, background, visited),
+            CodecKind::Array(item) | CodecKind::Dict(item) => {
+                visit(item, current, background, visited)
+            }
             CodecKind::Tagged { payload, .. } => visit(payload, current, background, visited),
             CodecKind::Tuple(items) | CodecKind::Union(items) => items
                 .iter()
@@ -4022,6 +4025,18 @@ fn decode_runtime_type_at(
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| format!("{path}.item is missing"))?;
             CodecKind::Array(Box::new(decode_runtime_type_at(
+                item,
+                &format!("{path}.item"),
+                current,
+                background,
+            )?))
+        }
+        "Dict" => {
+            let item = view
+                .dict_get_text(handle, "item")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("{path}.item is missing"))?;
+            CodecKind::Dict(Box::new(decode_runtime_type_at(
                 item,
                 &format!("{path}.item"),
                 current,
@@ -4352,6 +4367,39 @@ fn transform_codec(
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map(|items| CodecNode::Array(items, value.loc))
+        }
+        CodecKind::Dict(item) => {
+            let RuntimeValue::Dict(handle) = value.value else {
+                return Err(CodecFailure::new(
+                    format!("{path}: expected Dict"),
+                    value,
+                    schema.rule,
+                ));
+            };
+            let (names, values) = view
+                .dict_parts(handle)
+                .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?;
+            names
+                .iter()
+                .zip(values)
+                .map(|(name, item_value)| {
+                    let name = view
+                        .text(*name)
+                        .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?
+                        .to_owned();
+                    let node = transform_codec(
+                        item,
+                        *item_value,
+                        direction,
+                        &format!("{path}.{name}"),
+                        predicate_decisions,
+                        current,
+                        background,
+                    )?;
+                    Ok((name, node))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(|fields| CodecNode::Dict(fields, value.loc))
         }
         CodecKind::Tagged { tag, payload } => {
             let RuntimeValue::Tagged(handle) = value.value else {
@@ -5713,6 +5761,16 @@ fn generate_json_schema_node(
             ],
             loc,
         )),
+        CodecKind::Dict(item) => Ok(schema_dict(
+            vec![
+                ("type", schema_string("object", loc)),
+                (
+                    "additionalProperties",
+                    generate_json_schema_node(item, data, current, background, links, definitions)?,
+                ),
+            ],
+            loc,
+        )),
         CodecKind::Tagged { payload, .. } => {
             generate_json_schema_node(payload, data, current, background, links, definitions)
         }
@@ -5948,6 +6006,7 @@ fn codec_type_name(schema: &CodecType) -> &'static str {
         CodecKind::Bytes => "Bytes",
         CodecKind::Atom(_) => "Atom",
         CodecKind::Array(_) => "Array",
+        CodecKind::Dict(_) => "Dict",
         CodecKind::Tagged { .. } => "Tagged",
         CodecKind::Tuple(_) => "Tuple",
         CodecKind::Struct(_) => "Struct",
