@@ -81,3 +81,11 @@ semantics from an earlier RFC.
 60. Rename XL to Forma.
 61. Homogeneous Dict TypeMetadata.
 62. Typed executable effect protocol.
+63. Deterministic standard-library foundations.
+64. Homogeneous Dict combinators.
+65. TOML static data modules.
+66. Shared static-data publication pipeline.
+67. Conservative YAML static data modules.
+68. String literals and concat expressions.
+69. Deterministic output plans.
+70. Never and directional checking.
