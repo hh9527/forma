@@ -1,6 +1,6 @@
 # RFC 0072: Self-constrained closure inference
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0052, RFC 0070, RFC 0071
 
 ## Summary
@@ -19,16 +19,17 @@ infers:
 increment: Fn(Int) -> Int
 ```
 
-If the body does not provide enough evidence, the closure reports an explicit
-underconstrained-inference diagnostic:
+If the body does not provide enough evidence, this staged RFC retains the
+existing conservative fallback:
 
 ```forma
-let identity = fn(value) { value }; # cannot infer value
+let identity = fn(value) { value }; # Fn(Any) -> Any until RFC 0073
 ```
 
 Inferring that identity from a later call is intentionally deferred to RFC
 0073. This RFC keeps every fresh closure variable local to one closure
-expression and never generalizes it.
+expression, never generalizes it, and erases only the variables that remain
+unresolved when the closure completes.
 
 ## Motivation
 
@@ -59,8 +60,8 @@ a weaker function type than the checker can justify.
    the closure result;
 4. preserve relationships between multiple parameters and the result;
 5. resolve the complete closure type before it leaves the closure expression;
-6. report a focused diagnostic when any closure-local variable remains
-   unresolved;
+6. preserve the existing `Any` fallback only for closure-local variables that
+   remain unresolved, pending RFC 0073;
 7. keep every inferred closure monomorphic;
 8. preserve existing expected-type closure checking unchanged;
 9. publish resolved expression facts for parameters, body expressions, and the
@@ -101,7 +102,8 @@ body => ?R or a concrete result
 
 These variables are ordinary inference obligations owned by the current
 checker invocation, but their resolution boundary is the closure expression.
-They are not source-level type parameters and cannot escape as `Any`.
+They are not source-level type parameters and cannot escape unresolved; each is
+either solved concretely or receives the explicit transitional `Any` fallback.
 
 ## Evidence from the body
 
@@ -139,9 +141,9 @@ Both parameters become `Int`.
 RFC 0070 still applies: an actual `Never` expression satisfies an expectation
 but supplies no parameter evidence.
 
-## Underconstrained closures
+## Transitional unresolved closures
 
-The closure boundary rejects any remaining variable:
+The closure boundary cannot yet retain a remaining variable:
 
 ```forma
 fn(value) { value }
@@ -153,9 +155,10 @@ has the unresolved shape:
 Fn(?A) -> ?A
 ```
 
-This RFC does not turn that into `Fn(Any) -> Any`, `for(A) Fn(A) -> A`, or
-`Fn(Never) -> Never`. It reports a diagnostic identifying the unresolved
-parameter and closure.
+This RFC does not generalize that shape or confuse it with `Never`. Until RFC
+0073 introduces a block-lived obligation, it retains the previous
+`Fn(Any) -> Any` result. This is an explicit staging rule rather than evidence
+that the source requested a dynamic boundary.
 
 Likewise:
 
@@ -163,9 +166,9 @@ Likewise:
 fn(value) { [value] }
 ```
 
-remains underconstrained even though its relationship
-`Fn(?A) -> Array(?A)` is known. RFC 0073 may retain that relationship through a
-local binding and solve it from later uses.
+temporarily becomes `Fn(Any) -> Array(Any)` even though its relationship
+`Fn(?A) -> Array(?A)` is known. RFC 0073 retains that relationship through a
+local binding and solves it from later uses.
 
 ## Monomorphism
 
@@ -196,18 +199,10 @@ Captures do not generalize either closure.
 
 ## Diagnostics
 
-An unresolved closure reports:
-
-```text
-cannot infer type of closure parameter `value`
-```
-
-The primary location is the parameter. The closure expression may be included
-as context. If several parameters remain unresolved, the checker reports them
-in source order or emits one deterministic combined diagnostic.
-
 Conflicting body evidence continues to use the smallest existing expression
-diagnostic, for example `cannot unify String with Int`.
+diagnostic, for example `cannot unify String with Int`. Merely unresolved
+closure-local evidence retains the transitional `Any` fallback and does not
+introduce a new diagnostic in this RFC.
 
 ## Semantic facts
 
@@ -227,8 +222,8 @@ variable as a completed fact.
    expected function type is available;
 3. infer the body with those variables in the closure environment;
 4. resolve parameter and result descriptors after body inference;
-5. reject closure-local variables that remain unresolved at the closure
-   boundary;
+5. default only closure-local variables that remain unresolved at the closure
+   boundary to `Any`;
 6. retain expected-contract closure behavior and rigid generic definition
    checking;
 7. add arithmetic, known-call, multiple-parameter, branch, nested closure,
@@ -244,8 +239,8 @@ variable as a completed fact.
 4. the inferred result preserves structural relationships after resolution;
 5. expected function contracts behave exactly as before;
 6. generic higher-order callbacks behave exactly as before;
-7. `fn(value) { value }` reports an underconstrained parameter;
-8. `fn(value) { [value] }` remains underconstrained in this RFC;
+7. `fn(value) { value }` retains `Fn(Any) -> Any` in this RFC;
+8. `fn(value) { [value] }` retains `Fn(Any) -> Array(Any)` in this RFC;
 9. conflicting body evidence reports a deterministic incompatibility;
 10. `Never` does not solve a closure parameter;
 11. inferred closures remain monomorphic and create no implicit scheme;
@@ -280,3 +275,35 @@ That requires block-lived obligations, delayed diagnostics, environment
 rewriting, and final fact publication. Keeping 0072 closure-local makes its
 ownership and completion boundary independently testable before RFC 0073.
 
+## Implementation result
+
+Unannotated closures now allocate fresh parameter variables and solve them from
+operators, known calls, generic relationships, nested closures, and structural
+body results. Closures whose bodies establish concrete evidence publish exact
+monomorphic types such as `Fn(Int) -> Int` and `Fn(String) -> Int`.
+
+Generic calls inside an unannotated closure may retain a result variable when
+it remains linked to an unresolved closure argument. That allowance is scoped
+to closure inference; an ordinary underconstrained call such as an all-empty
+generic `concat` continues to fail immediately.
+
+Branch joins no longer bind an external closure variable merely because one
+branch returns that variable and another returns a concrete type. After the
+transitional fallback, a Union containing `Any` normalizes to `Any`. This
+preserves existing dynamic decorator and callback behavior while avoiding
+order-dependent specialization.
+
+The initially proposed immediate error for unresolved closure-local variables
+was not implemented. A full workspace audit found 27 existing cases where a
+closure body expresses a valid monomorphic relationship that is concretized by
+a later call. Rejecting those programs between RFC 0072 and RFC 0073 would
+create a broad temporary regression. The implementation therefore preserves
+the old `Any` fallback for precisely those unresolved variables; RFC 0073 owns
+removing it through delayed block-local solving.
+
+Tests cover arithmetic, known String calls, multiple related parameters,
+nested closures, expected contracts, `Never`, conservative identity/singleton
+fallbacks, generic result relationships, and the existing runtime suite. The
+final workspace run passed 240 Forma tests with one manual parser benchmark
+ignored, 12 CLI tests, and 19 LSP tests. Strict Clippy, formatting, and
+whitespace validation pass.

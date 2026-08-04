@@ -3138,6 +3138,7 @@ struct GenericInference<'a> {
     local_annotations: &'a HashMap<crate::Location, TypeDescriptor>,
     query: Option<crate::query::QueryContext>,
     next_variable: u32,
+    closure_inference_depth: usize,
     substitutions: HashMap<InferenceVariableId, TypeDescriptor>,
     records: HashMap<crate::Location, TypeDescriptor>,
 }
@@ -3155,6 +3156,7 @@ impl<'a> GenericInference<'a> {
             local_annotations,
             query,
             next_variable: 0,
+            closure_inference_depth: 0,
             substitutions: HashMap::new(),
             records: HashMap::new(),
         }
@@ -3163,6 +3165,12 @@ impl<'a> GenericInference<'a> {
     fn instantiate(&mut self, scheme: &TypeScheme) -> TypeDescriptor {
         let mut variables = HashMap::new();
         self.instantiate_with(&scheme.body, &mut variables)
+    }
+
+    fn fresh_variable(&mut self) -> TypeDescriptor {
+        let variable = InferenceVariableId(self.next_variable);
+        self.next_variable += 1;
+        TypeDescriptor::Inference(variable)
     }
 
     fn instantiate_with(
@@ -3271,12 +3279,20 @@ impl<'a> GenericInference<'a> {
                     })
                     .collect(),
             ),
-            TypeDescriptor::Union(variants) => TypeDescriptor::Union(
-                variants
+            TypeDescriptor::Union(variants) => {
+                let variants = variants
                     .iter()
                     .map(|variant| self.resolve(variant))
-                    .collect(),
-            ),
+                    .collect::<Vec<_>>();
+                if variants
+                    .iter()
+                    .any(|variant| matches!(variant, TypeDescriptor::Any))
+                {
+                    TypeDescriptor::Any
+                } else {
+                    union_or_single(variants)
+                }
+            }
             TypeDescriptor::Function { parameters, result } => TypeDescriptor::Function {
                 parameters: parameters
                     .iter()
@@ -3770,9 +3786,12 @@ impl<'a> GenericInference<'a> {
                             ));
                         }
                         let mut partial_tagged_evidence = false;
+                        let mut unresolved_argument_evidence = false;
                         for (argument, parameter) in arguments.iter().zip(&parameters) {
                             let argument_type =
                                 self.infer(argument, environment, Some(parameter))?;
+                            unresolved_argument_evidence |=
+                                contains_type_variable(&self.resolve(&argument_type));
                             partial_tagged_evidence |= matches!(
                                 self.resolve(&argument_type),
                                 TypeDescriptor::Tagged { .. }
@@ -3798,7 +3817,9 @@ impl<'a> GenericInference<'a> {
                         } else {
                             result
                         };
-                        if contains_type_variable(&result) {
+                        if contains_type_variable(&result)
+                            && !(self.closure_inference_depth > 0 && unresolved_argument_evidence)
+                        {
                             return Err(format!(
                                 "cannot infer generic result type {}",
                                 result.display_name()
@@ -3828,16 +3849,28 @@ impl<'a> GenericInference<'a> {
                 let parameter_types = expected
                     .as_ref()
                     .map(|(parameters, _)| parameters.clone())
-                    .unwrap_or_else(|| vec![TypeDescriptor::Any; parameters.len()]);
+                    .unwrap_or_else(|| parameters.iter().map(|_| self.fresh_variable()).collect());
                 for (parameter, ty) in parameters.iter().zip(&parameter_types) {
                     closure_environment.insert(parameter.value.clone(), ty.clone());
                 }
                 let result_expected = expected.as_ref().map(|(_, result)| result.as_ref());
-                let result = self.infer_block(body, &closure_environment, result_expected)?;
-                TypeDescriptor::Function {
+                let inferring_unannotated = expected.is_none();
+                if inferring_unannotated {
+                    self.closure_inference_depth += 1;
+                }
+                let result = self.infer_block(body, &closure_environment, result_expected);
+                if inferring_unannotated {
+                    self.closure_inference_depth -= 1;
+                }
+                let result = result?;
+                let function = TypeDescriptor::Function {
                     parameters: parameter_types,
                     result: Box::new(result),
+                };
+                if expected.is_none() && contains_type_variable(&function) {
+                    self.default_inference_variables_to_any(&function);
                 }
+                self.resolve(&function)
             }
             ExprKind::Block(block) => self.infer_block(block, environment, expected)?,
             ExprKind::If {
@@ -3848,7 +3881,10 @@ impl<'a> GenericInference<'a> {
                 self.infer(condition, environment, None)?;
                 let then_type = self.infer_block(then_branch, environment, expected)?;
                 let else_type = self.infer_block(else_branch, environment, expected)?;
-                if self.try_unify(&then_type, &else_type) {
+                if !contains_type_variable(&then_type)
+                    && !contains_type_variable(&else_type)
+                    && self.try_unify(&then_type, &else_type)
+                {
                     self.resolve(&then_type)
                 } else {
                     union_or_single(vec![then_type, else_type])
@@ -3871,10 +3907,10 @@ impl<'a> GenericInference<'a> {
                 }
                 if let Some(first) = arm_types.first().cloned() {
                     let substitutions = self.substitutions.clone();
-                    let unified = arm_types
-                        .iter()
-                        .skip(1)
-                        .all(|arm| self.unify(&first, arm).is_ok());
+                    let unified = !contains_type_variable(&first)
+                        && arm_types.iter().skip(1).all(|arm| {
+                            !contains_type_variable(arm) && self.unify(&first, arm).is_ok()
+                        });
                     if unified {
                         self.resolve(&first)
                     } else {
@@ -4965,6 +5001,74 @@ mod tests {
         )
         .unwrap_err();
         assert!(conflict.message.contains("String") && conflict.message.contains("Int"));
+    }
+
+    #[test]
+    fn unannotated_closures_infer_parameters_from_their_bodies() {
+        let arithmetic =
+            analyze_with_natives("let increment = fn(value) { value + 1 }; increment", &[])
+                .unwrap();
+        assert_eq!(arithmetic.display(arithmetic.result_type), "Fn(Int) -> Int");
+
+        let known_call = analyze_with_natives(
+            "native length: Fn(String) -> Int;\
+             let measure = fn(value) { length(value) }; measure",
+            &[("length", 1)],
+        )
+        .unwrap();
+        assert_eq!(
+            known_call.display(known_call.result_type),
+            "Fn(String) -> Int"
+        );
+
+        let related = analyze_with_natives(
+            "let combine = fn(left, right) { left + right + 1 }; combine",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(related.display(related.result_type), "Fn(Int, Int) -> Int");
+    }
+
+    #[test]
+    fn closure_local_inference_keeps_conservative_fallbacks_until_delayed_solving() {
+        let identity =
+            analyze_with_natives("let identity = fn(value) { value }; identity", &[]).unwrap();
+        assert_eq!(identity.display(identity.result_type), "Fn(Any) -> Any");
+
+        let singleton =
+            analyze_with_natives("let singleton = fn(value) { [value] }; singleton", &[]).unwrap();
+        assert_eq!(
+            singleton.display(singleton.result_type),
+            "Fn(Any) -> Array<Any>"
+        );
+
+        let never = analyze_with_natives(
+            "native stop: Fn() -> Never;\
+             let discard = fn(value) { stop() }; discard",
+            &[("stop", 0)],
+        )
+        .unwrap();
+        assert_eq!(never.display(never.result_type), "Fn(Any) -> Never");
+
+        let expected = analyze_with_natives(
+            "def identity: Fn(Int) -> Int = fn(value) { value }; identity",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(expected.display(expected.result_type), "Fn(Int) -> Int");
+    }
+
+    #[test]
+    fn nested_closures_share_only_body_constraints() {
+        let analysis = analyze_with_natives(
+            "let nested = fn(left) { fn(right) { left + right + 1 } }; nested",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            analysis.display(analysis.result_type),
+            "Fn(Int) -> Fn(Int) -> Int"
+        );
     }
 
     #[test]
