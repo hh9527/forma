@@ -79,3 +79,4 @@ semantics from an earlier RFC.
 58. Executable value adapter.
 59. Crate-relative module resolution.
 60. Rename XL to Forma.
+61. Homogeneous Dict TypeMetadata.
