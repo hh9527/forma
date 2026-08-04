@@ -92,3 +92,4 @@ semantics from an earlier RFC.
 71. Constraint-preserving structural inference.
 72. Self-constrained closure inference.
 73. Delayed monomorphic local inference.
+74. Intrinsic expression type constraints.
