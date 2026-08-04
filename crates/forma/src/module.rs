@@ -1384,6 +1384,9 @@ fn expression_has_import(expression: &Expr) -> bool {
         ExprKind::Call { callee, arguments } => {
             expression_has_import(callee) || arguments.iter().any(expression_has_import)
         }
+        ExprKind::TypeApply { callee, arguments } => {
+            expression_has_import(callee) || arguments.iter().any(expression_has_import)
+        }
         ExprKind::Closure { body, .. } => {
             body.value
                 .bindings
@@ -2622,15 +2625,18 @@ unchanged", "|"),
         fs::write(
             directory.join("main.forma"),
             r#"import generic from "./identity.forma";
-               (generic.identity(1), generic.identity("x"))"#,
+               (generic.identity(1), generic.identity("x"), generic.identity[Int](2))"#,
         )
         .unwrap();
         let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(
             module.analysis.display(module.analysis.result_type),
-            "(Int, String)"
+            "(Int, String, Int)"
         );
-        assert_eq!(module.execute(100_000).unwrap().to_string(), "(1, \"x\")");
+        assert_eq!(
+            module.execute(100_000).unwrap().to_string(),
+            "(1, \"x\", 2)"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

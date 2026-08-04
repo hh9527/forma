@@ -1,6 +1,6 @@
 # RFC 0077: Explicit generic type application
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0049, RFC 0051, RFC 0052, RFC 0053, RFC 0076
 
 ## Summary
@@ -169,6 +169,26 @@ original binding. Type argument expressions retain their own `TypeOf(T)` facts.
 - explicit generic lambdas;
 - monomorphic recursive SCC inference;
 - bounded parameters and traits.
+
+## Implementation result
+
+Implemented in the RFC 0077 change set.
+
+The lossless grammar, AST, parser, HIR, and semantic traversals now retain a
+postfix `TypeApply` expression. Its callee is indexed and compiled as the
+ordinary runtime value; type arguments are indexed and evaluated only by the
+tool stage, so runtime captures, call registers, and arity remain unchanged.
+
+`GenericInference` resolves schemes only from local/core names or statically
+known module fields, requires a non-empty scheme and exact argument count, and
+substitutes evaluated descriptors by `TypeParameterId` without fresh inference
+variables. The resulting monomorphic descriptor enters ordinary call and
+expected-type checking.
+
+Tests cover empty generic results, identity and multiple parameters, computed
+metadata, invalid targets, counts and metadata, bytecode erasure, and imported
+generic members. The final workspace run passed 251 Forma tests with one manual
+parser benchmark ignored, 12 CLI tests, and 19 LSP tests.
 
 ## Rejected alternatives
 

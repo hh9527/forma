@@ -73,6 +73,9 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
     fn predicate_primary_2(&self) -> bool {
         self.peek(1) != Token::RBracket
     }
+    fn predicate_type_arguments_1(&self) -> bool {
+        self.peek(1) != Token::RBracket
+    }
     fn predicate_primary_3(&self) -> bool {
         let mut depth = 0usize;
         let mut lookahead = 1usize;

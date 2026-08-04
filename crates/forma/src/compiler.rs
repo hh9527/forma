@@ -873,6 +873,7 @@ impl<'a> Compiler<'a> {
                 );
                 Ok(base)
             }
+            ExprKind::TypeApply { callee, .. } => self.compile_expr(callee),
             ExprKind::Closure {
                 parameters, body, ..
             } => {
@@ -1475,6 +1476,7 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
                 free_expr(argument, bound, free);
             }
         }
+        ExprKind::TypeApply { callee, .. } => free_expr(callee, bound, free),
         ExprKind::Closure {
             parameters, body, ..
         } => {
@@ -1580,6 +1582,7 @@ fn collect_runtime_names(expression: &Expr, names: &mut HashSet<String>) {
                 collect_runtime_names(argument, names);
             }
         }
+        ExprKind::TypeApply { callee, .. } => collect_runtime_names(callee, names),
         ExprKind::Closure { body, .. } => collect_runtime_names_block(body, names),
         ExprKind::If {
             condition,
@@ -1881,6 +1884,15 @@ let decorators = {
     #[test]
     fn executes_partially_annotated_closures_without_runtime_annotation_work() {
         let value = run("(fn(value: Int) -> Int { value + 1 })(41)").unwrap();
+        assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn erases_explicit_type_application_from_runtime_calls() {
+        let value = run("decl identity: for(A) Fn(A) -> A;\
+             def identity = fn(value) { value };\
+             identity[Int](42)")
+        .unwrap();
         assert!(matches!(value, Value::Int(42)));
     }
 

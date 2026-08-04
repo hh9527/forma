@@ -86,6 +86,10 @@ pub enum ExprKind {
         callee: Box<Expr>,
         arguments: Vec<Expr>,
     },
+    TypeApply {
+        callee: Box<Expr>,
+        arguments: Vec<Expr>,
+    },
     Closure {
         parameters: Vec<ClosureParameter>,
         result_annotation: Option<Box<Expr>>,

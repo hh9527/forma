@@ -2111,6 +2111,37 @@ fn collect_nested_annotation_types(
                 )?;
             }
         }
+        ExprKind::TypeApply { callee, arguments } => {
+            collect_nested_annotation_types(
+                source_name,
+                callee,
+                bindings,
+                account,
+                sources,
+                debug_sink,
+                annotations,
+            )?;
+            for argument in arguments {
+                let metadata = evaluate_tool_expression(
+                    source_name,
+                    argument,
+                    bindings,
+                    account,
+                    sources,
+                    debug_sink,
+                )?;
+                let descriptor = TypeDescriptor::from_value(&metadata).map_err(|message| {
+                    FrontendError::from_diagnostic(
+                        sources,
+                        Diagnostic::error(
+                            format!("type argument is invalid: {message}"),
+                            argument.location,
+                        ),
+                    )
+                })?;
+                annotations.insert(argument.location, descriptor);
+            }
+        }
         ExprKind::If {
             condition,
             then_branch,
@@ -3262,6 +3293,21 @@ impl<'a> GenericInference<'a> {
         self.instantiate_with(&scheme.body, &mut variables)
     }
 
+    fn explicit_scheme(&self, callee: &Expr) -> Option<TypeScheme> {
+        match &callee.value {
+            ExprKind::Variable(name) => self.schemes.get(&name.value).cloned(),
+            ExprKind::Field { receiver, field } => match &receiver.value {
+                ExprKind::Variable(module) => self
+                    .external_interfaces
+                    .get(&module.value)
+                    .and_then(|interface| interface.exports.get(&field.value))
+                    .cloned(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     fn fresh_variable(&mut self) -> TypeDescriptor {
         let variable = InferenceVariableId(self.next_variable);
         self.next_variable += 1;
@@ -3976,6 +4022,35 @@ impl<'a> GenericInference<'a> {
                     }
                 }
             }
+            ExprKind::TypeApply { callee, arguments } => {
+                let scheme = self.explicit_scheme(callee).ok_or_else(|| {
+                    "explicit type application requires a statically known generic binding"
+                        .to_owned()
+                })?;
+                if scheme.parameters.is_empty() {
+                    return Err("cannot apply type arguments to a monomorphic binding".into());
+                }
+                if scheme.parameters.len() != arguments.len() {
+                    return Err(format!(
+                        "type application expects {} arguments, found {}",
+                        scheme.parameters.len(),
+                        arguments.len()
+                    ));
+                }
+                self.infer(callee, environment, None)?;
+                let type_expected = TypeDescriptor::Type;
+                let mut replacements = HashMap::new();
+                for (parameter, argument) in scheme.parameters.iter().zip(arguments) {
+                    self.infer(argument, environment, Some(&type_expected))?;
+                    let descriptor = self
+                        .local_annotations
+                        .get(&argument.location)
+                        .cloned()
+                        .ok_or_else(|| "type argument metadata was not evaluated".to_owned())?;
+                    replacements.insert(parameter.id, descriptor);
+                }
+                substitute_bound_parameters(&scheme.body, &replacements)
+            }
             ExprKind::Closure {
                 parameters,
                 result_annotation,
@@ -4306,6 +4381,13 @@ fn infer_expr_with(
                 _ => TypeDescriptor::Any,
             }
         }
+        ExprKind::TypeApply { callee, arguments } => {
+            infer_expr_with(callee, environment, record);
+            for argument in arguments {
+                infer_expr_with(argument, environment, record);
+            }
+            TypeDescriptor::Any
+        }
         ExprKind::Call { callee, arguments } => {
             let callee = infer_expr_with(callee, environment, record);
             let argument_types = arguments
@@ -4416,6 +4498,12 @@ fn check_interpolations(
             check_interpolations(receiver, environment, sources)?;
         }
         ExprKind::Call { callee, arguments } => {
+            check_interpolations(callee, environment, sources)?;
+            for argument in arguments {
+                check_interpolations(argument, environment, sources)?;
+            }
+        }
+        ExprKind::TypeApply { callee, arguments } => {
             check_interpolations(callee, environment, sources)?;
             for argument in arguments {
                 check_interpolations(argument, environment, sources)?;
@@ -4599,6 +4687,75 @@ fn common_type(types: Vec<TypeDescriptor>) -> Option<TypeDescriptor> {
         Some(TypeDescriptor::Type)
     } else {
         None
+    }
+}
+
+fn substitute_bound_parameters(
+    descriptor: &TypeDescriptor,
+    replacements: &HashMap<TypeParameterId, TypeDescriptor>,
+) -> TypeDescriptor {
+    match descriptor {
+        TypeDescriptor::Bound(parameter) => replacements
+            .get(parameter)
+            .cloned()
+            .unwrap_or_else(|| descriptor.clone()),
+        TypeDescriptor::Array(item) => {
+            TypeDescriptor::Array(Box::new(substitute_bound_parameters(item, replacements)))
+        }
+        TypeDescriptor::Dict(item) => {
+            TypeDescriptor::Dict(Box::new(substitute_bound_parameters(item, replacements)))
+        }
+        TypeDescriptor::TypeOf(item) => {
+            TypeDescriptor::TypeOf(Box::new(substitute_bound_parameters(item, replacements)))
+        }
+        TypeDescriptor::Tagged { tag, payload } => TypeDescriptor::Tagged {
+            tag: tag.clone(),
+            payload: Box::new(substitute_bound_parameters(payload, replacements)),
+        },
+        TypeDescriptor::Tuple(items) => TypeDescriptor::Tuple(
+            items
+                .iter()
+                .map(|item| substitute_bound_parameters(item, replacements))
+                .collect(),
+        ),
+        TypeDescriptor::Struct(fields) => TypeDescriptor::Struct(
+            fields
+                .iter()
+                .map(|(name, field)| {
+                    (
+                        name.clone(),
+                        substitute_bound_parameters(field, replacements),
+                    )
+                })
+                .collect(),
+        ),
+        TypeDescriptor::Enum(variants) => TypeDescriptor::Enum(
+            variants
+                .iter()
+                .map(|(name, payload)| {
+                    (
+                        name.clone(),
+                        payload.as_ref().map(|payload| {
+                            Box::new(substitute_bound_parameters(payload, replacements))
+                        }),
+                    )
+                })
+                .collect(),
+        ),
+        TypeDescriptor::Union(variants) => canonical_union(
+            variants
+                .iter()
+                .map(|variant| substitute_bound_parameters(variant, replacements))
+                .collect(),
+        ),
+        TypeDescriptor::Function { parameters, result } => TypeDescriptor::Function {
+            parameters: parameters
+                .iter()
+                .map(|parameter| substitute_bound_parameters(parameter, replacements))
+                .collect(),
+            result: Box::new(substitute_bound_parameters(result, replacements)),
+        },
+        _ => descriptor.clone(),
     }
 }
 
@@ -5475,6 +5632,60 @@ mod tests {
         let invalid =
             analyze_with_natives("let value = fn(item: 1) { item }; value", &[]).unwrap_err();
         assert!(invalid.message.contains("closure annotation is invalid"));
+    }
+
+    #[test]
+    fn explicit_type_application_instantiates_complete_generic_schemes() {
+        let empty = analyze_with_natives(
+            "native empty: for(A) Fn() -> Array(A); empty[Int]()",
+            &[("empty", 0)],
+        )
+        .unwrap();
+        assert_eq!(empty.display(empty.result_type), "Array<Int>");
+
+        let pair = analyze_with_natives(
+            "native pair: for(A, B) Fn(A, B) -> B;\
+             pair[Int, String](1, \"x\")",
+            &[("pair", 2)],
+        )
+        .unwrap();
+        assert_eq!(pair.display(pair.result_type), "String");
+
+        let computed = analyze_with_natives(
+            "native identity: for(A) Fn(A) -> A;\
+             identity[Array(Int)]([1, 2])",
+            &[("identity", 1)],
+        )
+        .unwrap();
+        assert_eq!(computed.display(computed.result_type), "Array<Int>");
+    }
+
+    #[test]
+    fn explicit_type_application_rejects_bad_targets_counts_and_values() {
+        for (source, expected) in [
+            (
+                "native pair: for(A, B) Fn(A, B) -> A; pair[Int](1, 2)",
+                "expects 2 arguments, found 1",
+            ),
+            (
+                "native identity: for(A) Fn(A) -> A; identity[Int, String](1)",
+                "expects 1 arguments, found 2",
+            ),
+            (
+                "let identity = fn(value: Int) { value }; identity[Int](1)",
+                "statically known generic binding",
+            ),
+        ] {
+            let error = analyze_with_natives(source, &[("pair", 2), ("identity", 1)]).unwrap_err();
+            assert!(error.message.contains(expected), "{}", error.message);
+        }
+
+        let invalid = analyze_with_natives(
+            "native identity: for(A) Fn(A) -> A; identity[1](1)",
+            &[("identity", 1)],
+        )
+        .unwrap_err();
+        assert!(invalid.message.contains("type argument is invalid"));
     }
 
     #[test]

@@ -456,6 +456,13 @@ impl Resolver {
                 }
                 None
             }
+            ExprKind::TypeApply { callee, arguments } => {
+                self.index_expr(callee, scopes);
+                for argument in arguments {
+                    self.index_expr(argument, scopes);
+                }
+                None
+            }
             ExprKind::Closure {
                 parameters,
                 result_annotation,

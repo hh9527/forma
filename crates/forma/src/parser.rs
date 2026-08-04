@@ -735,6 +735,20 @@ impl<'a> Lowerer<'a> {
                     arguments,
                 }
             }
+            Rule::TypeApplyExpr => {
+                let callee_node = self
+                    .children(node)
+                    .find(|child| self.is_expression(*child))
+                    .ok_or_else(|| self.error(node, "type application has no callee"))?;
+                let arguments = rules
+                    .iter()
+                    .find(|child| self.rule(**child) == Some(Rule::TypeArguments))
+                    .map_or(Ok(Vec::new()), |args| self.expression_children(*args))?;
+                ExprKind::TypeApply {
+                    callee: Box::new(self.expression(callee_node)?),
+                    arguments,
+                }
+            }
             Rule::SectionExpr => {
                 let callee_node = self
                     .children(node)
@@ -1197,6 +1211,7 @@ impl<'a> Lowerer<'a> {
                     | Rule::PipelineExpr
                     | Rule::SectionExpr
                     | Rule::StringExpr
+                    | Rule::TypeApplyExpr
                     | Rule::UnaryExpr
                     | Rule::VariableExpr
             )
