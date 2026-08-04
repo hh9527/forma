@@ -6,8 +6,8 @@ use crate::lir::RegisterId;
 use crate::value::{
     BuiltinAtom, CoreArrayFunction, CoreAttributesFunction, CoreBuiltinTypeFunction,
     CoreCodecFunction, CoreDebugFunction, CoreDictFunction, CoreHashFunction, CoreJsonFunction,
-    CoreModelFunction, CoreResultFunction, Dict, NativeError, NativeKind, NativeLimit, Shape,
-    Value,
+    CoreModelFunction, CorePathFunction, CoreResultFunction, CoreStringFunction, Dict, NativeError,
+    NativeKind, NativeLimit, Shape, Value,
 };
 use crate::{Diagnostic, Origin, SourceDatabase};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -771,6 +771,20 @@ struct ArrayContinuation {
     next_index: usize,
     accumulator: Option<RichValue>,
     output: Vec<RichValue>,
+    return_target: ReturnTarget,
+    call_function: Arc<BytecodeFunction>,
+    call_pc: usize,
+    trace_frame: RuntimeFrame,
+}
+
+#[derive(Debug)]
+struct DictContinuation {
+    function: CoreDictFunction,
+    entries: Vec<(String, RichValue)>,
+    callback: RichValue,
+    next_index: usize,
+    accumulator: Option<RichValue>,
+    output: Vec<(String, RichValue)>,
     return_target: ReturnTarget,
     call_function: Arc<BytecodeFunction>,
     call_pc: usize,
@@ -2158,6 +2172,7 @@ fn drive_vm_action(
                                 call_pc,
                                 current,
                                 background,
+                                account,
                             )?,
                             NativeKind::CoreAttributes(function) => run_core_attributes(
                                 function,
@@ -2189,7 +2204,47 @@ fn drive_vm_action(
                                 background,
                                 account,
                             )?,
-                            NativeKind::CoreDict(function) => run_core_dict(
+                            NativeKind::CoreDict(function) => {
+                                if matches!(
+                                    function,
+                                    CoreDictFunction::MapValues
+                                        | CoreDictFunction::Filter
+                                        | CoreDictFunction::Fold
+                                ) {
+                                    start_dict_continuation(
+                                        function,
+                                        arguments,
+                                        return_target,
+                                        call_function,
+                                        call_pc,
+                                        current,
+                                        background,
+                                        account,
+                                    )?
+                                } else {
+                                    run_core_dict(
+                                        function,
+                                        &arguments,
+                                        return_target,
+                                        &call_function,
+                                        call_pc,
+                                        current,
+                                        background,
+                                        account,
+                                    )?
+                                }
+                            }
+                            NativeKind::CoreString(function) => run_core_string(
+                                function,
+                                &arguments,
+                                return_target,
+                                &call_function,
+                                call_pc,
+                                current,
+                                background,
+                                account,
+                            )?,
+                            NativeKind::CorePath(function) => run_core_path(
                                 function,
                                 &arguments,
                                 return_target,
@@ -2293,6 +2348,26 @@ impl NativeContinuation for ArrayContinuation {
     }
 }
 
+impl NativeContinuation for DictContinuation {
+    fn return_target(&self) -> &ReturnTarget {
+        &self.return_target
+    }
+
+    fn trace_frame(&self) -> &RuntimeFrame {
+        &self.trace_frame
+    }
+
+    fn resume(
+        self: Box<Self>,
+        value: RichValue,
+        current: &mut Heap,
+        background: &Heap,
+        account: &mut QuotaAccount,
+    ) -> Result<VmAction, RuntimeError> {
+        resume_dict_continuation(*self, value, current, background, account)
+    }
+}
+
 fn native_runtime_error(
     native: crate::NativeFunction,
     native_error: NativeError,
@@ -2311,6 +2386,7 @@ fn native_runtime_error(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_array_continuation(
     function: CoreArrayFunction,
     arguments: Vec<RichValue>,
@@ -2319,6 +2395,7 @@ fn start_array_continuation(
     call_pc: usize,
     current: &mut Heap,
     background: &Heap,
+    account: &mut QuotaAccount,
 ) -> Result<VmAction, RuntimeError> {
     let source = arguments[0];
     let RuntimeValue::Array(source_handle) = source.value else {
@@ -2361,6 +2438,46 @@ fn start_array_continuation(
         return Ok(VmAction::Return {
             value: RichValue::new(
                 RuntimeValue::Int(length),
+                instruction_location(&call_function, call_pc),
+            ),
+            return_target,
+        });
+    }
+    if function == CoreArrayFunction::Concat {
+        let arrays = view.sequence(source_handle, false).map_err(|heap_error| {
+            error(
+                RuntimeErrorKind::InvalidBytecode,
+                heap_error.to_string(),
+                &call_function,
+                call_pc,
+            )
+        })?;
+        let mut output = Vec::new();
+        for (index, array) in arrays.iter().copied().enumerate() {
+            let RuntimeValue::Array(handle) = array.value else {
+                return Err(error(
+                    RuntimeErrorKind::TypeMismatch,
+                    format!("@bim/std/array.concat item {index} must be an Array"),
+                    &call_function,
+                    call_pc,
+                ));
+            };
+            output.extend_from_slice(view.sequence(handle, false).map_err(|heap_error| {
+                error(
+                    RuntimeErrorKind::InvalidBytecode,
+                    heap_error.to_string(),
+                    &call_function,
+                    call_pc,
+                )
+            })?);
+        }
+        let bytes = logical_value_bytes(output.len()).map_err(|native_error| {
+            allocation_error(native_error.message, &call_function, call_pc)
+        })?;
+        charge_allocation(account, bytes, &call_function, call_pc)?;
+        return Ok(VmAction::Return {
+            value: RichValue::new(
+                RuntimeValue::Array(current.allocate(Object::Array(output.into()))),
                 instruction_location(&call_function, call_pc),
             ),
             return_target,
@@ -2435,7 +2552,9 @@ fn resume_array_continuation(
     account: &mut QuotaAccount,
 ) -> Result<VmAction, RuntimeError> {
     match continuation.function {
-        CoreArrayFunction::Length => unreachable!("length does not suspend"),
+        CoreArrayFunction::Length | CoreArrayFunction::Concat => {
+            unreachable!("non-callback array operation does not suspend")
+        }
         CoreArrayFunction::Map => {
             charge_array_output(&continuation, account, 1)?;
             continuation.output.push(value);
@@ -2491,6 +2610,68 @@ fn resume_array_continuation(
             continuation.output.extend(values);
         }
         CoreArrayFunction::Fold => continuation.accumulator = Some(value),
+        CoreArrayFunction::Any | CoreArrayFunction::All | CoreArrayFunction::Find => {
+            let matched = match value.value {
+                RuntimeValue::BuiltinAtom(BuiltinAtom::True) => true,
+                RuntimeValue::BuiltinAtom(BuiltinAtom::False) => false,
+                _ => {
+                    return Err(error(
+                        RuntimeErrorKind::TypeMismatch,
+                        format!(
+                            "{} predicate must return 'True or 'False",
+                            continuation.function.name()
+                        ),
+                        &continuation.call_function,
+                        continuation.call_pc,
+                    ));
+                }
+            };
+            if continuation.function == CoreArrayFunction::Any && matched {
+                return Ok(VmAction::Return {
+                    value: RichValue::new(
+                        RuntimeValue::BuiltinAtom(BuiltinAtom::True),
+                        instruction_location(&continuation.call_function, continuation.call_pc),
+                    ),
+                    return_target: continuation.return_target,
+                });
+            }
+            if continuation.function == CoreArrayFunction::All && !matched {
+                return Ok(VmAction::Return {
+                    value: RichValue::new(
+                        RuntimeValue::BuiltinAtom(BuiltinAtom::False),
+                        instruction_location(&continuation.call_function, continuation.call_pc),
+                    ),
+                    return_target: continuation.return_target,
+                });
+            }
+            if continuation.function == CoreArrayFunction::Find && matched {
+                let item = array_item(
+                    continuation.source,
+                    continuation.next_index - 1,
+                    current,
+                    background,
+                    &continuation.call_function,
+                    continuation.call_pc,
+                )?;
+                charge_array_output(&continuation, account, 2)?;
+                return Ok(VmAction::Return {
+                    value: RichValue::new(
+                        RuntimeValue::Tagged(current.allocate(Object::Tagged {
+                            tag: RichValue::new(
+                                RuntimeValue::BuiltinAtom(BuiltinAtom::Some),
+                                instruction_location(
+                                    &continuation.call_function,
+                                    continuation.call_pc,
+                                ),
+                            ),
+                            payload: item,
+                        })),
+                        instruction_location(&continuation.call_function, continuation.call_pc),
+                    ),
+                    return_target: continuation.return_target,
+                });
+            }
+        }
     }
     next_array_action(continuation, current, background)
 }
@@ -2519,15 +2700,31 @@ fn next_array_action(
         })?
         .len();
     if continuation.next_index >= length {
-        let value = if continuation.function == CoreArrayFunction::Fold {
-            continuation
+        let value = match continuation.function {
+            CoreArrayFunction::Fold => continuation
                 .accumulator
-                .expect("fold continuation has an accumulator")
-        } else {
-            RichValue::new(
-                RuntimeValue::Array(current.allocate(Object::Array(continuation.output.into()))),
+                .expect("fold continuation has an accumulator"),
+            CoreArrayFunction::Any => RichValue::new(
+                RuntimeValue::BuiltinAtom(BuiltinAtom::False),
                 instruction_location(&continuation.call_function, continuation.call_pc),
-            )
+            ),
+            CoreArrayFunction::All => RichValue::new(
+                RuntimeValue::BuiltinAtom(BuiltinAtom::True),
+                instruction_location(&continuation.call_function, continuation.call_pc),
+            ),
+            CoreArrayFunction::Find => RichValue::new(
+                RuntimeValue::BuiltinAtom(BuiltinAtom::None),
+                instruction_location(&continuation.call_function, continuation.call_pc),
+            ),
+            CoreArrayFunction::Map | CoreArrayFunction::Filter | CoreArrayFunction::FlatMap => {
+                RichValue::new(
+                    RuntimeValue::Array(
+                        current.allocate(Object::Array(continuation.output.into())),
+                    ),
+                    instruction_location(&continuation.call_function, continuation.call_pc),
+                )
+            }
+            CoreArrayFunction::Length | CoreArrayFunction::Concat => unreachable!(),
         };
         return Ok(VmAction::Return {
             value,
@@ -2624,6 +2821,291 @@ fn charge_array_output(
 
 const fn core_array_name(function: CoreArrayFunction) -> &'static str {
     function.name()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_core_string(
+    operation: CoreStringFunction,
+    arguments: &[RichValue],
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let argument = |index: usize| -> Result<String, RuntimeError> {
+        let view = HeapView {
+            current,
+            background: Some(background),
+        };
+        view.string_text(arguments[index])
+            .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+            .map(str::to_owned)
+            .ok_or_else(|| runtime_type_error("String", &arguments[index], &view, function, pc))
+    };
+    let call_loc = instruction_location(function, pc);
+    let value = match operation {
+        CoreStringFunction::Length => {
+            let length = i64::try_from(argument(0)?.chars().count()).map_err(|_| {
+                error(
+                    RuntimeErrorKind::IntegerOverflow,
+                    "String length does not fit Int",
+                    function,
+                    pc,
+                )
+            })?;
+            RichValue::new(RuntimeValue::Int(length), call_loc)
+        }
+        CoreStringFunction::Join => {
+            let RuntimeValue::Array(handle) = arguments[0].value else {
+                let view = HeapView {
+                    current,
+                    background: Some(background),
+                };
+                return Err(runtime_type_error(
+                    "Array(String)",
+                    &arguments[0],
+                    &view,
+                    function,
+                    pc,
+                ));
+            };
+            let separator = argument(1)?;
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            let items = view
+                .sequence(handle, false)
+                .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?;
+            let mut strings = Vec::with_capacity(items.len());
+            for (index, item) in items.iter().copied().enumerate() {
+                let text = view
+                    .string_text(item)
+                    .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                    .ok_or_else(|| {
+                        error(
+                            RuntimeErrorKind::TypeMismatch,
+                            format!("{} item {index} must be a String", operation.name()),
+                            function,
+                            pc,
+                        )
+                    })?;
+                strings.push(text);
+            }
+            let output = strings.join(&separator);
+            charge_allocation(account, output.len() as u64, function, pc)?;
+            RichValue::new(current.string(Some(background), &output), call_loc)
+        }
+        CoreStringFunction::Split => {
+            let source = argument(0)?;
+            let separator = argument(1)?;
+            let pieces = source.split(&separator).collect::<Vec<_>>();
+            let text_bytes = pieces.iter().try_fold(0u64, |total, piece| {
+                total.checked_add(piece.len() as u64).ok_or_else(|| {
+                    allocation_error("String split allocation size overflowed", function, pc)
+                })
+            })?;
+            let slot_bytes = logical_value_bytes(pieces.len())
+                .map_err(|native_error| allocation_error(native_error.message, function, pc))?;
+            charge_allocation(
+                account,
+                text_bytes.checked_add(slot_bytes).ok_or_else(|| {
+                    allocation_error("String split allocation size overflowed", function, pc)
+                })?,
+                function,
+                pc,
+            )?;
+            let values = pieces
+                .into_iter()
+                .map(|piece| RichValue::new(current.string(Some(background), piece), call_loc))
+                .collect::<Box<[_]>>();
+            RichValue::new(
+                RuntimeValue::Array(current.allocate(Object::Array(values))),
+                call_loc,
+            )
+        }
+        CoreStringFunction::StartsWith
+        | CoreStringFunction::EndsWith
+        | CoreStringFunction::Contains => {
+            let source = argument(0)?;
+            let needle = argument(1)?;
+            let result = match operation {
+                CoreStringFunction::StartsWith => source.starts_with(&needle),
+                CoreStringFunction::EndsWith => source.ends_with(&needle),
+                CoreStringFunction::Contains => source.contains(&needle),
+                _ => unreachable!(),
+            };
+            RichValue::new(
+                RuntimeValue::BuiltinAtom(if result {
+                    BuiltinAtom::True
+                } else {
+                    BuiltinAtom::False
+                }),
+                call_loc,
+            )
+        }
+        CoreStringFunction::Replace => {
+            let output = argument(0)?.replace(&argument(1)?, &argument(2)?);
+            charge_allocation(account, output.len() as u64, function, pc)?;
+            RichValue::new(current.string(Some(background), &output), call_loc)
+        }
+    };
+    Ok(VmAction::Return {
+        value,
+        return_target,
+    })
+}
+
+fn normalize_lexical_path(path: &str) -> String {
+    let absolute = path.starts_with('/');
+    let mut components: Vec<&str> = Vec::new();
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." if components.last().is_some_and(|last| *last != "..") => {
+                components.pop();
+            }
+            ".." if !absolute => components.push(component),
+            ".." => {}
+            _ => components.push(component),
+        }
+    }
+    if absolute {
+        if components.is_empty() {
+            "/".into()
+        } else {
+            format!("/{}", components.join("/"))
+        }
+    } else if components.is_empty() {
+        ".".into()
+    } else {
+        components.join("/")
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_core_path(
+    operation: CorePathFunction,
+    arguments: &[RichValue],
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let call_loc = instruction_location(function, pc);
+    let input = if operation == CorePathFunction::Join {
+        let RuntimeValue::Array(handle) = arguments[0].value else {
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            return Err(runtime_type_error(
+                "Array(String)",
+                &arguments[0],
+                &view,
+                function,
+                pc,
+            ));
+        };
+        let view = HeapView {
+            current,
+            background: Some(background),
+        };
+        let items = view
+            .sequence(handle, false)
+            .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?;
+        let mut joined = String::new();
+        for (index, item) in items.iter().copied().enumerate() {
+            let part = view
+                .string_text(item)
+                .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                .ok_or_else(|| {
+                    error(
+                        RuntimeErrorKind::TypeMismatch,
+                        format!("{} item {index} must be a String", operation.name()),
+                        function,
+                        pc,
+                    )
+                })?;
+            if part.starts_with('/') {
+                joined.clear();
+                joined.push_str(part);
+            } else {
+                if !joined.is_empty() && !joined.ends_with('/') {
+                    joined.push('/');
+                }
+                joined.push_str(part);
+            }
+        }
+        joined
+    } else {
+        let view = HeapView {
+            current,
+            background: Some(background),
+        };
+        view.string_text(arguments[0])
+            .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+            .map(str::to_owned)
+            .ok_or_else(|| runtime_type_error("String", &arguments[0], &view, function, pc))?
+    };
+    let normalized = normalize_lexical_path(&input);
+    let result = match operation {
+        CorePathFunction::Join | CorePathFunction::Normalize => Some(normalized),
+        CorePathFunction::Parent => match normalized.as_str() {
+            "." | "/" => None,
+            value if value.starts_with('/') => value
+                .rfind('/')
+                .map(|index| if index == 0 { "/" } else { &value[..index] })
+                .map(str::to_owned),
+            value => Some(
+                value
+                    .rfind('/')
+                    .map_or(".", |index| &value[..index])
+                    .to_owned(),
+            ),
+        },
+        CorePathFunction::FileName => match normalized.as_str() {
+            "." | "/" | ".." => None,
+            value => Some(value.rsplit('/').next().expect("non-empty path").to_owned()),
+        },
+    };
+    let value = if matches!(
+        operation,
+        CorePathFunction::Parent | CorePathFunction::FileName
+    ) {
+        if let Some(result) = result {
+            let bytes = (result.len() as u64)
+                .checked_add(
+                    logical_value_bytes(2).map_err(|native_error| {
+                        allocation_error(native_error.message, function, pc)
+                    })?,
+                )
+                .ok_or_else(|| allocation_error("Path allocation size overflowed", function, pc))?;
+            charge_allocation(account, bytes, function, pc)?;
+            let payload = RichValue::new(current.string(Some(background), &result), call_loc);
+            RichValue::new(
+                RuntimeValue::Tagged(current.allocate(Object::Tagged {
+                    tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Some), call_loc),
+                    payload,
+                })),
+                call_loc,
+            )
+        } else {
+            RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::None), call_loc)
+        }
+    } else {
+        let result = result.expect("path String operation returns a value");
+        charge_allocation(account, result.len() as u64, function, pc)?;
+        RichValue::new(current.string(Some(background), &result), call_loc)
+    };
+    Ok(VmAction::Return {
+        value,
+        return_target,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2861,10 +3343,198 @@ fn run_core_dict(
             merged.extend_from_slice(&right[right_index..]);
             allocate_core_dict(merged, function, pc, current, account)?
         }
+        CoreDictFunction::MapValues | CoreDictFunction::Filter | CoreDictFunction::Fold => {
+            unreachable!("callback Dict operations use continuations")
+        }
     };
     Ok(VmAction::Return {
         value,
         return_target,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_dict_continuation(
+    function: CoreDictFunction,
+    arguments: Vec<RichValue>,
+    return_target: ReturnTarget,
+    call_function: Arc<BytecodeFunction>,
+    call_pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let entries = core_dict_entries(
+        arguments[0],
+        "Dict",
+        &call_function,
+        call_pc,
+        current,
+        background,
+    )?;
+    let callback_index = if function == CoreDictFunction::Fold {
+        2
+    } else {
+        1
+    };
+    let callback = arguments[callback_index];
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let RuntimeValue::Func(callback_handle) = callback.value else {
+        return Err(runtime_type_error(
+            "Func",
+            &callback,
+            &view,
+            &call_function,
+            call_pc,
+        ));
+    };
+    let expected_arity = if function == CoreDictFunction::Fold {
+        3
+    } else {
+        1
+    };
+    let actual_arity = view
+        .function_arity(callback_handle)
+        .map_err(|heap_error| core_dict_heap_error(heap_error, &call_function, call_pc))?;
+    if actual_arity != expected_arity {
+        return Err(error(
+            RuntimeErrorKind::TypeMismatch,
+            format!(
+                "{} callback must accept {expected_arity} arguments, got {actual_arity}",
+                function.name()
+            ),
+            &call_function,
+            call_pc,
+        ));
+    }
+    let accumulator = (function == CoreDictFunction::Fold).then_some(arguments[1]);
+    next_dict_action(
+        DictContinuation {
+            function,
+            entries,
+            callback,
+            next_index: 0,
+            accumulator,
+            output: Vec::new(),
+            return_target,
+            trace_frame: RuntimeFrame {
+                function: function.name().into(),
+                instruction: 0,
+                origin: call_function.origin_at(call_pc),
+            },
+            call_function,
+            call_pc,
+        },
+        current,
+        background,
+        account,
+    )
+}
+
+fn resume_dict_continuation(
+    mut continuation: DictContinuation,
+    value: RichValue,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let entry_index = continuation.next_index - 1;
+    match continuation.function {
+        CoreDictFunction::MapValues => {
+            let key = continuation.entries[entry_index].0.clone();
+            charge_core_dict_output(
+                1,
+                std::iter::once(key.len()),
+                &continuation.call_function,
+                continuation.call_pc,
+                account,
+            )?;
+            continuation.output.push((key, value));
+        }
+        CoreDictFunction::Filter => match value.value {
+            RuntimeValue::BuiltinAtom(BuiltinAtom::True) => {
+                charge_core_dict_output(
+                    1,
+                    std::iter::once(continuation.entries[entry_index].0.len()),
+                    &continuation.call_function,
+                    continuation.call_pc,
+                    account,
+                )?;
+                continuation
+                    .output
+                    .push(continuation.entries[entry_index].clone());
+            }
+            RuntimeValue::BuiltinAtom(BuiltinAtom::False) => {}
+            _ => {
+                return Err(error(
+                    RuntimeErrorKind::TypeMismatch,
+                    "@bim/std/dict.filter predicate must return 'True or 'False",
+                    &continuation.call_function,
+                    continuation.call_pc,
+                ));
+            }
+        },
+        CoreDictFunction::Fold => continuation.accumulator = Some(value),
+        _ => unreachable!("only callback Dict operations suspend"),
+    }
+    next_dict_action(continuation, current, background, account)
+}
+
+fn next_dict_action(
+    mut continuation: DictContinuation,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    if continuation.next_index >= continuation.entries.len() {
+        let value = if continuation.function == CoreDictFunction::Fold {
+            continuation
+                .accumulator
+                .expect("fold continuation has an accumulator")
+        } else {
+            allocate_core_dict_unchecked(
+                continuation.output,
+                current,
+                instruction_location(&continuation.call_function, continuation.call_pc),
+            )
+        };
+        return Ok(VmAction::Return {
+            value,
+            return_target: continuation.return_target,
+        });
+    }
+
+    let (key, value) = continuation.entries[continuation.next_index].clone();
+    continuation.next_index += 1;
+    let arguments = if continuation.function == CoreDictFunction::Fold {
+        charge_allocation(
+            account,
+            key.len() as u64,
+            &continuation.call_function,
+            continuation.call_pc,
+        )?;
+        vec![
+            continuation
+                .accumulator
+                .expect("fold continuation has an accumulator"),
+            RichValue::new(current.string(Some(background), &key), value.loc),
+            value,
+        ]
+    } else {
+        vec![value]
+    };
+    let callee = continuation.callback;
+    let call_function = Arc::clone(&continuation.call_function);
+    let call_pc = continuation.call_pc;
+    Ok(VmAction::Call {
+        callee,
+        arguments,
+        return_target: ReturnTarget::Native(Box::new(continuation)),
+        call_function,
+        call_pc,
     })
 }
 
@@ -2914,18 +3584,30 @@ fn allocate_core_dict(
         pc,
         account,
     )?;
+    Ok(allocate_core_dict_unchecked(
+        entries,
+        current,
+        instruction_location(function, pc),
+    ))
+}
+
+fn allocate_core_dict_unchecked(
+    entries: Vec<(String, RichValue)>,
+    current: &mut Heap,
+    loc: Option<crate::Loc>,
+) -> RichValue {
     let (fields, values): (Vec<_>, Vec<_>) = entries
         .into_iter()
         .map(|(field, value)| (current.intern(&field), value))
         .unzip();
     let shape = current.intern_shape(fields);
-    Ok(RichValue::new(
+    RichValue::new(
         RuntimeValue::Dict(current.allocate(Object::Dict {
             shape,
             values: values.into(),
         })),
-        instruction_location(function, pc),
-    ))
+        loc,
+    )
 }
 
 fn charge_core_dict_output(

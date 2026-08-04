@@ -1,6 +1,6 @@
 # RFC 0064: Homogeneous Dict combinators
 
-- Status: Accepted
+- Status: Implemented
 - Depends on: RFC 0053, RFC 0061, RFC 0063
 
 ## Summary
@@ -105,3 +105,22 @@ that currently share one runtime Dict representation.
 The `Dict(A)` argument already carries sufficient static evidence. A redundant
 runtime witness would complicate calls and incorrectly suggest that callbacks
 need runtime type inspection.
+
+## Implementation result
+
+The three contracts are exported from `@bim/std/dict` exactly as specified.
+Their VM implementations use a dedicated resumable continuation over the
+canonical Dict shape. `map_values` retains keys while transforming item types,
+`filter` retains both key and located value, and `fold` supplies each String key
+between the accumulator and typed value.
+
+Output entries are allocation-charged as callback results arrive and the final
+Dict is published only after successful completion. Fold key Strings share the
+same quota account. Callback failures include the native combinator frame, and
+non-Bool filter results remain explicit runtime errors when static knowledge is
+`Any`.
+
+Vertical tests observe `Dict<String>` and `Dict<Int>` result types, canonical
+order, empty behavior, nested callback execution, rigid predicate contracts,
+heterogeneous input rejection, and located callback traces. The five legacy
+heterogeneous operations and their existing tests are unchanged.

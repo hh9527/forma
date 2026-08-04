@@ -1,6 +1,6 @@
 # RFC 0063: Deterministic standard-library foundations
 
-- Status: Accepted
+- Status: Implemented
 - Depends on: RFC 0053, RFC 0062
 
 ## Summary
@@ -137,3 +137,22 @@ template rather than the final plan.
 Current generic schemes express these concrete operations. Traits and
 associated types should be justified by abstractions that ordinary modules
 cannot represent, not introduced as a prerequisite for a small useful library.
+
+## Implementation result
+
+`@bim/std/string` and `@bim/std/path` are registered as typed native-backed
+core modules, and `@bim/std/array` exports the four additional generic
+operations. String length counts Unicode scalar values; splitting, joining,
+matching, and replacement retain valid UTF-8. Path normalization is implemented
+as host-independent `/` component processing and never calls a filesystem API.
+
+`any`, `all`, and `find` reuse the VM's resumable native continuation protocol
+and stop before later callbacks once their answer is known. `concat` validates
+every nested Array and charges its complete output. Tests cover empty inputs,
+short-circuiting past failing expressions, non-ASCII Strings, absolute-root
+clamping, retained relative parents, absolute join restarts, and Option results.
+
+An existing inference boundary remains visible: a nested Array literal passed
+directly to a generic function may not independently infer its inner collection
+type. Giving the construction an ordinary `Array(Array(T))` annotation supplies
+that context; no `concat`-specific inference rule was added.

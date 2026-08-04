@@ -130,10 +130,14 @@ pub type NativeCallback = fn(&mut CallContext<'_, '_>) -> Result<(), NativeError
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CoreArrayFunction {
     Length,
+    Concat,
     Map,
     Filter,
     FlatMap,
     Fold,
+    Any,
+    All,
+    Find,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -143,6 +147,28 @@ pub(crate) enum CoreDictFunction {
     Pairs,
     FromPairs,
     Merge,
+    MapValues,
+    Filter,
+    Fold,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreStringFunction {
+    Length,
+    Join,
+    Split,
+    StartsWith,
+    EndsWith,
+    Contains,
+    Replace,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CorePathFunction {
+    Join,
+    Normalize,
+    Parent,
+    FileName,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -353,14 +379,55 @@ impl CoreDictFunction {
             Self::Pairs => "@bim/std/dict.pairs",
             Self::FromPairs => "@bim/std/dict.from_pairs",
             Self::Merge => "@bim/std/dict.merge",
+            Self::MapValues => "@bim/std/dict.map_values",
+            Self::Filter => "@bim/std/dict.filter",
+            Self::Fold => "@bim/std/dict.fold",
         }
     }
 
     pub(crate) const fn arity(self) -> usize {
         match self {
             Self::Keys | Self::Values | Self::Pairs | Self::FromPairs => 1,
-            Self::Merge => 2,
+            Self::Merge | Self::MapValues | Self::Filter => 2,
+            Self::Fold => 3,
         }
+    }
+}
+
+impl CoreStringFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Length => "@bim/std/string.length",
+            Self::Join => "@bim/std/string.join",
+            Self::Split => "@bim/std/string.split",
+            Self::StartsWith => "@bim/std/string.starts_with",
+            Self::EndsWith => "@bim/std/string.ends_with",
+            Self::Contains => "@bim/std/string.contains",
+            Self::Replace => "@bim/std/string.replace",
+        }
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        match self {
+            Self::Length => 1,
+            Self::Join | Self::Split | Self::StartsWith | Self::EndsWith | Self::Contains => 2,
+            Self::Replace => 3,
+        }
+    }
+}
+
+impl CorePathFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Join => "@bim/std/path.join",
+            Self::Normalize => "@bim/std/path.normalize",
+            Self::Parent => "@bim/std/path.parent",
+            Self::FileName => "@bim/std/path.file_name",
+        }
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        1
     }
 }
 
@@ -368,17 +435,21 @@ impl CoreArrayFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Length => "@bim/std/array.length",
+            Self::Concat => "@bim/std/array.concat",
             Self::Map => "@bim/std/array.map",
             Self::Filter => "@bim/std/array.filter",
             Self::FlatMap => "@bim/std/array.flat_map",
             Self::Fold => "@bim/std/array.fold",
+            Self::Any => "@bim/std/array.any",
+            Self::All => "@bim/std/array.all",
+            Self::Find => "@bim/std/array.find",
         }
     }
 
     pub(crate) const fn arity(self) -> usize {
         match self {
-            Self::Length => 1,
-            Self::Map | Self::Filter | Self::FlatMap => 2,
+            Self::Length | Self::Concat => 1,
+            Self::Map | Self::Filter | Self::FlatMap | Self::Any | Self::All | Self::Find => 2,
             Self::Fold => 3,
         }
     }
@@ -392,6 +463,8 @@ pub(crate) enum NativeKind {
     CoreModel(CoreModelFunction),
     CoreBuiltinType(CoreBuiltinTypeFunction),
     CoreDict(CoreDictFunction),
+    CoreString(CoreStringFunction),
+    CorePath(CorePathFunction),
     CoreDebug(CoreDebugFunction),
     CoreHash(CoreHashFunction),
     CoreCodec(CoreCodecFunction),
@@ -459,6 +532,24 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreDict(function),
+        }
+    }
+
+    pub(crate) const fn core_string(function: CoreStringFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreString(function),
+        }
+    }
+
+    pub(crate) const fn core_path(function: CorePathFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CorePath(function),
         }
     }
 

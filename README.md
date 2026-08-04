@@ -208,6 +208,13 @@ isolation. A future host only needs to consume the concrete plan and perform
 its effects. Build rules and Kubernetes reconciliation can use the same
 boundary: **pure functions produce plans; the host performs effects**.
 
+The standard library supports that pure side directly. Generic Array
+operations compose and short-circuit typed collections; String operations are
+UTF-8 safe; lexical path operations use deterministic `/` semantics rather
+than the host filesystem; and homogeneous Dict combinators preserve
+`Dict<T>` through value mapping and filtering. These are ordinary imported
+functions with explicit contracts, not launcher magic.
+
 **A conservative language server.** Hover information comes from the same
 metadata used by runtime validation. Completion does not invent structure
 through `Any`. Incomplete source can still provide navigation and diagnostics
@@ -238,7 +245,7 @@ Forma is experimental. Today it has no effect system, package acquisition
 beyond path dependencies, YAML/TOML parsers, traits, or type narrowing. Static
 inference explicitly reports when it does not know instead of guessing. These
 are deliberate boundaries: the project is testing the "types as metadata"
-hypothesis deeply before expanding its scope. Sixty-two RFCs record the tradeoffs
+hypothesis deeply before expanding its scope. Sixty-four RFCs record the tradeoffs
 at each step, including the rejected alternatives.
 
 The intended use cases follow from those boundaries: **expressing build rules,
@@ -259,7 +266,7 @@ cargo run -p forma-lsp -- --help
 ## Documentation
 
 - [VISION.md](VISION.md): design thesis
-- [rfc/](rfc/): sixty-two design documents, each with rejected alternatives and
+- [rfc/](rfc/): sixty-four design documents, each with rejected alternatives and
   acceptance criteria
 - [README.zh.md](README.zh.md): 中文
 

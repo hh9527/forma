@@ -2147,6 +2147,90 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_array_string_and_path_modules_cover_plan_composition() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import arrays from "@bim/std/array";
+               import paths from "@bim/std/path";
+               import strings from "@bim/std/string";
+               let nested: Array(Array(Int)) = [[1, 2], [], [3]];
+               {
+                   concat: arrays.concat(nested),
+                   any: arrays.any([1, 0], fn(value) {
+                       if 0 < value { 'True } else { value / 0 < 1 }
+                   }),
+                   all: arrays.all([0, 1], fn(value) {
+                       if value < 1 { 'False } else { value / 0 < 1 }
+                   }),
+                   found: arrays.find([1, 2, 3], fn(value) { 1 < value }),
+                   missing: arrays.find([1], fn(value) { value < 0 }),
+                   empty_any: arrays.any([], fn(value) { value / 0 < 1 }),
+                   empty_all: arrays.all([], fn(value) { value / 0 < 1 }),
+                   chars: strings.length("形态a"),
+                   joined: strings.join(["a", "形", "c"], ":"),
+                   split: strings.split("a::形", ":"),
+                   scalar_split: strings.split("a形", ""),
+                   starts: strings.starts_with("形态", "形"),
+                   ends: strings.ends_with("forma", "ma"),
+                   contains: strings.contains("forma", "orm"),
+                   replaced: strings.replace("a-b-a", "a", "xy"),
+                   normalized: paths.normalize("/a/./b/../../../../c"),
+                   relative: paths.normalize("../../a/../b"),
+                   joined_path: paths.join(["/tool", "bin", "../lib", "gcc"]),
+                   restarted: paths.join(["ignored", "/absolute", "file"]),
+                   parent: paths.parent("/a/b/../c"),
+                   root_parent: paths.parent("/"),
+                   file_name: paths.file_name("a/b/../c"),
+               }"#,
+        )
+        .unwrap();
+
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(result) = module.execute(100_000).unwrap() else {
+            panic!("expected Dict result")
+        };
+        assert_eq!(result.get("concat").unwrap().to_string(), "[1, 2, 3]");
+        assert_eq!(result.get("any").unwrap().to_string(), "'True");
+        assert_eq!(result.get("all").unwrap().to_string(), "'False");
+        assert_eq!(result.get("found").unwrap().to_string(), "'Some(2)");
+        assert_eq!(result.get("missing").unwrap().to_string(), "'None");
+        assert_eq!(result.get("empty_any").unwrap().to_string(), "'False");
+        assert_eq!(result.get("empty_all").unwrap().to_string(), "'True");
+        assert_eq!(result.get("chars").unwrap().to_string(), "3");
+        assert_eq!(result.get("joined").unwrap().to_string(), r#""a:形:c""#);
+        assert_eq!(
+            result.get("split").unwrap().to_string(),
+            r#"["a", "", "形"]"#
+        );
+        assert_eq!(
+            result.get("scalar_split").unwrap().to_string(),
+            r#"["", "a", "形", ""]"#
+        );
+        assert_eq!(result.get("starts").unwrap().to_string(), "'True");
+        assert_eq!(result.get("ends").unwrap().to_string(), "'True");
+        assert_eq!(result.get("contains").unwrap().to_string(), "'True");
+        assert_eq!(result.get("replaced").unwrap().to_string(), r#""xy-b-xy""#);
+        assert_eq!(result.get("normalized").unwrap().to_string(), r#""/c""#);
+        assert_eq!(result.get("relative").unwrap().to_string(), r#""../../b""#);
+        assert_eq!(
+            result.get("joined_path").unwrap().to_string(),
+            r#""/tool/lib/gcc""#
+        );
+        assert_eq!(
+            result.get("restarted").unwrap().to_string(),
+            r#""/absolute/file""#
+        );
+        assert_eq!(result.get("parent").unwrap().to_string(), r#"'Some("/a")"#);
+        assert_eq!(result.get("root_parent").unwrap().to_string(), "'None");
+        assert_eq!(
+            result.get("file_name").unwrap().to_string(),
+            r#"'Some("c")"#
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn homogeneous_dict_metadata_preserves_types_through_core_codecs_and_schema() {
         let directory = fixture_dir();
         let main = directory.join("main.forma");
@@ -2750,6 +2834,101 @@ mod tests {
         assert_eq!(result.get("empty_keys").unwrap().to_string(), "[]");
         assert_eq!(result.get("empty_pairs").unwrap().to_string(), "[]");
         assert_eq!(result.get("empty_from_pairs").unwrap().to_string(), "{}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn homogeneous_dict_combinators_preserve_types_and_canonical_order() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import dicts from "@bim/std/dict";
+               let source: Dict(Int) = {z: 3, a: 1, middle: 2};
+               let empty: Dict(Int) = {};
+               {
+                   mapped: dicts.map_values(source, fn(value) { "v\{value}" }),
+                   filtered: dicts.filter(source, fn(value) { 1 < value }),
+                   folded: dicts.fold(source, "", fn(total, key, value) {
+                       "\{total}\{key}=\{value};"
+                   }),
+                   empty_mapped: dicts.map_values(empty, fn(value) { "v\{value}" }),
+                   empty_filtered: dicts.filter(empty, fn(value) { 0 < value }),
+                   empty_folded: dicts.fold(empty, 42, fn(total, key, value) {
+                       total + value
+                   }),
+               }"#,
+        )
+        .unwrap();
+
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            module.analysis.display(module.analysis.result_type),
+            "{empty_filtered: Dict<Int>, empty_folded: Int, empty_mapped: Dict<String>, filtered: Dict<Int>, folded: String, mapped: Dict<String>}"
+        );
+        let Value::Dict(result) = module.execute(100_000).unwrap() else {
+            panic!("expected Dict result")
+        };
+        assert_eq!(
+            result.get("mapped").unwrap().to_string(),
+            r#"{a: "v1", middle: "v2", z: "v3"}"#
+        );
+        assert_eq!(
+            result.get("filtered").unwrap().to_string(),
+            "{middle: 2, z: 3}"
+        );
+        assert_eq!(
+            result.get("folded").unwrap().to_string(),
+            r#""a=1;middle=2;z=3;""#
+        );
+        assert_eq!(result.get("empty_mapped").unwrap().to_string(), "{}");
+        assert_eq!(result.get("empty_filtered").unwrap().to_string(), "{}");
+        assert_eq!(result.get("empty_folded").unwrap().to_string(), "42");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn homogeneous_dict_combinators_reject_invalid_contracts_and_trace_callbacks() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        fs::write(
+            &main,
+            r#"import dicts from "@bim/std/dict";
+               dicts.filter({a: 1}, fn(value) { value })"#,
+        )
+        .unwrap();
+        let error = load_module(&main, BTreeMap::new(), 100_000).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot unify Int with enum {False, True}")
+        );
+
+        fs::write(
+            &main,
+            r#"import dicts from "@bim/std/dict";
+               let mixed = {number: 1, text: "two"};
+               dicts.map_values(mixed, fn(value) { value })"#,
+        )
+        .unwrap();
+        let error = load_module(&main, BTreeMap::new(), 100_000).unwrap_err();
+        assert!(error.to_string().contains("cannot unify"));
+
+        fs::write(
+            &main,
+            r#"import dicts from "@bim/std/dict";
+               let source: Dict(Int) = {a: 1};
+               dicts.map_values(source, fn(value) { value / 0 })"#,
+        )
+        .unwrap();
+        let module = load_module(&main, BTreeMap::new(), 100_000).unwrap();
+        let error = module.execute(100_000).unwrap_err();
+        assert!(error.to_string().contains("main.forma:3:"));
+        assert!(
+            error
+                .trace
+                .iter()
+                .any(|frame| frame.function == "@bim/std/dict.map_values")
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
