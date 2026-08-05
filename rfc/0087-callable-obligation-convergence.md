@@ -1,6 +1,6 @@
 # RFC 0087: Callable-obligation convergence
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0086
 - Tracking issue: https://github.com/hh9527/forma/issues/3
 
@@ -20,7 +20,7 @@ let compose = fn(outer, inner, value) {
 The eligible binding may generalize to:
 
 ```text
-for(A, B, C) Fn(Fn(B) -> C, Fn(A) -> B, A) -> C
+for(A, B, C) Fn(Fn(A) -> B, Fn(C) -> A, C) -> B
 ```
 
 This RFC primarily validates that RFC 0086 composes with existing identity,
@@ -152,3 +152,24 @@ unification remains authoritative.
 The current descriptors already form a finite substitution graph. New solver
 infrastructure is justified only by a concrete accepted program that cannot be
 represented or completed monotonically.
+
+## Implementation result
+
+Implemented through adversarial validation without adding solver machinery.
+RFC 0086's single Function-shell binding and the existing substitution graph
+already preserve one monomorphic identity across repeated calls and aliases.
+Nested argument and result calls add ordinary finite equations and converge
+through the existing recursive descriptor resolution and occurs-check.
+
+Tests cover compatible repeated calls in both orders, parameter conflicts in
+both orders, conflicts through an alias, exact-arity disagreement, composition,
+a call whose result is called again, and a concrete composed invocation. The
+inferred composition scheme uses Forma's established structural-occurrence
+parameter naming:
+
+```text
+for(A, B, C) Fn(Fn(A) -> B, Fn(C) -> A, C) -> B
+```
+
+No worklist, rollback, overload candidate, Union construction, runtime change,
+or additional production-code path was required.

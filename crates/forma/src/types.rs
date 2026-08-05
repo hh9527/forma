@@ -7015,6 +7015,79 @@ mod tests {
     }
 
     #[test]
+    fn inferred_callable_obligations_converge_across_repeated_calls() {
+        for source in [
+            "let use = fn(callback) { (callback(1), callback(2)) };\
+             use(fn(value) { value + 1 })",
+            "let use = fn(callback) { (callback(2), callback(1)) };\
+             use(fn(value) { value + 1 })",
+        ] {
+            let analysis = analyze_with_natives(source, &[]).unwrap();
+            assert_eq!(analysis.display(analysis.result_type), "(Int, Int)");
+        }
+
+        for source in [
+            "let use = fn(callback) { (callback(1), callback(\"x\")) }; use",
+            "let use = fn(callback) { (callback(\"x\"), callback(1)) }; use",
+            "let use = fn(callback) { let alias = callback;\
+                 (alias(1), callback(\"x\")) }; use",
+        ] {
+            let error = analyze_with_natives(source, &[]).unwrap_err();
+            assert!(error.message.contains("cannot unify"), "{}", error.message);
+        }
+
+        let arity = analyze_with_natives(
+            "let use = fn(callback) { (callback(1), callback(1, 2)) }; use",
+            &[],
+        )
+        .unwrap_err();
+        assert!(arity.message.contains("call expects 1 arguments, found 2"));
+    }
+
+    #[test]
+    fn inferred_callable_obligations_converge_through_nested_calls() {
+        let compose = analyze_with_natives(
+            "let compose = fn(outer, inner, value) { outer(inner(value)) }; compose",
+            &[],
+        )
+        .unwrap();
+        let definition = compose
+            .hir
+            .definitions()
+            .iter()
+            .find(|definition| definition.name == "compose")
+            .unwrap();
+        assert_eq!(
+            compose.definition_schemes[&definition.id].display_name(),
+            "for(A, B, C) Fn(Fn(A) -> B, Fn(C) -> A, C) -> B"
+        );
+
+        let nested = analyze_with_natives(
+            "let invoke_factory = fn(factory) { factory()() }; invoke_factory",
+            &[],
+        )
+        .unwrap();
+        let definition = nested
+            .hir
+            .definitions()
+            .iter()
+            .find(|definition| definition.name == "invoke_factory")
+            .unwrap();
+        assert_eq!(
+            nested.definition_schemes[&definition.id].display_name(),
+            "for(A) Fn(Fn() -> Fn() -> A) -> A"
+        );
+
+        let executed = analyze_with_natives(
+            "let compose = fn(outer, inner, value) { outer(inner(value)) };\
+             compose(fn(value) { `value=\\{value}` }, fn(value) { value + 1 }, 41)",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(executed.display(executed.result_type), "String");
+    }
+
+    #[test]
     fn intrinsic_expression_constraints_infer_booleans_and_numeric_families() {
         let condition = analyze_with_natives(
             "let select = fn(condition, value) {\
