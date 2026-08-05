@@ -283,6 +283,38 @@ pub(crate) enum CoreTypeDescFunction {
     Resolve,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreDynFunction {
+    Pack,
+    Desc,
+    Kind,
+    CheckInt,
+    CheckFloat,
+    CheckString,
+    CheckBytes,
+}
+
+impl CoreDynFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Pack => "@bim/std/dyn.pack",
+            Self::Desc => "@bim/std/dyn.desc",
+            Self::Kind => "@bim/std/dyn.kind",
+            Self::CheckInt => "@bim/std/dyn.check_int",
+            Self::CheckFloat => "@bim/std/dyn.check_float",
+            Self::CheckString => "@bim/std/dyn.check_string",
+            Self::CheckBytes => "@bim/std/dyn.check_bytes",
+        }
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        match self {
+            Self::Pack => 2,
+            _ => 1,
+        }
+    }
+}
+
 impl CoreTypeDescFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
@@ -506,6 +538,7 @@ pub(crate) enum NativeKind {
     CoreHash(CoreHashFunction),
     CoreCodec(CoreCodecFunction),
     CoreTypeDesc(CoreTypeDescFunction),
+    CoreDyn(CoreDynFunction),
     CoreResult(CoreResultFunction),
     CoreJson(CoreJsonFunction),
 }
@@ -624,6 +657,15 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreTypeDesc(function),
+        }
+    }
+
+    pub(crate) const fn core_dyn(function: CoreDynFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreDyn(function),
         }
     }
 
@@ -762,6 +804,39 @@ impl Dict {
 }
 
 #[derive(Clone)]
+pub struct DynValue {
+    identity: Arc<()>,
+    descriptor: Box<Value>,
+    value: Box<Value>,
+}
+
+impl DynValue {
+    pub(crate) fn from_parts_with_identity(
+        identity: Arc<()>,
+        descriptor: Value,
+        value: Value,
+    ) -> Self {
+        Self {
+            identity,
+            descriptor: Box::new(descriptor),
+            value: Box::new(value),
+        }
+    }
+
+    pub(crate) fn identity(&self) -> &Arc<()> {
+        &self.identity
+    }
+
+    pub(crate) fn descriptor(&self) -> &Value {
+        &self.descriptor
+    }
+
+    pub(crate) fn value(&self) -> &Value {
+        &self.value
+    }
+}
+
+#[derive(Clone)]
 pub enum Value {
     Int(i64),
     Float(f64),
@@ -773,6 +848,7 @@ pub enum Value {
     Tagged { tag: Atom, payload: Box<Value> },
     Tuple(Arc<[Value]>),
     Func(Arc<Closure>),
+    Dyn(Arc<DynValue>),
 }
 
 impl Value {
@@ -815,6 +891,7 @@ impl Value {
             Self::Tagged { .. } => "Tagged",
             Self::Tuple(_) => "Tuple",
             Self::Func(_) => "Func",
+            Self::Dyn(_) => "Dyn",
         }
     }
 }
@@ -860,6 +937,7 @@ impl fmt::Display for Value {
                 }
                 Prototype::Native(function) => write!(formatter, "<native fn {}>", function.name()),
             },
+            Self::Dyn(_) => formatter.write_str("<dyn>"),
         }
     }
 }

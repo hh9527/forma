@@ -1,7 +1,7 @@
 use crate::value::{
     CoreArrayFunction, CoreAttributesFunction, CoreCodecFunction, CoreDebugFunction,
-    CoreDictFunction, CoreHashFunction, CoreJsonFunction, CorePathFunction, CoreResultFunction,
-    CoreStringFunction, CoreTypeDescFunction, NativeFunction,
+    CoreDictFunction, CoreDynFunction, CoreHashFunction, CoreJsonFunction, CorePathFunction,
+    CoreResultFunction, CoreStringFunction, CoreTypeDescFunction, NativeFunction,
 };
 
 pub(crate) const ARRAY_MODULE: &str = "@bim/std/array";
@@ -19,6 +19,7 @@ pub(crate) const STRING_MODULE: &str = "@bim/std/string";
 pub(crate) const PATH_MODULE: &str = "@bim/std/path";
 pub(crate) const TOML_MODULE: &str = "@bim/std/toml";
 pub(crate) const TYPE_DESC_MODULE: &str = "@bim/std/type-desc";
+pub(crate) const DYN_MODULE: &str = "@bim/std/dyn";
 
 pub(crate) struct CoreModuleSpec {
     pub(crate) name: &'static str,
@@ -29,6 +30,55 @@ pub(crate) struct CoreModuleSpec {
 pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
     vec![
         CoreModuleSpec {
+            name: DYN_MODULE,
+            source: r#"
+@enum type ValueKind = {
+    Int: 'None, Float: 'None, String: 'None, Bytes: 'None,
+    Dict: 'None, Array: 'None, Atom: 'None, Tagged: 'None,
+    Tuple: 'None, Function: 'None,
+};
+native pack: for(A) Fn(TypeOf(A), A) -> Dyn;
+native desc: Fn(Dyn) -> Type;
+native kind: Fn(Dyn) -> ValueKind;
+native check_int: Fn(Dyn) -> Option(Int);
+native check_float: Fn(Dyn) -> Option(Float);
+native check_string: Fn(Dyn) -> Option(String);
+native check_bytes: Fn(Dyn) -> Option(Bytes);
+{
+    Dyn: Dyn,
+    ValueKind: ValueKind,
+    pack: pack,
+    desc: desc,
+    kind: kind,
+    check_int: check_int,
+    check_float: check_float,
+    check_string: check_string,
+    check_bytes: check_bytes,
+}
+"#,
+            functions: vec![
+                ("pack", NativeFunction::core_dyn(CoreDynFunction::Pack)),
+                ("desc", NativeFunction::core_dyn(CoreDynFunction::Desc)),
+                ("kind", NativeFunction::core_dyn(CoreDynFunction::Kind)),
+                (
+                    "check_int",
+                    NativeFunction::core_dyn(CoreDynFunction::CheckInt),
+                ),
+                (
+                    "check_float",
+                    NativeFunction::core_dyn(CoreDynFunction::CheckFloat),
+                ),
+                (
+                    "check_string",
+                    NativeFunction::core_dyn(CoreDynFunction::CheckString),
+                ),
+                (
+                    "check_bytes",
+                    NativeFunction::core_dyn(CoreDynFunction::CheckBytes),
+                ),
+            ],
+        },
+        CoreModuleSpec {
             name: TYPE_DESC_MODULE,
             source: r#"
 @enum type TypeDescKind = {
@@ -36,7 +86,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
     Int: 'None, Float: 'None, String: 'None, Bytes: 'None,
     Atom: 'None, Array: 'None, Dict: 'None, Tagged: 'None,
     Tuple: 'None, Struct: 'None, Enum: 'None, Union: 'None,
-    Function: 'None, WithAttributes: 'None, Bound: 'None, Ref: 'None,
+    Function: 'None, WithAttributes: 'None, Bound: 'None, Dyn: 'None, Ref: 'None,
 };
 native kind: Fn(Type) -> TypeDescKind;
 native children: Fn(Type) -> Array(Type);

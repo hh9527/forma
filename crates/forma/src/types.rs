@@ -42,6 +42,7 @@ pub enum TypeNode {
     Any,
     Never,
     Type,
+    Dyn,
     TypeOf(TypeId),
     Int,
     Float,
@@ -112,6 +113,7 @@ impl TypeGraph {
             TypeDescriptor::Any => TypeNode::Any,
             TypeDescriptor::Never => TypeNode::Never,
             TypeDescriptor::Type => TypeNode::Type,
+            TypeDescriptor::Dyn => TypeNode::Dyn,
             TypeDescriptor::TypeOf(instance) => TypeNode::TypeOf(self.intern_descriptor(instance)),
             TypeDescriptor::Int => TypeNode::Int,
             TypeDescriptor::Float => TypeNode::Float,
@@ -255,6 +257,10 @@ impl TypeGraph {
             "Type" => {
                 require(&["kind"])?;
                 TypeNode::Type
+            }
+            "Dyn" => {
+                require(&["kind"])?;
+                TypeNode::Dyn
             }
             "TypeOf" => {
                 require(&["instance", "kind"])?;
@@ -432,6 +438,7 @@ impl TypeGraph {
             TypeNode::Any => "Any".into(),
             TypeNode::Never => "Never".into(),
             TypeNode::Type => "Type".into(),
+            TypeNode::Dyn => "Dyn".into(),
             TypeNode::TypeOf(instance) => {
                 format!("TypeOf({})", self.display_with(*instance, active))
             }
@@ -625,6 +632,7 @@ pub enum TypeDescriptor {
     Any,
     Never,
     Type,
+    Dyn,
     TypeOf(Box<TypeDescriptor>),
     Int,
     Float,
@@ -658,6 +666,7 @@ impl TypeDescriptor {
             Self::Any => vec![kind_entry("Any")],
             Self::Never => vec![kind_entry("Never")],
             Self::Type => vec![kind_entry("Type")],
+            Self::Dyn => vec![kind_entry("Dyn")],
             Self::TypeOf(instance) => {
                 vec![
                     kind_entry("TypeOf"),
@@ -759,6 +768,7 @@ impl TypeDescriptor {
             Self::Any => "Any".into(),
             Self::Never => "Never".into(),
             Self::Type => "Type".into(),
+            Self::Dyn => "Dyn".into(),
             Self::TypeOf(instance) => format!("TypeOf({})", instance.display_name()),
             Self::Int => "Int".into(),
             Self::Float => "Float".into(),
@@ -827,6 +837,7 @@ fn display_scheme_descriptor(
         TypeDescriptor::Any => "Any".into(),
         TypeDescriptor::Never => "Never".into(),
         TypeDescriptor::Type => "Type".into(),
+        TypeDescriptor::Dyn => "Dyn".into(),
         TypeDescriptor::TypeOf(instance) => {
             format!("TypeOf({})", display_scheme_descriptor(instance, names))
         }
@@ -2320,6 +2331,7 @@ pub(crate) fn infer_value(value: &Value) -> TypeDescriptor {
                 result: Box::new(TypeDescriptor::Any),
             }
         }
+        Value::Dyn(_) => TypeDescriptor::Dyn,
     }
 }
 
@@ -2654,6 +2666,7 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
     let mut prelude = BTreeMap::new();
     for (name, descriptor) in [
         ("Type", TypeDescriptor::Type),
+        ("Dyn", TypeDescriptor::Dyn),
         ("Any", TypeDescriptor::Any),
         ("Never", TypeDescriptor::Never),
         ("Int", TypeDescriptor::Int),
@@ -2698,6 +2711,7 @@ fn core_static_prelude() -> HashMap<String, TypeDescriptor> {
     let mut prelude = HashMap::new();
     for (name, instance) in [
         ("Type", TypeDescriptor::Type),
+        ("Dyn", TypeDescriptor::Dyn),
         ("Any", TypeDescriptor::Any),
         ("Never", TypeDescriptor::Never),
         ("Int", TypeDescriptor::Int),
@@ -3077,6 +3091,10 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
             require(&["kind"])?;
             TypeDescriptor::Type
         }
+        "Dyn" => {
+            require(&["kind"])?;
+            TypeDescriptor::Dyn
+        }
         "TypeOf" => {
             require(&["instance", "kind"])?;
             let instance = value
@@ -3278,6 +3296,7 @@ fn validate_value_ref(
         TypeDescriptor::Any => Ok(()),
         TypeDescriptor::Never => Err(format!("{path} cannot have type Never")),
         TypeDescriptor::Type => decode_type_ref(value, path).map(|_| ()),
+        TypeDescriptor::Dyn if value.kind() == ValueKind::Dyn => Ok(()),
         TypeDescriptor::TypeOf(expected) => {
             let actual = decode_type_ref(value, path)?;
             if assignable(&actual, expected) && assignable(expected, &actual) {
@@ -3454,6 +3473,10 @@ fn decode_type(value: &Value, path: &str) -> Result<TypeDescriptor, String> {
         "Type" => {
             require_fields(metadata, path, &["kind"])?;
             TypeDescriptor::Type
+        }
+        "Dyn" => {
+            require_fields(metadata, path, &["kind"])?;
+            TypeDescriptor::Dyn
         }
         "TypeOf" => {
             require_fields(metadata, path, &["instance", "kind"])?;
@@ -5269,6 +5292,7 @@ fn collect_inference_variables(
         | TypeDescriptor::Any
         | TypeDescriptor::Never
         | TypeDescriptor::Type
+        | TypeDescriptor::Dyn
         | TypeDescriptor::Int
         | TypeDescriptor::Float
         | TypeDescriptor::String
@@ -5318,6 +5342,7 @@ fn collect_bound_parameters(descriptor: &TypeDescriptor, parameters: &mut Vec<Ty
         | TypeDescriptor::Any
         | TypeDescriptor::Never
         | TypeDescriptor::Type
+        | TypeDescriptor::Dyn
         | TypeDescriptor::Int
         | TypeDescriptor::Float
         | TypeDescriptor::String
@@ -5470,6 +5495,7 @@ fn contains_runtime_never_leaf(descriptor: &TypeDescriptor) -> bool {
         | TypeDescriptor::Function { .. }
         | TypeDescriptor::Bound(_)
         | TypeDescriptor::Inference(_) => false,
+        TypeDescriptor::Dyn => false,
     }
 }
 
@@ -5978,6 +6004,7 @@ fn interpolation_type_supported(descriptor: &TypeDescriptor) -> bool {
         }),
         TypeDescriptor::Float
         | TypeDescriptor::Type
+        | TypeDescriptor::Dyn
         | TypeDescriptor::TypeOf(_)
         | TypeDescriptor::Bytes
         | TypeDescriptor::Array(_)

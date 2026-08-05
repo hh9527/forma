@@ -1,5 +1,6 @@
 use crate::json::{SourcedValue, ValuePath, ValuePathSegment};
 use crate::source::Loc;
+use crate::value::DynValue;
 use crate::{
     Atom, BuiltinAtom, BytecodeFunction, Closure, Dict, FuncByteCode, NativeFunction, Prototype,
     Shape, Value,
@@ -49,6 +50,7 @@ pub(crate) enum RuntimeValue {
     Tagged(Handle),
     Dict(Handle),
     Func(Handle),
+    Dyn(Handle),
     UpLink(Handle),
 }
 
@@ -138,6 +140,11 @@ pub(crate) enum Object {
         identity: Arc<()>,
         prototype: RuntimePrototype,
         upvalues: Box<[RichValue]>,
+    },
+    Dyn {
+        identity: Arc<()>,
+        descriptor: RichValue,
+        value: RichValue,
     },
     UpLink {
         value: Option<RichValue>,
@@ -458,6 +465,9 @@ impl Heap {
             Value::Func(_) => {
                 return Err(HeapError("sourced data cannot contain Func"));
             }
+            Value::Dyn(_) => {
+                return Err(HeapError("sourced data cannot contain Dyn"));
+            }
         };
         Ok(RichValue::new(value, loc))
     }
@@ -538,6 +548,21 @@ impl Heap {
                     identity: Arc::clone(closure.identity()),
                     prototype,
                     upvalues,
+                }))
+            }
+            Value::Dyn(dyn_value) => {
+                let descriptor = self.import_value_with(
+                    background,
+                    dyn_value.descriptor(),
+                    externals,
+                    prototypes,
+                )?;
+                let value =
+                    self.import_value_with(background, dyn_value.value(), externals, prototypes)?;
+                RuntimeValue::Dyn(self.allocate(Object::Dyn {
+                    identity: Arc::clone(dyn_value.identity()),
+                    descriptor,
+                    value,
                 }))
             }
         }))
@@ -699,6 +724,21 @@ impl<'a> HeapView<'a> {
         Ok(*value)
     }
 
+    pub(crate) fn dyn_parts(
+        &self,
+        handle: Handle,
+    ) -> Result<(&'a Arc<()>, RichValue, RichValue), HeapError> {
+        let Object::Dyn {
+            identity,
+            descriptor,
+            value,
+        } = self.object(handle)?
+        else {
+            return Err(HeapError("handle is not a Dyn"));
+        };
+        Ok((identity, *descriptor, *value))
+    }
+
     pub(crate) fn sequence(
         &self,
         handle: Handle,
@@ -819,6 +859,11 @@ impl<'a> HeapView<'a> {
                 else {
                     return Err(HeapError("Func handle refers to another object kind"));
                 };
+                Ok(Arc::ptr_eq(left, right))
+            }
+            (RuntimeValue::Dyn(left), RuntimeValue::Dyn(right)) => {
+                let (left, _, _) = self.dyn_parts(left)?;
+                let (right, _, _) = self.dyn_parts(right)?;
                 Ok(Arc::ptr_eq(left, right))
             }
             (RuntimeValue::UpLink(_), _) | (_, RuntimeValue::UpLink(_)) => {
@@ -1080,6 +1125,24 @@ impl<'a> HeapView<'a> {
                     upvalues,
                 )))
             }
+            RuntimeValue::Dyn(handle) => {
+                let Object::Dyn {
+                    identity,
+                    descriptor,
+                    value,
+                } = self.enter_object(handle, visiting)?
+                else {
+                    return Err(HeapError("Dyn handle refers to another object kind"));
+                };
+                let descriptor = self.export_value_with(descriptor.value, visiting)?;
+                let value = self.export_value_with(value.value, visiting)?;
+                visiting.remove(&handle);
+                Value::Dyn(Arc::new(DynValue::from_parts_with_identity(
+                    Arc::clone(identity),
+                    descriptor,
+                    value,
+                )))
+            }
             RuntimeValue::UpLink(handle) => {
                 if !visiting.insert(handle) {
                     return Err(HeapError(
@@ -1266,6 +1329,9 @@ impl PendingCopy {
             RuntimeValue::Func(handle) => {
                 RuntimeValue::Func(self.copy_object(target, source, handle)?)
             }
+            RuntimeValue::Dyn(handle) => {
+                RuntimeValue::Dyn(self.copy_object(target, source, handle)?)
+            }
             RuntimeValue::UpLink(handle) => {
                 RuntimeValue::UpLink(self.copy_object(target, source, handle)?)
             }
@@ -1335,6 +1401,15 @@ impl PendingCopy {
                 identity: Arc::clone(identity),
                 prototype: self.copy_prototype(target, source, prototype)?,
                 upvalues: copy_values(self, upvalues)?,
+            },
+            Object::Dyn {
+                identity,
+                descriptor,
+                value,
+            } => Object::Dyn {
+                identity: Arc::clone(identity),
+                descriptor: self.copy_value(target, source, *descriptor)?,
+                value: self.copy_value(target, source, *value)?,
             },
             Object::UpLink { value } => Object::UpLink {
                 value: Some(self.copy_value(
@@ -1483,6 +1558,7 @@ fn value_contains_foreign(value: RuntimeValue, target: Storage) -> bool {
         | RuntimeValue::Tagged(handle)
         | RuntimeValue::Dict(handle)
         | RuntimeValue::Func(handle)
+        | RuntimeValue::Dyn(handle)
         | RuntimeValue::UpLink(handle) => handle.storage != target,
         RuntimeValue::Int(_) | RuntimeValue::Float(_) | RuntimeValue::BuiltinAtom(_) => false,
     }
@@ -1511,6 +1587,12 @@ fn object_contains_foreign(object: &Object, target: Storage) -> bool {
         Object::Closure { upvalues, .. } => upvalues
             .iter()
             .any(|value| rich_value_contains_foreign(*value, target)),
+        Object::Dyn {
+            descriptor, value, ..
+        } => {
+            rich_value_contains_foreign(*descriptor, target)
+                || rich_value_contains_foreign(*value, target)
+        }
         Object::UpLink { value } => {
             value.is_none_or(|value| rich_value_contains_foreign(value, target))
         }

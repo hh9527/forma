@@ -3192,6 +3192,73 @@ unchanged", "|"),
     }
 
     #[test]
+    fn core_dyn_packs_projects_and_publishes_opaque_values() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import dyn from "@bim/std/dyn";
+               let int_value = dyn.pack(Int, 41);
+               let string_value = dyn.pack(String, "text");
+               let float_value = dyn.pack(Float, 1.5);
+               let bytes_value = dyn.pack(Bytes, b"ab");
+               let captured = fn() { int_value };
+               {
+                   int_type: dyn.desc(int_value),
+                   int_kind: dyn.kind(int_value),
+                   int_value: dyn.check_int(int_value),
+                   wrong_value: dyn.check_string(int_value),
+                   string_value: dyn.check_string(string_value),
+                   float_value: dyn.check_float(float_value),
+                   bytes_value: dyn.check_bytes(bytes_value),
+                   same_identity: int_value == int_value,
+                   different_identity: int_value == dyn.pack(Int, 41),
+                   values: [captured(), string_value],
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            module
+                .analysis
+                .display(module.analysis.binding_types["int_value"]),
+            "Dyn"
+        );
+        let Value::Dict(output) = module.execute(100_000).unwrap() else {
+            panic!("Dyn test must return a Dict")
+        };
+        assert_eq!(output.get("int_type").unwrap().to_string(), "{kind: 'Int}");
+        assert_eq!(output.get("int_kind").unwrap().to_string(), "'Int");
+        assert_eq!(output.get("int_value").unwrap().to_string(), "'Some(41)");
+        assert_eq!(output.get("wrong_value").unwrap().to_string(), "'None");
+        assert_eq!(
+            output.get("string_value").unwrap().to_string(),
+            "'Some(\"text\")"
+        );
+        assert_eq!(output.get("float_value").unwrap().to_string(), "'Some(1.5)");
+        assert_eq!(
+            output.get("bytes_value").unwrap().to_string(),
+            "'Some(b\"\\x61\\x62\")"
+        );
+        assert_eq!(output.get("same_identity").unwrap().to_string(), "'True");
+        assert_eq!(
+            output.get("different_identity").unwrap().to_string(),
+            "'False"
+        );
+        assert_eq!(output.get("values").unwrap().to_string(), "[<dyn>, <dyn>]");
+
+        fs::write(
+            directory.join("invalid.forma"),
+            r#"import dyn from "@bim/std/dyn";
+               dyn.pack[Int](Int, "wrong")"#,
+        )
+        .unwrap();
+        let error =
+            load_module(directory.join("invalid.forma"), BTreeMap::new(), 100_000).unwrap_err();
+        assert!(error.to_string().contains("cannot unify String with Int"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn homogeneous_dict_combinators_preserve_types_and_canonical_order() {
         let directory = fixture_dir();
         fs::write(

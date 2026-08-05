@@ -1,6 +1,6 @@
 # RFC 0091: Opaque `Dyn` values
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0089, RFC 0090
 - Tracking issue: https://github.com/hh9527/forma/issues/4
 
@@ -135,3 +135,28 @@ shape. Concrete leaf projection is enough for the first equality interpreter.
 5. define identity equality and opaque formatting;
 6. add static, runtime, storage, publication, and malformed-boundary tests; and
 7. run the full quality gate and record the implementation result.
+
+## Implementation result
+
+Implemented `Dyn` as a closed nominal descriptor plus an opaque heap object
+containing identity, canonical descriptor, and payload edges. The object
+participates in heap copying, promotion, closure capture, collection storage,
+legacy Value import/export, bounded debug display, and identity equality. Its
+descriptor and payload remain private at the public Value boundary.
+
+`@bim/std/dyn` provides the generic `pack`, `desc`, `kind`, and exact Int,
+Float, String, and Bytes `check_*` projections. `pack` validates canonical
+runtime metadata in addition to its static `TypeOf(A), A` contract. Primitive
+projection strips explicit `WithAttributes` wrappers and resolves metadata
+references before checking both descriptor and payload kind.
+
+`Dyn` was added to canonical TypeMetadata, analysis graphs, module interfaces,
+validation, and codec planning as an opaque leaf. JSON and JSON Schema reject
+it explicitly. No implicit conversion, top type, generic recovery, or
+structural observation was added.
+
+Regression coverage checks inference, explicit type mismatch rejection, all
+primitive projections, descriptor and logical-kind observation, closure
+capture, Array storage, publication, opaque display, and identity equality.
+Full Forma tests pass with 283 passed and 1 ignored; all 13 CLI integration
+tests pass.

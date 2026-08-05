@@ -5,8 +5,8 @@ use crate::heap::{
 use crate::lir::RegisterId;
 use crate::value::{
     BuiltinAtom, CoreArrayFunction, CoreAttributesFunction, CoreBuiltinTypeFunction,
-    CoreCodecFunction, CoreDebugFunction, CoreDictFunction, CoreHashFunction, CoreJsonFunction,
-    CoreModelFunction, CorePathFunction, CoreResultFunction, CoreStringFunction,
+    CoreCodecFunction, CoreDebugFunction, CoreDictFunction, CoreDynFunction, CoreHashFunction,
+    CoreJsonFunction, CoreModelFunction, CorePathFunction, CoreResultFunction, CoreStringFunction,
     CoreTypeDescFunction, Dict, NativeError, NativeKind, NativeLimit, Shape, Value,
 };
 use crate::{Diagnostic, Origin, SourceDatabase};
@@ -124,6 +124,7 @@ pub enum ValueKind {
     Tagged,
     Tuple,
     Func,
+    Dyn,
 }
 
 #[derive(Clone, Copy)]
@@ -158,7 +159,8 @@ impl<'a> ValueRef<'a> {
             | RuntimeValue::Tagged(handle)
             | RuntimeValue::Tuple(handle)
             | RuntimeValue::Dict(handle)
-            | RuntimeValue::Func(handle) => Some(handle),
+            | RuntimeValue::Func(handle)
+            | RuntimeValue::Dyn(handle) => Some(handle),
             _ => None,
         }
     }
@@ -194,6 +196,7 @@ impl<'a> ValueRef<'a> {
             RuntimeValue::Tagged(_) => ValueKind::Tagged,
             RuntimeValue::Tuple(_) => ValueKind::Tuple,
             RuntimeValue::Func(_) => ValueKind::Func,
+            RuntimeValue::Dyn(_) => ValueKind::Dyn,
             RuntimeValue::UpLink(_) => {
                 unreachable!("up-links are private VM values")
             }
@@ -2294,6 +2297,16 @@ fn drive_vm_action(
                                 background,
                                 account,
                             )?,
+                            NativeKind::CoreDyn(operation) => run_core_dyn(
+                                operation,
+                                &arguments,
+                                return_target,
+                                &call_function,
+                                call_pc,
+                                current,
+                                background,
+                                account,
+                            )?,
                             NativeKind::CoreResult(operation) => run_core_result(
                                 operation,
                                 &arguments,
@@ -4135,6 +4148,7 @@ fn run_core_type_desc(
                     "Function",
                     "WithAttributes",
                     "Bound",
+                    "Dyn",
                 ];
                 if !KINDS.contains(&kind) {
                     return Err(error(
@@ -4213,6 +4227,184 @@ fn run_core_type_desc(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_core_dyn(
+    operation: CoreDynFunction,
+    arguments: &[RichValue],
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    if operation == CoreDynFunction::Pack {
+        decode_runtime_type(arguments[0], current, background).map_err(|message| {
+            error(
+                RuntimeErrorKind::TypeMismatch,
+                format!("@bim/std/dyn.pack expects canonical Type metadata: {message}"),
+                function,
+                pc,
+            )
+        })?;
+        charge_allocation(
+            account,
+            logical_value_bytes(2)
+                .map_err(|native_error| allocation_error(native_error.message, function, pc))?,
+            function,
+            pc,
+        )?;
+        return Ok(VmAction::Return {
+            value: RichValue::new(
+                RuntimeValue::Dyn(current.allocate(Object::Dyn {
+                    identity: Arc::new(()),
+                    descriptor: arguments[0],
+                    value: arguments[1],
+                })),
+                arguments[1].loc,
+            ),
+            return_target,
+        });
+    }
+
+    let RuntimeValue::Dyn(handle) = arguments[0].value else {
+        return Err(runtime_shallow_type_error(
+            "Dyn",
+            arguments[0],
+            function,
+            pc,
+        ));
+    };
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let (_, descriptor, value) = view
+        .dyn_parts(handle)
+        .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?;
+    match operation {
+        CoreDynFunction::Pack => unreachable!("pack handled above"),
+        CoreDynFunction::Desc => Ok(VmAction::Return {
+            value: descriptor,
+            return_target,
+        }),
+        CoreDynFunction::Kind => {
+            let kind = match value.value {
+                RuntimeValue::Int(_) => "Int",
+                RuntimeValue::Float(_) => "Float",
+                RuntimeValue::ShortString(_) | RuntimeValue::String(_) => "String",
+                RuntimeValue::Bytes(_) => "Bytes",
+                RuntimeValue::Dict(_) => "Dict",
+                RuntimeValue::Array(_) => "Array",
+                RuntimeValue::BuiltinAtom(_) | RuntimeValue::Atom(_) => "Atom",
+                RuntimeValue::Tagged(_) => "Tagged",
+                RuntimeValue::Tuple(_) => "Tuple",
+                RuntimeValue::Func(_) => "Function",
+                RuntimeValue::Dyn(_) => {
+                    return Err(error(
+                        RuntimeErrorKind::InvalidBytecode,
+                        "Dyn cannot directly contain another Dyn under its stored witness",
+                        function,
+                        pc,
+                    ));
+                }
+                RuntimeValue::UpLink(_) => {
+                    return Err(error(
+                        RuntimeErrorKind::InvalidBytecode,
+                        "Dyn payload cannot be an internal up-link",
+                        function,
+                        pc,
+                    ));
+                }
+            };
+            Ok(VmAction::Return {
+                value: RichValue::new(RuntimeValue::Atom(current.intern(kind)), value.loc),
+                return_target,
+            })
+        }
+        CoreDynFunction::CheckInt
+        | CoreDynFunction::CheckFloat
+        | CoreDynFunction::CheckString
+        | CoreDynFunction::CheckBytes => {
+            let expected = match operation {
+                CoreDynFunction::CheckInt => "Int",
+                CoreDynFunction::CheckFloat => "Float",
+                CoreDynFunction::CheckString => "String",
+                CoreDynFunction::CheckBytes => "Bytes",
+                _ => unreachable!(),
+            };
+            let descriptor_kind = dyn_descriptor_leaf_kind(descriptor, &view)
+                .map_err(|message| error(RuntimeErrorKind::TypeMismatch, message, function, pc))?;
+            let value_matches = match operation {
+                CoreDynFunction::CheckInt => matches!(value.value, RuntimeValue::Int(_)),
+                CoreDynFunction::CheckFloat => matches!(value.value, RuntimeValue::Float(_)),
+                CoreDynFunction::CheckString => matches!(
+                    value.value,
+                    RuntimeValue::ShortString(_) | RuntimeValue::String(_)
+                ),
+                CoreDynFunction::CheckBytes => matches!(value.value, RuntimeValue::Bytes(_)),
+                _ => unreachable!(),
+            };
+            if descriptor_kind != expected || !value_matches {
+                return Ok(VmAction::Return {
+                    value: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::None), value.loc),
+                    return_target,
+                });
+            }
+            charge_allocation(
+                account,
+                logical_value_bytes(2)
+                    .map_err(|native_error| allocation_error(native_error.message, function, pc))?,
+                function,
+                pc,
+            )?;
+            Ok(VmAction::Return {
+                value: RichValue::new(
+                    RuntimeValue::Tagged(current.allocate(Object::Tagged {
+                        tag: RichValue::new(
+                            RuntimeValue::BuiltinAtom(BuiltinAtom::Some),
+                            value.loc,
+                        ),
+                        payload: value,
+                    })),
+                    value.loc,
+                ),
+                return_target,
+            })
+        }
+    }
+}
+
+fn dyn_descriptor_leaf_kind<'a>(
+    mut descriptor: RichValue,
+    view: &HeapView<'a>,
+) -> Result<&'a str, String> {
+    loop {
+        if let RuntimeValue::UpLink(handle) = descriptor.value {
+            descriptor = view
+                .up_link(handle)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Dyn descriptor reference is not initialized".to_owned())?;
+            continue;
+        }
+        let RuntimeValue::Dict(handle) = descriptor.value else {
+            return Err("Dyn descriptor is not canonical Type metadata".into());
+        };
+        let kind = view
+            .dict_get_text(handle, "kind")
+            .map_err(|error| error.to_string())?
+            .and_then(|kind| view.atom_text(kind).ok().flatten())
+            .ok_or_else(|| "Dyn descriptor is missing an Atom kind".to_owned())?;
+        if kind != "WithAttributes" {
+            return Ok(kind);
+        }
+        descriptor = view
+            .dict_get_text(handle, "inner")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "WithAttributes descriptor is missing inner".to_owned())?;
+    }
+}
+
 fn type_desc_children(input: RichValue, view: &HeapView<'_>) -> Result<Vec<RichValue>, String> {
     if matches!(input.value, RuntimeValue::UpLink(_)) {
         return Ok(Vec::new());
@@ -4273,8 +4465,8 @@ fn type_desc_children(input: RichValue, view: &HeapView<'_>) -> Result<Vec<RichV
                 })
                 .collect()
         }
-        "Any" | "Never" | "Type" | "Int" | "Float" | "String" | "Bytes" | "Atom" | "Function"
-        | "Bound" => Ok(Vec::new()),
+        "Any" | "Never" | "Type" | "Dyn" | "Int" | "Float" | "String" | "Bytes" | "Atom"
+        | "Function" | "Bound" => Ok(Vec::new()),
         other => Err(format!("unknown Type metadata kind '{other}")),
     }
 }
@@ -4578,6 +4770,7 @@ enum CodecKind {
     UpLink(Handle),
     Any,
     Type,
+    Dyn,
     Int,
     Float,
     String,
@@ -4967,6 +5160,7 @@ fn assert_codec_graph_ready(
             }),
             CodecKind::Any
             | CodecKind::Type
+            | CodecKind::Dyn
             | CodecKind::Int
             | CodecKind::Float
             | CodecKind::String
@@ -5043,6 +5237,7 @@ fn decode_runtime_type_at(
         "Bound" => CodecKind::Any,
         "Any" => CodecKind::Any,
         "Type" => CodecKind::Type,
+        "Dyn" => CodecKind::Dyn,
         "Int" => CodecKind::Int,
         "Float" => CodecKind::Float,
         "String" => CodecKind::String,
@@ -5350,6 +5545,9 @@ fn transform_codec(
         CodecKind::Type => decode_runtime_type(value, current, background)
             .map(|_| CodecNode::Existing(value))
             .map_err(|message| CodecFailure::new(message, value, schema.rule)),
+        CodecKind::Dyn if matches!(value.value, RuntimeValue::Dyn(_)) => {
+            Ok(CodecNode::Existing(value))
+        }
         CodecKind::Int if matches!(value.value, RuntimeValue::Int(_)) => {
             Ok(CodecNode::Existing(value))
         }
@@ -6779,6 +6977,11 @@ fn generate_json_schema_node(
             schema.rule,
             schema.rule,
         )),
+        CodecKind::Dyn => Err(CodecFailure::new(
+            "JSON Schema cannot describe Dyn",
+            schema.rule,
+            schema.rule,
+        )),
         CodecKind::Int => Ok(schema_dict(
             vec![("type", schema_string("integer", loc))],
             loc,
@@ -7045,6 +7248,7 @@ fn codec_type_name(schema: &CodecType) -> &'static str {
         CodecKind::UpLink(_) => "recursive Type",
         CodecKind::Any => "Any",
         CodecKind::Type => "Type",
+        CodecKind::Dyn => "Dyn",
         CodecKind::Int => "Int",
         CodecKind::Float => "Float",
         CodecKind::String => "String",
@@ -7095,7 +7299,7 @@ fn codec_node_bytes(node: &CodecNode) -> Result<u64, NativeError> {
 
 fn legacy_value_bytes(value: &Value) -> Result<u64, NativeError> {
     match value {
-        Value::Int(_) | Value::Float(_) | Value::Func(_) => Ok(0),
+        Value::Int(_) | Value::Float(_) | Value::Func(_) | Value::Dyn(_) => Ok(0),
         Value::String(value) => Ok(value.len() as u64),
         Value::Bytes(value) => Ok(value.len() as u64),
         Value::Atom(atom) => Ok(atom.name().len() as u64),
@@ -7783,6 +7987,7 @@ impl<'a> JsonWriter<'a> {
                 return Err("JSON cannot encode Tagged; use a codec first".into());
             }
             RuntimeValue::Func(_) => return Err("JSON cannot encode Func".into()),
+            RuntimeValue::Dyn(_) => return Err("JSON cannot encode Dyn".into()),
             RuntimeValue::UpLink(_) => return Err("JSON cannot encode an internal up-link".into()),
         }
         Ok(())
@@ -8046,6 +8251,7 @@ impl<'a> DebugValueFormatter<'a> {
                 self.push(name);
                 self.push(">");
             }
+            RuntimeValue::Dyn(_) => self.push("<dyn>"),
             RuntimeValue::UpLink(handle) => {
                 if !self.enter(handle, depth) {
                     return Ok(());
@@ -8397,6 +8603,7 @@ fn runtime_shallow_type_error(
         RuntimeValue::Tagged(_) => "Tagged",
         RuntimeValue::Dict(_) => "Dict",
         RuntimeValue::Func(_) => "Func",
+        RuntimeValue::Dyn(_) => "Dyn",
         RuntimeValue::UpLink(_) => "internal up-link",
     };
     let mut runtime_error = error(
