@@ -491,10 +491,20 @@ impl EngineBuilder {
         id: Option<u32>,
         spec: NativeModuleSpec,
     ) -> Result<u32, ModuleError> {
-        if !spec.name.starts_with("@host/") || spec.name.len() == "@host/".len() {
+        if !spec.name.starts_with("@bim/") || spec.name.len() == "@bim/".len() {
             return Err(ModuleError::new(
-                "Host native module name must start with @host/ and include a name",
+                "Host native module name must start with @bim/ and include a name",
             ));
+        }
+        if spec.name == "@bim/std"
+            || spec.name.starts_with("@bim/std/")
+            || spec.name == "@bim/core"
+            || spec.name.starts_with("@bim/core/")
+        {
+            return Err(ModuleError::new(format!(
+                "built-in module name {:?} is in Forma's reserved namespace",
+                spec.name
+            )));
         }
         if self.names.contains(&spec.name) {
             return Err(ModuleError::new(format!(
@@ -787,7 +797,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                 .filter_map(|binding| match &binding.value.value.value {
                     ExprKind::String(target) => Some((
                         binding.value.name.value.clone(),
-                        binding.value.name.location,
+                        binding.value.value.location,
                         target.clone(),
                     )),
                     _ => None,
@@ -1482,7 +1492,13 @@ impl ModuleLoader {
                 return Err(ModuleError::new("import path must be a string"));
             };
             if relative.starts_with("@bim/") {
-                let (value, root, interface) = self.load_core_module(relative)?;
+                let (value, root, interface) =
+                    self.load_native_module(relative).map_err(|error| {
+                        ModuleError::new(self.sources.render(&Diagnostic::error(
+                            error.to_string(),
+                            binding.value.value.location,
+                        )))
+                    })?;
                 semantic_imports.push(SemanticImport {
                     name: binding.value.name.value.clone(),
                     location: binding.value.name.location,
@@ -1647,14 +1663,14 @@ impl ModuleLoader {
         Ok((analysis, function, external_roots))
     }
 
-    fn load_core_module(
+    fn load_native_module(
         &mut self,
         name: &str,
     ) -> Result<(Value, PersistentValue, ModuleInterface), ModuleError> {
         self.core_modules
             .get(name)
             .map(|(value, root, interface)| (value.clone(), *root, interface.clone()))
-            .ok_or_else(|| ModuleError::new(format!("unknown core module {name:?}")))
+            .ok_or_else(|| ModuleError::new(format!("unknown built-in module {name:?}")))
     }
 
     fn enter(&mut self, module_id: &ModuleId) -> Result<(), ModuleError> {
@@ -1811,6 +1827,12 @@ mod tests {
         Ok(())
     }
 
+    fn fixture_answer_callback(
+        context: &mut crate::CallContext<'_, '_>,
+    ) -> Result<(), crate::NativeError> {
+        context.set_int(context.result(), 42)
+    }
+
     fn fixture_dir() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1923,47 +1945,61 @@ mod tests {
         });
         assert_eq!(
             builder
-                .register_native_module(Some(2_000), spec("@host/acme/stable"))
+                .register_native_module(Some(2_000), spec("@bim/acme/stable"))
                 .unwrap(),
             2_000
         );
         assert_eq!(
             builder
-                .register_native_module(None, spec("@host/acme/automatic"))
+                .register_native_module(None, spec("@bim/acme/automatic"))
                 .unwrap(),
             1_024
         );
         assert!(
             builder
-                .register_native_module(Some(2_000), spec("@host/acme/collision"))
+                .register_native_module(Some(2_000), spec("@bim/acme/collision"))
                 .unwrap_err()
                 .to_string()
                 .contains("already registered")
         );
         assert!(
             builder
-                .register_native_module(Some(2_001), spec("@host/acme/stable"))
+                .register_native_module(Some(2_001), spec("@bim/acme/stable"))
                 .unwrap_err()
                 .to_string()
                 .contains("name")
         );
         assert!(
             builder
-                .register_native_module(Some(1_023), spec("@host/acme/reserved"))
+                .register_native_module(Some(1_023), spec("@bim/acme/reserved"))
                 .unwrap_err()
                 .to_string()
                 .contains("reserved range")
         );
         assert!(
             builder
-                .register_native_module(None, spec("@bim/std/impostor"))
+                .register_native_module(None, spec("acme/invalid"))
                 .unwrap_err()
                 .to_string()
-                .contains("must start with @host/")
+                .contains("must start with @bim/")
+        );
+        assert!(
+            builder
+                .register_native_module(None, spec("@bim/std/hash"))
+                .unwrap_err()
+                .to_string()
+                .contains("reserved namespace")
+        );
+        assert!(
+            builder
+                .register_native_module(None, spec("@bim/core/future"))
+                .unwrap_err()
+                .to_string()
+                .contains("reserved namespace")
         );
         assert_eq!(
             builder
-                .register_native_module(None, spec("@host/acme/after-errors"))
+                .register_native_module(None, spec("@bim/acme/after-errors"))
                 .unwrap(),
             1_025
         );
@@ -1983,6 +2019,136 @@ mod tests {
             .load_module(directory.join("main.forma"), BTreeMap::new())
             .unwrap();
         assert_eq!(engine.execute(&module).unwrap().to_string(), "1");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn registered_host_modules_flow_through_execution_and_workspace_recovery() {
+        let config = EngineConfig {
+            module_quota: Quota::with_fuel(500_000),
+            session_quota: Quota::with_fuel(500_000),
+        };
+        let mut builder = Engine::builder(config);
+        builder
+            .register_native_module(
+                Some(1_500),
+                NativeModuleSpec::new(
+                    "@bim/acme/runtime",
+                    "native type Token = @9; native answer: Fn() -> Int; {Token: Token, answer: answer}",
+                    vec![(
+                        "answer",
+                        crate::NativeFunction::new(
+                            "@bim/acme/runtime.answer",
+                            0,
+                            fixture_answer_callback,
+                        ),
+                    )],
+                ),
+            )
+            .unwrap();
+        let engine = builder.build();
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        fs::write(
+            &main,
+            r#"import host from "@bim/acme/runtime";
+import desc from "@bim/std/type-desc";
+{answer: host.answer(), name: desc.opaque_name(host.Token)}"#,
+        )
+        .unwrap();
+
+        let module = engine.load_module(&main, BTreeMap::new()).unwrap();
+        let Value::Dict(output) = engine.execute(&module).unwrap() else {
+            panic!("Host native module test must return a Dict")
+        };
+        assert_eq!(output.get("answer").unwrap().to_string(), "42");
+        assert_eq!(
+            output.get("name").unwrap().to_string(),
+            "'Some(\"@bim/acme/runtime#Token\")"
+        );
+        let host = module
+            .workspace
+            .modules()
+            .iter()
+            .find(|module| module.name == "@bim/acme/runtime")
+            .unwrap();
+        assert_eq!(host.kind, WorkspaceModuleKind::Core);
+        assert_eq!(host.state, WorkspaceModuleState::Known);
+
+        let snapshot = engine.recover_workspace(&main).unwrap();
+        assert!(snapshot.diagnostics().is_empty());
+        assert!(snapshot.modules().iter().any(|module| {
+            module.name == "@bim/acme/runtime"
+                && module.kind == WorkspaceModuleKind::Core
+                && module.state == WorkspaceModuleState::Known
+        }));
+        let clock = crate::RevisionClock::default();
+        let context = crate::QueryContext::current(clock);
+        let source = snapshot
+            .module_by_path(&fs::canonicalize(&main).unwrap())
+            .unwrap()
+            .source
+            .unwrap();
+        let source_text = snapshot.sources().get(source).text().to_string();
+        let needle = "host.answer";
+        let offset = source_text.find(needle).unwrap() + needle.len();
+        let completion = block_on_recovery(snapshot.query_completion_at(
+            &context,
+            crate::Location::new(source, crate::TextRange::at(offset as u32)),
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(completion.candidates.len(), 1);
+        assert_eq!(completion.candidates[0].label, "answer");
+        assert_eq!(
+            completion.candidates[0].kind,
+            crate::CompletionKind::ModuleExport
+        );
+        let async_snapshot =
+            block_on_recovery(engine.recover_workspace_async(&main, &BTreeMap::new(), &context))
+                .unwrap();
+        assert!(async_snapshot.diagnostics().is_empty());
+
+        let isolated = Engine::new(config)
+            .load_module(&main, BTreeMap::new())
+            .unwrap_err();
+        assert!(isolated.to_string().contains("unknown built-in module"));
+        assert!(isolated.to_string().contains("main.forma:1:18"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn unknown_host_modules_are_unavailable_without_blocking_independent_facts() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        fs::write(
+            &main,
+            r#"import missing from "@bim/acme/missing";
+type Independent = String;
+{Independent: Independent}"#,
+        )
+        .unwrap();
+        let snapshot = recovery_engine().recover_workspace(&main).unwrap();
+        let missing = snapshot
+            .modules()
+            .iter()
+            .find(|module| module.name == "@bim/acme/missing")
+            .unwrap();
+        assert_eq!(missing.kind, WorkspaceModuleKind::Core);
+        assert_eq!(missing.state, WorkspaceModuleState::Unavailable);
+        assert!(snapshot.diagnostics().iter().any(|diagnostic| {
+            diagnostic.message.contains("unknown built-in module")
+                && diagnostic.labels[0].location.start == 20
+        }));
+        let root = snapshot
+            .module_by_path(&fs::canonicalize(&main).unwrap())
+            .unwrap();
+        let independent = snapshot
+            .definitions()
+            .iter()
+            .find(|definition| definition.module == root.id && definition.name == "Independent")
+            .unwrap();
+        assert_eq!(independent.ty.state, crate::FactState::Known);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -3451,7 +3617,7 @@ unchanged", "|"),
             load_module(unknown_path, BTreeMap::new(), 100_000)
                 .unwrap_err()
                 .to_string()
-                .contains("unknown core module")
+                .contains("unknown built-in module")
         );
         fs::remove_dir_all(directory).unwrap();
     }

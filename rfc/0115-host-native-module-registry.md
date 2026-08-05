@@ -12,7 +12,7 @@ let mut builder = Engine::builder(config);
 let assigned = builder.register_native_module(
     None,
     NativeModuleSpec::new(
-        "@host/acme/secrets",
+        "@bim/acme/secrets",
         DECLARATIONS,
         functions,
     ),
@@ -30,12 +30,16 @@ let engine = builder.build();
 - `None` receives the smallest unused ID beginning at 1024;
 - zero and reserved IDs are rejected by the public Host path;
 - exhaustion is reported without partial registration;
-- logical names must begin with `@host/`, have a non-empty remainder, and be
-  unique within the builder.
+- logical names must begin with `@bim/`, have a non-empty remainder, and be
+  unique within the builder. Forma reserves the complete `@bim/std` and
+  `@bim/core` subtrees; the rest of the built-in namespace is available to the
+  Host.
 
-The `@bim/` namespace remains exclusively owned by Forma. Module IDs and names
-cannot alias one another. Registration order affects automatic IDs and is part
-of the builder input; automatic IDs carry no cross-Engine stability promise.
+The `@bim/` namespace denotes modules built into one Engine. Forma owns
+`@bim/std`, `@bim/core`, and all descendants of those two prefixes; the Host
+owns its other registered names. Module IDs and names cannot alias one another.
+Registration order affects automatic IDs and is part of the builder input;
+automatic IDs carry no cross-Engine stability promise.
 
 ## Specification
 
@@ -96,7 +100,7 @@ is built. Registry-level ID/name failures happen immediately at registration.
 
 Implemented public NativeModuleSpec and EngineBuilder APIs while retaining
 `Engine::new` as the empty-registry shortcut. Registration validates the
-`@host/...` namespace, rejects reserved and duplicate IDs and duplicate names,
+`@bim/...` namespace, rejects reserved-prefix, reserved-ID, and duplicate conflicts,
 and allocates the smallest free Host ID for `None`. Failed registrations leave
 both indexes unchanged. `build` consumes the builder and stores modules as an
 immutable ID-ordered Arc slice in Engine.

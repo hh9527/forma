@@ -1,6 +1,6 @@
 # RFC 0116: Host native module imports
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0059, RFC 0114, RFC 0115
 
 ## Summary
@@ -9,7 +9,7 @@ Forma modules may import a native module that the embedding Engine registered
 before construction:
 
 ```forma
-import secrets from "@host/acme/secrets";
+import secrets from "@bim/acme/secrets";
 ```
 
 The resolved ModuleId is the exact canonical logical name and has no physical
@@ -19,25 +19,26 @@ satisfied by a file, dependency, or manifest.
 
 ## Resolution
 
-`@host/` requests follow these rules:
+Registered Host modules use the existing `@bim/` request rules:
 
 1. the request must contain a non-empty path after the prefix;
 2. it resolves to `ModuleId::Builtin(exact_name)` with Forma format and no
    physical path;
 3. strict loading looks up the exact name in the frozen native registry;
-4. a miss reports `unknown Host native module` at the import site;
+4. a miss reports `unknown built-in module` at the import site;
 5. relative and `@src/` imports remain unavailable from native modules.
 
-The existing `@bim/` behavior is unchanged. Host names cannot shadow core
-names because registration rejects the core namespace.
+Host names cannot shadow current or future Forma modules because registration
+reserves the complete `@bim/std` and `@bim/core` subtrees. Core and Host
+modules otherwise share one built-in namespace and one import path model.
 
 ## Workspace projection
 
 Strict loading and recoverable synchronous/asynchronous workspace analysis use
 the same frozen module values and interfaces. A successful import contributes
 the exact ModuleId and its interface to semantic resolution and completion.
-Unknown imports produce one sourced unavailable-module fact with
-WorkspaceModuleKind::Host and do not block independent definitions.
+Unknown imports produce one sourced unavailable built-in-module fact and do
+not block independent definitions.
 
 Building another Engine from another builder may produce another registry;
 snapshots never consult a global mutable registry. Existing LoadedModule and
@@ -53,13 +54,13 @@ construction.
 5. recovery continues independent bindings after an unknown Host import;
 6. sync and async recovery observe the same frozen registry;
 7. two Engines do not leak Host registrations into one another;
-8. files and manifests cannot satisfy an `@host/...` request;
+8. files and manifests cannot satisfy an `@bim/...` request;
 9. no registry mutation or dynamic loading path is introduced; and
 10. full workspace tests and strict Clippy pass.
 
 ## Implementation plan
 
-1. recognize canonical `@host/...` module requests;
+1. reuse canonical `@bim/...` module requests;
 2. generalize strict native-module lookup and diagnostics;
 3. project Host imports through recoverable workspace analysis;
 4. add execution, opaque identity, completion, unknown, async, and isolation
@@ -75,3 +76,18 @@ construction.
 - FuncId or native-call bytecode instructions; or
 - persistence of automatically allocated IDs.
 
+## Implementation result
+
+Implemented Host modules as ordinary registered `@bim/...` built-ins, with no
+second namespace. The existing resolver produces the exact pathless Builtin
+ModuleId; strict and recoverable loaders authorize it by exact lookup in the
+Engine's frozen module map. Unknown names receive a sourced `unknown built-in
+module` diagnostic and cannot fall through to files or dependencies.
+
+Integration tests register `@bim/acme/runtime`, call its native Function,
+observe its opaque type name, type-check its interface, and complete its exact
+exports. Synchronous and asynchronous recovery both project the module as a
+known built-in. A separately built Engine cannot resolve it. Unknown built-ins
+remain unavailable while independent type facts stay known. Module completion
+now falls back to the known import-interface type for synthetic built-ins that
+have no source/result node, improving core and Host modules uniformly.

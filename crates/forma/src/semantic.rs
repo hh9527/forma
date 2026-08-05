@@ -674,10 +674,15 @@ impl WorkspaceSnapshot {
                 matches.next().is_none().then_some(definition)
             });
         let (kind, members) = if let Some(module) = definition.and_then(|item| item.import_target) {
-            (
-                CompletionKind::ModuleExport,
-                self.query_exports_of(context, module).await?,
-            )
+            let exports = self.query_exports_of(context, module).await?;
+            let members = if exports.is_empty() {
+                definition
+                    .and_then(|item| item.ty.value)
+                    .map_or_else(Vec::new, |ty| self.types.members_of(ty))
+            } else {
+                exports
+            };
+            (CompletionKind::ModuleExport, members)
         } else {
             let members = self
                 .type_at(receiver)

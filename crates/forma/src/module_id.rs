@@ -250,6 +250,9 @@ impl ModuleResolver {
         importer: &ModuleId,
         target: &str,
     ) -> Result<ResolvedModule, ResolveModuleError> {
+        if target == "@bim/" {
+            return Err(ResolveModuleError::InvalidImport(target.into()));
+        }
         if target.starts_with("@bim/") {
             return Ok(ResolvedModule {
                 id: ModuleId::builtin(target),
@@ -611,6 +614,10 @@ mod tests {
             .unwrap();
         assert_eq!(dependency.id.to_string(), "models/user.forma");
         assert_eq!(dependency.format, ModuleFormat::Forma);
+        assert!(matches!(
+            resolver.resolve_import(&root.id, "@bim/"),
+            Err(ResolveModuleError::InvalidImport(_))
+        ));
         std::fs::remove_dir_all(temporary).unwrap();
     }
 

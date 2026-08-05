@@ -1,6 +1,6 @@
 # RFC 0114: Static Host native modules
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0059, RFC 0113
 
 ## Summary
@@ -40,7 +40,7 @@ only within the built Engine and must not be treated as a persistent ABI.
 1. RFC 0115: add an Engine builder, Host native module specifications,
    explicit/automatic ID allocation, collision checks, and immutable registry
    ownership;
-2. RFC 0116: resolve registered `@host/...` imports in strict and recoverable
+2. RFC 0116: resolve registered `@bim/...` imports in strict and recoverable
    loading, publish module facts, and test snapshot sharing.
 
 Each child receives a proposal commit and a separate implementation/result
@@ -71,3 +71,17 @@ commit.
 - persistent bytecode/type caches; or
 - registration changes after Engine construction.
 
+## Implementation result
+
+RFCs 0115 and 0116 implement the complete static Host module path. A Host uses
+EngineBuilder to register trusted native specs with explicit or automatic IDs,
+then consumes the builder into an immutable Engine. Forma reserves the
+`@bim/std` and `@bim/core` subtrees; Host modules occupy the open ID range and
+other names in the shared `@bim/...` built-in namespace.
+
+Every workspace build links core and Host specs through the same declaration,
+arity, symbol, and native-type-slot checks. Strict execution, recoverable
+analysis, async queries, semantic imports, and completion all observe the
+Engine's frozen registry. Forma manifests and files cannot register or satisfy
+a built-in module. No dynamic loading, FuncId, registry mutation, or resource
+lifetime mechanism was introduced.
