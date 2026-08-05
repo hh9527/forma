@@ -99,3 +99,4 @@ semantics from an earlier RFC.
 78. Monomorphic recursive closure inference.
 79. Restricted local closure generalization.
 80. Usable rank-1 type inference umbrella.
+81. Partial explicit type application.
