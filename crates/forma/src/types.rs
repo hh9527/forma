@@ -49,7 +49,7 @@ pub enum TypeNode {
     Float,
     String,
     Bytes,
-    Opaque(String),
+    Opaque(crate::NativeType),
     Atom(Atom),
     Array(TypeId),
     Dict(TypeId),
@@ -121,7 +121,7 @@ impl TypeGraph {
             TypeDescriptor::Float => TypeNode::Float,
             TypeDescriptor::String => TypeNode::String,
             TypeDescriptor::Bytes => TypeNode::Bytes,
-            TypeDescriptor::Opaque(name) => TypeNode::Opaque(name.clone()),
+            TypeDescriptor::Opaque(native_type) => TypeNode::Opaque(native_type.clone()),
             TypeDescriptor::Atom(atom) => TypeNode::Atom(atom.clone()),
             TypeDescriptor::Array(item) => TypeNode::Array(self.intern_descriptor(item)),
             TypeDescriptor::Dict(item) => TypeNode::Dict(self.intern_descriptor(item)),
@@ -210,6 +210,9 @@ impl TypeGraph {
         path: &str,
         links: &mut HashMap<Handle, TypeId>,
     ) -> Result<TypeNode, String> {
+        if let Some(native_type) = value.as_native_type() {
+            return Ok(TypeNode::Opaque(native_type.clone()));
+        }
         loop {
             let fields = value
                 .dict_fields()
@@ -289,14 +292,6 @@ impl TypeGraph {
             "Bytes" => {
                 require(&["kind"])?;
                 TypeNode::Bytes
-            }
-            "Opaque" => {
-                require(&["kind", "name"])?;
-                let name = value
-                    .dict_get("name")
-                    .and_then(ValueRef::as_str)
-                    .ok_or_else(|| format!("{path}.name must be a String"))?;
-                TypeNode::Opaque(name.into())
             }
             "Atom" => {
                 require(&["kind", "tag"])?;
@@ -457,7 +452,9 @@ impl TypeGraph {
             TypeNode::Float => "Float".into(),
             TypeNode::String => "String".into(),
             TypeNode::Bytes => "Bytes".into(),
-            TypeNode::Opaque(name) => format!("opaque({name})"),
+            TypeNode::Opaque(native_type) => {
+                format!("opaque({})", native_type.qualified_name())
+            }
             TypeNode::Atom(atom) => format!("'{}", atom.name()),
             TypeNode::Array(item) => format!("Array<{}>", self.display_with(*item, active)),
             TypeNode::Dict(item) => format!("Dict<{}>", self.display_with(*item, active)),
@@ -650,7 +647,7 @@ pub enum TypeDescriptor {
     Float,
     String,
     Bytes,
-    Opaque(String),
+    Opaque(crate::NativeType),
     Atom(Atom),
     Array(Box<TypeDescriptor>),
     Dict(Box<TypeDescriptor>),
@@ -690,10 +687,7 @@ impl TypeDescriptor {
             Self::Float => vec![kind_entry("Float")],
             Self::String => vec![kind_entry("String")],
             Self::Bytes => vec![kind_entry("Bytes")],
-            Self::Opaque(name) => vec![
-                kind_entry("Opaque"),
-                ("name".into(), Value::string(name.as_str())),
-            ],
+            Self::Opaque(native_type) => return Value::NativeType(native_type.clone()),
             Self::Atom(tag) => vec![kind_entry("Atom"), ("tag".into(), Value::Atom(tag.clone()))],
             Self::Array(item) => vec![kind_entry("Array"), ("item".into(), item.to_value(vm))],
             Self::Dict(item) => vec![kind_entry("Dict"), ("item".into(), item.to_value(vm))],
@@ -791,7 +785,7 @@ impl TypeDescriptor {
             Self::Float => "Float".into(),
             Self::String => "String".into(),
             Self::Bytes => "Bytes".into(),
-            Self::Opaque(name) => format!("opaque({name})"),
+            Self::Opaque(native_type) => format!("opaque({})", native_type.qualified_name()),
             Self::Atom(atom) => format!("'{}", atom.name()),
             Self::Array(item) => format!("Array<{}>", item.display_name()),
             Self::Dict(item) => format!("Dict<{}>", item.display_name()),
@@ -863,7 +857,9 @@ fn display_scheme_descriptor(
         TypeDescriptor::Float => "Float".into(),
         TypeDescriptor::String => "String".into(),
         TypeDescriptor::Bytes => "Bytes".into(),
-        TypeDescriptor::Opaque(name) => format!("opaque({name})"),
+        TypeDescriptor::Opaque(native_type) => {
+            format!("opaque({})", native_type.qualified_name())
+        }
         TypeDescriptor::Atom(atom) => format!("'{}", atom.name()),
         TypeDescriptor::Array(item) => {
             format!("Array<{}>", display_scheme_descriptor(item, names))
@@ -1487,7 +1483,10 @@ pub(crate) fn analyze_program_with_bindings_observed(
         .expect("core prelude defines Any")
         .clone();
     for binding in &program.value.body.value.bindings {
-        if binding.value.kind == BindingKind::Type {
+        if matches!(
+            binding.value.kind,
+            BindingKind::Type | BindingKind::NativeType
+        ) {
             tool_values.insert(binding.value.name.value.clone(), any_metadata.clone());
             static_environment.insert(binding.value.name.value.clone(), TypeDescriptor::Type);
             binding_types.insert(binding.value.name.value.clone(), TypeDescriptor::Type);
@@ -1633,7 +1632,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
         }
         match binding.value.kind {
             BindingKind::Decl => continue,
-            BindingKind::Native => {
+            BindingKind::Native | BindingKind::NativeType => {
                 let value = external_values
                     .get(&binding.value.name.value)
                     .cloned()
@@ -1650,6 +1649,32 @@ pub(crate) fn analyze_program_with_bindings_observed(
                         )
                     })?;
                 tool_values.insert(binding.value.name.value.clone(), value);
+                if binding.value.kind == BindingKind::NativeType {
+                    let value = tool_values[&binding.value.name.value].clone();
+                    let descriptor = TypeDescriptor::from_value(&value).map_err(|message| {
+                        FrontendError::from_diagnostic(
+                            sources,
+                            Diagnostic::error(
+                                format!(
+                                    "native type {} is invalid: {message}",
+                                    binding.value.name.value
+                                ),
+                                binding.location,
+                            ),
+                        )
+                    })?;
+                    let witness = TypeDescriptor::TypeOf(Box::new(descriptor.clone()));
+                    declared_types.insert(binding.value.name.value.clone(), descriptor);
+                    static_environment.insert(binding.value.name.value.clone(), witness.clone());
+                    binding_types.insert(binding.value.name.value.clone(), witness.clone());
+                    binding_schemes.insert(
+                        binding.value.name.value.clone(),
+                        TypeScheme {
+                            parameters: Vec::new(),
+                            body: witness,
+                        },
+                    );
+                }
             }
             BindingKind::Type => {
                 let value = evaluate_tool_expression(
@@ -2434,7 +2459,10 @@ pub(crate) fn infer_value(value: &Value) -> TypeDescriptor {
         Value::Float(_) => TypeDescriptor::Float,
         Value::String(_) => TypeDescriptor::String,
         Value::Bytes(_) => TypeDescriptor::Bytes,
-        Value::Opaque(value) => TypeDescriptor::Opaque(value.type_name().into()),
+        Value::NativeType(native_type) => {
+            TypeDescriptor::TypeOf(Box::new(TypeDescriptor::Opaque(native_type.clone())))
+        }
+        Value::Opaque(value) => TypeDescriptor::Opaque(value.native_type().clone()),
         Value::Atom(atom) => TypeDescriptor::Atom(atom.clone()),
         Value::Array(items) => {
             let item =
@@ -3213,6 +3241,9 @@ fn decode_native_type(value: ValueRef<'_>) -> Result<TypeDescriptor, NativeError
 
 fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, String> {
     let value = value.resolve_hidden_up_link()?;
+    if let Some(native_type) = value.as_native_type() {
+        return Ok(TypeDescriptor::Opaque(native_type.clone()));
+    }
     let fields = value
         .dict_fields()
         .ok_or_else(|| format!("{path} must be a Dict"))?;
@@ -3295,14 +3326,6 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
         "Bytes" => {
             require(&["kind"])?;
             TypeDescriptor::Bytes
-        }
-        "Opaque" => {
-            require(&["kind", "name"])?;
-            let name = value
-                .dict_get("name")
-                .and_then(ValueRef::as_str)
-                .ok_or_else(|| format!("{path}.name must be a String"))?;
-            TypeDescriptor::Opaque(name.into())
         }
         "Atom" => {
             require(&["kind", "tag"])?;
@@ -3497,11 +3520,15 @@ fn validate_value_ref(
         TypeDescriptor::String if value.kind() == ValueKind::String => Ok(()),
         TypeDescriptor::Bytes if value.kind() == ValueKind::Bytes => Ok(()),
         TypeDescriptor::Opaque(expected) if value.kind() == ValueKind::Opaque => {
-            let actual = value.opaque_type_name().expect("ValueKind checked");
+            let actual = value.opaque_native_type().expect("ValueKind checked");
             if actual == expected {
                 Ok(())
             } else {
-                Err(format!("{path} must be {expected}, got {actual}"))
+                Err(format!(
+                    "{path} must be {}, got {}",
+                    expected.qualified_name(),
+                    actual.qualified_name()
+                ))
             }
         }
         TypeDescriptor::Atom(expected) if value.as_atom() == Some(expected.name()) => Ok(()),
@@ -3626,6 +3653,9 @@ fn kind_entry(kind: &str) -> (String, Value) {
 }
 
 fn decode_type(value: &Value, path: &str) -> Result<TypeDescriptor, String> {
+    if let Value::NativeType(native_type) = value {
+        return Ok(TypeDescriptor::Opaque(native_type.clone()));
+    }
     let Value::Dict(metadata) = value else {
         return Err(format!("{path} must be a Dict"));
     };
@@ -3691,13 +3721,6 @@ fn decode_type(value: &Value, path: &str) -> Result<TypeDescriptor, String> {
         "Bytes" => {
             require_fields(metadata, path, &["kind"])?;
             TypeDescriptor::Bytes
-        }
-        "Opaque" => {
-            require_fields(metadata, path, &["kind", "name"])?;
-            let Value::String(name) = metadata.get("name").expect("required field") else {
-                return Err(format!("{path}.name must be a String"));
-            };
-            TypeDescriptor::Opaque(name.to_string())
         }
         "Atom" => {
             require_fields(metadata, path, &["kind", "tag"])?;

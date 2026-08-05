@@ -18,10 +18,12 @@ knows only the generic `Opaque` carrier; it never knows SHA-256 or HashState.
 An opaque declaration is module-scoped and nominal:
 
 ```forma
-@opaque type HashState;
+native type HashState;
 ```
 
-Its stable identity is the resolved module ID plus local type name. Opaque
+Its runtime identity is a linker-assigned native module ID plus a fixed local
+type index. Its stable descriptive identity is the resolved module ID plus
+local type name. Opaque
 types participate generically in TypeDescriptor, TypeGraph, TypeOf, Function
 contracts, inference, validation, display, TypeDesc observation, heap
 copy/promotion, debug formatting, and equality as atomic leaves.
@@ -42,7 +44,7 @@ cannot mutate an observable alias.
 An owning module combines the declaration with ordinary native Functions:
 
 ```forma
-@opaque type HashState;
+native type HashState;
 native new: Fn() -> HashState;
 native update: Fn(HashState, Bytes) -> HashState;
 {HashState: HashState, new: new, update: update}
@@ -71,7 +73,7 @@ arbitrary VM object or depend on heap handles.
 
 ## Acceptance criteria
 
-1. `@opaque type T;` creates a stable module-qualified nominal type witness;
+1. `native type T;` links an unforgeable module-owned nominal type witness;
 2. Function contracts can accept and return that type;
 3. TypeDesc reports `Opaque`, its qualified name, and no children;
 4. one generic runtime carrier supports all declared opaque types;
@@ -85,7 +87,7 @@ arbitrary VM object or depend on heap handles.
 
 ## Implementation plan
 
-1. add the opaque type declaration and module-qualified metadata;
+1. add the native type declaration, module/local identity, and qualified metadata;
 2. add one immutable, cloneable opaque payload carrier and checked Host API;
 3. teach heap copying, equality, export/import, debug, and JSON boundaries once;
 4. add generic TypeDesc observation;
@@ -101,9 +103,11 @@ loading, finalizers, or a general ownership/marker system.
 
 ## Implementation result
 
-Implemented `@opaque type T;` as a top-level nominal type declaration whose
-identity is rewritten from the resolver's deterministic module ID and local
-name. Type metadata and TypeDesc use one generic `Opaque` node;
+Implemented `native type T;` as a top-level linked type declaration. Each
+native module receives an unobservable registry ID, and each declared type a
+fixed local index; source code cannot construct either. A stable qualified
+name remains available for display and persistence/rebinding. Type metadata and
+TypeDesc use one generic `Opaque` node;
 `type-desc.opaque_name` exposes the qualified identity and `children` is empty.
 Function contracts and runtime validation compare that nominal identity.
 

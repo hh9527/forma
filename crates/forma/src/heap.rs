@@ -45,6 +45,7 @@ pub(crate) enum RuntimeValue {
     ShortString(InternId),
     String(Handle),
     Bytes(Handle),
+    NativeType(Handle),
     Opaque(Handle),
     Array(Handle),
     Tuple(Handle),
@@ -177,6 +178,7 @@ pub(crate) enum Object {
     Reserved,
     String(Box<str>),
     Bytes(Box<[u8]>),
+    NativeType(crate::NativeType),
     Opaque(crate::value::OpaqueValue),
     Array(Box<[RichValue]>),
     Tuple(Box<[RichValue]>),
@@ -462,6 +464,9 @@ impl Heap {
             Value::Bytes(value) => {
                 RuntimeValue::Bytes(self.allocate(Object::Bytes(value.as_ref().into())))
             }
+            Value::NativeType(value) => {
+                RuntimeValue::NativeType(self.allocate(Object::NativeType(value.clone())))
+            }
             Value::Opaque(value) => {
                 RuntimeValue::Opaque(self.allocate(Object::Opaque(value.clone())))
             }
@@ -540,6 +545,9 @@ impl Heap {
             Value::String(value) => self.string(background, value),
             Value::Bytes(value) => {
                 RuntimeValue::Bytes(self.allocate(Object::Bytes(value.as_ref().into())))
+            }
+            Value::NativeType(value) => {
+                RuntimeValue::NativeType(self.allocate(Object::NativeType(value.clone())))
             }
             Value::Opaque(value) => {
                 RuntimeValue::Opaque(self.allocate(Object::Opaque(value.clone())))
@@ -979,6 +987,18 @@ impl<'a> HeapView<'a> {
                 };
                 Ok(left.logical_eq(right))
             }
+            (RuntimeValue::NativeType(left), RuntimeValue::NativeType(right)) => {
+                if left == right {
+                    return Ok(true);
+                }
+                let Object::NativeType(left) = self.object(left)? else {
+                    return Err(HeapError("NativeType handle refers to another object kind"));
+                };
+                let Object::NativeType(right) = self.object(right)? else {
+                    return Err(HeapError("NativeType handle refers to another object kind"));
+                };
+                Ok(left == right)
+            }
             (RuntimeValue::Array(left), RuntimeValue::Array(right))
             | (RuntimeValue::Tuple(left), RuntimeValue::Tuple(right)) => {
                 self.sequence_handles_equal(left, right, visited)
@@ -1120,6 +1140,14 @@ impl<'a> HeapView<'a> {
                     return Err(HeapError("Opaque handle refers to another object kind"));
                 };
                 let value = Value::Opaque(value.clone());
+                visiting.remove(&handle);
+                value
+            }
+            RuntimeValue::NativeType(handle) => {
+                let Object::NativeType(value) = self.enter_object(handle, visiting)? else {
+                    return Err(HeapError("NativeType handle refers to another object kind"));
+                };
+                let value = Value::NativeType(value.clone());
                 visiting.remove(&handle);
                 value
             }
@@ -1395,6 +1423,9 @@ impl PendingCopy {
             RuntimeValue::Opaque(handle) => {
                 RuntimeValue::Opaque(self.copy_object(target, source, handle)?)
             }
+            RuntimeValue::NativeType(handle) => {
+                RuntimeValue::NativeType(self.copy_object(target, source, handle)?)
+            }
             RuntimeValue::Array(handle) => {
                 RuntimeValue::Array(self.copy_object(target, source, handle)?)
             }
@@ -1465,6 +1496,7 @@ impl PendingCopy {
             Object::String(value) => Object::String(value.clone()),
             Object::Bytes(value) => Object::Bytes(value.clone()),
             Object::Opaque(value) => Object::Opaque(value.clone()),
+            Object::NativeType(value) => Object::NativeType(value.clone()),
             Object::Array(values) => Object::Array(copy_values(self, values)?),
             Object::Tuple(values) => Object::Tuple(copy_values(self, values)?),
             Object::Tagged { tag, payload } => Object::Tagged {
@@ -1636,6 +1668,7 @@ fn value_contains_foreign(value: RuntimeValue, target: Storage) -> bool {
         RuntimeValue::String(handle)
         | RuntimeValue::Bytes(handle)
         | RuntimeValue::Opaque(handle)
+        | RuntimeValue::NativeType(handle)
         | RuntimeValue::Array(handle)
         | RuntimeValue::Tuple(handle)
         | RuntimeValue::Tagged(handle)
@@ -1694,7 +1727,7 @@ fn object_contains_foreign(object: &Object, target: Storage) -> bool {
                     RuntimePrototype::Native(_) => false,
                 })
         }
-        Object::String(_) | Object::Bytes(_) | Object::Opaque(_) => false,
+        Object::String(_) | Object::Bytes(_) | Object::Opaque(_) | Object::NativeType(_) => false,
     }
 }
 
@@ -1997,8 +2030,17 @@ mod tests {
 
     #[test]
     fn opaque_values_preserve_nominal_identity_and_logical_equality() {
-        let token = Value::Opaque(crate::OpaqueValue::new("fixture#Token", 42_u64));
-        let other_type = Value::Opaque(crate::OpaqueValue::new("fixture#Other", 42_u64));
+        let module = crate::value::NativeModuleId(7);
+        let token_type = crate::NativeType::bind(
+            crate::value::NativeTypeId { module, local: 0 },
+            "fixture#Token",
+        );
+        let other_native_type = crate::NativeType::bind(
+            crate::value::NativeTypeId { module, local: 1 },
+            "fixture#Other",
+        );
+        let token = Value::Opaque(crate::OpaqueValue::new(token_type.clone(), 42_u64));
+        let other_type = Value::Opaque(crate::OpaqueValue::new(other_native_type.clone(), 42_u64));
         let mut main = Heap::main();
         let persistent = publish_value(&mut main, &token).unwrap().runtime();
         let mut work = Heap::work();
@@ -2014,9 +2056,9 @@ mod tests {
         let Value::Opaque(exported) = exported else {
             panic!("expected Opaque value")
         };
-        assert_eq!(exported.type_name(), "fixture#Token");
-        assert_eq!(exported.downcast_ref::<u64>("fixture#Token"), Some(&42));
-        assert!(exported.downcast_ref::<u64>("fixture#Other").is_none());
+        assert_eq!(exported.native_type().qualified_name(), "fixture#Token");
+        assert_eq!(exported.downcast_ref::<u64>(&token_type), Some(&42));
+        assert!(exported.downcast_ref::<u64>(&other_native_type).is_none());
     }
 
     #[test]

@@ -242,7 +242,7 @@ impl Resolver {
             BindingKind::Decl | BindingKind::Def => HirDefinitionKind::DefinitionSlot,
             BindingKind::Type => HirDefinitionKind::Type,
             BindingKind::Import => HirDefinitionKind::Import,
-            BindingKind::Native => HirDefinitionKind::Native,
+            BindingKind::Native | BindingKind::NativeType => HirDefinitionKind::Native,
         };
         let id = self.define_name(name, kind, binding.value.name.location, scope, top_level);
         self.hir.definitions[id.index()].type_parameters = binding
@@ -300,7 +300,10 @@ impl Resolver {
         for binding in bindings {
             if matches!(
                 binding.value.kind,
-                BindingKind::Decl | BindingKind::Native | BindingKind::Type
+                BindingKind::Decl
+                    | BindingKind::Native
+                    | BindingKind::NativeType
+                    | BindingKind::Type
             ) || binding.value.kind == BindingKind::Def && binding.value.annotation.is_some()
                 || binding.value.kind == BindingKind::Def
                     && matches!(binding.value.value.value, ExprKind::Closure { .. })
@@ -353,7 +356,10 @@ impl Resolver {
                     };
                     self.hir.definitions[definition.index()].value = Some(value);
                 }
-                BindingKind::Decl | BindingKind::Native | BindingKind::Type => {
+                BindingKind::Decl
+                | BindingKind::Native
+                | BindingKind::NativeType
+                | BindingKind::Type => {
                     let value = self.index_binding_expr(binding, &binding.value.value, scopes);
                     let definition = resolve_name(scopes, &binding.value.name.value)
                         .expect("predeclared binding has a definition");

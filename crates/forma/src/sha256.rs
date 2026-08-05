@@ -13,23 +13,179 @@ const ROUND: [u32; 64] = [
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
-pub(crate) fn hex(input: &[u8]) -> String {
-    let bit_len = (input.len() as u64).wrapping_mul(8);
-    let mut padded = input.to_vec();
-    padded.push(0x80);
-    while padded.len() % 64 != 56 {
-        padded.push(0);
-    }
-    padded.extend_from_slice(&bit_len.to_be_bytes());
+const PROTOCOL_PREFIX: &[u8] = b"forma.hash\0\x01";
 
-    let mut state = INITIAL;
-    for block in padded.chunks_exact(64) {
-        compress(&mut state, block);
+#[derive(Clone, Eq, PartialEq)]
+pub(crate) struct Context {
+    state: [u32; 8],
+    block: [u8; 64],
+    block_len: usize,
+    byte_len: u64,
+}
+
+impl std::fmt::Debug for Context {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HashState")
+            .field("bytes", &self.byte_len)
+            .finish_non_exhaustive()
     }
+}
+
+impl Default for Context {
+    fn default() -> Self {
+        Self {
+            state: INITIAL,
+            block: [0; 64],
+            block_len: 0,
+            byte_len: 0,
+        }
+    }
+}
+
+impl Context {
+    pub(crate) fn update(&mut self, mut input: &[u8]) {
+        self.byte_len = self.byte_len.wrapping_add(input.len() as u64);
+        if self.block_len != 0 {
+            let count = (64 - self.block_len).min(input.len());
+            self.block[self.block_len..self.block_len + count].copy_from_slice(&input[..count]);
+            self.block_len += count;
+            input = &input[count..];
+            if self.block_len == 64 {
+                compress(&mut self.state, &self.block);
+                self.block_len = 0;
+            }
+        }
+        for block in input.chunks_exact(64) {
+            compress(&mut self.state, block);
+        }
+        let remainder = input.len() % 64;
+        if remainder != 0 {
+            let tail = &input[input.len() - remainder..];
+            self.block[..remainder].copy_from_slice(tail);
+            self.block_len = remainder;
+        }
+    }
+
+    pub(crate) fn finish(mut self) -> [u8; 32] {
+        let bit_len = self.byte_len.wrapping_mul(8);
+        self.block[self.block_len] = 0x80;
+        self.block_len += 1;
+        if self.block_len > 56 {
+            self.block[self.block_len..].fill(0);
+            compress(&mut self.state, &self.block);
+            self.block = [0; 64];
+        } else {
+            self.block[self.block_len..56].fill(0);
+        }
+        self.block[56..].copy_from_slice(&bit_len.to_be_bytes());
+        compress(&mut self.state, &self.block);
+        let mut output = [0; 32];
+        for (chunk, word) in output.chunks_exact_mut(4).zip(self.state) {
+            chunk.copy_from_slice(&word.to_be_bytes());
+        }
+        output
+    }
+}
+
+fn argument_state(
+    context: &crate::CallContext<'_, '_>,
+    index: usize,
+    native_type: &crate::NativeType,
+) -> Result<Context, crate::NativeError> {
+    let register = context.argument(index)?;
+    context
+        .value(register)?
+        .as_opaque::<Context>(native_type)
+        .cloned()
+        .ok_or_else(|| crate::NativeError::new("expected @bim/std/hash#HashState"))
+}
+
+fn state_type(
+    context: &crate::CallContext<'_, '_>,
+) -> Result<crate::NativeType, crate::NativeError> {
+    context
+        .value(context.upvalue(0)?)?
+        .as_native_type()
+        .cloned()
+        .ok_or_else(|| crate::NativeError::new("HashState native type is not linked"))
+}
+
+fn initial_context() -> Context {
+    let mut context = Context::default();
+    context.update(PROTOCOL_PREFIX);
+    context
+}
+
+pub(crate) fn native_new(
+    context: &mut crate::CallContext<'_, '_>,
+) -> Result<(), crate::NativeError> {
+    let native_type = state_type(context)?;
+    context.set_opaque(context.result(), native_type, initial_context())
+}
+
+pub(crate) fn native_update_bytes(
+    context: &mut crate::CallContext<'_, '_>,
+) -> Result<(), crate::NativeError> {
+    let native_type = state_type(context)?;
+    let mut state = argument_state(context, 0, &native_type)?;
+    let bytes = context
+        .value(context.argument(1)?)?
+        .as_bytes()
+        .ok_or_else(|| crate::NativeError::new("expected Bytes"))?
+        .to_vec();
+    state.update(&[1]);
+    state.update(&(bytes.len() as u64).to_be_bytes());
+    state.update(&bytes);
+    context.set_opaque(context.result(), native_type, state)
+}
+
+pub(crate) fn native_update_string(
+    context: &mut crate::CallContext<'_, '_>,
+) -> Result<(), crate::NativeError> {
+    let native_type = state_type(context)?;
+    let mut state = argument_state(context, 0, &native_type)?;
+    let string = context
+        .value(context.argument(1)?)?
+        .as_str()
+        .ok_or_else(|| crate::NativeError::new("expected String"))?
+        .to_owned();
+    state.update(&[2]);
+    state.update(&(string.len() as u64).to_be_bytes());
+    state.update(string.as_bytes());
+    context.set_opaque(context.result(), native_type, state)
+}
+
+pub(crate) fn native_update_int(
+    context: &mut crate::CallContext<'_, '_>,
+) -> Result<(), crate::NativeError> {
+    let native_type = state_type(context)?;
+    let mut state = argument_state(context, 0, &native_type)?;
+    let value = context
+        .value(context.argument(1)?)?
+        .as_int()
+        .ok_or_else(|| crate::NativeError::new("expected Int"))?;
+    state.update(&[3]);
+    state.update(&value.to_be_bytes());
+    context.set_opaque(context.result(), native_type, state)
+}
+
+pub(crate) fn native_finish(
+    context: &mut crate::CallContext<'_, '_>,
+) -> Result<(), crate::NativeError> {
+    let native_type = state_type(context)?;
+    let state = argument_state(context, 0, &native_type)?;
+    context.set_bytes(context.result(), state.finish().to_vec())
+}
+
+pub(crate) fn hex(input: &[u8]) -> String {
+    let mut context = Context::default();
+    context.update(input);
+    let digest = context.finish();
 
     let mut output = String::with_capacity(64);
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    for byte in state.into_iter().flat_map(u32::to_be_bytes) {
+    for byte in digest {
         output.push(HEX[usize::from(byte >> 4)] as char);
         output.push(HEX[usize::from(byte & 0x0f)] as char);
     }
@@ -81,7 +237,7 @@ fn compress(state: &mut [u32; 8], block: &[u8]) {
 
 #[cfg(test)]
 mod tests {
-    use super::hex;
+    use super::{Context, hex};
 
     #[test]
     fn standard_vectors() {
@@ -92,6 +248,23 @@ mod tests {
         assert_eq!(
             hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn streaming_matches_one_shot_across_block_boundaries() {
+        let input = vec![b'x'; 137];
+        let mut context = Context::default();
+        context.update(&input[..3]);
+        context.update(&input[3..64]);
+        context.update(&input[64..]);
+        let digest = context.finish();
+        assert_eq!(
+            digest
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>(),
+            hex(&input)
         );
     }
 }

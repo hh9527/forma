@@ -1,6 +1,6 @@
 # RFC 0110: Deterministic stateful hash standard library
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0107, RFC 0109
 
 ## Summary
@@ -9,7 +9,7 @@
 SHA-256 state transitions:
 
 ```forma
-@opaque type HashState;
+native type HashState;
 native new: Fn() -> HashState;
 native update_bytes: Fn(HashState, Bytes) -> HashState;
 native update_string: Fn(HashState, String) -> HashState;
@@ -86,3 +86,23 @@ call; input provenance does not become the new root provenance.
 4. implement the versioned framing protocol and focused vectors;
 5. test aliasing, equality, type rejection, quotas, and debug opacity; and
 6. record the implementation result.
+
+## Implementation result
+
+Implemented `HashState` as local native type index zero in `@bim/std/hash`.
+The native module registry assigns an unobservable module ID, links the
+`NativeType` witness before contract analysis, and captures that witness as a
+hidden native closure upvalue. Hash callbacks neither hard-code nor reconstruct
+the type identity.
+
+The internal SHA-256 implementation now supports cloned incremental contexts.
+`new`, all three updates, and `finish` use the synchronous native ABI's checked
+NativeType/Opaque projection and deterministic allocation accounting. Updates
+copy the fixed-size context, apply the specified versioned framing, and return
+an independent logical state; finish returns 32 Bytes without consuming it.
+
+Protocol tests pin exact digests for empty state, String `"abc"`, Bytes
+`b"abc"`, and Int `-1`. They also cover repeatable finish, unchanged aliases,
+logical equality, and kind separation. Existing one-shot `sha256` vectors
+remain unchanged. Full workspace tests and strict Clippy pass without adding a
+HashState-specific type, value, or VM dispatch variant.

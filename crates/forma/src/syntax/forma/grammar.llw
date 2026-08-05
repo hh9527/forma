@@ -18,14 +18,15 @@ program: [?1 module_manifest] body;
 module_manifest: '@' '@' Identifier manifest_dict ';';
 manifest_dict: '{' [dict_field (?1 ',' dict_field)* [',']] '}' @dict_expr;
 body: (?1 binding)* expression;
-binding^: let_binding | decl_binding | def_binding | native_binding | type_binding | import_binding;
+binding^: let_binding | decl_binding | def_binding | ?1 native_type_binding | ?2 native_binding | type_binding | import_binding;
 let_binding: 'let' Identifier [':' expression] '=' expression ';';
 decl_binding: 'decl' Identifier ':' type_scheme ';';
 def_binding: 'def' Identifier [':' type_scheme] '=' expression ';';
 native_binding: 'native' Identifier ':' type_scheme ';';
+native_type_binding: 'native' 'type' Identifier ';';
 type_scheme: ['for' type_parameters] contract;
 type_parameters: '(' Identifier (?1 ',' Identifier)* [','] ')';
-type_binding: decorator* 'type' Identifier ['=' expression] ';';
+type_binding: decorator* 'type' Identifier '=' expression ';';
 import_binding: 'import' Identifier 'from' string_literal ';';
 
 expression:

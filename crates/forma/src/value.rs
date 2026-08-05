@@ -82,20 +82,62 @@ pub struct Dict {
 
 type OpaquePayload = dyn Any + Send + Sync;
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct NativeModuleId(pub(crate) u32);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct NativeTypeId {
+    pub(crate) module: NativeModuleId,
+    pub(crate) local: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct NativeType {
+    id: NativeTypeId,
+    qualified_name: Arc<str>,
+}
+
+impl NativeType {
+    pub(crate) fn bind(id: NativeTypeId, qualified_name: impl Into<Arc<str>>) -> Self {
+        Self {
+            id,
+            qualified_name: qualified_name.into(),
+        }
+    }
+
+    pub fn qualified_name(&self) -> &str {
+        &self.qualified_name
+    }
+}
+
+impl PartialEq for NativeType {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for NativeType {}
+
+impl std::hash::Hash for NativeType {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
 #[derive(Clone)]
 pub struct OpaqueValue {
-    type_name: Arc<str>,
+    native_type: NativeType,
     payload: Arc<OpaquePayload>,
     equal: fn(&OpaquePayload, &OpaquePayload) -> bool,
 }
 
 impl OpaqueValue {
-    pub fn new<T>(type_name: impl Into<Arc<str>>, payload: T) -> Self
+    pub fn new<T>(native_type: NativeType, payload: T) -> Self
     where
         T: Any + Eq + Send + Sync,
     {
         Self {
-            type_name: type_name.into(),
+            native_type,
             payload: Arc::new(payload),
             equal: |left, right| {
                 left.downcast_ref::<T>()
@@ -105,25 +147,25 @@ impl OpaqueValue {
         }
     }
 
-    pub fn type_name(&self) -> &str {
-        &self.type_name
+    pub fn native_type(&self) -> &NativeType {
+        &self.native_type
     }
 
-    pub fn downcast_ref<T: Any>(&self, expected_type: &str) -> Option<&T> {
-        (self.type_name.as_ref() == expected_type)
+    pub fn downcast_ref<T: Any>(&self, expected_type: &NativeType) -> Option<&T> {
+        (&self.native_type == expected_type)
             .then(|| self.payload.downcast_ref::<T>())
             .flatten()
     }
 
     pub(crate) fn logical_eq(&self, other: &Self) -> bool {
-        self.type_name == other.type_name
+        self.native_type == other.native_type
             && (self.equal)(self.payload.as_ref(), other.payload.as_ref())
     }
 }
 
 impl fmt::Debug for OpaqueValue {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "<opaque {}>", self.type_name)
+        write!(formatter, "<opaque {}>", self.native_type.qualified_name)
     }
 }
 
@@ -636,6 +678,7 @@ pub struct NativeFunction {
     arity: usize,
     callback: NativeCallback,
     kind: NativeKind,
+    native_type_local: Option<u32>,
 }
 
 impl NativeFunction {
@@ -645,6 +688,22 @@ impl NativeFunction {
             arity,
             callback,
             kind: NativeKind::Synchronous,
+            native_type_local: None,
+        }
+    }
+
+    pub const fn new_with_native_type(
+        name: &'static str,
+        arity: usize,
+        native_type_local: u32,
+        callback: NativeCallback,
+    ) -> Self {
+        Self {
+            name,
+            arity,
+            callback,
+            kind: NativeKind::Synchronous,
+            native_type_local: Some(native_type_local),
         }
     }
 
@@ -654,6 +713,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreArray(function),
+            native_type_local: None,
         }
     }
 
@@ -663,6 +723,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreAttributes(function),
+            native_type_local: None,
         }
     }
 
@@ -672,6 +733,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreModel(function),
+            native_type_local: None,
         }
     }
 
@@ -681,6 +743,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreBuiltinType(function),
+            native_type_local: None,
         }
     }
 
@@ -690,6 +753,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreDict(function),
+            native_type_local: None,
         }
     }
 
@@ -699,6 +763,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreString(function),
+            native_type_local: None,
         }
     }
 
@@ -708,6 +773,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CorePath(function),
+            native_type_local: None,
         }
     }
 
@@ -717,6 +783,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreDebug(function),
+            native_type_local: None,
         }
     }
 
@@ -726,6 +793,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreHash(function),
+            native_type_local: None,
         }
     }
 
@@ -735,6 +803,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreCodec(function),
+            native_type_local: None,
         }
     }
 
@@ -744,6 +813,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreTypeDesc(function),
+            native_type_local: None,
         }
     }
 
@@ -753,6 +823,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreDyn(function),
+            native_type_local: None,
         }
     }
 
@@ -762,6 +833,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreEq(function),
+            native_type_local: None,
         }
     }
 
@@ -771,6 +843,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreResult(function),
+            native_type_local: None,
         }
     }
 
@@ -780,6 +853,7 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreJson(function),
+            native_type_local: None,
         }
     }
 
@@ -797,6 +871,10 @@ impl NativeFunction {
 
     pub(crate) const fn kind(self) -> NativeKind {
         self.kind
+    }
+
+    pub(crate) const fn native_type_local(self) -> Option<u32> {
+        self.native_type_local
     }
 }
 
@@ -938,6 +1016,7 @@ pub enum Value {
     Float(f64),
     String(Arc<str>),
     Bytes(Arc<[u8]>),
+    NativeType(NativeType),
     Opaque(OpaqueValue),
     Dict(Dict),
     Array(Arc<[Value]>),
@@ -982,6 +1061,7 @@ impl Value {
             Self::Float(_) => "Float",
             Self::String(_) => "String",
             Self::Bytes(_) => "Bytes",
+            Self::NativeType(_) => "Type",
             Self::Opaque(_) => "Opaque",
             Self::Dict(_) => "Dict",
             Self::Array(_) => "Array",
@@ -1014,6 +1094,7 @@ impl fmt::Display for Value {
                 write!(formatter, "\"")
             }
             Self::Opaque(value) => write!(formatter, "{value:?}"),
+            Self::NativeType(value) => write!(formatter, "<type {}>", value.qualified_name()),
             Self::Dict(dict) => {
                 write!(formatter, "{{")?;
                 for (index, (field, value)) in

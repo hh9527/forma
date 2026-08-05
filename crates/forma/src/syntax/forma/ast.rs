@@ -128,6 +128,7 @@ pub enum Binding<'tree> {
     Decl(DeclBinding<'tree>),
     Def(DefBinding<'tree>),
     Native(NativeBinding<'tree>),
+    NativeType(NativeTypeBinding<'tree>),
     Type(TypeBinding<'tree>),
     Import(ImportBinding<'tree>),
 }
@@ -142,6 +143,7 @@ impl<'tree> Binding<'tree> {
             Rule::DeclBinding => Some(Self::Decl(DeclBinding { syntax })),
             Rule::DefBinding => Some(Self::Def(DefBinding { syntax })),
             Rule::NativeBinding => Some(Self::Native(NativeBinding { syntax })),
+            Rule::NativeTypeBinding => Some(Self::NativeType(NativeTypeBinding { syntax })),
             Rule::TypeBinding => Some(Self::Type(TypeBinding { syntax })),
             Rule::ImportBinding => Some(Self::Import(ImportBinding { syntax })),
             _ => None,
@@ -154,6 +156,7 @@ impl<'tree> Binding<'tree> {
             Self::Decl(node) => node.syntax,
             Self::Def(node) => node.syntax,
             Self::Native(node) => node.syntax,
+            Self::NativeType(node) => node.syntax,
             Self::Type(node) => node.syntax,
             Self::Import(node) => node.syntax,
         }
@@ -165,6 +168,7 @@ impl<'tree> Binding<'tree> {
             Self::Decl(node) => node.name(),
             Self::Def(node) => node.name(),
             Self::Native(node) => node.name(),
+            Self::NativeType(node) => node.name(),
             Self::Type(node) => node.name(),
             Self::Import(node) => node.name(),
         }
@@ -194,6 +198,7 @@ binding_node!(LetBinding);
 binding_node!(DeclBinding);
 binding_node!(DefBinding);
 binding_node!(NativeBinding);
+binding_node!(NativeTypeBinding);
 binding_node!(TypeBinding);
 binding_node!(ImportBinding);
 
@@ -422,15 +427,13 @@ pub fn validate(source: SourceId, tree: &CstData) -> Vec<SyntaxIssue> {
                 Some(Token::Semicolon),
                 ExpectedSyntax::BindingValue,
             )),
-            Binding::Type(node) if node.value().is_none() && node.decorators().next().is_none() => {
-                issues.push(missing_slot(
-                    source,
-                    node.value_slot(),
-                    node.syntax,
-                    Some(Token::Semicolon),
-                    ExpectedSyntax::BindingValue,
-                ))
-            }
+            Binding::Type(node) if node.value().is_none() => issues.push(missing_slot(
+                source,
+                node.value_slot(),
+                node.syntax,
+                Some(Token::Semicolon),
+                ExpectedSyntax::BindingValue,
+            )),
             Binding::Import(node) if node.path().is_none() => {
                 issues.push(missing_at(source, node.syntax, ExpectedSyntax::ImportPath))
             }
@@ -527,6 +530,7 @@ fn missing_after_keyword(source: SourceId, binding: Binding<'_>) -> SyntaxIssue 
         Binding::Decl(_) => Token::Decl,
         Binding::Def(_) => Token::Def,
         Binding::Native(_) => Token::Native,
+        Binding::NativeType(_) => Token::Native,
         Binding::Type(_) => Token::Type,
         Binding::Import(_) => Token::Import,
     };

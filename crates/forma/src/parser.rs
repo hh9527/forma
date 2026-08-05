@@ -44,7 +44,7 @@ pub fn parse_registered(sources: &SourceDatabase, source_id: SourceId) -> Fronte
     let source = sources.get(source_id);
     let parsed = crate::syntax::forma::parse_document(source_id, source.text());
     let mut diagnostics = parsed.diagnostics;
-    let lowerer = Lowerer::new(source_id, &source.name, source.text(), &parsed.syntax);
+    let lowerer = Lowerer::new(source_id, source.text(), &parsed.syntax);
     let manifest = match lowerer.manifest() {
         Ok(manifest) => manifest,
         Err(diagnostic) => {
@@ -97,7 +97,6 @@ fn compatibility_error(
 
 struct Lowerer<'a> {
     source_id: SourceId,
-    source_name: &'a str,
     source: &'a crate::document::DocumentText,
     cst: &'a CstData,
 }
@@ -153,13 +152,11 @@ fn validate_manifest_literal(expression: &Expr) -> Result<(), Diagnostic> {
 impl<'a> Lowerer<'a> {
     fn new(
         source_id: SourceId,
-        source_name: &'a str,
         source: &'a crate::document::DocumentText,
         cst: &'a CstData,
     ) -> Self {
         Self {
             source_id,
-            source_name,
             source,
             cst,
         }
@@ -255,6 +252,7 @@ impl<'a> Lowerer<'a> {
                     | Rule::DeclBinding
                     | Rule::DefBinding
                     | Rule::NativeBinding
+                    | Rule::NativeTypeBinding
                     | Rule::TypeBinding
                     | Rule::ImportBinding,
                 ) => bindings.push(self.binding(child)?),
@@ -405,6 +403,17 @@ impl<'a> Lowerer<'a> {
                     self.location(node),
                 ))
             }
+            Rule::NativeTypeBinding => Ok(located(
+                BindingData {
+                    decorators: Vec::new(),
+                    kind: BindingKind::NativeType,
+                    name,
+                    type_parameters: Vec::new(),
+                    annotation: None,
+                    value: located(ExprKind::Atom("None".into()), self.location(node)),
+                },
+                self.location(node),
+            )),
             Rule::DefBinding => {
                 let equal = self.first_token(node, Token::Equal)?;
                 let scheme = self
@@ -474,51 +483,17 @@ impl<'a> Lowerer<'a> {
             }
             Rule::TypeBinding => {
                 let decorators = self.decorators(node)?;
-                let value = if let Some(equal) = self.token_children(node, Token::Equal).next() {
-                    let start = self.cst.span(equal).start;
-                    let value = self.expression(
-                        self.children(node)
-                            .find(|child| {
-                                self.is_expression(*child) && self.cst.span(*child).start > start
-                            })
-                            .ok_or_else(|| self.error(node, "type has no value"))?,
-                    )?;
-                    self.apply_decorators(&decorators, "Type", &name, value, self.location(node))
-                } else if decorators.len() == 1
-                    && matches!(
-                        &decorators[0].value.callee.value,
-                        ExprKind::Variable(identifier) if identifier.value == "opaque"
-                    )
-                    && !decorators[0].value.configured
-                {
-                    let location = self.location(node);
-                    let identity = format!("{}#{}", self.source_name, name.value);
-                    located(
-                        ExprKind::Dict(vec![
-                            located(
-                                DictFieldKind {
-                                    decorators: Vec::new(),
-                                    name: located("kind".into(), location),
-                                    value: located(ExprKind::Atom("Opaque".into()), location),
-                                },
-                                location,
-                            ),
-                            located(
-                                DictFieldKind {
-                                    decorators: Vec::new(),
-                                    name: located("name".into(), location),
-                                    value: located(ExprKind::String(identity), location),
-                                },
-                                location,
-                            ),
-                        ]),
-                        location,
-                    )
-                } else {
-                    return Err(
-                        self.error(node, "type has no value; only @opaque type may omit '='")
-                    );
-                };
+                let equal = self.first_token(node, Token::Equal)?;
+                let start = self.cst.span(equal).start;
+                let value = self.expression(
+                    self.children(node)
+                        .find(|child| {
+                            self.is_expression(*child) && self.cst.span(*child).start > start
+                        })
+                        .ok_or_else(|| self.error(node, "type has no value"))?,
+                )?;
+                let value =
+                    self.apply_decorators(&decorators, "Type", &name, value, self.location(node));
                 Ok(located(
                     BindingData {
                         decorators,
@@ -2231,6 +2206,20 @@ mod tests {
         assert_eq!(binding.value.type_parameters[0].location.range(), 16..17);
         assert!(binding.value.annotation.is_some());
         assert_eq!(binding.location.range(), 0..59);
+    }
+
+    #[test]
+    fn lowers_native_type_declarations_without_forgeable_metadata() {
+        let program = parse(
+            "native-type.forma",
+            "native type State; native new: Fn() -> State; State",
+        )
+        .unwrap();
+        let binding = &program.value.body.value.bindings[0];
+        assert_eq!(binding.value.kind, BindingKind::NativeType);
+        assert_eq!(binding.value.name.value, "State");
+        assert!(binding.value.annotation.is_none());
+        assert_eq!(binding.location.range(), 0..18);
     }
 
     #[test]

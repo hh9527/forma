@@ -669,7 +669,7 @@ impl<'a> Compiler<'a> {
                     }
                     continue;
                 }
-                BindingKind::Import | BindingKind::Native => {
+                BindingKind::Import | BindingKind::Native | BindingKind::NativeType => {
                     let value = self
                         .external_values
                         .get(&binding.value.name.value)

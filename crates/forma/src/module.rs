@@ -138,11 +138,11 @@ fn install_core_modules(
     debug_sink: &Arc<dyn DebugSink>,
 ) -> Result<HashMap<&'static str, (Value, PersistentValue, ModuleInterface)>, ModuleError> {
     let mut modules = HashMap::new();
-    for spec in module_specs() {
+    for (module_index, spec) in module_specs().into_iter().enumerate() {
         let source_name = format!("<{}>", spec.name);
         let source_id = sources.add(source_name.clone(), spec.source);
         let parsed = parse_registered(sources, source_id);
-        let mut program = parsed.program.ok_or_else(|| {
+        let program = parsed.program.ok_or_else(|| {
             ModuleError::new(
                 parsed
                     .diagnostics
@@ -152,10 +152,44 @@ fn install_core_modules(
                     .join("\n"),
             )
         })?;
-        qualify_opaque_type_bindings(&mut program, spec.name);
         let implementations = spec.functions.into_iter().collect::<HashMap<_, _>>();
         let mut external_values = BTreeMap::new();
         let mut external_roots = HashMap::new();
+        let native_module = crate::value::NativeModuleId(module_index as u32);
+        let native_types = program
+            .value
+            .body
+            .value
+            .bindings
+            .iter()
+            .filter(|binding| binding.value.kind == BindingKind::NativeType)
+            .enumerate()
+            .map(|(local, binding)| {
+                crate::NativeType::bind(
+                    crate::value::NativeTypeId {
+                        module: native_module,
+                        local: local as u32,
+                    },
+                    format!("{}#{}", spec.name, binding.value.name.value),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (binding, native_type) in program
+            .value
+            .body
+            .value
+            .bindings
+            .iter()
+            .filter(|binding| binding.value.kind == BindingKind::NativeType)
+            .zip(&native_types)
+        {
+            let name = binding.value.name.value.clone();
+            let value = Value::NativeType(native_type.clone());
+            let root = publish_value(&mut main.heap, &value)
+                .map_err(|error| ModuleError::new(error.to_string()))?;
+            external_values.insert(name.clone(), value);
+            external_roots.insert(name, root);
+        }
         for binding in &program.value.body.value.bindings {
             if binding.value.kind != BindingKind::Native {
                 continue;
@@ -187,13 +221,25 @@ fn install_core_modules(
                     ),
                 )));
             }
-            let value = Value::Func(Arc::new(Closure::native(implementation)));
+            let value = if let Some(local) = implementation.native_type_local() {
+                let native_type = native_types.get(local as usize).ok_or_else(|| {
+                    ModuleError::new(format!(
+                        "native symbol {symbol:?} references missing native type index {local}"
+                    ))
+                })?;
+                Value::Func(Arc::new(Closure::native_with_upvalues(
+                    implementation,
+                    vec![Value::NativeType(native_type.clone())],
+                )))
+            } else {
+                Value::Func(Arc::new(Closure::native(implementation)))
+            };
             let root = publish_value(&mut main.heap, &value)
                 .map_err(|error| ModuleError::new(error.to_string()))?;
             external_values.insert(symbol.to_owned(), value);
             external_roots.insert(symbol.to_owned(), root);
         }
-        if external_values.len() != implementations.len() {
+        if external_values.len() - native_types.len() != implementations.len() {
             let undeclared = implementations
                 .keys()
                 .find(|symbol| !external_values.contains_key(**symbol))
@@ -1213,7 +1259,7 @@ impl ModuleLoader {
                 "{source_name}: @@manifest is only allowed in @main"
             )));
         }
-        let mut program = parsed.program.ok_or_else(|| {
+        let program = parsed.program.ok_or_else(|| {
             ModuleError::new(
                 parsed
                     .diagnostics
@@ -1223,7 +1269,6 @@ impl ModuleLoader {
                     .join("\n"),
             )
         })?;
-        qualify_opaque_type_bindings(&mut program, &module_id.to_string());
         reject_nested_imports(&program, &source_name)?;
         let mut external_provenance = BTreeMap::new();
         let mut external_roots = HashMap::new();
@@ -1286,14 +1331,12 @@ impl ModuleLoader {
             }
             external_bindings.insert(binding.value.name.value.clone(), sourced.value);
         }
-        if let Some(binding) = program
-            .value
-            .body
-            .value
-            .bindings
-            .iter()
-            .find(|binding| binding.value.kind == BindingKind::Native)
-        {
+        if let Some(binding) = program.value.body.value.bindings.iter().find(|binding| {
+            matches!(
+                binding.value.kind,
+                BindingKind::Native | BindingKind::NativeType
+            )
+        }) {
             return Err(ModuleError::new(self.sources.render(
                 &crate::source::Diagnostic::error(
                     format!(
@@ -1445,31 +1488,6 @@ impl ModuleLoader {
     fn leave(&mut self, module_id: &ModuleId) {
         let popped = self.visiting.pop();
         debug_assert_eq!(popped.as_ref(), Some(module_id));
-    }
-}
-
-fn qualify_opaque_type_bindings(program: &mut Program, owner: &str) {
-    for binding in &mut program.value.body.value.bindings {
-        if binding.value.kind != BindingKind::Type {
-            continue;
-        }
-        let ExprKind::Dict(fields) = &mut binding.value.value.value else {
-            continue;
-        };
-        let is_opaque = fields.iter().any(|field| {
-            field.value.name.value == "kind"
-                && matches!(&field.value.value.value, ExprKind::Atom(kind) if kind == "Opaque")
-        });
-        if !is_opaque {
-            continue;
-        }
-        if let Some(field) = fields
-            .iter_mut()
-            .find(|field| field.value.name.value == "name")
-        {
-            field.value.value.value =
-                ExprKind::String(format!("{owner}#{}", binding.value.name.value));
-        }
     }
 }
 
@@ -2244,6 +2262,24 @@ name = "rustc"
         .unwrap_err();
         assert!(missing.message().contains("not registered"));
         assert!(missing.to_string().contains("missing-native.forma:1:1"));
+
+        fs::write(
+            directory.join("missing-native-type.forma"),
+            "native type State; State",
+        )
+        .unwrap();
+        let missing_type = load_module(
+            directory.join("missing-native-type.forma"),
+            BTreeMap::new(),
+            100_000,
+        )
+        .unwrap_err();
+        assert!(missing_type.message().contains("not registered"));
+        assert!(
+            missing_type
+                .to_string()
+                .contains("missing-native-type.forma:1:1")
+        );
 
         fs::write(
             directory.join("nested-native.forma"),
@@ -3476,11 +3512,11 @@ unchanged", "|"),
         fs::write(
             directory.join("main.forma"),
             r#"import desc from "@bim/std/type-desc";
-               @opaque type Token;
+               import hash from "@bim/std/hash";
                {
-                   kind: desc.kind(Token),
-                   children: desc.children(Token),
-                   name: desc.opaque_name(Token),
+                   kind: desc.kind(hash.HashState),
+                   children: desc.children(hash.HashState),
+                   name: desc.opaque_name(hash.HashState),
                }"#,
         )
         .unwrap();
@@ -3490,17 +3526,76 @@ unchanged", "|"),
         };
         assert_eq!(output.get("kind").unwrap().to_string(), "'Opaque");
         assert_eq!(output.get("children").unwrap().to_string(), "[]");
-        assert!(output.get("name").unwrap().to_string().contains("#Token"));
+        assert_eq!(
+            output.get("name").unwrap().to_string(),
+            "'Some(\"@bim/std/hash#HashState\")"
+        );
         fs::write(
             directory.join("main.forma"),
             r#"import json from "@bim/std/json";
-               @opaque type Token;
-               json.decode(Token, "1")"#,
+               import hash from "@bim/std/hash";
+               json.decode(hash.HashState, "1")"#,
         )
         .unwrap();
         let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let error = module.execute(100_000).unwrap_err();
         assert!(error.to_string().contains("unsupported opaque type"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn core_hash_state_is_persistent_and_follows_the_versioned_protocol() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import hash from "@bim/std/hash";
+               let empty = hash.new();
+               let string = hash.update_string(empty, "abc");
+               let bytes = hash.update_bytes(empty, b"abc");
+               let integer = hash.update_int(empty, -1);
+               {
+                   empty: hash.finish(empty),
+                   empty_again: hash.finish(empty),
+                   string: hash.finish(string),
+                   bytes: hash.finish(bytes),
+                   integer: hash.finish(integer),
+                   empty_unchanged: empty == hash.new(),
+                   kinds_differ: string == bytes,
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(output) = module.execute(100_000).unwrap() else {
+            panic!("hash state test must return a Dict")
+        };
+        let digest = |name: &str| {
+            let Value::Bytes(bytes) = output.get(name).unwrap() else {
+                panic!("{name} must be Bytes")
+            };
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        assert_eq!(
+            digest("empty"),
+            "e3075b7c90c4e10b945920a0c776bb542603a6cfe7df6f8da93ecdfb1a545898"
+        );
+        assert_eq!(digest("empty_again"), digest("empty"));
+        assert_eq!(
+            digest("string"),
+            "bbf12f603914ceaf240fcacacda8dec4ce89aa310a5b36b549b054a6f9b62fe5"
+        );
+        assert_eq!(
+            digest("bytes"),
+            "f8ff0d57c0391de510bbe3837d0ab773a8d3d65831b710b977b7538cb332180c"
+        );
+        assert_eq!(
+            digest("integer"),
+            "a0ec6d43fd50e248f1d60dbccf959a33650b01aab3d5a578ce8be298fd7b7f70"
+        );
+        assert_eq!(output.get("empty_unchanged").unwrap().to_string(), "'True");
+        assert_eq!(output.get("kinds_differ").unwrap().to_string(), "'False");
         fs::remove_dir_all(directory).unwrap();
     }
 

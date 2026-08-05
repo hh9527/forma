@@ -52,6 +52,7 @@ pub enum BindingKind {
     Decl,
     Def,
     Native,
+    NativeType,
     Type,
     Import,
 }

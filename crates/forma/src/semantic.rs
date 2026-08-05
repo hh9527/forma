@@ -1292,7 +1292,9 @@ fn merge_type_node(
         TypeNode::Float => WorkspaceTypeNode::Float,
         TypeNode::String => WorkspaceTypeNode::String,
         TypeNode::Bytes => WorkspaceTypeNode::Bytes,
-        TypeNode::Opaque(name) => WorkspaceTypeNode::Opaque(name.clone()),
+        TypeNode::Opaque(native_type) => {
+            WorkspaceTypeNode::Opaque(native_type.qualified_name().into())
+        }
         TypeNode::Atom(atom) => WorkspaceTypeNode::Atom(atom.name().into()),
         TypeNode::Array(child) => WorkspaceTypeNode::Array(map(*child, target, mapped)),
         TypeNode::Dict(child) => WorkspaceTypeNode::Dict(map(*child, target, mapped)),

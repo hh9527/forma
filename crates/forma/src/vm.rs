@@ -119,6 +119,7 @@ pub enum ValueKind {
     Float,
     String,
     Bytes,
+    Type,
     Opaque,
     Dict,
     Array,
@@ -158,6 +159,7 @@ impl<'a> ValueRef<'a> {
             RuntimeValue::String(handle)
             | RuntimeValue::Bytes(handle)
             | RuntimeValue::Opaque(handle)
+            | RuntimeValue::NativeType(handle)
             | RuntimeValue::Array(handle)
             | RuntimeValue::Tagged(handle)
             | RuntimeValue::Tuple(handle)
@@ -193,6 +195,7 @@ impl<'a> ValueRef<'a> {
             RuntimeValue::Float(_) => ValueKind::Float,
             RuntimeValue::ShortString(_) | RuntimeValue::String(_) => ValueKind::String,
             RuntimeValue::Bytes(_) => ValueKind::Bytes,
+            RuntimeValue::NativeType(_) => ValueKind::Type,
             RuntimeValue::Opaque(_) => ValueKind::Opaque,
             RuntimeValue::Dict(_) => ValueKind::Dict,
             RuntimeValue::Array(_) => ValueKind::Array,
@@ -233,7 +236,27 @@ impl<'a> ValueRef<'a> {
         }
     }
 
-    pub fn as_opaque<T: std::any::Any>(self, expected_type: &str) -> Option<&'a T> {
+    pub fn as_bytes(self) -> Option<&'a [u8]> {
+        let RuntimeValue::Bytes(handle) = self.value.value else {
+            return None;
+        };
+        match self.view.object(handle).ok()? {
+            Object::Bytes(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_native_type(self) -> Option<&'a crate::NativeType> {
+        let RuntimeValue::NativeType(handle) = self.value.value else {
+            return None;
+        };
+        match self.view.object(handle).ok()? {
+            Object::NativeType(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn as_opaque<T: std::any::Any>(self, expected_type: &crate::NativeType) -> Option<&'a T> {
         let RuntimeValue::Opaque(handle) = self.value.value else {
             return None;
         };
@@ -243,12 +266,12 @@ impl<'a> ValueRef<'a> {
         }
     }
 
-    pub(crate) fn opaque_type_name(self) -> Option<&'a str> {
+    pub(crate) fn opaque_native_type(self) -> Option<&'a crate::NativeType> {
         let RuntimeValue::Opaque(handle) = self.value.value else {
             return None;
         };
         match self.view.object(handle).ok()? {
-            Object::Opaque(value) => Some(value.type_name()),
+            Object::Opaque(value) => Some(value.native_type()),
             _ => None,
         }
     }
@@ -465,17 +488,28 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
         self.set(destination, value)
     }
 
+    pub fn set_bytes(
+        &mut self,
+        destination: RegisterId,
+        value: impl Into<Box<[u8]>>,
+    ) -> Result<(), NativeError> {
+        let value = value.into();
+        self.charge_allocation(value.len())?;
+        let handle = self.current.allocate(Object::Bytes(value));
+        self.set(destination, RuntimeValue::Bytes(handle).into())
+    }
+
     pub fn set_opaque<T>(
         &mut self,
         destination: RegisterId,
-        type_name: impl Into<std::sync::Arc<str>>,
+        native_type: crate::NativeType,
         payload: T,
     ) -> Result<(), NativeError>
     where
         T: std::any::Any + Eq + Send + Sync,
     {
         self.charge_sequence(1)?;
-        let value = crate::OpaqueValue::new(type_name, payload);
+        let value = crate::OpaqueValue::new(native_type, payload);
         let handle = self.current.allocate(Object::Opaque(value));
         self.set(destination, RuntimeValue::Opaque(handle).into())
     }
@@ -4363,7 +4397,9 @@ fn run_core_type_desc(
     };
     match operation {
         CoreTypeDescFunction::Kind => {
-            let kind = if matches!(input.value, RuntimeValue::UpLink(_)) {
+            let kind = if matches!(input.value, RuntimeValue::NativeType(_)) {
+                "Opaque".to_owned()
+            } else if matches!(input.value, RuntimeValue::UpLink(_)) {
                 "Ref".to_owned()
             } else {
                 let RuntimeValue::Dict(handle) = input.value else {
@@ -4443,7 +4479,15 @@ fn run_core_type_desc(
             })
         }
         CoreTypeDescFunction::OpaqueName => {
-            let name = if let RuntimeValue::Dict(handle) = input.value {
+            let name = if let RuntimeValue::NativeType(handle) = input.value {
+                match view
+                    .object(handle)
+                    .map_err(|error| core_dict_heap_error(error, function, pc))?
+                {
+                    Object::NativeType(value) => Some(value.qualified_name().to_owned()),
+                    _ => None,
+                }
+            } else if let RuntimeValue::Dict(handle) = input.value {
                 let kind = view
                     .dict_get_text(handle, "kind")
                     .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
@@ -4593,6 +4637,7 @@ fn run_core_dyn(
                 RuntimeValue::ShortString(_) | RuntimeValue::String(_) => "String",
                 RuntimeValue::Bytes(_) => "Bytes",
                 RuntimeValue::Opaque(_) => "Opaque",
+                RuntimeValue::NativeType(_) => "Type",
                 RuntimeValue::Dict(_) => "Dict",
                 RuntimeValue::Array(_) => "Array",
                 RuntimeValue::BuiltinAtom(_) | RuntimeValue::Atom(_) => "Atom",
@@ -5202,6 +5247,9 @@ fn dyn_descriptor_leaf_kind<'a>(
 }
 
 fn type_desc_children(input: RichValue, view: &HeapView<'_>) -> Result<Vec<RichValue>, String> {
+    if matches!(input.value, RuntimeValue::NativeType(_)) {
+        return Ok(Vec::new());
+    }
     if matches!(input.value, RuntimeValue::UpLink(_)) {
         return Ok(Vec::new());
     }
@@ -5979,6 +6027,9 @@ fn decode_runtime_type_at(
     current: &Heap,
     background: &Heap,
 ) -> Result<CodecType, String> {
+    if matches!(value.value, RuntimeValue::NativeType(_)) {
+        return Err(format!("{path} uses an unsupported opaque type"));
+    }
     if let RuntimeValue::UpLink(handle) = value.value {
         return Ok(CodecType {
             kind: CodecKind::UpLink(handle),
@@ -8103,9 +8154,12 @@ fn codec_node_bytes(node: &CodecNode) -> Result<u64, NativeError> {
 
 fn legacy_value_bytes(value: &Value) -> Result<u64, NativeError> {
     match value {
-        Value::Int(_) | Value::Float(_) | Value::Opaque(_) | Value::Func(_) | Value::Dyn(_) => {
-            Ok(0)
-        }
+        Value::Int(_)
+        | Value::Float(_)
+        | Value::NativeType(_)
+        | Value::Opaque(_)
+        | Value::Func(_)
+        | Value::Dyn(_) => Ok(0),
         Value::String(value) => Ok(value.len() as u64),
         Value::Bytes(value) => Ok(value.len() as u64),
         Value::Atom(atom) => Ok(atom.name().len() as u64),
@@ -8793,6 +8847,7 @@ impl<'a> JsonWriter<'a> {
             }
             RuntimeValue::Bytes(_) => return Err("JSON cannot encode Bytes".into()),
             RuntimeValue::Opaque(_) => return Err("JSON cannot encode Opaque values".into()),
+            RuntimeValue::NativeType(_) => return Err("JSON cannot encode Type values".into()),
             RuntimeValue::Tuple(_) => {
                 return Err("JSON cannot encode Tuple; use a codec first".into());
             }
@@ -9036,6 +9091,14 @@ impl<'a> DebugValueFormatter<'a> {
             RuntimeValue::Opaque(handle) => match self.view.object(handle)? {
                 Object::Opaque(value) => self.push(&format!("{value:?}")),
                 _ => return Err(crate::heap::HeapError::new("invalid Opaque handle")),
+            },
+            RuntimeValue::NativeType(handle) => match self.view.object(handle)? {
+                Object::NativeType(value) => {
+                    self.push("<type ");
+                    self.push(value.qualified_name());
+                    self.push(">");
+                }
+                _ => return Err(crate::heap::HeapError::new("invalid NativeType handle")),
             },
             RuntimeValue::Array(handle) => self.sequence(handle, false, depth, "[", "]")?,
             RuntimeValue::Tuple(handle) => self.sequence(handle, true, depth, "(", ")")?,
@@ -9416,6 +9479,7 @@ fn runtime_shallow_type_error(
         RuntimeValue::ShortString(_) | RuntimeValue::String(_) => "String",
         RuntimeValue::Bytes(_) => "Bytes",
         RuntimeValue::Opaque(_) => "Opaque",
+        RuntimeValue::NativeType(_) => "Type",
         RuntimeValue::Array(_) => "Array",
         RuntimeValue::Tuple(_) => "Tuple",
         RuntimeValue::Tagged(_) => "Tagged",

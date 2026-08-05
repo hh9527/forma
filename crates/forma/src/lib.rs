@@ -69,8 +69,8 @@ pub use types::{
     analyze_source_with_quota,
 };
 pub use value::{
-    Atom, BuiltinAtom, Callable, Closure, Dict, NativeError, NativeFunction, OpaqueValue,
-    Prototype, Shape, Value,
+    Atom, BuiltinAtom, Callable, Closure, Dict, NativeError, NativeFunction, NativeType,
+    OpaqueValue, Prototype, Shape, Value,
 };
 pub use vm::{
     CallContext, DebugEvent, DebugSink, DiscardDebugSink, Quota, QuotaAccount, RuntimeError,

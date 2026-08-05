@@ -42,7 +42,7 @@ native equal: for(A, B) Fn(A, B) -> Bool;
             name: DYN_MODULE,
             source: r#"
 @enum type ValueKind = {
-    Int: 'None, Float: 'None, String: 'None, Bytes: 'None, Opaque: 'None,
+    Int: 'None, Float: 'None, String: 'None, Bytes: 'None, Type: 'None, Opaque: 'None,
     Dict: 'None, Array: 'None, Atom: 'None, Tagged: 'None,
     Tuple: 'None, Function: 'None, Dyn: 'None,
 };
@@ -547,12 +547,73 @@ def is_ok: for(A, E) Fn(Result(A, E)) -> Bool = fn(result) {
             name: HASH_MODULE,
             source: r#"
 native sha256: Fn(String) -> String;
-{sha256: sha256}
+native type HashState;
+native new: Fn() -> HashState;
+native update_bytes: Fn(HashState, Bytes) -> HashState;
+native update_string: Fn(HashState, String) -> HashState;
+native update_int: Fn(HashState, Int) -> HashState;
+native finish: Fn(HashState) -> Bytes;
+{
+    HashState: HashState,
+    sha256: sha256,
+    new: new,
+    update_bytes: update_bytes,
+    update_string: update_string,
+    update_int: update_int,
+    finish: finish,
+}
 "#,
-            functions: vec![(
-                "sha256",
-                NativeFunction::core_hash(CoreHashFunction::Sha256),
-            )],
+            functions: vec![
+                (
+                    "sha256",
+                    NativeFunction::core_hash(CoreHashFunction::Sha256),
+                ),
+                (
+                    "new",
+                    NativeFunction::new_with_native_type(
+                        "@bim/std/hash.new",
+                        0,
+                        0,
+                        crate::sha256::native_new,
+                    ),
+                ),
+                (
+                    "update_bytes",
+                    NativeFunction::new_with_native_type(
+                        "@bim/std/hash.update_bytes",
+                        2,
+                        0,
+                        crate::sha256::native_update_bytes,
+                    ),
+                ),
+                (
+                    "update_string",
+                    NativeFunction::new_with_native_type(
+                        "@bim/std/hash.update_string",
+                        2,
+                        0,
+                        crate::sha256::native_update_string,
+                    ),
+                ),
+                (
+                    "update_int",
+                    NativeFunction::new_with_native_type(
+                        "@bim/std/hash.update_int",
+                        2,
+                        0,
+                        crate::sha256::native_update_int,
+                    ),
+                ),
+                (
+                    "finish",
+                    NativeFunction::new_with_native_type(
+                        "@bim/std/hash.finish",
+                        1,
+                        0,
+                        crate::sha256::native_finish,
+                    ),
+                ),
+            ],
         },
         CoreModuleSpec {
             name: JSON_MODULE,
