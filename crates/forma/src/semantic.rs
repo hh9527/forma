@@ -1496,7 +1496,7 @@ mod tests {
             &main,
             "import model from \"./model.forma\";\n\
              import data from \"./data.json\";\n\
-             let f: Fn(Any) -> Any = fn(x) { let y = x; y };\n\
+             let f = fn(x) { let y = x; y };\n\
              let count = 1 + 2;\n\
              {model: model, data: data, f: f, count: count}",
         )
