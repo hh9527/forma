@@ -2126,6 +2126,18 @@ let decorators = {
     }
 
     #[test]
+    fn generated_function_results_rebase_to_the_authored_call_site() {
+        let source = "def inner: Fn() -> Any = fn() { 1 + 1 };\ndef outer: Fn() -> Any = fn() { inner() };\nlet value = outer();\nvalue.missing";
+        let call_start = source.find("outer();").unwrap();
+        let error = run(source).unwrap_err();
+        let ExecutionError::Runtime(error) = error else {
+            panic!("expected runtime error");
+        };
+        let data = error.data_location().expect("generated value location");
+        assert_eq!(data.range(), call_start..call_start + "outer()".len());
+    }
+
+    #[test]
     fn fuel_exhaustion_points_to_the_call_expression() {
         let error = run_source("test", "let f = fn() { 1 };\nf()", 0).unwrap_err();
         let ExecutionError::Runtime(error) = error else {

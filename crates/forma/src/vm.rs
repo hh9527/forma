@@ -750,7 +750,10 @@ struct ExecutionFrame {
 #[derive(Debug)]
 enum ReturnTarget {
     Root,
-    Register(Register),
+    Register {
+        destination: Register,
+        call_site: Option<crate::Loc>,
+    },
     Native(Box<dyn NativeContinuation>),
 }
 
@@ -1080,7 +1083,7 @@ impl Vm {
                         write_register(
                             &mut registers,
                             *dst,
-                            value.with_loc(value.loc.or(instruction_location(function, pc))),
+                            value.with_loc(value.loc().or(instruction_location(function, pc))),
                             function,
                             pc,
                         )?;
@@ -1732,7 +1735,10 @@ impl Vm {
                             VmAction::Call {
                                 callee,
                                 arguments,
-                                return_target: ReturnTarget::Register(*call_base),
+                                return_target: ReturnTarget::Register {
+                                    destination: *call_base,
+                                    call_site: instruction_location(function, pc),
+                                },
                                 call_function: function_arc,
                                 call_pc: pc,
                             },
@@ -1951,7 +1957,10 @@ fn drive_vm_action(
                 return_target,
             } => match return_target {
                 ReturnTarget::Root => return Ok(DriveOutcome::Root(value)),
-                ReturnTarget::Register(destination) => {
+                ReturnTarget::Register {
+                    destination,
+                    call_site,
+                } => {
                     let caller = frames.last().ok_or_else(|| RuntimeError {
                         kind: RuntimeErrorKind::InvalidBytecode,
                         message: "return register has no caller".into(),
@@ -1967,7 +1976,7 @@ fn drive_vm_action(
                     write_register(
                         &mut stack[caller.base..caller_end],
                         destination,
-                        value,
+                        value.rebase_generated(call_site),
                         &caller_function,
                         caller.pc.saturating_sub(1),
                     )?;
@@ -2034,7 +2043,7 @@ fn drive_vm_action(
                             tag: callee,
                             payload: arguments[0],
                         })),
-                        callee.loc,
+                        callee.loc(),
                     );
                     VmAction::Return {
                         value,
@@ -2163,7 +2172,9 @@ fn drive_vm_action(
                                 })?;
                                 VmAction::Return {
                                     value: value.with_loc(
-                                        value.loc.or(instruction_location(&call_function, call_pc)),
+                                        value
+                                            .loc()
+                                            .or(instruction_location(&call_function, call_pc)),
                                     ),
                                     return_target,
                                 }
@@ -2348,7 +2359,7 @@ fn drive_vm_action(
 impl ReturnTarget {
     fn native_depth(&self) -> usize {
         match self {
-            Self::Root | Self::Register(_) => 0,
+            Self::Root | Self::Register { .. } => 0,
             Self::Native(continuation) => 1 + continuation.return_target().native_depth(),
         }
     }
@@ -2558,21 +2569,21 @@ fn start_array_continuation(
             .map(|(left, right)| {
                 RichValue::new(
                     RuntimeValue::Tuple(current.allocate(Object::Tuple(vec![left, right].into()))),
-                    left.loc,
+                    left.loc(),
                 )
             })
             .collect();
         let pairs = RichValue::new(
             RuntimeValue::Array(current.allocate(Object::Array(pairs))),
-            source.loc,
+            source.loc(),
         );
         return Ok(VmAction::Return {
             value: RichValue::new(
                 RuntimeValue::Tagged(current.allocate(Object::Tagged {
-                    tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Some), source.loc),
+                    tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Some), source.loc()),
                     payload: pairs,
                 })),
-                source.loc,
+                source.loc(),
             ),
             return_target,
         });
@@ -3443,7 +3454,7 @@ fn run_core_dict(
             let values = entries
                 .into_iter()
                 .map(|(field, _)| {
-                    RichValue::new(current.string(Some(background), &field), arguments[0].loc)
+                    RichValue::new(current.string(Some(background), &field), arguments[0].loc())
                 })
                 .collect::<Box<[_]>>();
             RichValue::new(
@@ -3484,13 +3495,15 @@ fn run_core_dict(
             let pairs = entries
                 .into_iter()
                 .map(|(field, value)| {
-                    let field =
-                        RichValue::new(current.string(Some(background), &field), arguments[0].loc);
+                    let field = RichValue::new(
+                        current.string(Some(background), &field),
+                        arguments[0].loc(),
+                    );
                     RichValue::new(
                         RuntimeValue::Tuple(
                             current.allocate(Object::Tuple(vec![field, value].into())),
                         ),
-                        arguments[0].loc,
+                        arguments[0].loc(),
                     )
                 })
                 .collect::<Box<[_]>>();
@@ -3784,7 +3797,7 @@ fn next_dict_action(
             continuation
                 .accumulator
                 .expect("fold continuation has an accumulator"),
-            RichValue::new(current.string(Some(background), &key), value.loc),
+            RichValue::new(current.string(Some(background), &key), value.loc()),
             value,
         ]
     } else {
@@ -4190,7 +4203,7 @@ fn run_core_model(
         let member = allocate_attributes_wrapper(
             inner,
             attributes,
-            member.loc.or(instruction_location(function, pc)),
+            member.loc().or(instruction_location(function, pc)),
             function,
             pc,
             current,
@@ -4312,7 +4325,7 @@ fn run_core_type_desc(
                 kind.to_owned()
             };
             Ok(VmAction::Return {
-                value: RichValue::new(RuntimeValue::Atom(current.intern(&kind)), input.loc),
+                value: RichValue::new(RuntimeValue::Atom(current.intern(&kind)), input.loc()),
                 return_target,
             })
         }
@@ -4329,7 +4342,7 @@ fn run_core_type_desc(
             Ok(VmAction::Return {
                 value: RichValue::new(
                     RuntimeValue::Array(current.allocate(Object::Array(children.into()))),
-                    input.loc,
+                    input.loc(),
                 ),
                 return_target,
             })
@@ -4367,10 +4380,13 @@ fn run_core_type_desc(
             Ok(VmAction::Return {
                 value: RichValue::new(
                     RuntimeValue::Tagged(current.allocate(Object::Tagged {
-                        tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Ok), input.loc),
+                        tag: RichValue::new(
+                            RuntimeValue::BuiltinAtom(BuiltinAtom::Ok),
+                            input.loc(),
+                        ),
                         payload: result,
                     })),
-                    input.loc,
+                    input.loc(),
                 ),
                 return_target,
             })
@@ -4412,7 +4428,7 @@ fn run_core_dyn(
                     descriptor: arguments[0],
                     value: arguments[1],
                 })),
-                arguments[1].loc,
+                arguments[1].loc(),
             ),
             return_target,
         });
@@ -4462,7 +4478,7 @@ fn run_core_dyn(
                 }
             };
             Ok(VmAction::Return {
-                value: RichValue::new(RuntimeValue::Atom(current.intern(kind)), value.loc),
+                value: RichValue::new(RuntimeValue::Atom(current.intern(kind)), value.loc()),
                 return_target,
             })
         }
@@ -4491,7 +4507,10 @@ fn run_core_dyn(
             };
             if descriptor_kind != expected || !value_matches {
                 return Ok(VmAction::Return {
-                    value: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::None), value.loc),
+                    value: RichValue::new(
+                        RuntimeValue::BuiltinAtom(BuiltinAtom::None),
+                        value.loc(),
+                    ),
                     return_target,
                 });
             }
@@ -4507,11 +4526,11 @@ fn run_core_dyn(
                     RuntimeValue::Tagged(current.allocate(Object::Tagged {
                         tag: RichValue::new(
                             RuntimeValue::BuiltinAtom(BuiltinAtom::Some),
-                            value.loc,
+                            value.loc(),
                         ),
                         payload: value,
                     })),
-                    value.loc,
+                    value.loc(),
                 ),
                 return_target,
             })
@@ -4901,7 +4920,7 @@ fn finish_dyn_observation(
                         descriptor,
                         value,
                     })),
-                    value.loc,
+                    value.loc(),
                 ),
                 DynObservation::Children(children) => {
                     let children = children
@@ -4913,47 +4932,49 @@ fn finish_dyn_observation(
                                     descriptor,
                                     value,
                                 })),
-                                value.loc,
+                                value.loc(),
                             )
                         })
                         .collect();
                     RichValue::new(
                         RuntimeValue::Array(current.allocate(Object::Array(children))),
-                        input.loc,
+                        input.loc(),
                     )
                 }
                 DynObservation::NamedChildren(children) => {
                     let children = children
                         .into_iter()
                         .map(|(name, descriptor, value)| {
-                            let name =
-                                RichValue::new(current.string(Some(background), &name), input.loc);
+                            let name = RichValue::new(
+                                current.string(Some(background), &name),
+                                input.loc(),
+                            );
                             let child = RichValue::new(
                                 RuntimeValue::Dyn(current.allocate(Object::Dyn {
                                     identity: Arc::new(()),
                                     descriptor,
                                     value,
                                 })),
-                                value.loc,
+                                value.loc(),
                             );
                             RichValue::new(
                                 RuntimeValue::Tuple(
                                     current.allocate(Object::Tuple(vec![name, child].into())),
                                 ),
-                                value.loc,
+                                value.loc(),
                             )
                         })
                         .collect();
                     RichValue::new(
                         RuntimeValue::Array(current.allocate(Object::Array(children))),
-                        input.loc,
+                        input.loc(),
                     )
                 }
                 DynObservation::Tag(tag) => {
-                    RichValue::new(current.string(Some(background), &tag), input.loc)
+                    RichValue::new(current.string(Some(background), &tag), input.loc())
                 }
                 DynObservation::Payload(None) => {
-                    RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::None), input.loc)
+                    RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::None), input.loc())
                 }
                 DynObservation::Payload(Some((descriptor, value))) => {
                     let child = RichValue::new(
@@ -4962,26 +4983,26 @@ fn finish_dyn_observation(
                             descriptor,
                             value,
                         })),
-                        value.loc,
+                        value.loc(),
                     );
                     RichValue::new(
                         RuntimeValue::Tagged(current.allocate(Object::Tagged {
                             tag: RichValue::new(
                                 RuntimeValue::BuiltinAtom(BuiltinAtom::Some),
-                                input.loc,
+                                input.loc(),
                             ),
                             payload: child,
                         })),
-                        input.loc,
+                        input.loc(),
                     )
                 }
             };
             RichValue::new(
                 RuntimeValue::Tagged(current.allocate(Object::Tagged {
-                    tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Ok), input.loc),
+                    tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Ok), input.loc()),
                     payload: value,
                 })),
-                input.loc,
+                input.loc(),
             )
         }
         Err(message) => {
@@ -4996,8 +5017,8 @@ fn finish_dyn_observation(
                 })
                 .map_err(|native_error| allocation_error(native_error.message, function, pc))?;
             charge_allocation(account, bytes, function, pc)?;
-            let message = RichValue::new(current.string(Some(background), &message), input.loc);
-            let rule = RichValue::new(current.string(Some(background), rule), input.loc);
+            let message = RichValue::new(current.string(Some(background), &message), input.loc());
+            let rule = RichValue::new(current.string(Some(background), rule), input.loc());
             let fields = ["data", "message", "rule"]
                 .into_iter()
                 .map(|field| current.intern(field))
@@ -5008,14 +5029,14 @@ fn finish_dyn_observation(
                     shape,
                     values: vec![input, message, rule].into(),
                 })),
-                input.loc,
+                input.loc(),
             );
             RichValue::new(
                 RuntimeValue::Tagged(current.allocate(Object::Tagged {
-                    tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Err), input.loc),
+                    tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Err), input.loc()),
                     payload: blame,
                 })),
-                input.loc,
+                input.loc(),
             )
         }
     };
@@ -5141,8 +5162,8 @@ fn type_desc_resolve_error(
         })
         .map_err(|native_error| allocation_error(native_error.message, function, pc))?;
     charge_allocation(account, bytes, function, pc)?;
-    let message = RichValue::new(current.string(Some(background), message), input.loc);
-    let rule = RichValue::new(current.string(Some(background), rule), input.loc);
+    let message = RichValue::new(current.string(Some(background), message), input.loc());
+    let rule = RichValue::new(current.string(Some(background), rule), input.loc());
     let fields = ["data", "message", "rule"]
         .into_iter()
         .map(|field| current.intern(field))
@@ -5153,15 +5174,15 @@ fn type_desc_resolve_error(
             shape,
             values: vec![input, message, rule].into(),
         })),
-        input.loc,
+        input.loc(),
     );
     Ok(VmAction::Return {
         value: RichValue::new(
             RuntimeValue::Tagged(current.allocate(Object::Tagged {
-                tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Err), input.loc),
+                tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Err), input.loc()),
                 payload: blame,
             })),
-            input.loc,
+            input.loc(),
         ),
         return_target,
     })
@@ -5218,7 +5239,7 @@ fn run_core_union_model(
         normalized.push(allocate_attributes_wrapper(
             inner,
             attributes,
-            variant.loc.or(instruction_location(function, pc)),
+            variant.loc().or(instruction_location(function, pc)),
             function,
             pc,
             current,
@@ -5330,7 +5351,7 @@ fn allocate_builtin_enum(
         let variant = allocate_attributes_wrapper(
             inner,
             attributes,
-            inner.loc.or(loc),
+            inner.loc().or(loc),
             function,
             pc,
             current,
@@ -5684,7 +5705,7 @@ fn resume_json_encode_continuation(
                 &continuation.call_function,
                 continuation.call_pc,
             );
-            runtime.set_locations(value.loc, continuation.pending_rule.loc);
+            runtime.set_locations(value.loc(), continuation.pending_rule.loc());
             return Err(runtime);
         }
     };
@@ -5718,7 +5739,7 @@ fn finish_codec_result(
     let (tag, payload) = match result {
         Ok(node) => (BuiltinAtom::Ok, node),
         Err(failure) => {
-            let loc = failure.data.loc;
+            let loc = failure.data.loc();
             (
                 BuiltinAtom::Err,
                 CodecNode::Dict(
@@ -5743,10 +5764,10 @@ fn finish_codec_result(
     let payload = materialize_codec_node(payload, current, background);
     let value = RichValue::new(
         RuntimeValue::Tagged(current.allocate(Object::Tagged {
-            tag: RichValue::new(RuntimeValue::BuiltinAtom(tag), input.loc),
+            tag: RichValue::new(RuntimeValue::BuiltinAtom(tag), input.loc()),
             payload,
         })),
-        input.loc,
+        input.loc(),
     );
     Ok(VmAction::Return {
         value,
@@ -6257,7 +6278,7 @@ fn transform_codec(
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()
-                .map(|items| CodecNode::Array(items, value.loc))
+                .map(|items| CodecNode::Array(items, value.loc()))
         }
         CodecKind::Dict(item) => {
             let RuntimeValue::Dict(handle) = value.value else {
@@ -6290,7 +6311,7 @@ fn transform_codec(
                     Ok((name, node))
                 })
                 .collect::<Result<Vec<_>, _>>()
-                .map(|fields| CodecNode::Dict(fields, value.loc))
+                .map(|fields| CodecNode::Dict(fields, value.loc()))
         }
         CodecKind::Tagged { tag, payload } => {
             let RuntimeValue::Tagged(handle) = value.value else {
@@ -6315,7 +6336,7 @@ fn transform_codec(
                 ));
             }
             Ok(CodecNode::Tagged {
-                tag: Box::new(CodecNode::NamedAtom(tag.clone(), value.loc)),
+                tag: Box::new(CodecNode::NamedAtom(tag.clone(), value.loc())),
                 payload: Box::new(transform_codec(
                     payload,
                     actual_payload,
@@ -6325,7 +6346,7 @@ fn transform_codec(
                     current,
                     background,
                 )?),
-                loc: value.loc,
+                loc: value.loc(),
             })
         }
         CodecKind::Tuple(items) => {
@@ -6375,8 +6396,8 @@ fn transform_codec(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(match direction {
-                CodecDirection::Decode => CodecNode::Tuple(nodes, value.loc),
-                CodecDirection::Encode => CodecNode::Array(nodes, value.loc),
+                CodecDirection::Decode => CodecNode::Tuple(nodes, value.loc()),
+                CodecDirection::Encode => CodecNode::Array(nodes, value.loc()),
             })
         }
         CodecKind::Struct(fields) => transform_codec_struct(
@@ -6538,7 +6559,7 @@ fn transform_codec_struct(
                     schema.rule,
                 ));
             }
-            Ok(CodecNode::Dict(output, value.loc))
+            Ok(CodecNode::Dict(output, value.loc()))
         }
         CodecDirection::Encode => {
             let mut emitted = BTreeMap::new();
@@ -6552,7 +6573,7 @@ fn transform_codec_struct(
                 current,
                 background,
             )?;
-            Ok(CodecNode::Dict(emitted.into_iter().collect(), value.loc))
+            Ok(CodecNode::Dict(emitted.into_iter().collect(), value.loc()))
         }
     }
 }
@@ -6979,7 +7000,7 @@ fn transform_codec_enum(
                 }
                 return Ok(CodecNode::NamedAtom(
                     variant.internal_name.clone(),
-                    value.loc,
+                    value.loc(),
                 ));
             }
             let RuntimeValue::Dict(handle) = value.value else {
@@ -7023,7 +7044,7 @@ fn transform_codec_enum(
             Ok(CodecNode::Tagged {
                 tag: Box::new(CodecNode::NamedAtom(
                     variant.internal_name.clone(),
-                    value.loc,
+                    value.loc(),
                 )),
                 payload: Box::new(transform_codec(
                     payload,
@@ -7034,7 +7055,7 @@ fn transform_codec_enum(
                     current,
                     background,
                 )?),
-                loc: value.loc,
+                loc: value.loc(),
             })
         }
         CodecDirection::Encode => {
@@ -7060,7 +7081,10 @@ fn transform_codec_enum(
                         variant.rule,
                     ));
                 }
-                return Ok(CodecNode::String(variant.external_name.clone(), value.loc));
+                return Ok(CodecNode::String(
+                    variant.external_name.clone(),
+                    value.loc(),
+                ));
             }
             let RuntimeValue::Tagged(handle) = value.value else {
                 return Err(CodecFailure::new(
@@ -7113,7 +7137,7 @@ fn transform_codec_enum(
                         background,
                     )?,
                 )],
-                value.loc,
+                value.loc(),
             ))
         }
     }
@@ -7152,10 +7176,10 @@ fn transform_untagged_enum(
                 [(variant, node)] => Ok(CodecNode::Tagged {
                     tag: Box::new(CodecNode::NamedAtom(
                         variant.internal_name.clone(),
-                        value.loc,
+                        value.loc(),
                     )),
                     payload: Box::new(node.clone()),
-                    loc: value.loc,
+                    loc: value.loc(),
                 }),
                 [] => Err(CodecFailure::new(
                     format!(
@@ -7249,7 +7273,7 @@ fn decode_struct_fields(
                     current,
                     background,
                 )?,
-                container.loc,
+                container.loc(),
             )
         } else {
             let external = field.external_name.as_ref().expect("ordinary field name");
@@ -7284,7 +7308,7 @@ fn decode_struct_fields(
                 .map_err(|failure| CodecFailure::new(failure.message, default, default))?;
                 CodecNode::Existing(default)
             } else if option_item(&field.schema).is_some() {
-                CodecNode::Atom(BuiltinAtom::None, container.loc)
+                CodecNode::Atom(BuiltinAtom::None, container.loc())
             } else {
                 return Err(CodecFailure::new(
                     format!("{external_path}: missing required field"),
@@ -7427,11 +7451,11 @@ fn transform_codec_field(
         );
     };
     if value.value == RuntimeValue::BuiltinAtom(BuiltinAtom::None) {
-        return Ok(CodecNode::Atom(BuiltinAtom::None, value.loc));
+        return Ok(CodecNode::Atom(BuiltinAtom::None, value.loc()));
     }
     match direction {
         CodecDirection::Decode => Ok(CodecNode::Tagged {
-            tag: Box::new(CodecNode::Atom(BuiltinAtom::Some, value.loc)),
+            tag: Box::new(CodecNode::Atom(BuiltinAtom::Some, value.loc())),
             payload: Box::new(transform_codec(
                 item,
                 value,
@@ -7441,7 +7465,7 @@ fn transform_codec_field(
                 current,
                 background,
             )?),
-            loc: value.loc,
+            loc: value.loc(),
         }),
         CodecDirection::Encode => {
             let RuntimeValue::Tagged(handle) = value.value else {
@@ -7551,7 +7575,7 @@ fn generate_json_schema(
         };
         fields.push((
             "$defs".into(),
-            CodecNode::Dict(definitions.into_iter().collect(), schema.rule.loc),
+            CodecNode::Dict(definitions.into_iter().collect(), schema.rule.loc()),
         ));
     }
     Ok(root)
@@ -7566,7 +7590,7 @@ fn generate_json_schema_node(
     links: &mut HashMap<Handle, String>,
     definitions: &mut BTreeMap<String, CodecNode>,
 ) -> Result<CodecNode, CodecFailure> {
-    let loc = schema.rule.loc;
+    let loc = schema.rule.loc();
     if let Some(item) = option_item(schema) {
         return Ok(schema_dict(
             vec![(
@@ -7768,12 +7792,12 @@ fn generate_json_schema_node(
                             )?;
                             Ok(schema_dict(
                                 vec![
-                                    ("type", schema_string("object", variant.rule.loc)),
+                                    ("type", schema_string("object", variant.rule.loc())),
                                     (
                                         "properties",
                                         CodecNode::Dict(
                                             vec![(variant.external_name.clone(), property)],
-                                            variant.rule.loc,
+                                            variant.rule.loc(),
                                         ),
                                     ),
                                     (
@@ -7781,25 +7805,25 @@ fn generate_json_schema_node(
                                         CodecNode::Array(
                                             vec![schema_string(
                                                 &variant.external_name,
-                                                variant.rule.loc,
+                                                variant.rule.loc(),
                                             )],
-                                            variant.rule.loc,
+                                            variant.rule.loc(),
                                         ),
                                     ),
                                     (
                                         "additionalProperties",
-                                        CodecNode::Atom(BuiltinAtom::False, variant.rule.loc),
+                                        CodecNode::Atom(BuiltinAtom::False, variant.rule.loc()),
                                     ),
                                 ],
-                                variant.rule.loc,
+                                variant.rule.loc(),
                             ))
                         } else {
                             Ok(schema_dict(
                                 vec![(
                                     "const",
-                                    schema_string(&variant.external_name, variant.rule.loc),
+                                    schema_string(&variant.external_name, variant.rule.loc()),
                                 )],
-                                variant.rule.loc,
+                                variant.rule.loc(),
                             ))
                         }
                     })
@@ -8093,7 +8117,7 @@ fn run_core_result(
                         pc,
                     )
                 })? {
-                (message.to_owned(), payload.loc, None)
+                (message.to_owned(), payload.loc(), None)
             } else if let RuntimeValue::Dict(handle) = payload.value {
                 let message = view
                     .dict_get_text(handle, "message")
@@ -8130,7 +8154,7 @@ fn run_core_result(
                             pc,
                         )
                     })?;
-                (message, data.loc, rule.loc)
+                (message, data.loc(), rule.loc())
             } else {
                 return Err(error(
                     RuntimeErrorKind::TypeMismatch,
@@ -8206,7 +8230,7 @@ fn run_core_json(
             Err(parse_error) => {
                 let rule = RichValue::new(
                     current.atom(Some(background), "Json"),
-                    arguments[input_index].loc,
+                    arguments[input_index].loc(),
                 );
                 return finish_codec_result(
                     Err(CodecFailure {
@@ -8340,7 +8364,7 @@ fn run_core_json(
                     function,
                     pc,
                 );
-                runtime.set_locations(failure.data.loc, failure.rule.loc);
+                runtime.set_locations(failure.data.loc(), failure.rule.loc());
                 runtime
             },
         )?;
@@ -8351,7 +8375,7 @@ fn run_core_json(
             "$schema".into(),
             CodecNode::String(
                 "https://json-schema.org/draft/2020-12/schema".into(),
-                arguments[0].loc,
+                arguments[0].loc(),
             ),
         ));
         let bytes = codec_node_bytes(&node)
@@ -8457,13 +8481,19 @@ fn run_core_json(
             pc,
         )?;
         let closure = RichValue::new(
-            RuntimeValue::Func(current.allocate(Object::Closure {
-                identity: Arc::new(()),
-                prototype: crate::heap::RuntimePrototype::Native(crate::NativeFunction::core_json(
-                    CoreJsonFunction::StringifyPrettyValue,
-                )),
-                upvalues: vec![RichValue::new(RuntimeValue::Int(indent), arguments[0].loc)].into(),
-            })),
+            RuntimeValue::Func(
+                current.allocate(Object::Closure {
+                    identity: Arc::new(()),
+                    prototype: crate::heap::RuntimePrototype::Native(
+                        crate::NativeFunction::core_json(CoreJsonFunction::StringifyPrettyValue),
+                    ),
+                    upvalues: vec![RichValue::new(
+                        RuntimeValue::Int(indent),
+                        arguments[0].loc(),
+                    )]
+                    .into(),
+                }),
+            ),
             instruction_location(function, pc),
         );
         return Ok(VmAction::Return {
@@ -9235,7 +9265,7 @@ fn runtime_type_error(
             pc,
         ),
     };
-    runtime_error.set_data_location(actual.loc);
+    runtime_error.set_data_location(actual.loc());
     runtime_error
 }
 
@@ -9245,7 +9275,7 @@ fn runtime_shallow_type_error(
     function: &BytecodeFunction,
     pc: usize,
 ) -> RuntimeError {
-    let location = actual.loc;
+    let location = actual.loc();
     let actual_kind = match actual.value {
         RuntimeValue::Int(_) => "Int",
         RuntimeValue::Float(_) => "Float",
@@ -9286,7 +9316,7 @@ fn runtime_numeric_type_error(
             pc,
         ),
     };
-    runtime_error.set_data_location(left.loc.or(right.loc));
+    runtime_error.set_data_location(left.loc().or(right.loc()));
     runtime_error
 }
 

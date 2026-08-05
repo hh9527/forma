@@ -1,6 +1,6 @@
 # RFC 0102: Structural value provenance
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0046, RFC 0100, RFC 0101
 
 ## Summary
@@ -201,3 +201,27 @@ Work returns to discussion if implementation requires:
 5. exposing physical filesystem paths;
 6. combining successful provenance with Never/failure lineage; or
 7. operation-specific source policy outside the documented native categories.
+
+## Implementation result
+
+`RichValue` now stores a compact `Unknown | Original(Loc) | Generated(Loc)`
+provenance enum in place of its raw optional location. The representation
+remains Copy and 32 bytes on 64-bit targets, so structural provenance adds no
+per-value allocation and no edge-size regression. Existing location consumers
+use a bounded accessor and remain unaware of the classification.
+
+JSON, TOML, and YAML sourced imports mark roots and child edges Original.
+Bytecode literals and computations remain Generated, while moves and structural
+selection preserve the existing rich edge. Heap copying and Work-to-Main
+publication now replace only storage handles and copy provenance exactly,
+including Original classification.
+
+VM return targets carry the authored call location. The single common return
+path preserves Original roots and rebases Generated or Unknown roots, covering
+ordinary Functions, synchronous natives, native continuations, and proper tail
+calls without recursively rewriting container children. Regression coverage
+proves sourced root/child classification, copy preservation, compact layout,
+Original-versus-Generated rebasing, and nested Function call-site attribution.
+
+Full Forma tests pass with 296 passed and 1 ignored; all 13 CLI and 20 LSP tests
+pass, and strict workspace Clippy reports no warnings.

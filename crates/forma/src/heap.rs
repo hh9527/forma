@@ -57,20 +57,70 @@ pub(crate) enum RuntimeValue {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RichValue {
     pub(crate) value: RuntimeValue,
-    pub(crate) loc: Option<Loc>,
+    provenance: Provenance,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Provenance {
+    Unknown,
+    Original(Loc),
+    Generated(Loc),
 }
 
 impl RichValue {
     pub(crate) const fn new(value: RuntimeValue, loc: Option<Loc>) -> Self {
-        Self { value, loc }
+        Self {
+            value,
+            provenance: match loc {
+                Some(loc) => Provenance::Generated(loc),
+                None => Provenance::Unknown,
+            },
+        }
+    }
+
+    pub(crate) const fn original(value: RuntimeValue, loc: Option<Loc>) -> Self {
+        Self {
+            value,
+            provenance: match loc {
+                Some(loc) => Provenance::Original(loc),
+                None => Provenance::Unknown,
+            },
+        }
     }
 
     pub(crate) const fn unknown(value: RuntimeValue) -> Self {
         Self::new(value, None)
     }
 
-    pub(crate) const fn with_loc(self, loc: Option<Loc>) -> Self {
-        Self { loc, ..self }
+    pub(crate) fn with_loc(self, loc: Option<Loc>) -> Self {
+        if self.loc() == loc {
+            self
+        } else {
+            Self::new(self.value, loc)
+        }
+    }
+
+    pub(crate) const fn rebase_generated(self, call_site: Option<Loc>) -> Self {
+        match self.provenance {
+            Provenance::Original(_) => self,
+            Provenance::Unknown | Provenance::Generated(_) => Self::new(self.value, call_site),
+        }
+    }
+
+    pub(crate) const fn loc(self) -> Option<Loc> {
+        match self.provenance {
+            Provenance::Unknown => None,
+            Provenance::Original(loc) | Provenance::Generated(loc) => Some(loc),
+        }
+    }
+
+    const fn with_value(self, value: RuntimeValue) -> Self {
+        Self { value, ..self }
+    }
+
+    #[cfg(test)]
+    const fn is_original(self) -> bool {
+        matches!(self.provenance, Provenance::Original(_))
     }
 }
 
@@ -421,7 +471,7 @@ impl Heap {
                 let payload = self.import_sourced_at(background, payload, provenance, path)?;
                 path.pop();
                 RuntimeValue::Tagged(self.allocate(Object::Tagged {
-                    tag: RichValue::new(tag, loc),
+                    tag: RichValue::original(tag, loc),
                     payload,
                 }))
             }
@@ -469,7 +519,7 @@ impl Heap {
                 return Err(HeapError("sourced data cannot contain Dyn"));
             }
         };
-        Ok(RichValue::new(value, loc))
+        Ok(RichValue::original(value, loc))
     }
 
     fn import_value_with(
@@ -1336,7 +1386,7 @@ impl PendingCopy {
                 RuntimeValue::UpLink(self.copy_object(target, source, handle)?)
             }
         };
-        Ok(RichValue::new(copied, value.loc))
+        Ok(value.with_value(copied))
     }
 
     fn copy_object(
@@ -1659,15 +1709,69 @@ mod tests {
     }
 
     #[test]
+    fn call_site_rebasing_preserves_original_values_only() {
+        let original_loc = location("data", 1..2);
+        let generated_loc = location("function", 3..4);
+        let call_loc = location("caller", 5..6);
+
+        let original = RichValue::original(RuntimeValue::Int(1), Some(original_loc));
+        let generated = RichValue::new(RuntimeValue::Int(2), Some(generated_loc));
+
+        let preserved = original.rebase_generated(Some(call_loc));
+        assert!(preserved.is_original());
+        assert_eq!(preserved.loc(), Some(original_loc));
+        assert_eq!(
+            generated.rebase_generated(Some(call_loc)).loc(),
+            Some(call_loc)
+        );
+        assert_eq!(
+            RichValue::unknown(RuntimeValue::Int(3))
+                .rebase_generated(Some(call_loc))
+                .loc(),
+            Some(call_loc)
+        );
+    }
+
+    #[test]
+    fn sourced_import_marks_root_and_children_original() {
+        let root_loc = location("data", 0..5);
+        let item_loc = location("data-item", 1..2);
+        let sourced = SourcedValue {
+            value: Value::Array(vec![Value::Int(7)].into()),
+            provenance: crate::json::Provenance {
+                values: [
+                    (Vec::new(), root_loc),
+                    (vec![ValuePathSegment::Index(0)], item_loc),
+                ]
+                .into_iter()
+                .collect(),
+                keys: Default::default(),
+            },
+        };
+        let mut heap = Heap::work();
+        let root = heap.import_sourced_value(None, &sourced).unwrap();
+        assert!(root.is_original());
+        assert_eq!(root.loc(), Some(root_loc));
+        let RuntimeValue::Array(handle) = root.value else {
+            panic!("expected imported Array")
+        };
+        let Object::Array(items) = heap.object(handle).unwrap() else {
+            panic!("expected Array object")
+        };
+        assert!(items[0].is_original());
+        assert_eq!(items[0].loc(), Some(item_loc));
+    }
+
+    #[test]
     fn copy_preserves_root_and_collection_edge_locations() {
         let root_loc = location("root", 0..5);
         let item_loc = location("item", 6..7);
         let mut world = Heap::main();
         let mut current = Heap::work();
         let array = current.allocate(Object::Array(
-            vec![RichValue::new(RuntimeValue::Int(42), Some(item_loc))].into(),
+            vec![RichValue::original(RuntimeValue::Int(42), Some(item_loc))].into(),
         ));
-        let root = RichValue::new(RuntimeValue::Array(array), Some(root_loc));
+        let root = RichValue::original(RuntimeValue::Array(array), Some(root_loc));
 
         let copied = copy_roots(
             &mut world,
@@ -1679,14 +1783,16 @@ mod tests {
         )
         .unwrap()[0];
 
-        assert_eq!(copied.loc, Some(root_loc));
+        assert_eq!(copied.loc(), Some(root_loc));
+        assert!(copied.is_original());
         let RuntimeValue::Array(handle) = copied.value else {
             panic!("expected copied Array")
         };
         let Object::Array(items) = world.object(handle).unwrap() else {
             panic!("expected copied Array object")
         };
-        assert_eq!(items[0].loc, Some(item_loc));
+        assert_eq!(items[0].loc(), Some(item_loc));
+        assert!(items[0].is_original());
     }
 
     #[test]
