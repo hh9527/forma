@@ -249,9 +249,9 @@ typed Agent plans, and host-driven Agent loops.
 ## Try It
 
 ```sh
-cargo run -p forma -- check examples/mvp/main.forma
-cargo run -p forma -- run examples/mvp/external.forma --input examples/mvp/request.json
-cargo run -p forma -- show examples/mvp/main.forma
+cargo run -p forma-cli -- check examples/mvp/main.forma
+cargo run -p forma-cli -- run examples/mvp/external.forma --input examples/mvp/request.json
+cargo run -p forma-cli -- show examples/mvp/main.forma
 cargo run -p forma-lsp -- --help
 ```
 

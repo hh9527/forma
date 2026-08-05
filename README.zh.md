@@ -161,9 +161,9 @@ Forma 仍是实验品。它没有语言级效果、环境隐式 IO、动态导�
 ## 试一试
 
 ```sh
-cargo run -p forma -- check examples/mvp/main.forma
-cargo run -p forma -- run examples/mvp/external.forma --input examples/mvp/request.json
-cargo run -p forma -- show examples/mvp/main.forma
+cargo run -p forma-cli -- check examples/mvp/main.forma
+cargo run -p forma-cli -- run examples/mvp/external.forma --input examples/mvp/request.json
+cargo run -p forma-cli -- show examples/mvp/main.forma
 cargo run -p forma-lsp -- --help
 ```
 

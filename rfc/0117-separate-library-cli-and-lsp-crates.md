@@ -1,6 +1,6 @@
 # RFC 0117: Separate library, CLI, and LSP crates
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0046, RFC 0100, RFC 0114
 
 ## Summary
@@ -69,3 +69,16 @@ move with the binary and continue to use `CARGO_BIN_EXE_forma`.
 - changing public language-engine APIs; or
 - independent release/version policy in this phase.
 
+## Implementation result
+
+Added the `forma-cli` package with binary target `forma` and a path dependency
+on the library-only `forma` package. The existing CLI entrypoint moved without
+behavior changes, and all CLI black-box tests moved with it; consequently
+`CARGO_BIN_EXE_forma` continues to address the same executable. The `forma`
+manifest no longer declares a binary target.
+
+`forma-lsp` remains an independent application over the same `forma` library.
+README development commands now select `-p forma-cli`, while installed command
+examples remain `forma`. Cargo metadata and the full quality gate confirm the
+one-way dependency graph and target ownership. No public language API or
+runtime behavior changed.

@@ -6,10 +6,6 @@ edition.workspace = true
 [lib]
 path = "src/lib.rs"
 
-[[bin]]
-name = "forma"
-path = "src/main.rs"
-
 [dependencies]
 codespan-reporting = "0.13"
 crop = { version = "0.4.3", features = ["utf16-metric"] }

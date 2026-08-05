@@ -114,6 +114,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "forma-cli"
+version = "0.1.0"
+dependencies = [
+ "forma",
+]
+
+[[package]]
 name = "forma-lsp"
 version = "0.1.0"
 dependencies = [
