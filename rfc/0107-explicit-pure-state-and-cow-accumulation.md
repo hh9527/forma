@@ -1,4 +1,4 @@
-# RFC 0107: Explicit pure state and COW accumulation
+# RFC 0107: Explicit pure state and persistent accumulation
 
 - Status: Proposed
 - Depends on: RFC 0053, RFC 0061, RFC 0089 through RFC 0099, RFC 0102
@@ -20,9 +20,9 @@ def my_hash:
     };
 ```
 
-Runtime values use immutable language semantics and opportunistic copy-on-write
-storage. A unique backing allocation may be updated in place; an aliased value
-is copied before mutation. This is an implementation optimization, never a
+Runtime values use immutable language semantics and persistent storage. The VM
+may add copy-on-write only where it has real uniqueness evidence; COW is an
+optional implementation optimization, never a phase requirement or a
 language-level uniqueness promise.
 
 The phase delivers two concrete applications:
@@ -32,7 +32,7 @@ The phase delivers two concrete applications:
 2. ordinary Array-based diagnostic records threaded explicitly through
    validation functions and higher-order combinators.
 
-This is an umbrella RFC. RFCs 0108 through 0112 define collection COW,
+This is an umbrella RFC. RFCs 0108 through 0112 define persistent collection updates,
 HashState, the hash byte protocol, the reference hash interpreter, and explicit
 diagnostic collection before this RFC becomes Implemented.
 
@@ -54,9 +54,9 @@ Array(DiagnosticRecord) -> Array(DiagnosticRecord)
 ```
 
 Repeated `let` shadowing makes the current state visually local, while
-`array.fold` and `array.try_fold` carry it through recursion. COW can remove the
-common runtime copying cost without making aliasing observable or requiring a
-static ownership system.
+`array.fold` and `array.try_fold` carry it through recursion. Persistent copies
+preserve ordinary value semantics without requiring a static ownership system;
+runtime sharing may reduce copying where the representation supports it.
 
 This phase tests that simpler model with real user-space interpreters before
 Forma commits to a language-level accumulation abstraction.
@@ -84,8 +84,10 @@ let updated = hash.update_string(original, "forma");
 ```
 
 The runtime may mutate backing storage only when it proves that doing so cannot
-change any live alias. Otherwise it copies. No Forma program may distinguish a
-COW fast path from a persistent copy.
+change any live alias. Otherwise it copies. The current handle heap does not
+prove unique reachability merely because an inner Arc has one strong reference:
+multiple runtime values may still share the same Handle. RFC 0108 therefore
+does not claim an Array COW fast path.
 
 `Result` placement remains explicit API policy. These two contracts are
 different and the language does not choose between them:
@@ -101,13 +103,15 @@ HashState is a nominal leaf type whose representation is unavailable to Forma
 code. It is not a Host resource and has no external identity or lifetime:
 
 ```text
-HashState = heap-owned Arc<HashContext>
+HashState = heap-owned opaque HashContext
 ```
 
 The first implementation is dedicated rather than a general native-payload
 ABI. HashState may cross ordinary Function, Result, Tuple, Array, closure, heap
-promotion, and module boundaries like any other value. Clone shares the Arc;
-update uses COW; old aliases remain valid.
+promotion, and module boundaries like any other value. Implementations may
+share an immutable context across heap copies, but update must produce an
+independent logical context and old aliases remain valid. The initial
+fixed-size SHA-256 context may simply be copied on update.
 
 HashState cannot be constructed structurally, reflected into fields, encoded
 by ordinary codecs, or persisted as external data. TypeDesc reports a stable
@@ -137,7 +141,7 @@ formatting. Dict fields use canonical field order.
 The algorithm and protocol version are explicit standard-library contracts.
 `finish` does not consume or invalidate its input at the language level.
 Structural `==` compares HashState's logical algorithm/version/context state,
-never Arc or heap identity, so COW cannot change equality.
+never backing-storage or heap identity.
 
 ## Reference structural hash
 
@@ -201,24 +205,24 @@ Generated at the operation site, while existing records and the appended
 record retain their own data/rule anchors. A caller or Host explicitly decides
 whether to format, reject, or publish the finished records.
 
-## COW and quotas
+## Persistent storage and quotas
 
-COW is never exempt from resource accounting. Operations charge deterministic
-logical work and a deterministic logical output-allocation cost independent of
-whether storage is unique. A COW fast path does not receive extra quota, and a
-shared-storage path does not fail merely because it performs the required
-physical copy. Whether a backing allocation happens to be unique must not
-change fuel, success/failure, diagnostic ordering, serialized output, or source
-provenance.
+Persistent updates are never exempt from resource accounting. Operations
+charge deterministic logical work and deterministic logical output allocation.
+A future storage-sharing fast path does not receive extra quota, and a copied
+path does not change semantic success/failure merely because its physical
+representation differs. Storage choices must not change fuel, diagnostic
+ordering, serialized output, equality, or source provenance.
 
 Heap copy and promotion preserve sharing where supported but never publish a
-mutable alias. Failed WorkWorlds discard newly allocated COW state normally.
+mutable alias. Failed WorkWorlds discard newly allocated persistent state normally.
 No resource-table transaction log is needed.
 
 ## Phase sequence
 
-1. RFC 0108: add provenance-preserving Array append and focused COW storage,
-   including alias, quota, heap-copy, and callback-boundary tests;
+1. RFC 0108: add provenance-preserving persistent Array append, including
+   alias, quota, heap-copy, and callback-boundary tests, without claiming a COW
+   fast path in the current handle heap;
 2. RFC 0109: add the dedicated nominal opaque HashState runtime value and
    TypeDesc leaf without a general native opaque ABI;
 3. RFC 0110: add `@bim/std/hash`, deterministic domain-separated update
@@ -235,7 +239,7 @@ the full workspace quality gate.
 ## Goals
 
 1. validate explicit pure state threading for hashing and diagnostics;
-2. make the common update path efficient through unobservable Arc/COW;
+2. keep update costs bounded and leave room for unobservable runtime sharing;
 3. add a useful deterministic standard hash API;
 4. prove user-space structural hashing over existing reflection boundaries;
 5. collect multiple source-aware diagnostic records as ordinary data;
@@ -260,8 +264,8 @@ the full workspace quality gate.
 
 1. state parameters and results are visible in every public Function type;
 2. aliases observe immutable snapshots before and after updates;
-3. unique and shared COW paths produce identical values and provenance;
-4. COW behavior cannot be detected through equality, codec, debug, or quotas;
+3. aliases and persistent updates produce stable values and provenance;
+4. storage sharing cannot be detected through equality, codec, debug, or quotas;
 5. HashState is nominal and opaque but remains an ordinary heap value;
 6. HashState needs no Host resource table or lifetime protocol;
 7. the hash byte protocol is deterministic, versioned, and domain-separated;
