@@ -1391,6 +1391,7 @@ fn expression_has_import(expression: &Expr) -> bool {
                     TypeArgumentKind::Infer => false,
                 })
         }
+        ExprKind::Interpreter { operand, .. } => expression_has_import(operand),
         ExprKind::Closure { body, .. } => {
             body.value
                 .bindings

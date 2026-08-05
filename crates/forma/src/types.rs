@@ -1454,15 +1454,6 @@ pub(crate) fn analyze_program_with_bindings_observed(
             .cloned()
             .collect::<Vec<_>>(),
     );
-    if let Some(reference) = hir.unresolved().next() {
-        return Err(FrontendError::from_diagnostic(
-            sources,
-            Diagnostic::error(
-                format!("unknown binding {:?}", reference.name),
-                reference.location,
-            ),
-        ));
-    }
     let mut tool_values = prelude.clone();
     let mut static_environment = core_static_prelude();
     let mut declared_types = BTreeMap::new();
@@ -1586,6 +1577,29 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 format!("definition {name:?} is initialized more than once"),
             ));
         }
+    }
+
+    for binding in &program.value.body.value.bindings {
+        if matches!(binding.value.value.value, ExprKind::Interpreter { .. }) {
+            let contract = definition_contracts.get(&binding.value.name.value);
+            validate_interpreter_contract(&binding.value.type_parameters, contract).map_err(
+                |message| {
+                    FrontendError::from_diagnostic(
+                        sources,
+                        Diagnostic::error(message, binding.value.value.location),
+                    )
+                },
+            )?;
+        }
+    }
+    if let Some(reference) = hir.unresolved().next() {
+        return Err(FrontendError::from_diagnostic(
+            sources,
+            Diagnostic::error(
+                format!("unknown binding {:?}", reference.name),
+                reference.location,
+            ),
+        ));
     }
 
     for binding in &program.value.body.value.bindings {
@@ -2296,6 +2310,49 @@ pub(crate) fn analyze_program_with_bindings_observed(
     })
 }
 
+fn validate_interpreter_contract(
+    type_parameters: &[crate::ast::Identifier],
+    contract: Option<&TypeDescriptor>,
+) -> Result<(), String> {
+    const EXPECTED: &str = "interpreter requires exactly for(A) Fn(TypeOf(A)) -> Fn(A, A) -> R where R does not contain A";
+    if contract.is_none() {
+        return Err("interpreter requires an explicit for(A) Fn(TypeOf(A)) -> Fn(A, A) -> R definition contract".into());
+    }
+    let [parameter] = type_parameters else {
+        return Err(EXPECTED.into());
+    };
+    let Some(TypeDescriptor::Function {
+        parameters: outer_parameters,
+        result: outer_result,
+    }) = contract
+    else {
+        return Err(format!(
+            "interpreter requires an explicit for({}) Fn(TypeOf({})) -> Fn({}, {}) -> R definition contract",
+            parameter.value, parameter.value, parameter.value, parameter.value
+        ));
+    };
+    let bound = TypeDescriptor::Bound(TypeParameterId(0));
+    if outer_parameters != &[TypeDescriptor::TypeOf(Box::new(bound.clone()))] {
+        return Err(EXPECTED.into());
+    }
+    let TypeDescriptor::Function {
+        parameters: inner_parameters,
+        result,
+    } = outer_result.as_ref()
+    else {
+        return Err(EXPECTED.into());
+    };
+    if inner_parameters != &[bound.clone(), bound.clone()] {
+        return Err(EXPECTED.into());
+    }
+    let mut result_parameters = Vec::new();
+    collect_bound_parameters(result, &mut result_parameters);
+    if result_parameters.contains(&TypeParameterId(0)) {
+        return Err(EXPECTED.into());
+    }
+    Ok(())
+}
+
 pub(crate) fn infer_value(value: &Value) -> TypeDescriptor {
     match value {
         Value::Int(_) => TypeDescriptor::Int,
@@ -2550,6 +2607,15 @@ fn collect_nested_annotation_types(
                 annotations.insert(expression.location, descriptor);
             }
         }
+        ExprKind::Interpreter { operand, .. } => collect_nested_annotation_types(
+            source_name,
+            operand,
+            bindings,
+            account,
+            sources,
+            debug_sink,
+            annotations,
+        )?,
         ExprKind::If {
             condition,
             then_branch,
@@ -4951,6 +5017,9 @@ impl<'a> GenericInference<'a> {
                 }
                 substitute_bound_parameters(&scheme.body, &replacements)
             }
+            ExprKind::Interpreter { elaboration, .. } => {
+                self.infer(elaboration, environment, expected)?
+            }
             ExprKind::Closure {
                 parameters,
                 result_annotation,
@@ -5584,6 +5653,7 @@ fn expression_references_names(
                     TypeArgumentKind::Infer => false,
                 })
         }
+        ExprKind::Interpreter { operand, .. } => expression_references_names(operand, names, bound),
         ExprKind::Closure {
             parameters,
             result_annotation,
@@ -5843,6 +5913,9 @@ fn infer_expr_with(
                 _ => TypeDescriptor::Any,
             }
         }
+        ExprKind::Interpreter { elaboration, .. } => {
+            infer_expr_with(elaboration, environment, record)
+        }
         ExprKind::Closure {
             parameters,
             result_annotation,
@@ -5950,6 +6023,9 @@ fn check_interpolations(
                     check_interpolations(argument, environment, sources)?;
                 }
             }
+        }
+        ExprKind::Interpreter { operand, .. } => {
+            check_interpolations(operand, environment, sources)?;
         }
         ExprKind::Closure {
             parameters,

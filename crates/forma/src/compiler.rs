@@ -883,6 +883,7 @@ impl<'a> Compiler<'a> {
                 Ok(base)
             }
             ExprKind::TypeApply { callee, .. } => self.compile_expr(callee),
+            ExprKind::Interpreter { elaboration, .. } => self.compile_expr(elaboration),
             ExprKind::Closure {
                 parameters, body, ..
             } => {
@@ -1486,6 +1487,7 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
             }
         }
         ExprKind::TypeApply { callee, .. } => free_expr(callee, bound, free),
+        ExprKind::Interpreter { elaboration, .. } => free_expr(elaboration, bound, free),
         ExprKind::Closure {
             parameters, body, ..
         } => {
@@ -1592,6 +1594,9 @@ fn collect_runtime_names(expression: &Expr, names: &mut HashSet<String>) {
             }
         }
         ExprKind::TypeApply { callee, .. } => collect_runtime_names(callee, names),
+        ExprKind::Interpreter { elaboration, .. } => {
+            collect_runtime_names(elaboration, names);
+        }
         ExprKind::Closure { body, .. } => collect_runtime_names_block(body, names),
         ExprKind::If {
             condition,

@@ -1,6 +1,6 @@
 # RFC 0097: Semantic `interpreter` expression
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0093, RFC 0096
 
 ## Summary
@@ -138,3 +138,24 @@ does not trigger compiler elaboration.
 5. add parser, HIR, type, execution, recovery, and diagnostic regressions; and
 6. run the full quality gate and record the implementation result.
 
+## Implementation result
+
+Implemented a distinct `ExprKind::Interpreter` retaining both the authored
+operand and a compiler-only ordinary elaboration. The parser now recognizes
+and preserves the construct without auditing its generic contract. HIR indexes
+only the authored operand, while capture/runtime-name collection and bytecode
+compilation consume the elaboration; generated parameters and the hidden Dyn
+pack binding therefore do not appear as authored references.
+
+Strict type analysis evaluates definition contracts and validates the RFC 0093
+scheme before unresolved operand diagnostics, so missing and malformed contexts
+retain dedicated interpreter errors. Bidirectional inference checks the ordinary
+elaboration against the authored expected Function, preserving existing operand
+arity/result diagnostics and execution. Partial expression recording and source
+validation understand the new node without introducing an opcode or runtime
+callable.
+
+Regression coverage proves AST retention, authored-only HIR references, valid
+explicit and inferred calls, erased operand mismatch, and invalid contextual
+shapes. Full Forma tests pass with 290 passed and 1 ignored; all 13 CLI tests
+pass. Workspace LSP tests and strict Clippy also pass.

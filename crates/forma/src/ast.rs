@@ -90,6 +90,10 @@ pub enum ExprKind {
         callee: Box<Expr>,
         arguments: Vec<TypeArgument>,
     },
+    Interpreter {
+        operand: Box<Expr>,
+        elaboration: Box<Expr>,
+    },
     Closure {
         parameters: Vec<ClosureParameter>,
         result_annotation: Option<Box<Expr>>,

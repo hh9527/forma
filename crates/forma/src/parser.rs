@@ -445,14 +445,6 @@ impl<'a> Lowerer<'a> {
                     .ok_or_else(|| self.error(node, "definition has no value"))?;
                 let interpreter_node = self.expression_head(value_node);
                 let value = if self.rule(interpreter_node) == Some(Rule::InterpreterExpr) {
-                    let annotation = annotation.as_ref().ok_or_else(|| {
-                        self.error(
-                            interpreter_node,
-                            "interpreter requires an explicit for(A) Fn(TypeOf(A)) -> Fn(A, A) -> R definition contract",
-                        )
-                    })?;
-                    validate_interpreter_contract(&type_parameters, annotation)
-                        .map_err(|message| self.error(interpreter_node, message))?;
                     self.lower_interpreter(interpreter_node)?
                 } else {
                     self.expression(value_node)?
@@ -834,9 +826,15 @@ impl<'a> Lowerer<'a> {
             .children(node)
             .find(|child| self.is_expression(*child))
             .ok_or_else(|| self.error(node, "interpreter has no operand"))?;
-        Ok(interpreter_expansion(
-            self.expression(operand)?,
-            self.location(node),
+        let location = self.location(node);
+        let operand = self.expression(operand)?;
+        let elaboration = interpreter_expansion(operand.clone(), location);
+        Ok(located(
+            ExprKind::Interpreter {
+                operand: Box::new(operand),
+                elaboration: Box::new(elaboration),
+            },
+            location,
         ))
     }
 
@@ -1658,83 +1656,6 @@ fn placeholder_parameter(index: usize) -> String {
     format!("\0xl_placeholder_{index}")
 }
 
-fn validate_interpreter_contract(
-    type_parameters: &[Identifier],
-    contract: &Expr,
-) -> Result<(), &'static str> {
-    const EXPECTED: &str = "interpreter requires exactly for(A) Fn(TypeOf(A)) -> Fn(A, A) -> R where R does not contain A";
-    let [parameter] = type_parameters else {
-        return Err(EXPECTED);
-    };
-    let Some((outer_parameters, outer_result)) = function_contract_parts(contract) else {
-        return Err(EXPECTED);
-    };
-    let [witness] = outer_parameters else {
-        return Err(EXPECTED);
-    };
-    if !is_named_application(witness, "TypeOf", &parameter.value) {
-        return Err(EXPECTED);
-    }
-    let Some((inner_parameters, result)) = function_contract_parts(outer_result) else {
-        return Err(EXPECTED);
-    };
-    let [left, right] = inner_parameters else {
-        return Err(EXPECTED);
-    };
-    if !is_variable(left, &parameter.value)
-        || !is_variable(right, &parameter.value)
-        || expression_mentions(result, &parameter.value)
-    {
-        return Err(EXPECTED);
-    }
-    Ok(())
-}
-
-fn function_contract_parts(contract: &Expr) -> Option<(&[Expr], &Expr)> {
-    let ExprKind::Call { callee, arguments } = &contract.value else {
-        return None;
-    };
-    if !is_variable(callee, "Fn") {
-        return None;
-    }
-    let [parameters, result] = arguments.as_slice() else {
-        return None;
-    };
-    let ExprKind::Array(parameters) = &parameters.value else {
-        return None;
-    };
-    Some((parameters, result))
-}
-
-fn is_named_application(expression: &Expr, constructor: &str, argument: &str) -> bool {
-    matches!(
-        &expression.value,
-        ExprKind::Call { callee, arguments }
-            if is_variable(callee, constructor)
-                && matches!(arguments.as_slice(), [value] if is_variable(value, argument))
-    )
-}
-
-fn is_variable(expression: &Expr, expected: &str) -> bool {
-    matches!(&expression.value, ExprKind::Variable(name) if name.value == expected)
-}
-
-fn expression_mentions(expression: &Expr, name: &str) -> bool {
-    match &expression.value {
-        ExprKind::Variable(identifier) => identifier.value == name,
-        ExprKind::Array(items) | ExprKind::Tuple(items) => {
-            items.iter().any(|item| expression_mentions(item, name))
-        }
-        ExprKind::Call { callee, arguments } => {
-            expression_mentions(callee, name)
-                || arguments
-                    .iter()
-                    .any(|argument| expression_mentions(argument, name))
-        }
-        _ => false,
-    }
-}
-
 fn interpreter_expansion(operand: Expr, location: Location) -> Expr {
     let type_name = "\0forma_interpreter_type";
     let left_name = "\0forma_interpreter_left";
@@ -2156,5 +2077,22 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn preserves_interpreter_operand_in_ast() {
+        let program = parse(
+            "interpreter.forma",
+            "def lift: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Bool = interpreter(eq_i); lift",
+        )
+        .unwrap();
+        let value = &program.value.body.value.bindings[0].value.value;
+        let ExprKind::Interpreter { operand, .. } = &value.value else {
+            panic!("expected interpreter expression")
+        };
+        assert!(matches!(
+            &operand.value,
+            ExprKind::Variable(name) if name.value == "eq_i"
+        ));
     }
 }

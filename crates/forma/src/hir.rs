@@ -482,6 +482,10 @@ impl Resolver {
                 }
                 None
             }
+            ExprKind::Interpreter { operand, .. } => {
+                self.index_expr(operand, scopes);
+                None
+            }
             ExprKind::Closure {
                 parameters,
                 result_annotation,
@@ -636,5 +640,28 @@ mod tests {
             .expect("placeholder expression");
         assert!(placeholder.reference.is_none());
         assert!(placeholder.parent.is_some());
+    }
+
+    #[test]
+    fn interpreter_hir_indexes_only_authored_operand() {
+        let program = parse(
+            "hir.forma",
+            "def lift: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Bool = interpreter(eq_i); lift",
+        )
+        .unwrap();
+        let hir = HirProgram::resolve(
+            &program,
+            ["Fn", "TypeOf", "Bool", "eq_i"]
+                .into_iter()
+                .map(str::to_owned),
+        );
+        let names = hir
+            .references()
+            .iter()
+            .map(|reference| reference.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"eq_i"));
+        assert!(!names.iter().any(|name| name.contains("forma_interpreter")));
+        assert!(!names.contains(&"\0forma_pack_dyn"));
     }
 }
