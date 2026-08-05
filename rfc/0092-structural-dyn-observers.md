@@ -1,6 +1,6 @@
 # RFC 0092: Structural `Dyn` observers
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0089 through RFC 0091
 - Tracking issue: https://github.com/hh9527/forma/issues/4
 
@@ -125,3 +125,27 @@ walks values owns its semantic path and may wrap or enrich observer errors.
 5. centralize structured observer blame and allocation accounting;
 6. add direct, mismatch, recursive, quota, and publication regressions; and
 7. run the full quality gate and record the implementation result.
+
+## Implementation result
+
+Implemented `field`, `array_items`, `tuple_items`, `tag`, and `payload` in the
+existing `CoreDynFunction` family. Observation first builds a read-only plan
+from one heap view, then allocates all child packages and the Result after
+validation succeeds. Failures allocate only a structured `BlameError`; no
+partially projected child escapes.
+
+Parent descriptors resolve `$ref` and strip `WithAttributes` locally. Child
+packages retain the exact canonical child descriptor, including wrappers and
+recursive references. Struct fields are selected from declared metadata and
+runtime Dict shape together; Dict items reuse their homogeneous descriptor.
+Array and Tuple observers remain distinct and Tuple length is checked.
+
+Atom, Tagged, and Enum observation validates runtime tag, declared variant,
+and unit/payload agreement. Tags are returned as String, unit payloads as
+`'None`, and payload variants as `'Some(Dyn)`. Function and unsupported kinds
+return value-level blame.
+
+Regression coverage includes Struct, Dict, Array, Tuple, payload Enum, unit
+Enum, missing fields, wrong shapes, child descriptor narrowing, and a finite
+recursive Struct/Array traversal to an Int leaf. Full Forma tests pass with 284
+passed and 1 ignored; all 13 CLI integration tests pass.

@@ -292,6 +292,11 @@ pub(crate) enum CoreDynFunction {
     CheckFloat,
     CheckString,
     CheckBytes,
+    Field,
+    ArrayItems,
+    TupleItems,
+    Tag,
+    Payload,
 }
 
 impl CoreDynFunction {
@@ -304,12 +309,17 @@ impl CoreDynFunction {
             Self::CheckFloat => "@bim/std/dyn.check_float",
             Self::CheckString => "@bim/std/dyn.check_string",
             Self::CheckBytes => "@bim/std/dyn.check_bytes",
+            Self::Field => "@bim/std/dyn.field",
+            Self::ArrayItems => "@bim/std/dyn.array_items",
+            Self::TupleItems => "@bim/std/dyn.tuple_items",
+            Self::Tag => "@bim/std/dyn.tag",
+            Self::Payload => "@bim/std/dyn.payload",
         }
     }
 
     pub(crate) const fn arity(self) -> usize {
         match self {
-            Self::Pack => 2,
+            Self::Pack | Self::Field => 2,
             _ => 1,
         }
     }

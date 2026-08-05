@@ -35,7 +35,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
 @enum type ValueKind = {
     Int: 'None, Float: 'None, String: 'None, Bytes: 'None,
     Dict: 'None, Array: 'None, Atom: 'None, Tagged: 'None,
-    Tuple: 'None, Function: 'None,
+    Tuple: 'None, Function: 'None, Dyn: 'None,
 };
 native pack: for(A) Fn(TypeOf(A), A) -> Dyn;
 native desc: Fn(Dyn) -> Type;
@@ -44,6 +44,11 @@ native check_int: Fn(Dyn) -> Option(Int);
 native check_float: Fn(Dyn) -> Option(Float);
 native check_string: Fn(Dyn) -> Option(String);
 native check_bytes: Fn(Dyn) -> Option(Bytes);
+native field: Fn(Dyn, String) -> Result(Dyn, BlameError);
+native array_items: Fn(Dyn) -> Result(Array(Dyn), BlameError);
+native tuple_items: Fn(Dyn) -> Result(Array(Dyn), BlameError);
+native tag: Fn(Dyn) -> Result(String, BlameError);
+native payload: Fn(Dyn) -> Result(Option(Dyn), BlameError);
 {
     Dyn: Dyn,
     ValueKind: ValueKind,
@@ -54,6 +59,11 @@ native check_bytes: Fn(Dyn) -> Option(Bytes);
     check_float: check_float,
     check_string: check_string,
     check_bytes: check_bytes,
+    field: field,
+    array_items: array_items,
+    tuple_items: tuple_items,
+    tag: tag,
+    payload: payload,
 }
 "#,
             functions: vec![
@@ -75,6 +85,20 @@ native check_bytes: Fn(Dyn) -> Option(Bytes);
                 (
                     "check_bytes",
                     NativeFunction::core_dyn(CoreDynFunction::CheckBytes),
+                ),
+                ("field", NativeFunction::core_dyn(CoreDynFunction::Field)),
+                (
+                    "array_items",
+                    NativeFunction::core_dyn(CoreDynFunction::ArrayItems),
+                ),
+                (
+                    "tuple_items",
+                    NativeFunction::core_dyn(CoreDynFunction::TupleItems),
+                ),
+                ("tag", NativeFunction::core_dyn(CoreDynFunction::Tag)),
+                (
+                    "payload",
+                    NativeFunction::core_dyn(CoreDynFunction::Payload),
                 ),
             ],
         },

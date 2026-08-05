@@ -3259,6 +3259,87 @@ unchanged", "|"),
     }
 
     #[test]
+    fn core_dyn_structural_observers_preserve_child_descriptors() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import dyn from "@bim/std/dyn";
+               import result from "@bim/std/result";
+               import arrays from "@bim/std/array";
+               @struct type User = {name: String, pair: Tuple([Int, String])};
+               @struct type Node = {value: Int, children: Array(Node)};
+               @enum type Maybe = {None: 'None, Some: Int};
+               let user = dyn.pack(User, {name: "Ada", pair: (1, "one")});
+               let name = result.unwrap(dyn.field(user, "name"));
+               let pair = result.unwrap(dyn.field(user, "pair"));
+               let dict = dyn.pack(Dict(Int), {a: 7});
+               let numbers = dyn.pack(Array(Int), [1, 2]);
+               let root = dyn.pack(Node, {
+                   value: 1,
+                   children: [{value: 2, children: []}],
+               });
+               let children = result.unwrap(dyn.field(root, "children"));
+               let child_nodes = result.unwrap(dyn.array_items(children));
+               {
+                   name: dyn.check_string(name),
+                   dict_value: dyn.check_int(result.unwrap(dyn.field(dict, "a"))),
+                   array_values: arrays.map(
+                       result.unwrap(dyn.array_items(numbers)),
+                       dyn.check_int,
+                   ),
+                   tuple_values: arrays.map(
+                       result.unwrap(dyn.tuple_items(pair)),
+                       dyn.kind,
+                   ),
+                   enum_tag: result.unwrap(dyn.tag(dyn.pack(Maybe, 'Some(3)))),
+                   enum_payload: match result.unwrap(dyn.payload(dyn.pack(Maybe, 'Some(3)))) {
+                       'Some(value) => dyn.check_int(value),
+                       'None => 'None,
+                   },
+                   unit_payload: result.unwrap(dyn.payload(dyn.pack(Maybe, 'None))),
+                   recursive_values: arrays.map(child_nodes, fn(child) {
+                       dyn.check_int(result.unwrap(dyn.field(child, "value")))
+                   }),
+                   missing: dyn.field(user, "missing"),
+                   wrong_shape: dyn.array_items(user),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 200_000).unwrap();
+        let Value::Dict(output) = module.execute(200_000).unwrap() else {
+            panic!("structural Dyn test must return a Dict")
+        };
+        assert_eq!(output.get("name").unwrap().to_string(), "'Some(\"Ada\")");
+        assert_eq!(output.get("dict_value").unwrap().to_string(), "'Some(7)");
+        assert_eq!(
+            output.get("array_values").unwrap().to_string(),
+            "['Some(1), 'Some(2)]"
+        );
+        assert_eq!(
+            output.get("tuple_values").unwrap().to_string(),
+            "['Int, 'String]"
+        );
+        assert_eq!(output.get("enum_tag").unwrap().to_string(), "\"Some\"");
+        assert_eq!(output.get("enum_payload").unwrap().to_string(), "'Some(3)");
+        assert_eq!(output.get("unit_payload").unwrap().to_string(), "'None");
+        assert_eq!(
+            output.get("recursive_values").unwrap().to_string(),
+            "['Some(2)]"
+        );
+        for field in ["missing", "wrong_shape"] {
+            let Value::Tagged { tag, payload } = output.get(field).unwrap() else {
+                panic!("observer failure must return Result")
+            };
+            assert_eq!(tag.name(), "Err");
+            let Value::Dict(blame) = payload.as_ref() else {
+                panic!("observer failure must contain BlameError")
+            };
+            assert!(blame.get("message").unwrap().to_string().len() > 4);
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn homogeneous_dict_combinators_preserve_types_and_canonical_order() {
         let directory = fixture_dir();
         fs::write(

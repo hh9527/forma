@@ -69,11 +69,12 @@ metadata. RFC 0090 operations are authoritative for observing it.
 `ValueKind` is a closed public Enum describing logical runtime shapes:
 
 ```text
-Int Float String Bytes Dict Array Atom Tagged Tuple Function
+Int Float String Bytes Dict Array Atom Tagged Tuple Function Dyn
 ```
 
-It does not include VM handles, up-links, registers, storage generations, or
-`Dyn` itself. `kind` reports the wrapped payload kind.
+It does not include VM handles, up-links, registers, or storage generations.
+`kind` reports the wrapped payload kind; explicit nested packing therefore
+reports `'Dyn`.
 
 ## Checked primitive projection
 

@@ -4300,14 +4300,7 @@ fn run_core_dyn(
                 RuntimeValue::Tagged(_) => "Tagged",
                 RuntimeValue::Tuple(_) => "Tuple",
                 RuntimeValue::Func(_) => "Function",
-                RuntimeValue::Dyn(_) => {
-                    return Err(error(
-                        RuntimeErrorKind::InvalidBytecode,
-                        "Dyn cannot directly contain another Dyn under its stored witness",
-                        function,
-                        pc,
-                    ));
-                }
+                RuntimeValue::Dyn(_) => "Dyn",
                 RuntimeValue::UpLink(_) => {
                     return Err(error(
                         RuntimeErrorKind::InvalidBytecode,
@@ -4372,7 +4365,394 @@ fn run_core_dyn(
                 return_target,
             })
         }
+        CoreDynFunction::Field
+        | CoreDynFunction::ArrayItems
+        | CoreDynFunction::TupleItems
+        | CoreDynFunction::Tag
+        | CoreDynFunction::Payload => {
+            let field = if operation == CoreDynFunction::Field {
+                Some(
+                    view.string_text(arguments[1])
+                        .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                        .ok_or_else(|| {
+                            runtime_shallow_type_error("String", arguments[1], function, pc)
+                        })?
+                        .to_owned(),
+                )
+            } else {
+                None
+            };
+            let observation =
+                observe_dyn_structure(operation, descriptor, value, field.as_deref(), &view);
+            finish_dyn_observation(
+                operation,
+                arguments[0],
+                observation,
+                return_target,
+                function,
+                pc,
+                current,
+                background,
+                account,
+            )
+        }
     }
+}
+
+enum DynObservation {
+    Child(RichValue, RichValue),
+    Children(Vec<(RichValue, RichValue)>),
+    Tag(String),
+    Payload(Option<(RichValue, RichValue)>),
+}
+
+fn observe_dyn_structure(
+    operation: CoreDynFunction,
+    descriptor: RichValue,
+    value: RichValue,
+    field: Option<&str>,
+    view: &HeapView<'_>,
+) -> Result<DynObservation, String> {
+    let descriptor = normalize_dyn_descriptor(descriptor, view)?;
+    let RuntimeValue::Dict(type_handle) = descriptor.value else {
+        return Err("Dyn descriptor is not Type metadata".into());
+    };
+    let kind = view
+        .dict_get_text(type_handle, "kind")
+        .map_err(|error| error.to_string())?
+        .and_then(|kind| view.atom_text(kind).ok().flatten())
+        .ok_or_else(|| "Dyn descriptor has no Atom kind".to_owned())?;
+    let type_field = |name: &str| {
+        view.dict_get_text(type_handle, name)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("{kind} descriptor is missing {name}"))
+    };
+    match operation {
+        CoreDynFunction::Field => {
+            let name = field.expect("field operation has a name");
+            let RuntimeValue::Dict(value_handle) = value.value else {
+                return Err(format!("dyn.field expected {kind} runtime Dict"));
+            };
+            let child_value = view
+                .dict_get_text(value_handle, name)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("dyn.field could not find field {name:?}"))?;
+            let child_desc = match kind {
+                "Struct" => {
+                    let RuntimeValue::Dict(fields) = type_field("fields")?.value else {
+                        return Err("Struct.fields descriptor must be a Dict".into());
+                    };
+                    view.dict_get_text(fields, name)
+                        .map_err(|error| error.to_string())?
+                        .ok_or_else(|| format!("Struct has no declared field {name:?}"))?
+                }
+                "Dict" => type_field("item")?,
+                _ => return Err(format!("dyn.field does not support descriptor kind {kind}")),
+            };
+            Ok(DynObservation::Child(child_desc, child_value))
+        }
+        CoreDynFunction::ArrayItems => {
+            if kind != "Array" {
+                return Err(format!("dyn.array_items expected Array, got {kind}"));
+            }
+            let RuntimeValue::Array(handle) = value.value else {
+                return Err("dyn.array_items expected runtime Array".into());
+            };
+            let item = type_field("item")?;
+            let values = view
+                .sequence(handle, false)
+                .map_err(|error| error.to_string())?;
+            Ok(DynObservation::Children(
+                values.iter().map(|value| (item, *value)).collect(),
+            ))
+        }
+        CoreDynFunction::TupleItems => {
+            if kind != "Tuple" {
+                return Err(format!("dyn.tuple_items expected Tuple, got {kind}"));
+            }
+            let RuntimeValue::Tuple(handle) = value.value else {
+                return Err("dyn.tuple_items expected runtime Tuple".into());
+            };
+            let RuntimeValue::Array(items) = type_field("items")?.value else {
+                return Err("Tuple.items descriptor must be an Array".into());
+            };
+            let descriptors = view
+                .sequence(items, false)
+                .map_err(|error| error.to_string())?;
+            let values = view
+                .sequence(handle, true)
+                .map_err(|error| error.to_string())?;
+            if descriptors.len() != values.len() {
+                return Err("Tuple descriptor and runtime value have different lengths".into());
+            }
+            Ok(DynObservation::Children(
+                descriptors
+                    .iter()
+                    .copied()
+                    .zip(values.iter().copied())
+                    .collect(),
+            ))
+        }
+        CoreDynFunction::Tag => {
+            let (tag, _) = dyn_tagged_parts(kind, type_handle, value, view)?;
+            Ok(DynObservation::Tag(tag))
+        }
+        CoreDynFunction::Payload => {
+            let (_, payload) = dyn_tagged_parts(kind, type_handle, value, view)?;
+            Ok(DynObservation::Payload(payload))
+        }
+        _ => unreachable!("only structural operations reach observer"),
+    }
+}
+
+fn normalize_dyn_descriptor(
+    mut descriptor: RichValue,
+    view: &HeapView<'_>,
+) -> Result<RichValue, String> {
+    loop {
+        if let RuntimeValue::UpLink(handle) = descriptor.value {
+            descriptor = view
+                .up_link(handle)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Dyn descriptor reference is not initialized".to_owned())?;
+            continue;
+        }
+        let RuntimeValue::Dict(handle) = descriptor.value else {
+            return Err("Dyn descriptor is not canonical Type metadata".into());
+        };
+        let kind = view
+            .dict_get_text(handle, "kind")
+            .map_err(|error| error.to_string())?
+            .and_then(|kind| view.atom_text(kind).ok().flatten())
+            .ok_or_else(|| "Dyn descriptor is missing an Atom kind".to_owned())?;
+        if kind != "WithAttributes" {
+            return Ok(descriptor);
+        }
+        descriptor = view
+            .dict_get_text(handle, "inner")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "WithAttributes descriptor is missing inner".to_owned())?;
+    }
+}
+
+fn dyn_tagged_parts(
+    kind: &str,
+    type_handle: Handle,
+    value: RichValue,
+    view: &HeapView<'_>,
+) -> Result<(String, Option<(RichValue, RichValue)>), String> {
+    let runtime = match value.value {
+        RuntimeValue::BuiltinAtom(_) | RuntimeValue::Atom(_) => {
+            let tag = view
+                .atom_text(value)
+                .map_err(|error| error.to_string())?
+                .expect("Atom has text")
+                .to_owned();
+            (tag, None)
+        }
+        RuntimeValue::Tagged(handle) => {
+            let (tag, payload) = view.tagged(handle).map_err(|error| error.to_string())?;
+            let tag = view
+                .atom_text(tag)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Tagged runtime tag is not an Atom".to_owned())?
+                .to_owned();
+            (tag, Some(payload))
+        }
+        _ => {
+            return Err(format!(
+                "dyn tagged observer expected Atom or Tagged for {kind}"
+            ));
+        }
+    };
+    match kind {
+        "Atom" => {
+            let expected = view
+                .dict_get_text(type_handle, "tag")
+                .map_err(|error| error.to_string())?
+                .and_then(|tag| view.atom_text(tag).ok().flatten())
+                .ok_or_else(|| "Atom descriptor has no tag".to_owned())?;
+            if runtime.0 != expected || runtime.1.is_some() {
+                return Err(format!("expected unit tag '{expected}"));
+            }
+            Ok((runtime.0, None))
+        }
+        "Tagged" => {
+            let expected = view
+                .dict_get_text(type_handle, "tag")
+                .map_err(|error| error.to_string())?
+                .and_then(|tag| view.atom_text(tag).ok().flatten())
+                .ok_or_else(|| "Tagged descriptor has no tag".to_owned())?;
+            if runtime.0 != expected {
+                return Err(format!("expected tag '{expected}"));
+            }
+            let payload = runtime
+                .1
+                .ok_or_else(|| format!("tag '{expected} requires a payload"))?;
+            let payload_desc = view
+                .dict_get_text(type_handle, "payload")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Tagged descriptor has no payload".to_owned())?;
+            Ok((runtime.0, Some((payload_desc, payload))))
+        }
+        "Enum" => {
+            let RuntimeValue::Dict(variants) = view
+                .dict_get_text(type_handle, "variants")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "Enum descriptor has no variants".to_owned())?
+                .value
+            else {
+                return Err("Enum.variants descriptor must be a Dict".into());
+            };
+            let variant = view
+                .dict_get_text(variants, &runtime.0)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| format!("Enum has no variant {:?}", runtime.0))?;
+            let (inner, _) = strip_runtime_attributes(variant, "Dyn.enum.variant", view)?;
+            let unit = view.atom_text(inner).ok().flatten() == Some("None");
+            match (unit, runtime.1) {
+                (true, None) => Ok((runtime.0, None)),
+                (true, Some(_)) => Err(format!("unit variant {:?} has a payload", runtime.0)),
+                (false, Some(payload)) => Ok((runtime.0, Some((variant, payload)))),
+                (false, None) => Err(format!("variant {:?} requires a payload", runtime.0)),
+            }
+        }
+        _ => Err(format!(
+            "dyn tagged observer does not support descriptor kind {kind}"
+        )),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_dyn_observation(
+    operation: CoreDynFunction,
+    input: RichValue,
+    observation: Result<DynObservation, String>,
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let payload = match observation {
+        Ok(observation) => {
+            let units = match &observation {
+                DynObservation::Child(_, _) => 3,
+                DynObservation::Children(children) => 2 + children.len() * 3,
+                DynObservation::Tag(tag) => 2 + tag.len(),
+                DynObservation::Payload(None) => 2,
+                DynObservation::Payload(Some(_)) => 5,
+            };
+            charge_allocation(
+                account,
+                logical_value_bytes(units)
+                    .map_err(|native_error| allocation_error(native_error.message, function, pc))?,
+                function,
+                pc,
+            )?;
+            let value = match observation {
+                DynObservation::Child(descriptor, value) => RichValue::new(
+                    RuntimeValue::Dyn(current.allocate(Object::Dyn {
+                        identity: Arc::new(()),
+                        descriptor,
+                        value,
+                    })),
+                    value.loc,
+                ),
+                DynObservation::Children(children) => {
+                    let children = children
+                        .into_iter()
+                        .map(|(descriptor, value)| {
+                            RichValue::new(
+                                RuntimeValue::Dyn(current.allocate(Object::Dyn {
+                                    identity: Arc::new(()),
+                                    descriptor,
+                                    value,
+                                })),
+                                value.loc,
+                            )
+                        })
+                        .collect();
+                    RichValue::new(
+                        RuntimeValue::Array(current.allocate(Object::Array(children))),
+                        input.loc,
+                    )
+                }
+                DynObservation::Tag(tag) => {
+                    RichValue::new(current.string(Some(background), &tag), input.loc)
+                }
+                DynObservation::Payload(None) => {
+                    RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::None), input.loc)
+                }
+                DynObservation::Payload(Some((descriptor, value))) => {
+                    let child = RichValue::new(
+                        RuntimeValue::Dyn(current.allocate(Object::Dyn {
+                            identity: Arc::new(()),
+                            descriptor,
+                            value,
+                        })),
+                        value.loc,
+                    );
+                    RichValue::new(
+                        RuntimeValue::Tagged(current.allocate(Object::Tagged {
+                            tag: RichValue::new(
+                                RuntimeValue::BuiltinAtom(BuiltinAtom::Some),
+                                input.loc,
+                            ),
+                            payload: child,
+                        })),
+                        input.loc,
+                    )
+                }
+            };
+            RichValue::new(
+                RuntimeValue::Tagged(current.allocate(Object::Tagged {
+                    tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Ok), input.loc),
+                    payload: value,
+                })),
+                input.loc,
+            )
+        }
+        Err(message) => {
+            let rule = operation.name().trim_start_matches("@bim/std/");
+            let bytes = logical_value_bytes(6)
+                .and_then(|bytes| {
+                    bytes
+                        .checked_add(u64::try_from(message.len() + rule.len()).unwrap_or(u64::MAX))
+                        .ok_or_else(|| {
+                            NativeError::allocation_limit("Dyn observer error size overflowed")
+                        })
+                })
+                .map_err(|native_error| allocation_error(native_error.message, function, pc))?;
+            charge_allocation(account, bytes, function, pc)?;
+            let message = RichValue::new(current.string(Some(background), &message), input.loc);
+            let rule = RichValue::new(current.string(Some(background), rule), input.loc);
+            let fields = ["data", "message", "rule"]
+                .into_iter()
+                .map(|field| current.intern(field))
+                .collect();
+            let shape = current.intern_shape(fields);
+            let blame = RichValue::new(
+                RuntimeValue::Dict(current.allocate(Object::Dict {
+                    shape,
+                    values: vec![input, message, rule].into(),
+                })),
+                input.loc,
+            );
+            RichValue::new(
+                RuntimeValue::Tagged(current.allocate(Object::Tagged {
+                    tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Err), input.loc),
+                    payload: blame,
+                })),
+                input.loc,
+            )
+        }
+    };
+    Ok(VmAction::Return {
+        value: payload,
+        return_target,
+    })
 }
 
 fn dyn_descriptor_leaf_kind<'a>(
