@@ -3538,8 +3538,31 @@ unchanged", "|"),
         )
         .unwrap();
         let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Tagged { tag, payload } = module.execute(100_000).unwrap() else {
+            panic!("opaque JSON decode must return a Result")
+        };
+        assert_eq!(tag.name(), "Err");
+        let Value::Dict(error) = payload.as_ref() else {
+            panic!("opaque JSON decode error must be structured")
+        };
+        assert_eq!(
+            error.get("message").unwrap().to_string(),
+            "\"$: Opaque has no JSON codec\""
+        );
+        fs::write(
+            directory.join("main.forma"),
+            r#"import json from "@bim/std/json";
+               import hash from "@bim/std/hash";
+               json.schema(hash.HashState)"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         let error = module.execute(100_000).unwrap_err();
-        assert!(error.to_string().contains("unsupported opaque type"));
+        assert!(
+            error
+                .to_string()
+                .contains("Opaque has no JSON Schema mapping")
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -5991,6 +6014,102 @@ unchanged", "|"),
             assert!(
                 output.get(field).unwrap().to_string().starts_with("'Err("),
                 "{field}"
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn explicit_diagnostics_collect_without_implicit_host_publication() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        let data = directory.join("project.json");
+        fs::write(
+            directory.join("explicit-diagnostics.forma"),
+            include_str!("../../../examples/explicit-diagnostics.forma"),
+        )
+        .unwrap();
+        fs::write(
+            &data,
+            r#"{"name":"","packages":[{"name":"","version":0},{"name":"ok","version":1}]}"#,
+        )
+        .unwrap();
+        fs::write(
+            &main,
+            r#"import validation from "./explicit-diagnostics.forma";
+import arrays from "@bim/std/array";
+import project from "./project.json";
+let initial: Array(BlameError) = [];
+match validation.validate_project(project, initial) {
+    (checked, diagnostics) => {
+        count: arrays.length(diagnostics),
+        initial_count: arrays.length(initial),
+        unchanged: checked == project,
+        messages: arrays.map(diagnostics, fn(item) { item.message }),
+    },
+}"#,
+        )
+        .unwrap();
+
+        let module = load_module(&main, BTreeMap::new(), 500_000).unwrap();
+        let Value::Dict(output) = module.execute(500_000).unwrap() else {
+            panic!("diagnostic collection test must return a Dict")
+        };
+        assert_eq!(output.get("count").unwrap().to_string(), "3");
+        assert_eq!(output.get("initial_count").unwrap().to_string(), "0");
+        assert_eq!(output.get("unchanged").unwrap().to_string(), "'True");
+        let Value::Array(messages) = output.get("messages").unwrap() else {
+            panic!("messages must be an Array")
+        };
+        assert_eq!(
+            messages.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            [
+                "\"project name must not be empty\"",
+                "\"package name must not be empty\"",
+                "\"package version must be positive\"",
+            ]
+        );
+
+        let snapshot = recovery_engine().recover_workspace(&main).unwrap();
+        assert!(snapshot.diagnostics().is_empty());
+
+        for message in [
+            "project name must not be empty",
+            "package name must not be empty",
+            "package version must be positive",
+        ] {
+            fs::write(
+                &main,
+                format!(
+                    r#"import validation from "./explicit-diagnostics.forma";
+import arrays from "@bim/std/array";
+import results from "@bim/std/result";
+import project from "./project.json";
+let diagnostics = match validation.validate_project(project, []) {{
+    (_, collected) => collected,
+}};
+match arrays.find(diagnostics, fn(item) {{ item.message == "{message}" }}) {{
+    'Some(error) => results.unwrap('Err(error)),
+    'None => 0,
+}}"#
+                ),
+            )
+            .unwrap();
+            let module = load_module(&main, BTreeMap::new(), 500_000).unwrap();
+            let error = module.execute(500_000).unwrap_err();
+            assert!(error.message.contains(message));
+            let data_location = error.data_location().expect("diagnostic data location");
+            assert_eq!(
+                module.sources.get(data_location.source).name.as_ref(),
+                data.display().to_string()
+            );
+            let rule_location = error.rule_location().expect("diagnostic rule location");
+            assert_eq!(
+                module.sources.get(rule_location.source).name.as_ref(),
+                directory
+                    .join("explicit-diagnostics.forma")
+                    .display()
+                    .to_string()
             );
         }
         fs::remove_dir_all(directory).unwrap();

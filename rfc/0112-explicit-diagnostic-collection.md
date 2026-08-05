@@ -1,6 +1,6 @@
 # RFC 0112: Explicit diagnostic collection
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0056, RFC 0095, RFC 0102, RFC 0105, RFC 0108
 
 ## Summary
@@ -132,3 +132,17 @@ adds no uninterruptible traversal or quota exemption.
 - parallel validation or nondeterministic merge ordering; or
 - changing Result, `?`, Host failure lineage, or LSP scheduling.
 
+## Implementation result
+
+Implemented as `examples/explicit-diagnostics.forma`. The example aliases
+DiagnosticRecord to BlameError, validates one Project and its nested Package
+Array, and explicitly threads the persistent diagnostics Array through
+`array.push` and `array.fold`.
+
+The integration test imports the checked value from JSON and observes three
+records in deterministic order while the input value and initial empty Array
+remain unchanged. Recoverable workspace evaluation reports no diagnostics for
+the ordinary returned collection. The test then explicitly selects and
+publishes each record through `result.unwrap`; every resulting Host diagnostic
+anchors data in the JSON source and its rule in the authored example source.
+No VM operation, hidden channel, or Host publication rule was added.

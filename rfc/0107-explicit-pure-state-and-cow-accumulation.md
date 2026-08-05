@@ -1,6 +1,6 @@
 # RFC 0107: Explicit pure state and persistent accumulation
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0053, RFC 0061, RFC 0089 through RFC 0099, RFC 0102
 
 ## Summary
@@ -60,6 +60,23 @@ runtime sharing may reduce copying where the representation supports it.
 
 This phase tests that simpler model with real user-space interpreters before
 Forma commits to a language-level accumulation abstraction.
+
+## Implementation result
+
+RFCs 0108 through 0112 complete both reference applications. Persistent Array
+push supplies the ordinary collection update; module-owned native types carry
+immutable opaque library state; `@bim/std/hash` defines a deterministic
+stateful byte protocol; the reference structural hash interpreter explicitly
+threads HashState; and the diagnostic example explicitly threads
+Array(BlameError) through nested validation.
+
+Both applications preserve old aliases and expose state in their Function
+types. The diagnostic example proves that sourced records remain ordinary data
+until a caller explicitly projects them through a Host-visible failure. No
+accumulation effect, movable binding, hidden state result, Port, or Host
+resource table was needed. This is evidence for retaining explicit pure state
+as the baseline; it does not rule out a later accumulation abstraction backed
+by a separate demonstrated use case.
 
 ## Semantic baseline
 

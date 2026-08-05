@@ -1,0 +1,68 @@
+import arrays from "@bim/std/array";
+
+@struct type Package = {
+    name: String,
+    version: Int,
+};
+
+@struct type Project = {
+    name: String,
+    packages: Array(Package),
+};
+
+type DiagnosticRecord = BlameError;
+type Diagnostics = Array(DiagnosticRecord);
+type Validation = Tuple([Project, Diagnostics]);
+
+def require_text:
+    Fn(String, String, Diagnostics) -> Diagnostics =
+    fn(value, message, diagnostics) {
+        if value == "" {
+            arrays.push(diagnostics, blame!(value, message))
+        } else {
+            diagnostics
+        }
+    };
+
+def check_package:
+    Fn(Diagnostics, Package) -> Diagnostics =
+    fn(diagnostics, package) {
+        let diagnostics = require_text(
+            package.name,
+            "package name must not be empty",
+            diagnostics,
+        );
+        let diagnostics = if package.version < 1 {
+            arrays.push(
+                diagnostics,
+                blame!(package.version, "package version must be positive"),
+            )
+        } else {
+            diagnostics
+        };
+        diagnostics
+    };
+
+def validate_project:
+    Fn(Project, Diagnostics) -> Validation =
+    fn(project, diagnostics) {
+        let diagnostics = require_text(
+            project.name,
+            "project name must not be empty",
+            diagnostics,
+        );
+        let diagnostics = arrays.fold(
+            project.packages,
+            diagnostics,
+            check_package,
+        );
+        (project, diagnostics)
+    };
+
+{
+    DiagnosticRecord: DiagnosticRecord,
+    Diagnostics: Diagnostics,
+    Package: Package,
+    Project: Project,
+    validate_project: validate_project,
+}
