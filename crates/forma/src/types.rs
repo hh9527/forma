@@ -2122,7 +2122,46 @@ pub(crate) fn analyze_program_with_bindings_observed(
             .iter()
             .map(|(location, ty)| (*location, inference.resolve(ty))),
     );
+    inference.top_level_inferred_schemes = inference
+        .top_level_inferred_schemes
+        .iter()
+        .map(|(name, scheme)| {
+            let mut scheme = scheme.clone();
+            scheme.body = inference.resolve(&scheme.body);
+            (name.clone(), scheme)
+        })
+        .collect();
+    inference.inferred_schemes = inference
+        .inferred_schemes
+        .iter()
+        .map(|(location, scheme)| {
+            let mut scheme = scheme.clone();
+            scheme.body = inference.resolve(&scheme.body);
+            (*location, scheme)
+        })
+        .collect();
     binding_schemes.extend(inference.top_level_inferred_schemes.clone());
+    let resolved_result = inference.resolve(&result_type);
+    for (name, descriptor) in &binding_types {
+        let resolved = inference.resolve(descriptor);
+        if contains_type_variable(&resolved) {
+            return Err(frontend_error(
+                source_name,
+                format!(
+                    "cannot publish unresolved binding {name:?}: {}",
+                    resolved.display_name()
+                ),
+            ));
+        }
+    }
+    for (name, scheme) in &inference.top_level_inferred_schemes {
+        validate_publishable_scheme(scheme).map_err(|message| {
+            frontend_error(
+                source_name,
+                format!("cannot publish scheme for {name:?}: {message}"),
+            )
+        })?;
+    }
     let mut types = TypeGraph::default();
     let declared_types: BTreeMap<String, TypeId> = declared_types
         .into_iter()
@@ -2139,7 +2178,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
             (name, types.intern_descriptor(&descriptor))
         })
         .collect();
-    let result_type = types.intern_descriptor(&inference.resolve(&result_type));
+    let result_type = types.intern_descriptor(&resolved_result);
     let expression_types: BTreeMap<HirExpressionId, TypeId> = hir
         .expressions()
         .iter()
@@ -2183,7 +2222,16 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 })
                 .map(|scheme| (definition.id, scheme))
         })
-        .collect();
+        .collect::<BTreeMap<_, _>>();
+    for (definition, scheme) in &definition_schemes {
+        if hir
+            .definition(*definition)
+            .is_some_and(|definition| definition.top_level)
+        {
+            validate_publishable_scheme(scheme)
+                .map_err(|message| frontend_error(source_name, message))?;
+        }
+    }
     let module_interface = ModuleInterface {
         exports: match &program.value.body.value.result.value {
             ExprKind::Dict(fields) => fields
@@ -2201,6 +2249,10 @@ pub(crate) fn analyze_program_with_bindings_observed(
             _ => BTreeMap::new(),
         },
     };
+    for scheme in module_interface.exports.values() {
+        validate_publishable_scheme(scheme)
+            .map_err(|message| frontend_error(source_name, message))?;
+    }
     Ok(Analysis {
         types,
         declared_types,
@@ -5172,6 +5224,32 @@ fn collect_bound_parameters(descriptor: &TypeDescriptor, parameters: &mut Vec<Ty
     }
 }
 
+fn validate_publishable_scheme(scheme: &TypeScheme) -> Result<(), String> {
+    if contains_type_variable(&scheme.body) {
+        return Err(format!(
+            "body contains unresolved {}",
+            scheme.body.display_name()
+        ));
+    }
+    let declared = scheme
+        .parameters
+        .iter()
+        .map(|parameter| parameter.id)
+        .collect::<HashSet<_>>();
+    let mut referenced = Vec::new();
+    collect_bound_parameters(&scheme.body, &mut referenced);
+    if let Some(parameter) = referenced
+        .into_iter()
+        .find(|parameter| !declared.contains(parameter))
+    {
+        return Err(format!(
+            "body references unbound parameter T{}",
+            parameter.0
+        ));
+    }
+    Ok(())
+}
+
 fn bind_inference_variables(
     descriptor: &TypeDescriptor,
     replacements: &HashMap<InferenceVariableId, TypeParameterId>,
@@ -7384,6 +7462,45 @@ mod tests {
                 )
                 .unwrap_err()
                 .contains("infinite type")
+        );
+    }
+
+    #[test]
+    fn published_schemes_reject_solver_and_unbound_parameter_identities() {
+        let mut sources = SourceDatabase::default();
+        let source = sources.add("scheme.forma", "");
+        let location = crate::Location::from_usize(source, 0..0).unwrap();
+        let valid = TypeScheme {
+            parameters: vec![TypeParameter {
+                id: TypeParameterId(0),
+                name: "A".into(),
+                location,
+            }],
+            body: TypeDescriptor::Function {
+                parameters: vec![TypeDescriptor::Bound(TypeParameterId(0))],
+                result: Box::new(TypeDescriptor::Bound(TypeParameterId(0))),
+            },
+        };
+        assert!(validate_publishable_scheme(&valid).is_ok());
+
+        let unresolved = TypeScheme {
+            parameters: Vec::new(),
+            body: TypeDescriptor::Inference(InferenceVariableId(0)),
+        };
+        assert!(
+            validate_publishable_scheme(&unresolved)
+                .unwrap_err()
+                .contains("unresolved")
+        );
+
+        let unbound = TypeScheme {
+            parameters: Vec::new(),
+            body: TypeDescriptor::Bound(TypeParameterId(7)),
+        };
+        assert!(
+            validate_publishable_scheme(&unbound)
+                .unwrap_err()
+                .contains("unbound parameter T7")
         );
     }
 

@@ -1,6 +1,6 @@
 # RFC 0084: Inference diagnostics and boundary audit
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0070 through RFC 0083
 - Tracking issue: https://github.com/hh9527/forma/issues/1
 
@@ -232,3 +232,28 @@ parameter names, completed descriptors, or an unavailable state.
 A plausible but wrong scheme is more damaging than an explicit unavailable
 fact because completion, navigation, and downstream module checking would rely
 on it.
+
+## Implementation result
+
+Implemented as an explicit scheme-publication audit in the complete analyzer.
+Inferred scheme bodies are first normalized through the final substitution
+state. Every top-level definition scheme and module export is then rejected if
+it contains an inference descriptor or references a `Bound` identity not
+declared by that scheme.
+
+The implementation preserves one necessary distinction found during the
+audit. A module result may contain an erased runtime function shape whose
+generic positions are represented as `Any`; its authoritative `TypeScheme` is
+published separately in the module interface. Rejecting the unresolved
+pre-erasure result descriptor would incorrectly reject every generic standard
+library module. Nested schemes may likewise reference an outer rigid `Bound`;
+self-containment is required at the top-level publication boundary, not inside
+an enclosing generic checking context.
+
+Existing dedicated diagnostics remain authoritative: placeholder errors point
+to `_`, generic calls distinguish missing evidence from unification conflicts,
+numeric obligations cannot generalize, and recursive components publish no
+implicit scheme. Regression coverage now directly rejects solver identities
+and unbound parameters in publishable schemes, while the existing CLI, LSP,
+recovery, cancellation, alias, recursion, and module-interface suites exercise
+the complete boundary matrix.
