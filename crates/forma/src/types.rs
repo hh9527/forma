@@ -106,7 +106,9 @@ impl TypeGraph {
 
     fn intern_descriptor(&mut self, descriptor: &TypeDescriptor) -> TypeId {
         let node = match descriptor {
-            TypeDescriptor::Bound(_) | TypeDescriptor::Inference(_) => TypeNode::Any,
+            TypeDescriptor::Bound(_) | TypeDescriptor::Inference(_) => {
+                unreachable!("solver descriptors must be explicitly erased before interning")
+            }
             TypeDescriptor::Any => TypeNode::Any,
             TypeDescriptor::Never => TypeNode::Never,
             TypeDescriptor::Type => TypeNode::Type,
@@ -160,6 +162,10 @@ impl TypeGraph {
             },
         };
         self.push(node)
+    }
+
+    fn intern_erased_descriptor(&mut self, descriptor: &TypeDescriptor) -> TypeId {
+        self.intern_descriptor(&erase_type_variables(descriptor))
     }
 
     fn decode_persistent(
@@ -1827,6 +1833,15 @@ pub(crate) fn analyze_program_with_bindings_observed(
     let mut delayed_bindings = Vec::new();
     let mut recursive_skeletons = HashMap::new();
     let component_plan = definition_component_plan(&program.value.body, &hir);
+    if let Some(location) = component_plan.indirect_recursive.iter().next() {
+        return Err(FrontendError::from_diagnostic(
+            sources,
+            Diagnostic::error(
+                "indirect recursive definition requires an explicit contract",
+                *location,
+            ),
+        ));
+    }
     let uncontracted_definition_names = program
         .value
         .body
@@ -2175,17 +2190,17 @@ pub(crate) fn analyze_program_with_bindings_observed(
         .into_iter()
         .map(|(name, descriptor)| {
             let descriptor = inference.resolve(&descriptor);
-            (name, types.intern_descriptor(&descriptor))
+            (name, types.intern_erased_descriptor(&descriptor))
         })
         .collect();
-    let result_type = types.intern_descriptor(&resolved_result);
+    let result_type = types.intern_erased_descriptor(&resolved_result);
     let expression_types: BTreeMap<HirExpressionId, TypeId> = hir
         .expressions()
         .iter()
         .filter_map(|expression| {
             expression_descriptors
                 .get(&expression.location)
-                .map(|descriptor| (expression.id, types.intern_descriptor(descriptor)))
+                .map(|descriptor| (expression.id, types.intern_erased_descriptor(descriptor)))
         })
         .collect();
     let any_type = types.intern_descriptor(&TypeDescriptor::Any);
@@ -3657,6 +3672,7 @@ struct GenericInference<'a> {
 #[derive(Default)]
 struct DefinitionComponentPlan {
     recursive: HashSet<crate::Location>,
+    indirect_recursive: HashSet<crate::Location>,
     acyclic: Vec<crate::Location>,
 }
 
@@ -3695,37 +3711,61 @@ fn definition_component_plan(block: &Block, hir: &HirProgram) -> DefinitionCompo
         .enumerate()
         .map(|(index, (definition, _))| (*definition, index))
         .collect::<HashMap<_, _>>();
-    let mut edges = vec![Vec::new(); candidates.len()];
-    for (index, (definition, _)) in candidates.iter().enumerate() {
-        let Some(root) = hir
-            .definition(*definition)
-            .and_then(|definition| definition.value)
-        else {
-            continue;
-        };
-        for expression in hir.expressions() {
-            let Some(reference) = expression.reference.and_then(|id| hir.reference(id)) else {
-                continue;
-            };
-            let HirResolution::Definition(target) = reference.resolution else {
-                continue;
-            };
-            let Some(&target) = indices.get(&target) else {
-                continue;
-            };
-            let mut owner = Some(expression.id);
-            let mut contained = false;
-            while let Some(current) = owner {
-                if current == root {
-                    contained = true;
-                    break;
+    let direct_dependencies = hir
+        .definitions()
+        .iter()
+        .filter_map(|definition| {
+            let root = definition.value?;
+            let mut dependencies = Vec::new();
+            for expression in hir.expressions() {
+                let Some(reference) = expression.reference.and_then(|id| hir.reference(id)) else {
+                    continue;
+                };
+                let HirResolution::Definition(target) = reference.resolution else {
+                    continue;
+                };
+                let mut owner = Some(expression.id);
+                while let Some(current) = owner {
+                    if current == root {
+                        if !dependencies.contains(&target) {
+                            dependencies.push(target);
+                        }
+                        break;
+                    }
+                    owner = hir
+                        .expression(current)
+                        .and_then(|expression| expression.parent);
                 }
-                owner = hir
-                    .expression(current)
-                    .and_then(|expression| expression.parent);
             }
-            if contained && !edges[index].contains(&target) {
-                edges[index].push(target);
+            dependencies.sort_unstable();
+            Some((definition.id, dependencies))
+        })
+        .collect::<HashMap<_, _>>();
+    let mut edges = vec![Vec::new(); candidates.len()];
+    let mut indirect_edge_sources = HashSet::new();
+    for (index, (definition, _)) in candidates.iter().enumerate() {
+        let mut pending = direct_dependencies
+            .get(definition)
+            .into_iter()
+            .flatten()
+            .map(|dependency| (*dependency, false))
+            .collect::<Vec<_>>();
+        let mut visited = HashSet::new();
+        while let Some((target, indirect)) = pending.pop() {
+            if !visited.insert((target, indirect)) {
+                continue;
+            }
+            if let Some(&target) = indices.get(&target) {
+                if !edges[index].contains(&target) {
+                    edges[index].push(target);
+                }
+                if indirect {
+                    indirect_edge_sources.insert(index);
+                }
+                continue;
+            }
+            if let Some(dependencies) = direct_dependencies.get(&target) {
+                pending.extend(dependencies.iter().map(|dependency| (*dependency, true)));
             }
         }
         edges[index].sort_unstable();
@@ -3768,8 +3808,12 @@ fn definition_component_plan(block: &Block, hir: &HirProgram) -> DefinitionCompo
     }
     DefinitionComponentPlan {
         recursive: recursive_indices
-            .into_iter()
-            .map(|index| candidates[index].1)
+            .iter()
+            .map(|index| candidates[*index].1)
+            .collect(),
+        indirect_recursive: recursive_indices
+            .intersection(&indirect_edge_sources)
+            .map(|index| candidates[*index].1)
             .collect(),
         acyclic: ordered
             .into_iter()
@@ -4934,6 +4978,9 @@ impl<'a> GenericInference<'a> {
         let mut delayed = Vec::new();
         let mut recursive_skeletons = HashMap::new();
         let component_plan = definition_component_plan(block, self.hir);
+        if !component_plan.indirect_recursive.is_empty() {
+            return Err("indirect recursive definition requires an explicit contract".into());
+        }
         let uncontracted_definition_names = block
             .value
             .bindings
@@ -7174,6 +7221,27 @@ mod tests {
     }
 
     #[test]
+    fn indirect_recursive_definitions_never_publish_acyclic_schemes() {
+        for source in [
+            "def a = fn(value) { b(value) }; let tmp = a;\
+             def b = fn(value) { tmp(value) }; let number = a(1); a(\"x\")",
+            "def a = fn(value) { b(value) }; let holder = {call: a};\
+             def b = fn(value) { holder.call(value) }; let number = a(1); a(\"x\")",
+            "def a = fn(value) { b(value) }; let make = fn() { a };\
+             def b = fn(value) { make()(value) }; let number = a(1); a(\"x\")",
+        ] {
+            let error = analyze_with_natives(source, &[]).unwrap_err();
+            assert!(
+                error
+                    .message
+                    .contains("indirect recursive definition requires an explicit contract"),
+                "{}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
     fn recursive_inference_uses_partial_and_later_evidence_but_stays_monomorphic() {
         let partial = analyze_with_natives(
             "def countdown = fn(value: Int) -> Int {\
@@ -7502,6 +7570,22 @@ mod tests {
                 .unwrap_err()
                 .contains("unbound parameter T7")
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "solver descriptors must be explicitly erased before interning")]
+    fn strict_type_graph_interning_rejects_solver_descriptors() {
+        TypeGraph::default().intern_descriptor(&TypeDescriptor::Inference(InferenceVariableId(0)));
+    }
+
+    #[test]
+    fn explicit_runtime_erasure_is_the_only_solver_to_any_path() {
+        let mut types = TypeGraph::default();
+        let erased = types.intern_erased_descriptor(&TypeDescriptor::Function {
+            parameters: vec![TypeDescriptor::Bound(TypeParameterId(0))],
+            result: Box::new(TypeDescriptor::Inference(InferenceVariableId(0))),
+        });
+        assert_eq!(types.display(erased), "Fn(Any) -> Any");
     }
 
     #[test]
