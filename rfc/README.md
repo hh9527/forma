@@ -104,3 +104,4 @@ semantics from an earlier RFC.
 83. Acyclic `def` component generalization.
 84. Inference diagnostics and boundary audit.
 85. Bounded callable-shape inference umbrella.
+86. Unknown-callee Function-shape constraints.
