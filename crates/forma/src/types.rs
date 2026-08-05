@@ -4466,6 +4466,9 @@ impl<'a> GenericInference<'a> {
                                 arguments.len()
                             ));
                         }
+                        if let Some(expected) = expected {
+                            self.check(&result, expected)?;
+                        }
                         let mut partial_tagged_evidence = false;
                         let mut unresolved_argument_evidence = false;
                         for (argument, parameter) in arguments.iter().zip(&parameters) {
@@ -4487,9 +4490,6 @@ impl<'a> GenericInference<'a> {
                                 self.default_inference_variables_to_any(parameter);
                             }
                         }
-                        if let Some(expected) = expected {
-                            self.check(&result, expected)?;
-                        }
                         let result = self.resolve(&result);
                         let result = if matches!(result, TypeDescriptor::TypeOf(_))
                             && contains_type_variable(&result)
@@ -4501,6 +4501,7 @@ impl<'a> GenericInference<'a> {
                         if contains_type_variable(&result)
                             && self.delayed_initializer_depth == 0
                             && !has_placeholder
+                            && expected.is_none()
                             && !(self.closure_inference_depth > 0 && unresolved_argument_evidence)
                         {
                             return Err(format!(
@@ -6296,6 +6297,65 @@ mod tests {
             conflicting.message.contains("cannot unify String with Int"),
             "{}",
             conflicting.message
+        );
+    }
+
+    #[test]
+    fn generic_calls_complete_from_the_whole_call_context() {
+        for source in [
+            "native empty: for(A) Fn() -> A; native choose: for(A) Fn(A, A) -> A; choose(empty(), 1)",
+            "native empty: for(A) Fn() -> A; native choose: for(A) Fn(A, A) -> A; choose(1, empty())",
+            "native stop: Fn() -> Never; native choose: for(A) Fn(A, A) -> A; choose(stop(), 1)",
+            "native stop: Fn() -> Never; native choose: for(A) Fn(A, A) -> A; choose(1, stop())",
+        ] {
+            let analysis =
+                analyze_with_natives(source, &[("empty", 0), ("choose", 2), ("stop", 0)]).unwrap();
+            assert_eq!(analysis.display(analysis.result_type), "Int");
+        }
+
+        let callback = analyze_with_natives(
+            "native make: for(A, B) Fn(Fn(A) -> B) -> B;\
+             let values: Array(Int) = make(fn(value) { [value] }); values",
+            &[("make", 1)],
+        )
+        .unwrap();
+        assert_eq!(callback.display(callback.result_type), "Array<Int>");
+
+        let partial = analyze_with_natives(
+            "native empty: for(A) Fn() -> A; native choose: for(A) Fn(A, A) -> A;\
+             choose[_](empty(), \"value\")",
+            &[("empty", 0), ("choose", 2)],
+        )
+        .unwrap();
+        assert_eq!(partial.display(partial.result_type), "String");
+    }
+
+    #[test]
+    fn generic_call_context_rejects_conflicts_and_remains_underconstrained() {
+        let conflict = analyze_with_natives(
+            "native empty: for(A) Fn() -> A; native choose: for(A) Fn(A, A) -> A;\
+             let value: String = choose(empty(), 1); value",
+            &[("empty", 0), ("choose", 2)],
+        )
+        .unwrap_err();
+        assert!(
+            conflict.message.contains("cannot unify"),
+            "{}",
+            conflict.message
+        );
+
+        let unresolved = analyze_with_natives(
+            "native empty: for(A) Fn() -> A; native choose: for(A) Fn(A, A) -> A;\
+             choose(empty(), empty())",
+            &[("empty", 0), ("choose", 2)],
+        )
+        .unwrap_err();
+        assert!(
+            unresolved
+                .message
+                .contains("cannot infer generic result type"),
+            "{}",
+            unresolved.message
         );
     }
 

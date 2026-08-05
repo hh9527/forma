@@ -1,6 +1,6 @@
 # RFC 0082: Context-complete generic inference
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0052, RFC 0070 through RFC 0077, RFC 0079 through RFC 0081
 - Tracking issue: https://github.com/hh9527/forma/issues/1
 
@@ -239,3 +239,24 @@ smaller and deterministic.
 
 That makes ordinary inference silently cross a dynamic boundary. `Any` remains
 an explicit contract choice, not an ambiguity fallback.
+
+## Implementation result
+
+Implemented in the rank-1 call checker. A surrounding expected result is now
+checked immediately after function arity and before argument inference. An
+inner generic call whose result has been connected to an enclosing inference
+descriptor is allowed to remain pending at that boundary; the enclosing call,
+closure, binding, or program completion owns the final underconstrained check.
+
+This removes the concrete source-order discrepancy between
+`choose(empty(), 1)` and `choose(1, empty())`. Both connect the inner result to
+the outer parameter identity and complete as `Int`. Calls with only empty
+evidence still fail, while annotations, callbacks, partial explicit type
+application, `Never`, and conflicts use the same substitution state.
+
+Regression tests cover both argument orders, empty and `Never` evidence,
+result-to-callback propagation through a structural Array result, `_`
+composition, conflicting annotations, and a genuinely underconstrained outer
+call. Existing expression-fact publication, cancellation, and bytecode paths
+remain unchanged; the implementation neither reorders evaluation nor retries
+an expression.
