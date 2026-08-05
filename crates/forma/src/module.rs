@@ -176,31 +176,67 @@ fn declared_native_types(
     Ok(native_types)
 }
 
-fn install_core_modules(
+struct TrustedNativeModule {
+    id: u32,
+    name: String,
+    source: String,
+    functions: Vec<(String, crate::NativeFunction)>,
+    core: bool,
+}
+
+fn install_native_modules(
     main: &mut MainWorld,
     sources: &mut SourceDatabase,
     debug_sink: &Arc<dyn DebugSink>,
-) -> Result<HashMap<&'static str, (Value, PersistentValue, ModuleInterface)>, ModuleError> {
+    host_modules: &[RegisteredNativeModule],
+) -> Result<HashMap<String, (Value, PersistentValue, ModuleInterface)>, ModuleError> {
     let mut modules = HashMap::new();
-    let specs = module_specs();
+    let mut specs = module_specs()
+        .into_iter()
+        .map(|spec| TrustedNativeModule {
+            id: spec.native_id,
+            name: spec.name.to_owned(),
+            source: spec.source.to_owned(),
+            functions: spec
+                .functions
+                .into_iter()
+                .map(|(name, function)| (name.to_owned(), function))
+                .collect(),
+            core: true,
+        })
+        .collect::<Vec<_>>();
+    specs.extend(host_modules.iter().map(|spec| TrustedNativeModule {
+        id: spec.id,
+        name: spec.name.clone(),
+        source: spec.source.clone(),
+        functions: spec.functions.clone(),
+        core: false,
+    }));
     let mut native_module_ids = HashMap::new();
     for spec in &specs {
-        if spec.native_id == 0 || spec.native_id > crate::value::RESERVED_NATIVE_MODULE_MAX {
+        let valid_id = if spec.core {
+            spec.id > 0 && spec.id <= crate::value::RESERVED_NATIVE_MODULE_MAX
+        } else {
+            spec.id > crate::value::RESERVED_NATIVE_MODULE_MAX
+        };
+        if !valid_id {
             return Err(ModuleError::new(format!(
-                "core module {} has invalid reserved native module ID {}",
-                spec.name, spec.native_id
+                "native module {} has invalid {} module ID {}",
+                spec.name,
+                if spec.core { "reserved" } else { "Host" },
+                spec.id
             )));
         }
-        if let Some(previous) = native_module_ids.insert(spec.native_id, spec.name) {
+        if let Some(previous) = native_module_ids.insert(spec.id, spec.name.clone()) {
             return Err(ModuleError::new(format!(
-                "core modules {previous} and {} use duplicate native module ID {}",
-                spec.name, spec.native_id
+                "native modules {previous} and {} use duplicate native module ID {}",
+                spec.name, spec.id
             )));
         }
     }
     for spec in specs {
         let source_name = format!("<{}>", spec.name);
-        let source_id = sources.add(source_name.clone(), spec.source);
+        let source_id = sources.add(source_name.clone(), &spec.source);
         let parsed = parse_registered(sources, source_id);
         let program = parsed.program.ok_or_else(|| {
             ModuleError::new(
@@ -215,8 +251,8 @@ fn install_core_modules(
         let implementations = spec.functions.into_iter().collect::<HashMap<_, _>>();
         let mut external_values = BTreeMap::new();
         let mut external_roots = HashMap::new();
-        let native_module = crate::value::NativeModuleId(spec.native_id);
-        let native_types = declared_native_types(&program, native_module, spec.name, sources)?;
+        let native_module = crate::value::NativeModuleId(spec.id);
+        let native_types = declared_native_types(&program, native_module, &spec.name, sources)?;
         for (name, native_type) in native_types.values() {
             let value = Value::NativeType(native_type.clone());
             let root = publish_value(&mut main.heap, &value)
@@ -276,7 +312,7 @@ fn install_core_modules(
         if external_values.len() - native_types.len() != implementations.len() {
             let undeclared = implementations
                 .keys()
-                .find(|symbol| !external_values.contains_key(**symbol))
+                .find(|symbol| !external_values.contains_key(*symbol))
                 .expect("registry size differs");
             return Err(ModuleError::new(format!(
                 "native symbol {undeclared:?} for {} has no XL declaration",
@@ -401,6 +437,105 @@ pub struct EngineConfig {
 pub struct Engine {
     config: EngineConfig,
     debug_sink: Arc<dyn DebugSink>,
+    native_modules: Arc<[RegisteredNativeModule]>,
+}
+
+pub struct NativeModuleSpec {
+    name: String,
+    source: String,
+    functions: Vec<(String, crate::NativeFunction)>,
+}
+
+impl NativeModuleSpec {
+    pub fn new(
+        name: impl Into<String>,
+        source: impl Into<String>,
+        functions: Vec<(&'static str, crate::NativeFunction)>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            source: source.into(),
+            functions: functions
+                .into_iter()
+                .map(|(name, function)| (name.to_owned(), function))
+                .collect(),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RegisteredNativeModule {
+    id: u32,
+    name: String,
+    source: String,
+    functions: Vec<(String, crate::NativeFunction)>,
+}
+
+pub struct EngineBuilder {
+    config: EngineConfig,
+    modules: BTreeMap<u32, RegisteredNativeModule>,
+    names: HashSet<String>,
+}
+
+impl EngineBuilder {
+    fn new(config: EngineConfig) -> Self {
+        Self {
+            config,
+            modules: BTreeMap::new(),
+            names: HashSet::new(),
+        }
+    }
+
+    pub fn register_native_module(
+        &mut self,
+        id: Option<u32>,
+        spec: NativeModuleSpec,
+    ) -> Result<u32, ModuleError> {
+        if !spec.name.starts_with("@host/") || spec.name.len() == "@host/".len() {
+            return Err(ModuleError::new(
+                "Host native module name must start with @host/ and include a name",
+            ));
+        }
+        if self.names.contains(&spec.name) {
+            return Err(ModuleError::new(format!(
+                "Host native module name {:?} is already registered",
+                spec.name
+            )));
+        }
+        let id = match id {
+            Some(id) if id <= crate::value::RESERVED_NATIVE_MODULE_MAX => {
+                return Err(ModuleError::new(format!(
+                    "Host native module ID {id} is in Forma's reserved range"
+                )));
+            }
+            Some(id) => id,
+            None => (crate::value::RESERVED_NATIVE_MODULE_MAX + 1..=u32::MAX)
+                .find(|candidate| !self.modules.contains_key(candidate))
+                .ok_or_else(|| ModuleError::new("Host native module ID space is exhausted"))?,
+        };
+        if self.modules.contains_key(&id) {
+            return Err(ModuleError::new(format!(
+                "Host native module ID {id} is already registered"
+            )));
+        }
+        let module = RegisteredNativeModule {
+            id,
+            name: spec.name.clone(),
+            source: spec.source,
+            functions: spec.functions,
+        };
+        self.names.insert(spec.name);
+        self.modules.insert(id, module);
+        Ok(id)
+    }
+
+    pub fn build(self) -> Engine {
+        Engine {
+            config: self.config,
+            debug_sink: Arc::new(DiscardDebugSink),
+            native_modules: self.modules.into_values().collect(),
+        }
+    }
 }
 
 impl fmt::Debug for Engine {
@@ -414,10 +549,11 @@ impl fmt::Debug for Engine {
 
 impl Engine {
     pub fn new(config: EngineConfig) -> Self {
-        Self {
-            config,
-            debug_sink: Arc::new(DiscardDebugSink),
-        }
+        Self::builder(config).build()
+    }
+
+    pub fn builder(config: EngineConfig) -> EngineBuilder {
+        EngineBuilder::new(config)
     }
 
     pub fn with_debug_sink(mut self, debug_sink: Arc<dyn DebugSink>) -> Self {
@@ -434,11 +570,12 @@ impl Engine {
         path: impl AsRef<Path>,
         external_bindings: BTreeMap<String, Value>,
     ) -> Result<LoadedModule, ModuleError> {
-        load_module_with_quota_and_debug_sink(
+        load_module_with_native_modules(
             path,
             external_bindings,
             self.config.module_quota,
             Arc::clone(&self.debug_sink),
+            &self.native_modules,
         )
     }
 
@@ -486,10 +623,15 @@ impl Engine {
         }
         let mut main = MainWorld::building();
         let mut sources = SourceDatabase::default();
-        let core_modules = install_core_modules(&mut main, &mut sources, &self.debug_sink)?
-            .into_iter()
-            .map(|(name, (value, _, interface))| (name.to_owned(), (value, interface)))
-            .collect();
+        let core_modules = install_native_modules(
+            &mut main,
+            &mut sources,
+            &self.debug_sink,
+            &self.native_modules,
+        )?
+        .into_iter()
+        .map(|(name, (value, _, interface))| (name.to_owned(), (value, interface)))
+        .collect();
         let mut builder = RecoverableWorkspaceBuilder {
             engine: self,
             resolver,
@@ -535,10 +677,15 @@ impl Engine {
             .map_err(|error| ModuleError::new(error.to_string()))?;
         let mut main = MainWorld::building();
         let mut sources = SourceDatabase::default();
-        let core_modules = install_core_modules(&mut main, &mut sources, &self.debug_sink)?
-            .into_iter()
-            .map(|(name, (value, _, interface))| (name.to_owned(), (value, interface)))
-            .collect();
+        let core_modules = install_native_modules(
+            &mut main,
+            &mut sources,
+            &self.debug_sink,
+            &self.native_modules,
+        )?
+        .into_iter()
+        .map(|(name, (value, _, interface))| (name.to_owned(), (value, interface)))
+        .collect();
         let mut builder = RecoverableWorkspaceBuilder {
             engine: self,
             resolver,
@@ -1075,6 +1222,16 @@ pub fn load_module_with_quota_and_debug_sink(
     module_quota: Quota,
     debug_sink: Arc<dyn DebugSink>,
 ) -> Result<LoadedModule, ModuleError> {
+    load_module_with_native_modules(path, external_bindings, module_quota, debug_sink, &[])
+}
+
+fn load_module_with_native_modules(
+    path: impl AsRef<Path>,
+    external_bindings: BTreeMap<String, Value>,
+    module_quota: Quota,
+    debug_sink: Arc<dyn DebugSink>,
+    native_modules: &[RegisteredNativeModule],
+) -> Result<LoadedModule, ModuleError> {
     let resolver = ModuleResolver::for_root(path.as_ref())
         .map_err(|error| ModuleError::new(error.to_string()))?;
     let root_module = resolver
@@ -1085,7 +1242,8 @@ pub fn load_module_with_quota_and_debug_sink(
     }
     let mut main = MainWorld::building();
     let mut sources = SourceDatabase::default();
-    let core_modules = install_core_modules(&mut main, &mut sources, &debug_sink)?;
+    let core_modules =
+        install_native_modules(&mut main, &mut sources, &debug_sink, native_modules)?;
     let mut loader = ModuleLoader {
         resolver,
         cache: HashMap::new(),
@@ -1104,7 +1262,7 @@ pub fn load_module_with_quota_and_debug_sink(
 struct ModuleLoader {
     resolver: ModuleResolver,
     cache: HashMap<ModuleId, ModuleState>,
-    core_modules: HashMap<&'static str, (Value, PersistentValue, ModuleInterface)>,
+    core_modules: HashMap<String, (Value, PersistentValue, ModuleInterface)>,
     main: MainWorld,
     visiting: Vec<ModuleId>,
     dependencies: BTreeSet<PathBuf>,
@@ -1647,6 +1805,12 @@ mod tests {
     use std::sync::Mutex;
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    fn fixture_native_callback(
+        _: &mut crate::CallContext<'_, '_>,
+    ) -> Result<(), crate::NativeError> {
+        Ok(())
+    }
+
     fn fixture_dir() -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1733,6 +1897,93 @@ mod tests {
 
         let overflow = declarations("native type Huge = @4294967296; Huge").unwrap_err();
         assert!(overflow.to_string().contains("must fit the u32 range"));
+    }
+
+    #[test]
+    fn engine_builder_allocates_and_freezes_host_native_modules() {
+        fn spec(name: &str) -> NativeModuleSpec {
+            NativeModuleSpec::new(
+                name,
+                "native type Token = @7; native make: Fn() -> Token; {Token: Token, make: make}",
+                vec![(
+                    "make",
+                    crate::NativeFunction::new_with_native_type(
+                        "host.make",
+                        0,
+                        7,
+                        fixture_native_callback,
+                    ),
+                )],
+            )
+        }
+
+        let mut builder = Engine::builder(EngineConfig {
+            module_quota: Quota::with_fuel(100_000),
+            session_quota: Quota::with_fuel(100_000),
+        });
+        assert_eq!(
+            builder
+                .register_native_module(Some(2_000), spec("@host/acme/stable"))
+                .unwrap(),
+            2_000
+        );
+        assert_eq!(
+            builder
+                .register_native_module(None, spec("@host/acme/automatic"))
+                .unwrap(),
+            1_024
+        );
+        assert!(
+            builder
+                .register_native_module(Some(2_000), spec("@host/acme/collision"))
+                .unwrap_err()
+                .to_string()
+                .contains("already registered")
+        );
+        assert!(
+            builder
+                .register_native_module(Some(2_001), spec("@host/acme/stable"))
+                .unwrap_err()
+                .to_string()
+                .contains("name")
+        );
+        assert!(
+            builder
+                .register_native_module(Some(1_023), spec("@host/acme/reserved"))
+                .unwrap_err()
+                .to_string()
+                .contains("reserved range")
+        );
+        assert!(
+            builder
+                .register_native_module(None, spec("@bim/std/impostor"))
+                .unwrap_err()
+                .to_string()
+                .contains("must start with @host/")
+        );
+        assert_eq!(
+            builder
+                .register_native_module(None, spec("@host/acme/after-errors"))
+                .unwrap(),
+            1_025
+        );
+
+        let engine = builder.build();
+        assert_eq!(
+            engine
+                .native_modules
+                .iter()
+                .map(|module| module.id)
+                .collect::<Vec<_>>(),
+            [1_024, 1_025, 2_000]
+        );
+        let directory = fixture_dir();
+        fs::write(directory.join("main.forma"), "1").unwrap();
+        let module = engine
+            .load_module(directory.join("main.forma"), BTreeMap::new())
+            .unwrap();
+        assert_eq!(engine.execute(&module).unwrap().to_string(), "1");
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

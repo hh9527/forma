@@ -1,6 +1,6 @@
 # RFC 0115: Host native module registry
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0113, RFC 0114
 
 ## Summary
@@ -92,3 +92,19 @@ is built. Registry-level ID/name failures happen immediately at registration.
 - persistent identity for automatically assigned IDs; or
 - untrusted declaration source.
 
+## Implementation result
+
+Implemented public NativeModuleSpec and EngineBuilder APIs while retaining
+`Engine::new` as the empty-registry shortcut. Registration validates the
+`@host/...` namespace, rejects reserved and duplicate IDs and duplicate names,
+and allocates the smallest free Host ID for `None`. Failed registrations leave
+both indexes unchanged. `build` consumes the builder and stores modules as an
+immutable ID-ordered Arc slice in Engine.
+
+The trusted installer now links fixed core specs and frozen Host specs through
+one path. It revalidates the core/Host ID partition, explicit native type
+slots, declaration/implementation completeness, arity, and requested type
+witnesses. Tests cover explicit and automatic IDs, gap-free allocation after
+failed attempts, all registry conflicts, frozen ordering, Host type-witness
+linking, and compatibility of an ordinary Engine load. Import visibility is
+intentionally deferred to RFC 0116.
