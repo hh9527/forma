@@ -1,0 +1,143 @@
+import arrays from "@bim/std/array";
+import desc from "@bim/std/type-desc";
+import dyn from "@bim/std/dyn";
+import strings from "@bim/std/string";
+
+@enum type TypeDescKind = {
+    Any: 'None, Never: 'None, Type: 'None, TypeOf: 'None,
+    Int: 'None, Float: 'None, String: 'None, Bytes: 'None,
+    Atom: 'None, Array: 'None, Dict: 'None, Tagged: 'None,
+    Tuple: 'None, Struct: 'None, Enum: 'None, Union: 'None,
+    Function: 'None, WithAttributes: 'None, Bound: 'None, Dyn: 'None, Ref: 'None,
+};
+type ShowResult = Result(String, BlameError);
+type ShowState = Result(Array(String), BlameError);
+type Field = Tuple([String, Dyn]);
+
+def blame: Fn(Dyn, String) -> ShowResult = fn(value, message) {
+    'Err({data: value, rule: "my_show", message: message})
+};
+
+def logical_kind: Fn(Type) -> TypeDescKind = fn(ty) {
+    match desc.kind(ty) {
+        'WithAttributes => arrays.fold(desc.children(ty), 'Any, fn(ignored, child) {
+            logical_kind(child)
+        }),
+        'Ref => match desc.resolve(ty) {
+            'Ok(target) => logical_kind(target),
+            'Err(_) => 'Ref,
+        },
+        kind => kind,
+    }
+};
+
+def append: Fn(Array(String), String) -> Array(String) = fn(items, item) {
+    arrays.concat([items, [item]])
+};
+
+def finish_parts: Fn(FoldControl(ShowState, ShowState), String, String) -> ShowResult =
+    fn(control, open, close) {
+        let state = match control {
+            'Continue(value) => value,
+            'Break(value) => value,
+        };
+        match state {
+            'Err(error) => 'Err(error),
+            'Ok(parts) => 'Ok(`\{open}\{strings.join(parts, ", ")}\{close}`),
+        }
+    };
+
+def show_items: Fn(Array(Dyn), String, String) -> ShowResult = fn(values, open, close) {
+    finish_parts(
+        arrays.fold_control[Dyn, ShowState, ShowState](values, 'Ok([]), fn(state, value) {
+            match state {
+                'Err(error) => 'Break('Err(error)),
+                'Ok(parts) => match show_dyn(value) {
+                    'Err(error) => 'Break('Err(error)),
+                    'Ok(rendered) => 'Continue('Ok(append(parts, rendered))),
+                },
+            }
+        }),
+        open,
+        close,
+    )
+};
+
+def show_fields: Fn(Array(Field)) -> ShowResult = fn(fields) {
+    finish_parts(
+        arrays.fold_control[Field, ShowState, ShowState](fields, 'Ok([]), fn(state, field) {
+            match state {
+                'Err(error) => 'Break('Err(error)),
+                'Ok(parts) => match field {
+                    (name, value) => match show_dyn(value) {
+                        'Err(error) => 'Break('Err(error)),
+                        'Ok(rendered) => 'Continue('Ok(append(parts, `\{name}: \{rendered}`))),
+                    },
+                },
+            }
+        }),
+        "{",
+        "}",
+    )
+};
+
+def show_tagged: Fn(Dyn) -> ShowResult = fn(value) {
+    match dyn.tag(value) {
+        'Err(error) => 'Err(error),
+        'Ok(tag) => match dyn.payload(value) {
+            'Err(error) => 'Err(error),
+            'Ok('None) => 'Ok(`'\{tag}`),
+            'Ok('Some(payload)) => match show_dyn(payload) {
+                'Err(error) => 'Err(error),
+                'Ok(rendered) => 'Ok(`'\{tag}(\{rendered})`),
+            },
+        },
+    }
+};
+
+def quote: Fn(String) -> String = fn(value) {
+    let slashes = strings.replace(value, "\\", "\\\\");
+    let quotes = strings.replace(slashes, "\"", "\\\"");
+    `"\{quotes}"`
+};
+
+def show_dyn: Fn(Dyn) -> ShowResult = fn(value) {
+    match logical_kind(dyn.desc(value)) {
+        'Int => match dyn.check_int(value) {
+            'None => blame(value, "invalid Int package"),
+            'Some(number) => 'Ok(`\{number}`),
+        },
+        'Float => match dyn.check_float(value) {
+            'None => blame(value, "invalid Float package"),
+            'Some(number) => 'Ok(`\{number}`),
+        },
+        'String => match dyn.check_string(value) {
+            'None => blame(value, "invalid String package"),
+            'Some(text) => 'Ok(quote(text)),
+        },
+        'Array => match dyn.array_items(value) {
+            'Err(error) => 'Err(error),
+            'Ok(items) => show_items(items, "[", "]"),
+        },
+        'Tuple => match dyn.tuple_items(value) {
+            'Err(error) => 'Err(error),
+            'Ok(items) => show_items(items, "(", ")"),
+        },
+        'Struct => match dyn.fields(value) {
+            'Err(error) => 'Err(error),
+            'Ok(fields) => show_fields(fields),
+        },
+        'Dict => match dyn.fields(value) {
+            'Err(error) => 'Err(error),
+            'Ok(fields) => show_fields(fields),
+        },
+        'Atom => show_tagged(value),
+        'Tagged => show_tagged(value),
+        'Enum => show_tagged(value),
+        kind => blame(value, `unsupported my_show descriptor: \{kind}`),
+    }
+};
+
+def my_show: for(A) Fn(TypeOf(A)) -> Fn(A) -> ShowResult = interpreter(show_dyn);
+
+{my_show: my_show, show_dyn: show_dyn}

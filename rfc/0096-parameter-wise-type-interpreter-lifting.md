@@ -1,6 +1,6 @@
 # RFC 0096: Parameter-wise type interpreter lifting
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0055, RFC 0089 through RFC 0095
 
 ## Summary
@@ -255,3 +255,28 @@ status and implementation result are updated only after RFC 0099 demonstrates
 the complete phase. No child silently broadens an accepted shape to make its
 example easier.
 
+## Implementation result
+
+RFCs 0097 through 0099 complete the parameter-wise lifting phase. Interpreter
+syntax is now retained as an authored AST node through HIR and semantic analysis,
+while bytecode consumes only its validated ordinary elaboration. Contract
+validation moved out of parser acceptance and operates on evaluated
+TypeDescriptors.
+
+The adapter supports one or more explicit TypeOf witnesses, direct interpreted
+inputs in arbitrary positions, repeated uses of a witness, exact pass-through
+inputs, and metadata-only witnesses. It rejects missing and duplicate witnesses,
+nested interpreted inputs, callbacks containing interpreted parameters, and
+results containing those parameters. Runtime behavior remains ordinary closures,
+calls, and invariant-preserving Dyn packs with no interpreter opcode, traits,
+lookup, descriptor derivation, or code generation.
+
+`examples/reference-show.forma` validates that the mechanism is not
+equality-specific: a unary user-space interpreter recursively renders supported
+primitive and structural values and propagates explicit blame for opaque domains.
+The existing binary reference equality interpreter remains compatible with the
+same generalized path.
+
+Full Forma tests pass with 292 passed and 1 ignored; all 13 CLI and 20 LSP tests
+pass, and strict workspace Clippy reports no warnings. The stopping-rule cases
+remain deferred rather than hidden behind a broader cast or fallback.

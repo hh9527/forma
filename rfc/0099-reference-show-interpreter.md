@@ -1,6 +1,6 @@
 # RFC 0099: Reference Show interpreter
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0096 through RFC 0098
 
 ## Summary
@@ -115,3 +115,25 @@ tagged values. An opaque Function demonstrates explicit blame.
 5. run the quality gate and record the implementation result; and
 6. mark RFC 0096 Implemented with a phase summary.
 
+## Implementation result
+
+Added `examples/reference-show.forma` as an ordinary importable Forma module.
+Its recursive `show_dyn` uses public TypeDesc normalization and Dyn observers,
+`array.fold_control` for fail-fast sequence/field traversal, Array/String
+combinators for assembly, and a small user-space quote/escape helper. The lifted
+`my_show` has the proposed unary generic contract and uses the generalized
+parameter-wise interpreter path.
+
+The supported implementation renders Int, Float, String, Array, Tuple, Struct,
+Dict, Atom, Tagged, Enum, attributes, and explicit recursive descriptor links.
+Unsupported Function and descriptor domains return BlameError with rule
+`my_show`; no debug stringification or native fallback occurs.
+
+Execution tests import the example and cover inferred and explicit type
+application, escaped strings, sequences, Tuples, records, nullary and payload
+tags, and Function blame. The expected output is asserted exactly, including
+delimiters and escaping. The example required no new observer, standard module,
+VM operation, or compiler exception.
+
+Full Forma tests pass with 292 passed and 1 ignored; all 13 CLI and 20 LSP tests
+pass, and strict workspace Clippy reports no warnings.

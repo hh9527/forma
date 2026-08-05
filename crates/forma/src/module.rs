@@ -5441,6 +5441,64 @@ unchanged", "|"),
     }
 
     #[test]
+    fn forma_show_interpreter_renders_supported_values() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("reference-show.forma"),
+            include_str!("../../../examples/reference-show.forma"),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import show from "./reference-show.forma";
+               @struct type User = {name: String, scores: Array(Int)};
+               @enum type Choice = {None: 'None, Some: String};
+               type Pair = Tuple([Int, String]);
+               type Unary = Fn(Int) -> Int;
+               let user: User = {name: "Ada", scores: [2, 3]};
+               let none: Choice = 'None;
+               let some: Choice = 'Some("x");
+               {
+                   inferred: show.my_show(Int)(42),
+                   explicit: show.my_show[Int](Int)(42),
+                   string: show.my_show(String)("a\"b\\c"),
+                   array: show.my_show(Array(Int))([1, 2]),
+                   tuple: show.my_show(Pair)((1, "x")),
+                   record: show.my_show(User)(user),
+                   atom: show.my_show(Choice)(none),
+                   tagged: show.my_show(Choice)(some),
+                   function_error: show.my_show(Unary)(fn(value) { value }),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 500_000).unwrap();
+        let Value::Dict(output) = module.execute(500_000).unwrap() else {
+            panic!("show interpreter test must return a Dict")
+        };
+        for (field, expected) in [
+            ("inferred", "'Ok(\"42\")"),
+            ("explicit", "'Ok(\"42\")"),
+            ("string", "'Ok(\"\\\"a\\\\\\\"b\\\\\\\\c\\\"\")"),
+            ("array", "'Ok(\"[1, 2]\")"),
+            ("tuple", "'Ok(\"(1, \\\"x\\\")\")"),
+            ("record", "'Ok(\"{name: \\\"Ada\\\", scores: [2, 3]}\")"),
+            ("atom", "'Ok(\"'None\")"),
+            ("tagged", "'Ok(\"'Some(\\\"x\\\")\")"),
+        ] {
+            assert_eq!(output.get(field).unwrap().to_string(), expected, "{field}");
+        }
+        let Value::Tagged { tag, payload } = output.get("function_error").unwrap() else {
+            panic!("unsupported Function must return blame")
+        };
+        assert_eq!(tag.name(), "Err");
+        let Value::Dict(error) = payload.as_ref() else {
+            panic!("show error must contain BlameError")
+        };
+        assert_eq!(error.get("rule").unwrap().to_string(), "\"my_show\"");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn interpreter_lifts_parameters_independently() {
         let directory = fixture_dir();
         fs::write(
