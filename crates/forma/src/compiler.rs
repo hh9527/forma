@@ -1927,6 +1927,20 @@ let decorators = {
     }
 
     #[test]
+    fn executes_inferred_generic_closures_without_runtime_instances() {
+        let value = run("let identity = fn(value) { value };\
+             (identity(42), identity(\"value\"), identity[Int](7))")
+        .unwrap();
+        assert!(matches!(
+            value,
+            Value::Tuple(items)
+                if matches!(items[0], Value::Int(42))
+                    && matches!(&items[1], Value::String(text) if text.as_ref() == "value")
+                    && matches!(items[2], Value::Int(7))
+        ));
+    }
+
+    #[test]
     fn pipeline_is_uniform_reverse_application() {
         let value = run("let add = fn(a) { fn(b) { a + b } }; 40 |> add(2)").unwrap();
         assert!(matches!(value, Value::Int(42)));

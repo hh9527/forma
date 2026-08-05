@@ -65,6 +65,23 @@ without mutating the shared world.
 
 ## What follows from these ideas
 
+**Local polymorphism stays a static property.** An unannotated closure-valued
+`let` can infer a rank-1 scheme and instantiate it independently at each direct
+use:
+
+```forma
+let identity = fn(value) { value };
+(identity(1), identity("text")) # (Int, String)
+```
+
+This creates one runtime closure, not a family of generated functions. The
+checker generalizes only variables owned by a non-recursive closure literal;
+aliases instantiate once, numeric constraints are not erased into an
+unconstrained parameter, and forward-visible `def` groups remain monomorphic
+unless they carry an explicit `for(...)` contract. The restriction keeps type
+inference useful without quietly introducing higher-rank values or polymorphic
+recursion.
+
 **Text makes evaluation visible.** Double-quoted and raw forms are inert
 Strings; evaluated concatenation uses backticks:
 
@@ -278,7 +295,7 @@ Forma is experimental. Today it has no effect system, package acquisition
 beyond path dependencies, traits, or type narrowing. Static
 inference explicitly reports when it does not know instead of guessing. These
 are deliberate boundaries: the project is testing the "types as metadata"
-hypothesis deeply before expanding its scope. Seventy-eight RFCs record the tradeoffs
+hypothesis deeply before expanding its scope. Seventy-nine RFCs record the tradeoffs
 at each step, including the rejected alternatives.
 
 The intended use cases follow from those boundaries: **expressing build rules,

@@ -181,6 +181,9 @@ async fn semantic_request(
             .await
             .map_err(query_error)?
             .and_then(|ty| snapshot.types().display(ty));
+        let ty = definition
+            .and_then(|definition| definition.scheme.clone())
+            .or(ty);
         let contents = match (definition, ty) {
             (Some(definition), Some(ty)) => Some(format!("{}: {ty}", definition.name)),
             (Some(definition), None) => Some(format!("{}: unknown", definition.name)),
@@ -1266,6 +1269,33 @@ mod tests {
         assert!(matches!(
             hover.expect("expression hover").contents,
             lsp::HoverContents::Scalar(lsp::MarkedString::String(ref text)) if text == "Int"
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hover_reports_inferred_local_type_schemes() {
+        let (_, state, uri) =
+            semantic_fixture("let identity = fn(value) { value };\nidentity(1)").await;
+        let hover: Option<lsp::Hover> = serde_json::from_value(
+            dispatch_request(
+                state,
+                request(
+                    54,
+                    lsp::request::HoverRequest::METHOD,
+                    serde_json::json!({
+                        "textDocument": { "uri": uri },
+                        "position": { "line": 1, "character": 2 }
+                    }),
+                ),
+            )
+            .await
+            .expect("hover response"),
+        )
+        .expect("hover result");
+        assert!(matches!(
+            hover.expect("scheme hover").contents,
+            lsp::HoverContents::Scalar(lsp::MarkedString::String(ref text))
+                if text == "identity: for(A) Fn(A) -> A"
         ));
     }
 

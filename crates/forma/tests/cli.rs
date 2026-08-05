@@ -463,6 +463,29 @@ fn show_observes_deterministic_workspace_and_position_queries() {
 }
 
 #[test]
+fn show_reports_inferred_local_type_schemes() {
+    let directory = fixture_dir();
+    let main = directory.join("main.forma");
+    fs::write(&main, "let identity = fn(value) { value };\nidentity(1)").unwrap();
+
+    let show = forma()
+        .args(["show", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    let output = String::from_utf8_lossy(&show.stdout);
+    assert!(
+        output.contains("Let identity") && output.contains("for(A) Fn(A) -> A"),
+        "{output}"
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn types_projects_recursive_types_from_the_workspace_snapshot() {
     let directory = fixture_dir();
     let main = directory.join("main.forma");

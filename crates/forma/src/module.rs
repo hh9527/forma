@@ -2641,6 +2641,33 @@ unchanged", "|"),
     }
 
     #[test]
+    fn inferred_generic_let_exports_instantiate_per_member_access() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("identity.forma"),
+            r#"let identity = fn(value) { value };
+               {identity: identity}"#,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import generic from "./identity.forma";
+               (generic.identity(1), generic.identity("x"), generic.identity[Int](2))"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            module.analysis.display(module.analysis.result_type),
+            "(Int, String, Int)"
+        );
+        assert_eq!(
+            module.execute(100_000).unwrap().to_string(),
+            "(1, \"x\", 2)"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn typed_metadata_constructors_cross_module_interfaces() {
         let directory = fixture_dir();
         fs::write(

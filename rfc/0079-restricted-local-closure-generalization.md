@@ -1,6 +1,6 @@
 # RFC 0079: Restricted local closure generalization
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0049, RFC 0052, RFC 0073, RFC 0076, RFC 0077, RFC 0078
 
 ## Summary
@@ -312,3 +312,34 @@ would publish a stronger and false contract.
 That requires first-class scheme values or special propagation rules through
 arbitrary expressions. Direct-reference instantiation keeps polymorphism
 predicative and matches existing declared-generic behavior.
+
+## Implementation result
+
+Implemented in the authoritative bidirectional checker. `GenericInference`
+maintains lexical scheme scopes alongside monomorphic descriptor environments.
+An eligible `let` closure is first inferred under RFC 0073's delayed boundary;
+the checker then resolves body constraints, collects initializer-owned variables
+in structural order, excludes outstanding numeric-domain variables, and
+replaces the remaining variables with stable bound parameters.
+Inferred parameter identities avoid rigid parameters already present in the
+descriptor, and instantiation replaces only parameters declared by that scheme;
+an inner generic closure can therefore capture an outer generic parameter
+without conflating the two.
+
+Direct variable references and RFC 0077 type applications consult the same
+scoped scheme table. Each direct reference receives fresh inference variables,
+while a non-closure alias records one instantiated descriptor and consequently
+remains monomorphic. Scheme scopes explicitly record monomorphic shadows, so a
+local binding cannot accidentally expose a same-named core or outer generic.
+
+Inferred schemes are retained for nested definition facts and direct top-level
+module exports. Workspace definitions carry their scheme presentation
+separately from the erased runtime type graph; CLI `show` and LSP hover therefore
+report `for(A) Fn(A) -> A`, while ordinary call expressions retain their
+instantiated monomorphic facts.
+
+Coverage includes independent Int/String instances, repeated parameter/result
+relationships, partial annotations, concrete and unresolved captures,
+monomorphic aliases, numeric-domain rejection, lexical shadowing, explicit type
+application, cross-module export/import, runtime closure identity, CLI output,
+and LSP hover. Full workspace tests and strict Clippy checks pass.

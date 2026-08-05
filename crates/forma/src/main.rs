@@ -634,15 +634,20 @@ fn show_workspace(workspace: &WorkspaceSnapshot) -> Result<(), String> {
     println!("definitions:");
     for definition in workspace.definitions() {
         let location = show_location(workspace, definition.location);
-        let ty = definition.ty.value.map_or_else(
-            || format!(" {:?}", definition.ty.state),
-            |ty| {
-                format!(
-                    " t{} = {}",
-                    ty.index(),
-                    workspace.types().display(ty).unwrap_or_else(|| "?".into())
+        let ty = definition.scheme.as_ref().map_or_else(
+            || {
+                definition.ty.value.map_or_else(
+                    || format!(" {:?}", definition.ty.state),
+                    |ty| {
+                        format!(
+                            " t{} = {}",
+                            ty.index(),
+                            workspace.types().display(ty).unwrap_or_else(|| "?".into())
+                        )
+                    },
                 )
             },
+            |scheme| format!(" = {scheme}"),
         );
         let target = definition
             .import_target
@@ -727,10 +732,14 @@ fn show_at(
     println!("position: {}:{line}:{column}", source.name);
     if let Some(definition) = workspace.definition_at(location) {
         println!(
-            "definition: d{} {:?} {}",
+            "definition: d{} {:?} {}{}",
             definition.id.index(),
             definition.kind,
-            definition.name
+            definition.name,
+            definition
+                .scheme
+                .as_ref()
+                .map_or_else(String::new, |scheme| format!(": {scheme}"))
         );
     }
     if let Some(reference) = workspace.reference_at(location) {

@@ -164,6 +164,7 @@ pub struct Definition {
     pub location: Location,
     pub additional_locations: Vec<Location>,
     pub ty: SemanticFact<WorkspaceTypeId>,
+    pub scheme: Option<String>,
     pub import_target: Option<WorkspaceModuleId>,
 }
 
@@ -427,6 +428,7 @@ impl WorkspaceSnapshot {
                     || SemanticFact::unknown(UnknownReason::InvalidSyntax),
                     |fact| map_partial_fact(fact, &type_map),
                 ),
+                scheme: None,
                 import_target: None,
             })
             .collect::<Vec<_>>();
@@ -1075,6 +1077,12 @@ impl WorkspaceSnapshot {
                     location: definition.location,
                     additional_locations: definition.additional_locations.clone(),
                     ty,
+                    scheme: input.analysis.as_ref().and_then(|analysis| {
+                        analysis
+                            .definition_schemes
+                            .get(&definition.id)
+                            .map(crate::types::TypeScheme::display_name)
+                    }),
                     import_target: (definition.kind == DefinitionKind::Import)
                         .then(|| import_targets.get(definition.name.as_str()).copied())
                         .flatten(),

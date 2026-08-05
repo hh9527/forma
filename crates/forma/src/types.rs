@@ -584,6 +584,29 @@ pub struct TypeScheme {
     pub body: TypeDescriptor,
 }
 
+impl TypeScheme {
+    pub fn display_name(&self) -> String {
+        let names = self
+            .parameters
+            .iter()
+            .map(|parameter| (parameter.id, parameter.name.as_str()))
+            .collect::<HashMap<_, _>>();
+        let body = display_scheme_descriptor(&self.body, &names);
+        if self.parameters.is_empty() {
+            body
+        } else {
+            format!(
+                "for({}) {body}",
+                self.parameters
+                    .iter()
+                    .map(|parameter| parameter.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ModuleInterface {
     pub exports: BTreeMap<String, TypeScheme>,
@@ -786,6 +809,83 @@ impl TypeDescriptor {
     }
 }
 
+fn display_scheme_descriptor(
+    descriptor: &TypeDescriptor,
+    names: &HashMap<TypeParameterId, &str>,
+) -> String {
+    match descriptor {
+        TypeDescriptor::Bound(parameter) => names
+            .get(parameter)
+            .map_or_else(|| format!("T{}", parameter.0), |name| (*name).to_owned()),
+        TypeDescriptor::Inference(variable) => format!("?{}", variable.0),
+        TypeDescriptor::Any => "Any".into(),
+        TypeDescriptor::Never => "Never".into(),
+        TypeDescriptor::Type => "Type".into(),
+        TypeDescriptor::TypeOf(instance) => {
+            format!("TypeOf({})", display_scheme_descriptor(instance, names))
+        }
+        TypeDescriptor::Int => "Int".into(),
+        TypeDescriptor::Float => "Float".into(),
+        TypeDescriptor::String => "String".into(),
+        TypeDescriptor::Bytes => "Bytes".into(),
+        TypeDescriptor::Atom(atom) => format!("'{}", atom.name()),
+        TypeDescriptor::Array(item) => {
+            format!("Array<{}>", display_scheme_descriptor(item, names))
+        }
+        TypeDescriptor::Dict(item) => {
+            format!("Dict<{}>", display_scheme_descriptor(item, names))
+        }
+        TypeDescriptor::Tagged { tag, payload } => format!(
+            "'{}({})",
+            tag.name(),
+            display_scheme_descriptor(payload, names)
+        ),
+        TypeDescriptor::Tuple(items) => format!(
+            "({})",
+            items
+                .iter()
+                .map(|item| display_scheme_descriptor(item, names))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TypeDescriptor::Struct(fields) => format!(
+            "{{{}}}",
+            fields
+                .iter()
+                .map(|(name, item)| {
+                    format!("{name}: {}", display_scheme_descriptor(item, names))
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TypeDescriptor::Enum(variants) => format!(
+            "enum {{{}}}",
+            variants
+                .iter()
+                .map(|(name, payload)| payload.as_ref().map_or_else(
+                    || name.clone(),
+                    |payload| format!("{name}({})", display_scheme_descriptor(payload, names))
+                ))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TypeDescriptor::Union(variants) => variants
+            .iter()
+            .map(|variant| display_scheme_descriptor(variant, names))
+            .collect::<Vec<_>>()
+            .join(" | "),
+        TypeDescriptor::Function { parameters, result } => format!(
+            "Fn({}) -> {}",
+            parameters
+                .iter()
+                .map(|parameter| display_scheme_descriptor(parameter, names))
+                .collect::<Vec<_>>()
+                .join(", "),
+            display_scheme_descriptor(result, names)
+        ),
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Analysis {
     pub types: TypeGraph,
@@ -794,6 +894,7 @@ pub struct Analysis {
     pub result_type: TypeId,
     pub hir: HirProgram,
     pub definition_types: BTreeMap<HirDefinitionId, TypeId>,
+    pub definition_schemes: BTreeMap<HirDefinitionId, TypeScheme>,
     pub expression_types: BTreeMap<HirExpressionId, TypeId>,
     pub module_interface: ModuleInterface,
     pub(crate) prelude: BTreeMap<String, Value>,
@@ -1747,6 +1848,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
         let first_owned_variable = inference.next_variable;
         if let Some(skeleton) = inference.recursive_closure_skeleton(&binding.value.value) {
             checked_environment.insert(binding.value.name.value.clone(), skeleton.clone());
+            inference.set_local_scheme(binding.value.name.value.clone(), None);
             recursive_skeletons.insert(
                 binding.value.name.value.clone(),
                 (skeleton.clone(), first_owned_variable),
@@ -1807,6 +1909,9 @@ pub(crate) fn analyze_program_with_bindings_observed(
             binding.value.kind,
             BindingKind::Decl | BindingKind::Native | BindingKind::Import
         ) {
+            if binding.value.kind == BindingKind::Import {
+                inference.set_local_scheme(binding.value.name.value.clone(), None);
+            }
             continue;
         }
         if recursive_skeletons.contains_key(&binding.value.name.value) {
@@ -1878,10 +1983,42 @@ pub(crate) fn analyze_program_with_bindings_observed(
             continue;
         }
         if matches!(binding.value.kind, BindingKind::Let | BindingKind::Def) {
-            let checked = expected.cloned().unwrap_or(inferred);
+            let inferred_scheme = (binding.value.kind == BindingKind::Let
+                && binding.value.annotation.is_none()
+                && binding.value.type_parameters.is_empty()
+                && matches!(binding.value.value.value, ExprKind::Closure { .. }))
+            .then(|| {
+                inference.generalize_local_closure(
+                    &inferred,
+                    first_owned_variable,
+                    binding.value.name.location,
+                )
+            })
+            .flatten();
+            let checked = inferred_scheme.as_ref().map_or_else(
+                || expected.cloned().unwrap_or(inferred),
+                |scheme| scheme.body.clone(),
+            );
             checked_environment.insert(binding.value.name.value.clone(), checked.clone());
             binding_types.insert(binding.value.name.value.clone(), checked.clone());
-            if is_delayed && !is_recursive {
+            if inferred_scheme.is_some()
+                || binding.value.kind == BindingKind::Let
+                || binding.value.annotation.is_none()
+                    && !definition_contracts.contains_key(&binding.value.name.value)
+            {
+                inference
+                    .set_local_scheme(binding.value.name.value.clone(), inferred_scheme.clone());
+            }
+            if let Some(scheme) = &inferred_scheme {
+                inference
+                    .inferred_schemes
+                    .insert(binding.value.name.location, scheme.clone());
+            }
+            if let Some(scheme) = inferred_scheme {
+                inference
+                    .top_level_inferred_schemes
+                    .insert(binding.value.name.value.clone(), scheme);
+            } else if is_delayed && !is_recursive {
                 delayed_bindings.push((
                     binding.value.name.value.clone(),
                     binding.value.value.location,
@@ -1928,6 +2065,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
             .iter()
             .map(|(location, ty)| (*location, inference.resolve(ty))),
     );
+    binding_schemes.extend(inference.top_level_inferred_schemes.clone());
     let mut types = TypeGraph::default();
     let declared_types: BTreeMap<String, TypeId> = declared_types
         .into_iter()
@@ -1970,6 +2108,25 @@ pub(crate) fn analyze_program_with_bindings_observed(
             (definition.id, ty)
         })
         .collect();
+    let definition_schemes = hir
+        .definitions()
+        .iter()
+        .filter_map(|definition| {
+            inference
+                .inferred_schemes
+                .get(&definition.location)
+                .cloned()
+                .or_else(|| {
+                    definition
+                        .top_level
+                        .then(|| binding_schemes.get(&definition.name))
+                        .flatten()
+                        .filter(|scheme| !scheme.parameters.is_empty())
+                        .cloned()
+                })
+                .map(|scheme| (definition.id, scheme))
+        })
+        .collect();
     let module_interface = ModuleInterface {
         exports: match &program.value.body.value.result.value {
             ExprKind::Dict(fields) => fields
@@ -1994,6 +2151,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
         result_type,
         hir,
         definition_types,
+        definition_schemes,
         expression_types,
         module_interface,
         prelude,
@@ -3365,7 +3523,10 @@ fn infer_expr(expression: &Expr, environment: &HashMap<String, TypeDescriptor>) 
 }
 
 struct GenericInference<'a> {
-    schemes: &'a HashMap<String, TypeScheme>,
+    schemes: HashMap<String, TypeScheme>,
+    scheme_scopes: Vec<HashMap<String, Option<TypeScheme>>>,
+    top_level_inferred_schemes: HashMap<String, TypeScheme>,
+    inferred_schemes: HashMap<crate::Location, TypeScheme>,
     external_interfaces: &'a BTreeMap<String, ModuleInterface>,
     local_annotations: &'a HashMap<crate::Location, TypeDescriptor>,
     query: Option<crate::query::QueryContext>,
@@ -3381,13 +3542,16 @@ struct GenericInference<'a> {
 
 impl<'a> GenericInference<'a> {
     fn new(
-        schemes: &'a HashMap<String, TypeScheme>,
+        schemes: &HashMap<String, TypeScheme>,
         external_interfaces: &'a BTreeMap<String, ModuleInterface>,
         local_annotations: &'a HashMap<crate::Location, TypeDescriptor>,
         query: Option<crate::query::QueryContext>,
     ) -> Self {
         Self {
-            schemes,
+            schemes: schemes.clone(),
+            scheme_scopes: vec![HashMap::new()],
+            top_level_inferred_schemes: HashMap::new(),
+            inferred_schemes: HashMap::new(),
             external_interfaces,
             local_annotations,
             query,
@@ -3403,13 +3567,49 @@ impl<'a> GenericInference<'a> {
     }
 
     fn instantiate(&mut self, scheme: &TypeScheme) -> TypeDescriptor {
-        let mut variables = HashMap::new();
+        let mut implicit_parameters = Vec::new();
+        if scheme.parameters.is_empty() {
+            collect_bound_parameters(&scheme.body, &mut implicit_parameters);
+        }
+        let parameters = scheme
+            .parameters
+            .iter()
+            .map(|parameter| parameter.id)
+            .chain(implicit_parameters);
+        let mut variables = parameters
+            .map(|parameter| {
+                let variable = InferenceVariableId(self.next_variable);
+                self.next_variable += 1;
+                (parameter, variable)
+            })
+            .collect();
         self.instantiate_with(&scheme.body, &mut variables)
+    }
+
+    fn scoped_scheme(&self, name: &str) -> Option<Option<TypeScheme>> {
+        self.scheme_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn scheme(&self, name: &str) -> Option<TypeScheme> {
+        match self.scoped_scheme(name) {
+            Some(scheme) => scheme,
+            None => self.schemes.get(name).cloned(),
+        }
+    }
+
+    fn set_local_scheme(&mut self, name: String, scheme: Option<TypeScheme>) {
+        self.scheme_scopes
+            .last_mut()
+            .expect("type inference always has a scheme scope")
+            .insert(name, scheme);
     }
 
     fn explicit_scheme(&self, callee: &Expr) -> Option<TypeScheme> {
         match &callee.value {
-            ExprKind::Variable(name) => self.schemes.get(&name.value).cloned(),
+            ExprKind::Variable(name) => self.scheme(&name.value),
             ExprKind::Field { receiver, field } => match &receiver.value {
                 ExprKind::Variable(module) => self
                     .external_interfaces
@@ -3426,6 +3626,51 @@ impl<'a> GenericInference<'a> {
         let variable = InferenceVariableId(self.next_variable);
         self.next_variable += 1;
         TypeDescriptor::Inference(variable)
+    }
+
+    fn generalize_local_closure(
+        &self,
+        descriptor: &TypeDescriptor,
+        first_owned_variable: u32,
+        location: crate::Location,
+    ) -> Option<TypeScheme> {
+        let descriptor = self.resolve(descriptor);
+        let mut variables = Vec::new();
+        collect_inference_variables(&descriptor, &mut variables);
+        variables.retain(|variable| variable.0 >= first_owned_variable);
+        variables.dedup();
+        if variables.is_empty()
+            || variables
+                .iter()
+                .any(|variable| self.numeric_variables.contains(variable))
+        {
+            return None;
+        }
+        let mut bound_parameters = Vec::new();
+        collect_bound_parameters(&descriptor, &mut bound_parameters);
+        let first_parameter = bound_parameters
+            .iter()
+            .map(|parameter| parameter.0)
+            .max()
+            .map_or(Some(0), |parameter| parameter.checked_add(1))?;
+        let replacements = variables
+            .iter()
+            .enumerate()
+            .map(|(index, variable)| (*variable, TypeParameterId(first_parameter + index as u32)))
+            .collect::<HashMap<_, _>>();
+        let parameters = variables
+            .iter()
+            .enumerate()
+            .map(|(index, _)| TypeParameter {
+                id: TypeParameterId(first_parameter + index as u32),
+                name: inferred_type_parameter_name(index),
+                location,
+            })
+            .collect();
+        Some(TypeScheme {
+            parameters,
+            body: bind_inference_variables(&descriptor, &replacements),
+        })
     }
 
     fn recursive_closure_skeleton(&mut self, expression: &Expr) -> Option<TypeDescriptor> {
@@ -3542,14 +3787,9 @@ impl<'a> GenericInference<'a> {
         variables: &mut HashMap<TypeParameterId, InferenceVariableId>,
     ) -> TypeDescriptor {
         match ty {
-            TypeDescriptor::Bound(parameter) => {
-                let fresh = variables.entry(*parameter).or_insert_with(|| {
-                    let fresh = InferenceVariableId(self.next_variable);
-                    self.next_variable += 1;
-                    fresh
-                });
-                TypeDescriptor::Inference(*fresh)
-            }
+            TypeDescriptor::Bound(parameter) => variables
+                .get(parameter)
+                .map_or_else(|| ty.clone(), |fresh| TypeDescriptor::Inference(*fresh)),
             TypeDescriptor::Array(item) => {
                 TypeDescriptor::Array(Box::new(self.instantiate_with(item, variables)))
             }
@@ -3995,14 +4235,14 @@ impl<'a> GenericInference<'a> {
             query.check().map_err(|error| error.to_string())?;
         }
         let inferred = match &expression.value {
-            ExprKind::Variable(name) => self.schemes.get(&name.value).map_or_else(
+            ExprKind::Variable(name) => self.scheme(&name.value).map_or_else(
                 || {
                     environment
                         .get(&name.value)
                         .cloned()
                         .unwrap_or(TypeDescriptor::Any)
                 },
-                |scheme| self.instantiate(scheme),
+                |scheme| self.instantiate(&scheme),
             ),
             ExprKind::Int(_) => TypeDescriptor::Int,
             ExprKind::Float(_) => TypeDescriptor::Float,
@@ -4395,6 +4635,18 @@ impl<'a> GenericInference<'a> {
         environment: &HashMap<String, TypeDescriptor>,
         expected: Option<&TypeDescriptor>,
     ) -> Result<TypeDescriptor, String> {
+        self.scheme_scopes.push(HashMap::new());
+        let result = self.infer_block_scoped(block, environment, expected);
+        self.scheme_scopes.pop();
+        result
+    }
+
+    fn infer_block_scoped(
+        &mut self,
+        block: &Block,
+        environment: &HashMap<String, TypeDescriptor>,
+        expected: Option<&TypeDescriptor>,
+    ) -> Result<TypeDescriptor, String> {
         let mut environment = environment.clone();
         let mut delayed = Vec::new();
         let mut recursive_skeletons = HashMap::new();
@@ -4414,6 +4666,7 @@ impl<'a> GenericInference<'a> {
             let first_owned_variable = self.next_variable;
             if let Some(skeleton) = self.recursive_closure_skeleton(&binding.value.value) {
                 environment.insert(binding.value.name.value.clone(), skeleton.clone());
+                self.set_local_scheme(binding.value.name.value.clone(), None);
                 recursive_skeletons.insert(
                     binding.value.name.value.clone(),
                     (skeleton.clone(), first_owned_variable),
@@ -4502,9 +4755,29 @@ impl<'a> GenericInference<'a> {
                 binding.value.kind,
                 BindingKind::Let | BindingKind::Def | BindingKind::Import
             ) {
-                let descriptor = binding_expected.cloned().unwrap_or(inferred);
+                let inferred_scheme = (binding.value.kind == BindingKind::Let
+                    && binding.value.annotation.is_none()
+                    && binding.value.type_parameters.is_empty()
+                    && matches!(binding.value.value.value, ExprKind::Closure { .. }))
+                .then(|| {
+                    self.generalize_local_closure(
+                        &inferred,
+                        first_owned_variable,
+                        binding.value.name.location,
+                    )
+                })
+                .flatten();
+                let descriptor = inferred_scheme.as_ref().map_or_else(
+                    || binding_expected.cloned().unwrap_or(inferred),
+                    |scheme| scheme.body.clone(),
+                );
                 environment.insert(binding.value.name.value.clone(), descriptor.clone());
-                if is_delayed && !is_recursive {
+                self.set_local_scheme(binding.value.name.value.clone(), inferred_scheme.clone());
+                if let Some(scheme) = &inferred_scheme {
+                    self.inferred_schemes
+                        .insert(binding.value.name.location, scheme.clone());
+                }
+                if is_delayed && !is_recursive && inferred_scheme.is_none() {
                     delayed.push((
                         binding.value.name.value.clone(),
                         descriptor,
@@ -4528,6 +4801,178 @@ impl<'a> GenericInference<'a> {
         }
         Ok(self.resolve(&result))
     }
+}
+
+fn collect_inference_variables(
+    descriptor: &TypeDescriptor,
+    variables: &mut Vec<InferenceVariableId>,
+) {
+    match descriptor {
+        TypeDescriptor::Inference(variable) => {
+            if !variables.contains(variable) {
+                variables.push(*variable);
+            }
+        }
+        TypeDescriptor::Array(item)
+        | TypeDescriptor::Dict(item)
+        | TypeDescriptor::TypeOf(item)
+        | TypeDescriptor::Tagged { payload: item, .. } => {
+            collect_inference_variables(item, variables);
+        }
+        TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
+            for item in items {
+                collect_inference_variables(item, variables);
+            }
+        }
+        TypeDescriptor::Struct(fields) => {
+            for field in fields.values() {
+                collect_inference_variables(field, variables);
+            }
+        }
+        TypeDescriptor::Enum(variants) => {
+            for payload in variants.values().flatten() {
+                collect_inference_variables(payload, variables);
+            }
+        }
+        TypeDescriptor::Function { parameters, result } => {
+            for parameter in parameters {
+                collect_inference_variables(parameter, variables);
+            }
+            collect_inference_variables(result, variables);
+        }
+        TypeDescriptor::Bound(_)
+        | TypeDescriptor::Any
+        | TypeDescriptor::Never
+        | TypeDescriptor::Type
+        | TypeDescriptor::Int
+        | TypeDescriptor::Float
+        | TypeDescriptor::String
+        | TypeDescriptor::Bytes
+        | TypeDescriptor::Atom(_) => {}
+    }
+}
+
+fn collect_bound_parameters(descriptor: &TypeDescriptor, parameters: &mut Vec<TypeParameterId>) {
+    match descriptor {
+        TypeDescriptor::Bound(parameter) => {
+            if !parameters.contains(parameter) {
+                parameters.push(*parameter);
+            }
+        }
+        TypeDescriptor::Array(item)
+        | TypeDescriptor::Dict(item)
+        | TypeDescriptor::TypeOf(item)
+        | TypeDescriptor::Tagged { payload: item, .. } => {
+            collect_bound_parameters(item, parameters);
+        }
+        TypeDescriptor::Tuple(items) | TypeDescriptor::Union(items) => {
+            for item in items {
+                collect_bound_parameters(item, parameters);
+            }
+        }
+        TypeDescriptor::Struct(fields) => {
+            for field in fields.values() {
+                collect_bound_parameters(field, parameters);
+            }
+        }
+        TypeDescriptor::Enum(variants) => {
+            for payload in variants.values().flatten() {
+                collect_bound_parameters(payload, parameters);
+            }
+        }
+        TypeDescriptor::Function {
+            parameters: items,
+            result,
+        } => {
+            for item in items {
+                collect_bound_parameters(item, parameters);
+            }
+            collect_bound_parameters(result, parameters);
+        }
+        TypeDescriptor::Inference(_)
+        | TypeDescriptor::Any
+        | TypeDescriptor::Never
+        | TypeDescriptor::Type
+        | TypeDescriptor::Int
+        | TypeDescriptor::Float
+        | TypeDescriptor::String
+        | TypeDescriptor::Bytes
+        | TypeDescriptor::Atom(_) => {}
+    }
+}
+
+fn bind_inference_variables(
+    descriptor: &TypeDescriptor,
+    replacements: &HashMap<InferenceVariableId, TypeParameterId>,
+) -> TypeDescriptor {
+    match descriptor {
+        TypeDescriptor::Inference(variable) => replacements.get(variable).map_or_else(
+            || descriptor.clone(),
+            |parameter| TypeDescriptor::Bound(*parameter),
+        ),
+        TypeDescriptor::Array(item) => {
+            TypeDescriptor::Array(Box::new(bind_inference_variables(item, replacements)))
+        }
+        TypeDescriptor::Dict(item) => {
+            TypeDescriptor::Dict(Box::new(bind_inference_variables(item, replacements)))
+        }
+        TypeDescriptor::TypeOf(item) => {
+            TypeDescriptor::TypeOf(Box::new(bind_inference_variables(item, replacements)))
+        }
+        TypeDescriptor::Tagged { tag, payload } => TypeDescriptor::Tagged {
+            tag: tag.clone(),
+            payload: Box::new(bind_inference_variables(payload, replacements)),
+        },
+        TypeDescriptor::Tuple(items) => TypeDescriptor::Tuple(
+            items
+                .iter()
+                .map(|item| bind_inference_variables(item, replacements))
+                .collect(),
+        ),
+        TypeDescriptor::Struct(fields) => TypeDescriptor::Struct(
+            fields
+                .iter()
+                .map(|(name, field)| (name.clone(), bind_inference_variables(field, replacements)))
+                .collect(),
+        ),
+        TypeDescriptor::Enum(variants) => TypeDescriptor::Enum(
+            variants
+                .iter()
+                .map(|(name, payload)| {
+                    (
+                        name.clone(),
+                        payload.as_ref().map(|payload| {
+                            Box::new(bind_inference_variables(payload, replacements))
+                        }),
+                    )
+                })
+                .collect(),
+        ),
+        TypeDescriptor::Union(items) => TypeDescriptor::Union(
+            items
+                .iter()
+                .map(|item| bind_inference_variables(item, replacements))
+                .collect(),
+        ),
+        TypeDescriptor::Function { parameters, result } => TypeDescriptor::Function {
+            parameters: parameters
+                .iter()
+                .map(|parameter| bind_inference_variables(parameter, replacements))
+                .collect(),
+            result: Box::new(bind_inference_variables(result, replacements)),
+        },
+        descriptor => descriptor.clone(),
+    }
+}
+
+fn inferred_type_parameter_name(index: usize) -> String {
+    u8::try_from(index)
+        .ok()
+        .filter(|index| *index < 26)
+        .map_or_else(
+            || format!("T{index}"),
+            |index| char::from(b'A' + index).to_string(),
+        )
 }
 
 fn contains_type_variable(ty: &TypeDescriptor) -> bool {
@@ -5707,6 +6152,16 @@ mod tests {
                 if parameters == &[TypeDescriptor::Bound(TypeParameterId(0))]
                     && **result == TypeDescriptor::Bound(TypeParameterId(0))
         ));
+        let identity = exported
+            .hir
+            .definitions()
+            .iter()
+            .find(|definition| definition.name == "identity")
+            .unwrap();
+        assert_eq!(
+            exported.definition_schemes[&identity.id].display_name(),
+            "for(A) Fn(A) -> A"
+        );
     }
 
     #[test]
@@ -5914,14 +6369,11 @@ mod tests {
         let condition = analyze_with_natives(
             "let select = fn(condition, value) {\
                  if condition { value } else { value }\
-             }; let selected = select('True, 1); select",
+             }; (select('True, 1), select('False, \"value\"))",
             &[],
         )
         .unwrap();
-        assert_eq!(
-            condition.display(condition.result_type),
-            "Fn(enum {False, True}, Int) -> Int"
-        );
+        assert_eq!(condition.display(condition.result_type), "(Int, String)");
 
         for (source, expected) in [
             ("let add = fn(value) { value + 1 }; add", "Fn(Int) -> Int"),
@@ -5994,7 +6446,7 @@ mod tests {
         assert_eq!(nested.display(nested.result_type), "Int | String");
 
         let delayed = analyze_with_natives(
-            "let choose = fn(flag, value) {\
+            "def choose = fn(flag, value) {\
                  if flag { value } else { 1 }\
              }; let selected = choose('True, 2); choose",
             &[],
@@ -6205,7 +6657,7 @@ mod tests {
     #[test]
     fn delayed_bindings_are_solved_monomorphically_by_later_uses() {
         let direct = analyze_with_natives(
-            "let identity = fn(value) { value }; let number = identity(1); identity",
+            "def identity = fn(value) { value }; let number = identity(1); identity",
             &[],
         )
         .unwrap();
@@ -6213,7 +6665,7 @@ mod tests {
         assert_eq!(direct.display(direct.binding_types["number"]), "Int");
 
         let alias = analyze_with_natives(
-            "let identity = fn(value) { value }; let alias = identity;\
+            "def identity = fn(value) { value }; let alias = identity;\
              let number = alias(1); identity",
             &[],
         )
@@ -6222,7 +6674,7 @@ mod tests {
 
         let callback = analyze_with_natives(
             "native map: for(A, B) Fn(Array(A), Fn(A) -> B) -> Array(B);\
-             let identity = fn(value) { value };\
+             def identity = fn(value) { value };\
              let mapped = map([1, 2], identity); identity",
             &[("map", 2)],
         )
@@ -6249,7 +6701,7 @@ mod tests {
     #[test]
     fn delayed_bindings_reject_conflicts_and_underconstrained_results() {
         let conflict = analyze_with_natives(
-            "let identity = fn(value) { value };\
+            "def identity = fn(value) { value };\
              let number = identity(1); identity(\"text\")",
             &[],
         )
@@ -6257,9 +6709,9 @@ mod tests {
         assert!(conflict.message.contains("cannot unify String with Int"));
 
         for source in [
-            "let identity = fn(value) { value }; identity",
+            "def identity = fn(value) { value }; identity",
             "let values = []; values",
-            "{ let identity = fn(value) { value }; identity }",
+            "{ def identity = fn(value) { value }; identity }",
         ] {
             let error = analyze_with_natives(source, &[]).unwrap_err();
             assert!(
@@ -6279,6 +6731,107 @@ mod tests {
         let recursive =
             analyze_with_natives("def recurse = fn(value) { recurse(value) }; recurse", &[]);
         assert!(recursive.is_err());
+    }
+
+    #[test]
+    fn eligible_let_closures_generalize_and_instantiate_independently() {
+        let analysis = analyze_with_natives(
+            "let identity = fn(value) { value };\
+             let wrap = fn(value) { [value] };\
+             (identity(1), identity(\"text\"), wrap(2), wrap(\"value\"))",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            analysis.display(analysis.result_type),
+            "(Int, String, Array<Int>, Array<String>)"
+        );
+
+        let explicit =
+            analyze_with_natives("let identity = fn(value) { value }; identity[Int](1)", &[])
+                .unwrap();
+        assert_eq!(explicit.display(explicit.result_type), "Int");
+
+        let exported = analyze_with_natives(
+            "let identity = fn(value) { value }; {identity: identity}",
+            &[],
+        )
+        .unwrap();
+        let scheme = &exported.module_interface.exports["identity"];
+        assert_eq!(scheme.parameters[0].name, "A");
+        assert!(matches!(
+            &scheme.body,
+            TypeDescriptor::Function { parameters, result }
+                if parameters == &[TypeDescriptor::Bound(TypeParameterId(0))]
+                    && **result == TypeDescriptor::Bound(TypeParameterId(0))
+        ));
+    }
+
+    #[test]
+    fn local_generalization_respects_annotations_aliases_constraints_and_scopes() {
+        let partial = analyze_with_natives(
+            "let keep = fn(left: Int, right) { (left, right) };\
+             (keep(1, \"x\"), keep(2, 3))",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            partial.display(partial.result_type),
+            "((Int, String), (Int, Int))"
+        );
+
+        let captures = analyze_with_natives(
+            "native append: for(A) Fn(Array(A), A) -> Array(A);\
+             let values = [];\
+             let pair = fn(value) { (values, value) };\
+             let first = pair(1); let second = pair(\"x\");\
+             let appended = append(values, 2); (first, second, appended)",
+            &[("append", 2)],
+        )
+        .unwrap();
+        assert_eq!(
+            captures.display(captures.result_type),
+            "((Array<Int>, Int), (Array<Int>, String), Array<Int>)"
+        );
+
+        let alias = analyze_with_natives(
+            "let identity = fn(value) { value }; let alias = identity;\
+             (alias(1), alias(\"text\"))",
+            &[],
+        )
+        .unwrap_err();
+        assert!(alias.message.contains("cannot unify String with Int"));
+
+        let numeric =
+            analyze_with_natives("let negate = fn(value) { -value }; negate", &[]).unwrap_err();
+        assert!(numeric.message.contains("cannot infer monomorphic binding"));
+
+        let nested = analyze_with_natives(
+            "let identity = fn(value) { value };\
+             ({ let identity = fn(value) { [value] }; identity(1) }, identity(\"x\"))",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(nested.display(nested.result_type), "(Array<Int>, String)");
+
+        let rigid_capture = analyze_with_natives(
+            "def outer: for(Outer) Fn(Outer) -> Any = fn(value) {\
+                 let pair = fn(other) { (value, other) };\
+                 (pair(1), pair(\"x\"))\
+             }; outer(0)",
+            &[],
+        )
+        .unwrap();
+        let pair = rigid_capture
+            .hir
+            .definitions()
+            .iter()
+            .find(|definition| definition.name == "pair")
+            .unwrap();
+        assert_eq!(
+            rigid_capture.definition_schemes[&pair.id].display_name(),
+            "for(A) Fn(A) -> (T0, A)"
+        );
     }
 
     #[test]
