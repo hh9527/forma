@@ -1,212 +1,293 @@
 # Forma Language Vision
 
-## Purpose
+## The Question
 
-Forma is an experimental general-purpose programming language implemented in Rust.
-It explores whether a small dynamic runtime, a mostly pure functional language,
-and a closed-world toolchain can use the same ordinary language to perform both
-program computation and higher-order type metadata computation.
+Forma is an experimental language built around one question:
 
-The central hypothesis is:
+> In a closed and pure world, what is the smallest language that can support
+> programmable data transformation and validation, deterministic execution
+> with a finite termination boundary, and first-class diagnostics and
+> feedback?
 
-> In a sufficiently closed world, types can be ordinary immutable metadata,
-> and higher-order type operations can be pure functions evaluated by a
-> toolchain-hosted instance of the language runtime.
+The question is not primarily about type theory. Forma uses ideas from
+programming-language research where they help answer it, but those ideas are
+tools rather than the objective. The objective is a small, coherent data
+programming environment that remains understandable when transformation logic
+becomes real software.
 
-Forma is not a configuration DSL. Configuration, validation, normalization,
-encoding, and similar domains should be expressed by general-purpose functions
-and libraries rather than special merge rules or domain-specific evaluation
-semantics.
+Static configuration formats are easy to inspect but cannot express every
+useful policy. General-purpose scripting languages are programmable, but their
+open worlds, effects, ambient inputs, and weak data provenance make them hard
+to reproduce, embed, audit, and diagnose. Sandboxing a scripting language with
+fuel and a host API allowlist limits damage, but does not explain where a bad
+value or rule came from, preserve useful facts through incomplete programs, or
+give tools an authoritative semantic model.
 
-## Design Principles
+Forma explores the space between those choices.
 
-### One language across two stages
+## The Four Requirements
 
-Forma has a tool stage and a program stage. Both stages use the same value model,
-function semantics, and evaluator.
+### Programmable transformation and validation
 
-- The tool stage evaluates closed, pure metadata computations for type
-  checking, editor information, and compile-time derivation.
-- The program stage executes ordinary program code on the dynamic VM.
-- Type annotations are normally erased before program execution.
-- Type metadata explicitly used as a value can be retained at runtime.
+Validation, normalization, migration, decoding, encoding, schema generation,
+and plan construction are all transformations of ordinary data. Forma should
+provide enough general computation to express them with functions, immutable
+values, recursion, pattern matching, and modules.
 
-There is no separate macro language or unrestricted type-level language.
-Operations such as `Partial(User)` and `Result(String, Error)` should be
-ordinary pure function calls over type metadata.
+The language does not define configuration-specific merge, priority, default,
+or constraint semantics. Those are policies, and policies belong in ordinary
+libraries that users can inspect, replace, and compose.
 
-### Closed world by default
+Validation is not a hidden language operation. It can be expressed as a
+transformation with an explicit result:
 
-The toolchain should be able to enumerate the program's code and static data:
+```text
+A -> Result(B, BlameError)
+```
+
+`B` may be the original value or a normalized domain value. The same principle
+applies to codecs and derived schemas: the language supplies computation and
+data; libraries supply domain meaning.
+
+### A closed and pure world
+
+A Forma execution operates on an enumerable world:
 
 - module paths are statically known;
-- packages and inputs in the build graph are pinned;
-- JSON, YAML, and TOML files can participate as data modules;
-- runtime `eval` and arbitrary dynamic imports are outside the model;
-- genuine external data enters through a small number of explicit boundaries,
-  such as command-line input.
+- dependencies are fixed before execution;
+- Forma, JSON, YAML, and TOML modules participate in the same immutable graph;
+- runtime `eval` and arbitrary dynamic imports are outside the model; and
+- genuine runtime inputs enter only through explicit host-provided values.
 
-Closed definitions do not imply that every runtime value is known at compile
-time. Tool-stage evaluation is allowed only for pure computations with known
-inputs and is subject to deterministic resource limits.
+Ordinary values are immutable and functions are pure. The implementation may
+use unobservable mutation for allocation, interning, caches, and publication,
+but failed work must not leak partially initialized state into the persistent
+world.
 
-### Pure functional center
+Closed does not mean that every value is statically known. It means that the
+code, static data, dependency graph, and explicit inputs that may influence one
+execution are bounded and identifiable.
 
-- Ordinary values are immutable.
-- Functions are pure by default.
-- Control flow is expression-oriented.
-- Blocks, conditionals, and pattern matching produce values.
-- Domain behavior is composed from functions instead of hidden language rules.
+### Deterministic, finitely bounded execution
 
-The VM and trusted built-ins may use unobservable mutation for garbage
-collection, interning, caches, copy-on-write, and uniqueness optimizations.
-Observable effects, processes, IO, and process-local storage are deliberately
-deferred until a coherent effect boundary is designed.
+Forma permits ordinary recursion. It does not require every program to be
+strongly normalizing. Instead, every hosted execution has explicit limits for
+evaluation fuel, stack use, call depth, and allocation. Within those limits an
+execution deterministically produces a value or a structured failure.
 
-### Small dynamic runtime
+Fuel is charged for operations that can expand the dynamic path, such as calls
+and taken control-flow back edges. It is a termination boundary, not a virtual
+CPU tariff. Harmless compiler lowering changes should not alter whether
+straight-line code fits within a budget.
 
-The program runtime is a compact bytecode VM inspired by Lua's implementation
-shape, with an immutable term model influenced by Erlang. The initial native
-value categories are:
+Determinism also includes representation and observation:
 
-```text
-Int(i64), Float(f64), String, Bytes,
-Dict, Array, Atom, Tuple, Func
-```
+- collection shapes and output ordering are canonical where order has no
+  domain meaning;
+- module identities do not depend on incidental physical paths;
+- lexical path operations do not observe the host filesystem;
+- diagnostic and inference results do not depend on traversal order; and
+- failed or stale analysis cannot publish partial state.
 
-The initial numeric semantics use `i64` and `f64`. Integer overflow and integer
-division by zero are runtime errors. Floating-point behavior follows IEEE 754.
+### Diagnostics and feedback are first-class
 
-`Dict` is the sole native string-keyed product value. Conceptually it is:
+A data program is useful only if a human or an agent can understand what it
+knows, why it failed, and where to make a repair. Diagnostics are therefore a
+design input, not presentation added after the evaluator works.
 
-```text
-Dict = (shape, values)
-```
-
-Its shape is a canonical, expression-order-independent set of string fields.
-An implementation can store it as a sorted field array aligned with a value
-array, and equal shapes can be shared. Static record types and homogeneous
-`Dict<T>` types erase to the same runtime value.
-
-### Atoms and tagged tuples
-
-Atoms are symbolic runtime values. Sum values use Erlang-style tagged terms:
+Source origins travel through static data, values, transformations, type
+metadata, and runtime failures. A validation error should identify both sides
+of the relationship:
 
 ```text
-'None
-('Some, value)
-('Ok, value)
-('Err, error)
+config.yaml:12:16: expected Int
+  model.forma:8:15: requirement declared here
 ```
 
-The VM assigns stable identities and language semantics to these built-in
-atoms:
+JSON, YAML, and TOML files in the module graph are not opaque external blobs.
+They are first-class source modules with syntax diagnostics, stable locations,
+value provenance, dependency identity, and participation in workspace
+analysis. Truly external values enter separately through a host window.
 
-```text
-'None, 'Some, 'Ok, 'Err, 'True, 'False
+Incomplete source is normal during editing and generation. Recoverable syntax,
+HIR, semantic facts, workspace revisions, and the language server should retain
+independent knowledge around damage. The tooling must distinguish an explicit
+`Any` from a fact that is unknown, conflicting, blocked by a dependency, or
+incomputable within the tool-stage budget. It must not fabricate precision to
+make completion appear richer.
+
+The same authoritative semantics should drive strict checking, runtime
+validation, command-line inspection, and editor feedback.
+
+## Types as Programmable Metadata
+
+Types are a means to make transformation and feedback programmable without
+splitting the system into separate schema, validation, codec, documentation,
+and editor models.
+
+A type declaration produces canonical immutable Forma data. That metadata can
+be passed to functions, transformed, printed, interpreted, and retained at
+runtime when used as a value:
+
+```forma
+def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) {
+    Option(Item)
+};
+
+type MaybeInt = Maybe(Int);
 ```
 
-Boolean conditions accept only `'True` and `'False`; Forma does not use general
-truthy/falsy coercion. Tags remain ordinary observable atoms, and tagged values
-remain ordinary tuples even when bytecode instructions optimize their use.
-
-### Types are metadata
-
-A type declaration provides a static constraint and a canonical metadata value.
-Metadata is composed only from ordinary Forma values and fixed, documented shapes.
-It can be inspected, passed to functions, transformed, and retained at runtime.
+`Maybe` is an ordinary pure function evaluated by the toolchain-hosted Forma
+VM. The type checker interprets its result; it does not reimplement `Maybe` in
+a hidden type-level evaluator.
 
 The same metadata may support:
 
 - static checking and LSP information;
-- runtime validation;
-- normalization and corrective transformation;
+- runtime validation and normalization;
 - encoding and decoding;
-- documentation and schema generation.
+- documentation and schema generation; and
+- user-space interpreters over heterogeneous typed data.
 
-Type metadata computation is ordinary pure computation. When a type position
-requires a concrete result, the toolchain evaluates the expression in its own
-VM. If it cannot produce a valid type within its resource budget, it reports a
-tool-stage evaluation error rather than silently inventing a precise type.
+`TypeOf(A)` retains the relationship between a metadata witness and the values
+it describes. `Dyn` permits safe existential packaging and structural
+observation without becoming an unchecked cast. `interpreter(...)` provides a
+narrow, one-way bridge from statically witnessed values to user-space metadata
+interpreters. It must not allow an interpreter to manufacture or recover an
+arbitrary `A`.
 
-Omitted types are inferred when practical. A type that is omitted and cannot be
-inferred is `Any`. `Any` represents a loss of static guarantees, not a distinct
-runtime value category.
+Dedicated static machinery is justified only when ordinary data and tool-stage
+functions cannot provide the required abstraction, safety, diagnostics, or
+analysis. Greater type-system generality is not an objective by itself.
 
-Whether traits, row polymorphism, higher-kinded types, or higher-order types
-need dedicated surface constructs is intentionally unresolved. Ordinary
-functions over type metadata should be tried first; dedicated static machinery
-must be justified by abstraction, diagnostics, or analysis that ordinary
-tool-stage evaluation cannot provide.
+## One Evaluator Across Two Stages
 
-### General-purpose composition
+Forma has a tool stage and a program stage, but both use the same value model,
+function behavior, bytecode VM, quotas, and evaluation semantics.
 
-Forma does not define configuration-specific merge, priority, defaulting, or
-constraint semantics. Such policies are explicit functions:
+- The tool stage evaluates closed metadata computations for checking, editor
+  information, and derivation.
+- The program stage evaluates ordinary data transformations.
+- Type annotations are erased unless their metadata is explicitly used as a
+  runtime value.
+
+There is no separate macro language or unrestricted type-level language.
+Elaboration may reduce surface conveniences to a smaller core, but it must not
+create a second set of domain or stage-specific evaluation rules.
+
+## A Small Runtime Data Model
+
+The dynamic runtime is inspired by Lua's compact VM shape and Erlang's
+immutable term model. Its basic value categories are:
 
 ```text
-input
-|> normalize\(_, User)
-|> validate\(User, _)
-|> encode_json
+Int, Float, String, Bytes, Dict, Array, Atom, Tuple, Func
 ```
 
-This preserves one set of evaluation rules across configuration, data
-processing, application logic, and tooling.
+`Dict` is the sole native string-keyed product representation. Static Structs
+and homogeneous `Dict<T>` values share that runtime form while retaining
+different metadata. Atoms and tagged tuples express symbolic and sum values:
 
-## Surface Direction
+```text
+'None
+'Some(value)
+'Ok(value)
+'Err(error)
+```
 
-The surface syntax is broadly Rust-like, without Rust ownership semantics.
+Boolean conditions accept only `'True` and `'False`; there is no general
+truthiness coercion. Runtime representation stays small and uniform while
+metadata and ordinary libraries provide richer interpretations.
 
-- Named functions use `fn name(args) { ... }`.
-- Closures use `fn(args) { ... }`, not `|args| { ... }`.
-- `|>` is a left-associative, low-precedence pipeline operator.
-- `value |> f` is exactly equivalent to `f(value)`.
-- `f\(_, value)` constructs an ordinary closure by explicit placeholder
-  application; indexed placeholders such as `_1` can reorder arguments.
-- `if`, `match`, and blocks are expressions.
-- Bindings are immutable.
+## The Host Boundary
 
-Surface syntax may elaborate into a smaller core language, but elaboration must
-not introduce domain-specific or stage-specific evaluation semantics.
+Forma has no authority over the external world. It does not need a general
+effect system or a universal action ABI. A host opens a small, explicit window
+by supplying ordinary input values and deciding whether an ordinary output
+value has external meaning:
 
-## Static Data Modules
+```text
+external world
+    -> host freezes explicit input
+    -> closed Forma computation
+    -> ordinary output value
+    -> host validates, authorizes, and interprets it
+    -> external world
+```
 
-Static data files may be imported as immutable modules and become part of the
-closed dependency graph:
+The VM does not know that a value describes a process, file, deployment, or
+approval. Different hosts define different input and output protocols using
+ordinary Forma types. Possessing a value of a plan type does not itself grant
+the capability to perform that plan.
 
-- JSON, YAML, and TOML produce data values;
-- text produces a `String`;
-- JSON Lines produces an `Array` of data values.
+The standard `forma run`, `forma exec`, and `forma build` commands are concrete
+host adapters, not the beginning of a language-level effect system. Domain
+semantics such as execution ordering, retries, transactions, permissions, and
+real-world observation remain permanently owned by the host.
 
-Arbitrary external object keys should remain strings rather than permanently
-interned atoms. Format features that cannot map deterministically to Forma values
-must be rejected or handled by an explicit library policy.
+## Agentic Systems
 
-## MVP Thesis
+Agentic software increases the value of Forma's constraints. Generated code is
+cheap; trustworthy feedback and controlled external meaning are not.
 
-The MVP is successful only if it demonstrates this vertical loop:
+Forma can serve as a source-aware, typed IR for plans. An agent may generate or
+modify a pure Forma program, while the host receives a complete value that can
+be checked, compared, reviewed, signed, or rejected before any effect occurs.
+The plan vocabulary remains host-defined ordinary data.
 
-1. Parse and execute expression-oriented Forma code on a bytecode VM.
-2. Load a static data module into the same immutable value model.
-3. Represent a type as canonical runtime metadata.
-4. Execute an ordinary pure function over that metadata in the tool-stage VM.
-5. Feed the computed metadata back into static checking.
-6. Use the same metadata for runtime validation or normalization.
-7. Erase unused type information before program-stage execution.
-8. Admit external JSON through an explicit CLI boundary and validate it.
+Forma can also define the pure transition of a host-driven loop:
 
-The MVP does not require traits, dedicated HKT syntax, effects, processes, a
-JIT, package management, production garbage collection, or a complete LSP.
-It should expose enough structured analysis output to prove that a future LSP
-can consume the toolchain's computed types.
+```text
+Context x State x Observation
+    -> Result(LoopDecision(State, Plan, Output), BlameError)
+```
+
+The host owns time, persistence, observation, effects, retries, approvals, and
+the total loop budget. Forma computes one deterministic, finitely bounded step.
+Diagnostics and provenance make the loop repairable and auditable: failures can
+point to generated Forma, a JSON/YAML/TOML source value, and the rule that
+rejected it rather than collapsing into an unstructured tool error.
+
+These are opportunities enabled by the core model, not Agent-specific language
+features.
+
+## Admission Rule
+
+Every proposed feature should answer three questions:
+
+1. Is it necessary to express programmable data transformation or validation,
+   or to provide authoritative diagnostics and feedback for that programming?
+2. Can it instead be ordinary Forma code, metadata interpreted by a library,
+   or behavior owned by a host?
+3. Does it preserve the closed world, purity, deterministic observation, and
+   finite execution boundary?
+
+The language should grow only when the required capability cannot be expressed
+or explained faithfully through existing mechanisms. A feature is not
+justified merely because it is common in general-purpose languages or elegant
+in a more general type system.
 
 ## Evaluation Criteria
 
-The experiment has succeeded when the loop above works with few compiler
-special cases. It has failed, or needs redesign, if the type checker must
-reimplement ordinary metadata functions in a separate hidden type language.
+The experiment succeeds when:
 
-Engineering quality for the MVP includes deterministic behavior, source-aware
-diagnostics, resource-bounded tool-stage execution, focused tests, and examples
-that exercise the complete two-stage path.
+1. non-trivial transformation and validation policies can be ordinary Forma
+   functions rather than language-specific rules;
+2. static data and Forma source share one closed, source-aware module graph;
+3. type metadata can be computed and interpreted without a hidden second
+   evaluator;
+4. strict checking, runtime validation, CLI queries, and LSP feedback agree on
+   authoritative semantic facts;
+5. every execution ends with a value or a source-aware resource failure within
+   its configured bounds;
+6. incomplete programs retain precise independent facts without fabricated
+   certainty;
+7. hosts can define useful input and output windows without adding domain
+   semantics or effects to the language; and
+8. new application domains primarily add Forma libraries and host adapters,
+   not VM instructions or language constructs.
+
+The project needs redesign if rich policies repeatedly require compiler
+special cases, if metadata functions must be duplicated in a hidden type
+language, if diagnostics lose the origin of transformed data or rules, or if a
+new host domain requires Forma itself to acquire external authority.

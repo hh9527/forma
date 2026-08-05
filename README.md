@@ -1,37 +1,76 @@
 # Forma
 
-> Forma was formerly known as XL. The full design history is recorded in
+> Forma was formerly known as XL. Its design history is recorded in
 > [rfc/](rfc/).
 
-**Forma is an experimental language built around one question: what does a
-language become when types are ordinary data?**
+**Forma is an experimental language for programmable data transformation and
+validation in a closed, pure, deterministic, and source-aware world.**
 
-Configuration languages have explored several mature approaches. CUE
-organizes constraints around unification; Dhall uses strong normalization to
-establish a decidable execution boundary; Starlark provides controlled
-general-purpose computation; and Nickel makes contracts and configuration
-merging central abstractions. Each choice solves real problems while placing
-the corresponding domain concepts in the language itself.
+It asks:
 
-Forma takes a different position: **domain semantics should live in data, and
-the language should provide computation**. Configuration, validation,
-normalization, codecs, and schema generation are not language features. They
-are ordinary functions operating on ordinary data.
+> What is the smallest language that can provide general data computation,
+> finite execution boundaries, and first-class diagnostics and feedback?
 
-## Three interlocking bets
+Forma sits between static configuration and general-purpose scripting. Static
+formats are inspectable but limited; scripting languages are programmable but
+often open, effectful, difficult to reproduce, and weak at explaining the
+origin of transformed data. A sandbox with fuel and an API allowlist can bound
+a script, but it does not by itself provide an authoritative semantic model,
+cross-data provenance, recoverable analysis, or precise editor feedback.
 
-### One language, two stages
+Forma treats those requirements as one design problem.
 
-Forma has a tool stage and a program stage, but both share one value model,
-one bytecode VM, and one evaluation semantics. There is no separate type-level
-language, macro language, or second compile-time evaluator. The tool stage
-runs ordinary Forma code under fuel and resource quotas, deterministically and
-with cacheable results.
+## The Core Model
 
-### Types as metadata
+### Ordinary computation over ordinary data
 
-A type declaration evaluates to ordinary Forma data rather than an internal
-structure accessible only to the compiler:
+Configuration, validation, normalization, migration, codecs, schema
+generation, and plan construction are not language features. They are ordinary
+pure functions over immutable values.
+
+Forma supplies functions, closures, recursion, pattern matching, modules, and a
+small runtime data model. Domain policies such as merge, defaults, precedence,
+and encoding live in libraries where they can be inspected, replaced, and
+composed.
+
+### A closed and bounded world
+
+Module paths are statically known, dependencies are fixed, runtime `eval` is
+absent, and genuine runtime input enters through explicit host values. Forma,
+JSON, YAML, and TOML files participate in the same immutable module graph.
+
+Forma permits recursion, but every execution has independent fuel, stack, call
+depth, and allocation quotas. An execution deterministically produces a value
+or a structured resource failure within its configured boundary. Failed work
+is discarded atomically rather than partially published into the persistent
+world.
+
+### Diagnostics are first-class
+
+Source locations travel with values through imports, transformations, metadata,
+and codec normalization. A validation failure can identify both the data and
+the rule that rejected it:
+
+```text
+user.yaml:4:8: expected Int
+  User.forma:3:10: requirement declared here
+```
+
+JSON, YAML, and TOML files in the workspace are first-class source modules, not
+opaque external blobs. They retain syntax diagnostics and field-level
+provenance and participate in dependency and workspace analysis.
+
+Incomplete Forma source still provides useful navigation, types, and
+diagnostics. Semantic facts distinguish known values from explicit `Any`,
+unknown information, conflicts, dependency blocking, and tool-stage
+incomputability. Completion does not invent structure to appear helpful.
+
+This feedback model is part of the language experiment, not an editor added
+after execution works.
+
+### Types are programmable metadata
+
+A type declaration evaluates to canonical ordinary Forma data:
 
 ```forma
 def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) {
@@ -41,65 +80,49 @@ def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) {
 type MaybeInt = Maybe(Int);
 ```
 
-`Maybe` is not a type operator. It is an ordinary function, called normally at
-the tool stage, that returns ordinary data. The type checker does not
-reimplement its body; it interprets the resulting data. Consequently:
+`Maybe` is an ordinary pure function evaluated by the same VM used for program
+code. The type checker interprets its result rather than reimplementing the
+function in a hidden type-level language.
 
-- **Types can be printed**: `debug.dbg(User)` displays the type itself because
-  it is a value.
-- **Types can be transformed by functions**: `Partial(User)` and `Array(User)`
-  are function calls.
-- **Types retain what they describe**: with `TypeOf(A)`,
-  `decode(User, input)` has type `Result(User, BlameError)`, not
-  `Result(Any, Any)`. The instance type survives the boundary.
+The same metadata can drive static checking, LSP information, runtime
+validation, normalization, codecs, documentation, schema generation, and
+user-space interpreters. `TypeOf(A)` preserves the relationship between a
+metadata witness and the values it describes; the narrow `Dyn` and
+`interpreter(...)` boundary supports heterogeneous interpretation without an
+unchecked cast.
 
-### A closed world
+Types are central to Forma, but they serve the larger goal: programmable data
+rules with authoritative, source-aware feedback.
 
-Module paths are statically known, dependencies are fixed, runtime `eval` is
-absent, and external data enters through explicit boundaries. The closed world
-is leverage: compile-time evaluation can be reproducible, tooling can
-enumerate all code, and running someone else's configuration inside a host
-process can be bounded by default. Every execution has independent fuel,
-stack, allocation, and depth quotas; failure discards its work atomically
-without mutating the shared world.
+## The Host Owns Effects
 
-## What follows from these ideas
+Forma has no authority over the external world. A host supplies explicit
+ordinary inputs and decides whether an ordinary output has external meaning:
 
-**Local polymorphism stays a static property.** An unannotated closure-valued
-`let` can infer a rank-1 scheme and instantiate it independently at each direct
-use:
-
-```forma
-let identity = fn(value) { value };
-(identity(1), identity("text")) # (Int, String)
+```text
+external world
+    -> host input snapshot
+    -> closed Forma computation
+    -> output value
+    -> host validation and authorization
+    -> external world
 ```
 
-This creates one runtime closure, not a family of generated functions. The
-checker generalizes only variables owned by a non-recursive closure literal;
-aliases instantiate once, numeric constraints are not erased into an
-unconstrained parameter, and forward-visible `def` groups remain monomorphic
-unless they carry an explicit `for(...)` contract. The restriction keeps type
-inference useful without quietly introducing higher-rank values or polymorphic
-recursion.
+There is no universal Forma action ABI. A process launcher, build system,
+Kubernetes controller, or agent runtime defines its own types and interprets
+only the values it recognizes. Permissions, IO, retries, transactions, clocks,
+and observation remain host concerns.
 
-**Text makes evaluation visible.** Double-quoted and raw forms are inert
-Strings; evaluated concatenation uses backticks:
+`forma run`, `forma exec`, and `forma build` are concrete host adapters, not a
+language-level effect system. Today the exec and build adapters validate and
+print canonical plans without performing their described effects.
 
-```forma
-let literal = "ordinary\nString";
-let raw = r##"quotes " and \slashes stay unchanged"##;
-let message = `hello \{name}`;
-let continued = "first \
-    second"; # "first second"
-```
+## What This Enables
 
-Raw Strings accept up to 255 matching `#` delimiters. Escaped Strings and
-concat text support Rust-style ASCII and Unicode scalar escapes. This keeps
-plain data visibly separate from expressions while making embedded source and
-multiline text practical.
+### Codecs and schemas without language magic
 
-**Serde, without macros.** Decorators are ordinary functions, attributes are
-ordinary data, and codecs are ordinary interpreters of metadata:
+Decorators are functions, attributes are data, and codecs are metadata
+interpreters:
 
 ```forma
 import json from "@bim/std/json";
@@ -113,198 +136,117 @@ type User = {
 };
 ```
 
-Field renaming, defaults, flattening, and skip conditions are library
-functions that annotate metadata. Encoding and decoding share one plan, and
-JSON Schema is generated from that same plan. The language itself has no
-special knowledge of this vocabulary.
+Field renaming, defaults, flattening, and skip policies are library-defined
+metadata. Encoding and decoding share one plan, and JSON Schema is generated
+from that same plan.
 
-**Errors that point to both sides.** Source locations travel with values
-through imports, transformations, and codec normalization. A validation error
-can report:
+### Deterministic executable and output plans
+
+An executable entry is an ordinary function:
 
 ```text
-user.json:1:21: expected Int
-  User.forma:3:47: contract rule declared here
+Fn(ExecSettings, ExecRequest) -> ExecEnv
 ```
 
-The error identifies both the data location and the rule location.
-`BlameError` preserves both sources directly, without a codec-specific
-diagnostic structure separate from the value model.
+The host supplies the platform, install prefix, environment, arguments, and
+working directory. Forma returns a fully concrete value containing artifacts,
+paths, binary, arguments, and environment. The host expands no templates and
+reinterprets no policy.
 
-**Executable plans.** Forma can express a more capable form of DotSlash. An
-entry module is an ordinary pure function,
-`Fn(ExecSettings, ExecRequest) -> ExecEnv`: the host explicitly supplies the
-platform, install prefix, environment, arguments, and working
-directory, and the function returns a fully concrete execution plan. It can
-select multiple artifacts, for example installing a platform-specific
-interpreter separately from a platform-independent runtime; derive stable
-installation locations with `hash.sha256`; and construct search
-paths, library paths, and environment variables.
+A build entry similarly returns `Fn() -> build.OutputPlan`. The adapter
+validates normalized relative paths, rejects duplicate targets, and emits
+canonical JSON. Text generation uses ordinary strings and functions rather
+than a second template language.
 
-Command-line rewriting belongs to the same pure computation. A gcc or rustc
-launcher can add a sysroot and platform-specific search paths, inject
-`source-prefix-map`, and rewrite user-supplied source arguments after artifact
-locations are known. The returned `ExecEnv` already contains the final binary,
-arguments, environment, and paths. The host expands no templates, substitutes
-no variables, and reinterprets no policy. There is no special context module
-or launcher syntax here, only explicit parameters, ordinary functions, and
-typed data; the connection between the closed world and the effectful
-host stays narrow.
+### Static data as source
 
-The effect boundary can be expressed as a set of ordinary Forma types.
-Installation methods form an extensible enum, while `ExecEnv` contains only
-the final values consumed by the effect layer:
+JSON, TOML, and YAML modules enter the same immutable graph as Forma code. TOML
+temporal categories retain distinct tagged representations. YAML follows the
+1.2 Core Schema conservatively: legacy implicit booleans and timestamps remain
+Strings, mapping keys must be Strings, and custom tags and merge keys are
+rejected. Ambiguous format behavior is rejected or delegated to explicit
+library policy.
+
+### Conservative local polymorphism
+
+An unannotated closure-valued `let` can infer a rank-1 scheme:
 
 ```forma
-@enum type UnpackType = {
-    TarGzip: 'None,
-    Tar: 'None,
-};
-
-@struct type UnpackOpt = {
-    dest: String,
-    ty: UnpackType,
-    src: String,
-    strip: Int,
-    digest: Option(String),
-};
-
-@enum type Install = {
-    Unpack: UnpackOpt,
-};
-
-@struct type ExecEnv = {
-    install: Array(Install),
-    cwd: Option(String),
-    bin: String,
-    args: Array(String),
-    env: Dict(String),
-};
+let identity = fn(value) { value };
+(identity(1), identity("text")) # (Int, String)
 ```
 
-`Dict(String)` describes dynamic keys whose values are all Strings, unlike a
-Struct with a fixed field set. The complete protocol uses existing
-TypeMetadata and remains ordinary data; it adds no special installation
-statement or command-line rewriting syntax.
+Inference is intentionally bounded. Aliases instantiate once, recursive groups
+remain monomorphic without an explicit contract, and numeric constraints are
+not erased into unconstrained parameters. Forma prefers an explicit unknown or
+diagnostic over unstable inferred precision.
 
-For example, a reproducible gcc launch plan can be written in full:
+## Agentic Systems
 
-```forma
-#!/usr/bin/env -S forma exec --dry-run
+Machine-generated programs make Forma's constraints more valuable. Generation
+is cheap; trustworthy feedback and controlled external meaning are not.
 
-import arrays from "@bim/std/array";
-import exec from "@bim/std/exec";
-import hash from "@bim/std/hash";
+Forma can act as a typed, source-aware IR for plans. An agent generates or
+modifies a pure program; Forma returns a complete plan value that a host can
+validate, compare, review, sign, or reject before any effect occurs. The plan's
+action vocabulary remains ordinary host-defined data.
 
-type ExecSettings = exec.ExecSettings;
-type ExecRequest = exec.ExecRequest;
-type ExecEnv = exec.ExecEnv;
+Forma can also define one pure step of a host-driven loop:
 
-let main: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
-    let platform = `\{settings.platform.os}-\{settings.platform.arch}`;
-    let toolchain_url = `https://example.invalid/gcc-\{platform}.tar.gz`;
-    let sysroot_url = `https://example.invalid/sysroot-\{platform}.tar.gz`;
-    let toolchain = `\{settings.install_prefix}/\{hash.sha256(`gcc:\{toolchain_url}:unpack-v1`)}`;
-    let sysroot = `\{settings.install_prefix}/\{hash.sha256(`sysroot:\{sysroot_url}:unpack-v1`)}`;
-    let args: Array(String) = arrays.flat_map([
-        [
-            `--sysroot=\{sysroot}`,
-            `-isystem\{sysroot}/usr/include`,
-            `-ffile-prefix-map=\{request.cwd}=.`,
-        ],
-        request.args,
-    ], fn(part) { part });
-
-    {
-        install: [
-            'Unpack({dest: toolchain, ty: 'TarGzip, src: toolchain_url, strip: 1, digest: 'None}),
-            'Unpack({dest: sysroot, ty: 'TarGzip, src: sysroot_url, strip: 1, digest: 'None}),
-        ],
-        bin: `\{toolchain}/bin/gcc`,
-        args: args,
-        env: {FORMA_SYSROOT: sysroot},
-        cwd: 'Some(request.cwd),
-    }
-};
-
-main
+```text
+Context x State x Observation
+    -> Result(LoopDecision(State, Plan, Output), BlameError)
 ```
 
-`Unpack` carries its own `src`, so the protocol needs no separate download
-action. The effect layer can fetch, cache, and verify the artifact from `src`
-and its optional `digest`, then unpack it into the already determined `dest`.
+The host owns observation, persistence, time, effects, retries, approvals, and
+the overall loop budget. Forma computes one deterministic, finitely bounded
+transition. Its diagnostics can point back to generated Forma, a JSON/YAML/TOML
+source value, and the rule that rejected it, creating a precise repair and
+audit loop.
 
-Today, `forma exec --dry-run` only validates and prints the plan; it does not
-download, install, or start a process. Even before the effect layer exists,
-every deterministic decision can be reviewed, versioned, and tested in
-isolation. A future host only needs to consume the concrete plan and perform
-its effects. Build rules and Kubernetes reconciliation can use the same
-boundary: **pure functions produce plans; the host performs effects**.
+These uses require no Agent-specific syntax and grant Forma no additional
+authority.
 
-The same boundary now covers generated text. A module returning
-`Fn() -> build.OutputPlan` can declare ordered `TextFile` artifacts, while
-`forma build --dry-run` validates normalized relative paths, rejects duplicate
-targets, and prints canonical JSON without writing anything. Raw Strings and
-concat handle source text; `@bim/std/string` provides line splitting/joining,
-indentation, explicit margin trimming, and trailing-newline normalization.
-There is no separate template language or implicit layout state.
+## Design Tradeoffs
 
-The standard library supports that pure side directly. Generic Array
-operations compose and short-circuit typed collections; String operations are
-UTF-8 safe; lexical path operations use deterministic `/` semantics rather
-than the host filesystem; and homogeneous Dict combinators preserve
-`Dict<T>` through value mapping and filtering. These are ordinary imported
-functions with explicit contracts, not launcher magic.
-
-JSON, TOML, and YAML files can enter the same immutable module graph as source code.
-TOML tables become ordinary Dicts, while its four temporal scalar categories
-remain distinct as validated Tagged String values through
-`@bim/std/toml.DateTime`. YAML follows the 1.2 Core Schema conservatively:
-legacy implicit Booleans and timestamps remain Strings, mapping keys must be
-Strings, and custom tags and merge keys are rejected. Codec failures retain
-both the external data location and the Forma type declaration that imposed
-the requirement.
-
-**A conservative language server.** Hover information comes from the same
-metadata used by runtime validation. Completion does not invent structure
-through `Any`. Incomplete source can still provide navigation and diagnostics
-while distinguishing unknown, conflicting, and unevaluable states.
-
-## Design tradeoffs
-
-- **Compared with CUE**: Forma does not use unification as the foundational
-  semantics for constraints and composition. Types are data; validation and
-  composition policies are explicit functions.
-- **Compared with Dhall**: both value pure computation and reproducible
-  results. Dhall guarantees termination through strong normalization; Forma
-  permits recursion and bounds execution with fuel and resource quotas.
-- **Compared with Starlark**: both are suited to controlled execution inside a
-  host. Forma additionally makes type metadata available to ordinary
-  computation, with static tools and the runtime interpreting the same data.
-- **Compared with Nickel**: Nickel makes contracts, merging, and priorities
-  central configuration mechanisms. Forma favors expressing those policies as
-  library functions that can be inspected, replaced, and composed.
+- **Compared with CUE:** Forma does not make unification the foundational
+  semantics of constraints and composition. Policies are explicit functions
+  over data.
+- **Compared with Dhall:** both value pure, reproducible computation. Dhall
+  guarantees normalization; Forma permits recursion and supplies deterministic
+  fuel and resource boundaries.
+- **Compared with Starlark:** both support controlled hosted computation. Forma
+  additionally makes programmable type metadata, source provenance, partial
+  semantic facts, and editor feedback part of the core experiment.
+- **Compared with Nickel:** Nickel makes contracts, merging, and priorities
+  central configuration mechanisms. Forma keeps such policies in replaceable
+  libraries.
+- **Compared with a sandboxed scripting language:** Forma is not only bounded.
+  It unifies static data, transformation code, rules, runtime validation, and
+  tooling in one source-aware semantic model.
 
 Forma does not eliminate complexity. It tries to place domain complexity in
-libraries and data, where users can read, replace, and extend it, while
-keeping the language core small and consistent.
+ordinary libraries and data while keeping the trusted language semantics small
+and consistent.
 
-## Honest boundaries
+## Current Boundaries
 
-Forma is experimental. Today it has no effect system, package acquisition
-beyond path dependencies, traits, or type narrowing. Static
-inference explicitly reports when it does not know instead of guessing. These
-are deliberate boundaries: the project is testing the "types as metadata"
-hypothesis deeply before expanding its scope. The RFCs record the tradeoffs at
-each step, including the rejected alternatives.
+Forma is experimental. It has no language-level effects, ambient IO, dynamic
+imports, general package acquisition, traits, or type narrowing. Hosts may
+provide narrow adapters, but effects are not a deferred part of the language.
 
-The intended use cases follow from those boundaries: **expressing build rules,
-continuous reconciliation in Kubernetes operators, and reusable configuration
-packages**. In each case, a host needs to execute externally supplied logic
-deterministically and explain where both the data and the violated rule came
-from.
+The project has now demonstrated the central vertical path, including computed
+and recursive type metadata, derived codecs and schemas, recoverable workspace
+semantics, a language server, bounded rank-1 inference, safe dynamic
+observation, and user-space reference Equality and Show interpreters. It has
+not yet demonstrated production-scale hosts, long-term compatibility, or broad
+external use.
 
-## Try it
+Likely application domains include reusable configuration packages, build and
+toolchain planning, continuous reconciliation, policy-driven data pipelines,
+typed Agent plans, and host-driven Agent loops.
+
+## Try It
 
 ```sh
 cargo run -p forma -- check examples/mvp/main.forma
@@ -315,10 +257,9 @@ cargo run -p forma-lsp -- --help
 
 ## Documentation
 
-- [VISION.md](VISION.md): design thesis
-- [rfc/](rfc/): sixty-five design documents, each with rejected alternatives and
-  acceptance criteria
-- [README.zh.md](README.zh.md): 中文
+- [VISION.md](VISION.md): the design thesis and feature admission rule
+- [rfc/](rfc/): numbered design documents with acceptance evidence
+- [README.zh.md](README.zh.md): Chinese introduction
 
 ## Verification
 

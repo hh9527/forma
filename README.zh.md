@@ -1,22 +1,49 @@
 # Forma
 
-> Forma 原名 XL，发布后更名。设计演进的全过程记录在 [rfc/](rfc/)。
+> Forma 原名 XL，完整设计演进记录在 [rfc/](rfc/) 中。
 
-**Forma 是一门实验性语言，它想回答一个问题：当类型只是普通数据的时候，一门语言会变成什么样。**
+**Forma 是一门实验性语言：它在一个封闭、纯粹、确定且来源可追踪的世界中，提供可编程的数据转化与校验。**
 
-配置语言已经探索出几条成熟路线：CUE 以合一（unification）组织约束，Dhall 以强规范化换取可判定的执行边界，Starlark 提供受控的通用计算，Nickel 则把契约与配置合并作为核心抽象。这些选择各自解决了真实问题，也把相应的领域概念放进了语言机制。
+它试图回答：
 
-Forma 赌的是另一个方向：**领域语义应该住在数据里，语言只提供计算**。配置、校验、规范化、编解码、schema 生成——这些不是语言特性，而是普通函数对普通数据的普通操作。
+> 一门语言最小需要什么，才能同时提供通用的数据计算、有限的执行边界，以及一等的诊断与反馈？
 
-## 三个相互咬合的赌注
+Forma 位于静态配置和通用脚本之间。静态格式容易检查，但表达力有限；脚本语言可以编程，却通常具有开放世界、效果、环境隐式输入，也难以解释转换后的数据究竟来自哪里。给脚本增加 fuel 和 Host API 白名单可以限制破坏，却不会自动得到权威的语义模型、跨数据来源追踪、容错分析或精确的编辑器反馈。
 
-### 一种语言，两个阶段
+Forma 把这些诉求当作同一个设计问题。
 
-Forma 有工具阶段和程序阶段，但它们共享同一套值模型、同一个字节码 VM、同一份求值语义。没有独立的"类型层语言"，没有宏语言，没有编译期的第二套求值器。工具阶段跑的就是普通 Forma 代码——有燃料上限、有配额、确定性、可缓存。
+## 核心模型
 
-### 类型即元数据
+### 普通计算处理普通数据
 
-类型声明求值的结果不是只能由编译器访问的内部结构，而是普通的 Forma 数据：
+配置、校验、规范化、迁移、编解码、schema 生成和计划构造都不是语言特性，而是普通纯函数对不可变数据的操作。
+
+Forma 提供函数、闭包、递归、模式匹配、模块和较小的运行时数据模型。合并、默认值、优先级、编码等领域政策留在库中，可以被阅读、替换和组合。
+
+### 封闭且有界的世界
+
+模块路径静态可知，依赖预先固定，没有运行时 `eval`，真正的运行时输入只能通过 Host 显式提供的值进入。Forma、JSON、YAML 和 TOML 文件共同参与同一个不可变模块图。
+
+Forma 允许递归，但每次执行都有独立的 fuel、栈、调用深度和分配配额。在配置的边界内，执行会确定地产生一个值或一个结构化资源错误。失败工作被原子丢弃，不会把半完成状态发布到持久世界。
+
+### 诊断是一等公民
+
+源码位置会跟随值穿过导入、转化、元数据和 codec 规范化。校验失败可以同时指出数据和拒绝它的规则：
+
+```text
+user.yaml:4:8: expected Int
+  User.forma:3:10: requirement declared here
+```
+
+工作区中的 JSON、YAML 和 TOML 不是不透明的外部数据，而是一等源码模块。它们保留语法诊断和字段级来源，并参与依赖图与工作区分析。
+
+即使 Forma 源码尚不完整，导航、类型和诊断仍应保留有用信息。语义事实明确区分已知值、显式 `Any`、未知、冲突、依赖阻塞和工具阶段不可计算。补全不会为了显得聪明而虚构结构。
+
+反馈模型是语言实验的一部分，不是求值器完成后附加的编辑器功能。
+
+### 类型是可编程元数据
+
+类型声明求值为规范化的普通 Forma 数据：
 
 ```forma
 def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) {
@@ -26,40 +53,34 @@ def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) {
 type MaybeInt = Maybe(Int);
 ```
 
-`Maybe` 不是类型操作符，它是一个普通函数，在工具阶段被普通地调用，返回普通的数据。类型检查器不重新实现它的函数体——它解释这份数据。这意味着：
+`Maybe` 是由程序代码所使用的同一个 VM 求值的普通纯函数。类型检查器解释它的结果，而不是在隐藏的类型层语言中重新实现这个函数。
 
-- **类型可以被打印**：`debug.dbg(User)` 把你的类型原样打出来，因为它就是值
-- **类型可以被函数变换**：`Partial(User)`、`Array(User)` 都是函数调用
-- **类型知道自己描述谁**：`TypeOf(A)` 让 `decode(User, input)` 的类型是 `Result(User, BlameError)` 而不是 `Result(Any, Any)`——实例类型穿越边界，全程不丢
+同一份元数据可以驱动静态检查、LSP 信息、运行时校验、规范化、codec、文档、schema 生成和用户态解释器。`TypeOf(A)` 保留元数据见证与其所描述值之间的关系；受限的 `Dyn` 与 `interpreter(...)` 边界允许异质解释，但不提供不安全 cast。
 
-### 封闭世界
+类型是 Forma 的核心机制，但它服务于更上位的目标：让数据规则可编程，并获得权威且来源可追踪的反馈。
 
-模块路径静态可知，依赖固定，无运行时 `eval`，外部数据经显式边界进入。封闭世界不是限制，是杠杆：它让编译期求值可再生、让工具链能枚举全部代码、让"在别人的进程里安全地跑别人的配置"成为默认能力——每次执行有燃料、栈、分配、深度的独立配额，失败原子地丢弃，不污染共享世界。
+## 效果属于 Host
 
-## 这些理念长出了什么
+Forma 本身没有影响外部世界的权限。Host 提供显式的普通输入，并决定某个普通输出值是否具有外部意义：
 
-**局部多态只存在于静态层。** 未标注、由闭包字面量初始化的 `let` 可以推导出 rank-1 scheme，并在每次直接使用时独立实例化：
-
-```forma
-let identity = fn(value) { value };
-(identity(1), identity("text")) # (Int, String)
+```text
+外部世界
+    -> Host 冻结输入快照
+    -> 封闭的 Forma 计算
+    -> 普通输出值
+    -> Host 校验与授权
+    -> 外部世界
 ```
 
-运行时仍然只有一个闭包，不会生成一族函数。检查器只泛化非递归闭包字面量自己拥有的变量；别名只实例化一次，数值约束不会被抹成无约束参数，具有前向可见性的 `def` 组仍保持单态，除非显式写出 `for(...)` 契约。这个限制让类型推导足够实用，同时不会悄悄引入 higher-rank value 或多态递归。
+Forma 不定义通用 action ABI。进程启动器、构建系统、Kubernetes controller 或 Agent runtime 各自定义类型，只解释自己认识的值。权限、IO、重试、事务、时钟和观察永远属于 Host。
 
-**文本是否求值，一眼可见。** 双引号和 raw 形式是纯 String，执行表达式的 concat 使用反引号：
+`forma run`、`forma exec` 和 `forma build` 是具体的 Host adapter，不是语言级效果系统。当前 exec 和 build adapter 只校验并输出规范化计划，不执行计划所描述的效果。
 
-```forma
-let literal = "ordinary\nString";
-let raw = r##"quotes " and \slashes stay unchanged"##;
-let message = `hello \{name}`;
-let continued = "first \
-    second"; # "first second"
-```
+## 这些原则带来了什么
 
-raw String 最多接受 255 个成对的 `#`；转义 String 和 concat 文本支持 Rust 风格的 ASCII 与 Unicode scalar escape。普通数据与表达式因此在源码中明确分开，同时仍适合承载嵌入源码和多行文本。
+### 没有语言魔法的 codec 与 schema
 
-**Serde，但没有宏。** 装饰器是普通函数，属性是普通数据，codec 是元数据的普通解释器：
+Decorator 是函数，attribute 是数据，codec 是元数据解释器：
 
 ```forma
 import json from "@bim/std/json";
@@ -73,121 +94,69 @@ type User = {
 };
 ```
 
-字段重命名、默认值、扁平化、跳过条件——全部是库函数写在元数据上的标注，编解码器按同一份计划双向工作，JSON Schema 也从同一份计划生成。语言本身对这些词汇一无所知。
+字段改名、默认值、扁平化和 skip policy 都是库定义的元数据。编码与解码共享一份计划，JSON Schema 也由同一份计划生成。
 
-**会指路的错误信息。** 每个值都带着自己的源码位置旅行——穿过导入、变换、codec 归一化。校验失败时：
+### 确定的执行与输出计划
+
+执行入口是一个普通函数：
 
 ```text
-user.json:1:21: expected Int
-  User.forma:3:47: contract rule declared here
+Fn(ExecSettings, ExecRequest) -> ExecEnv
 ```
 
-错误同时标出数据位置和规则位置。Forma 的 `BlameError` 直接保留这两类来源，不需要为 codec 另建一套与值模型分离的诊断结构。
+Host 提供平台、安装前缀、环境、参数和工作目录。Forma 返回包含工件、路径、二进制、参数与环境的完整具体值。Host 不展开模板，也不重新解释政策。
 
-**可执行的计划。** Forma 可以表达一种能力更丰富的 DotSlash：入口模块是普通的纯函数 `Fn(ExecSettings, ExecRequest) -> ExecEnv`，宿主显式传入平台、安装前缀、环境、参数和工作目录，函数返回已经完全确定的执行计划。它可以选择多个工件，例如把平台相关的解释器与平台无关的运行时分别安装；可以用 `hash.sha256` 计算稳定的安装位置；也可以构造搜索路径、库路径和环境变量。
+构建入口同样返回 `Fn() -> build.OutputPlan`。adapter 校验规范化相对路径、拒绝重复目标并输出 canonical JSON。文本生成使用普通 String 与函数，而不是第二门模板语言。
 
-命令行改写同样属于这段纯计算。一个 gcc 或 rustc 启动器可以根据计算出的安装位置补充 sysroot 和平台相关搜索路径，注入 `source-prefix-map`，再改写用户传入的源文件参数。返回的 `ExecEnv` 已经包含最终的 bin、args、env 和路径：宿主不展开模板、不替换变量，也不重新解释策略。这里没有特殊的上下文模块或启动器语法，只有显式参数、普通函数和类型化数据；内外世界的连接点因此很薄。
+### 静态数据也是源码
 
-效果边界可以由一组普通的 Forma 类型表达。安装方式是可扩展的枚举，`ExecEnv` 则只包含效果层需要消费的最终值：
+JSON、TOML 和 YAML 模块与 Forma 代码进入同一个不可变模块图。TOML 的时间类型保留为不同的 tagged representation。YAML 保守遵循 1.2 Core Schema：旧式隐式布尔值和时间戳仍是 String，mapping key 必须是 String，并拒绝 custom tag 与 merge key。存在歧义的格式行为会被拒绝，或交给显式库政策处理。
+
+### 保守的局部多态
+
+未标注、由闭包字面量初始化的 `let` 可以推导 rank-1 scheme：
 
 ```forma
-@enum type UnpackType = {
-    TarGzip: 'None,
-    Tar: 'None,
-};
-
-@struct type UnpackOpt = {
-    dest: String,
-    ty: UnpackType,
-    src: String,
-    strip: Int,
-    digest: Option(String),
-};
-
-@enum type Install = {
-    Unpack: UnpackOpt,
-};
-
-@struct type ExecEnv = {
-    install: Array(Install),
-    cwd: Option(String),
-    bin: String,
-    args: Array(String),
-    env: Dict(String),
-};
+let identity = fn(value) { value };
+(identity(1), identity("text")) # (Int, String)
 ```
 
-`Dict(String)` 表示键名动态、值均为 String 的字典，与字段固定的 Struct 不同。整份协议只使用现有的 TypeMetadata，仍然只是普通数据，不会增加专用的安装语句或命令行改写语法。
+推断刻意保持有界。别名只实例化一次；递归组在没有显式契约时保持单态；数值约束不会被抹成无约束参数。Forma 宁可给出明确的未知或诊断，也不发布不稳定的精确信息。
 
-例如，一个可再生的 gcc 启动计划可以完整地写成：
+## Agentic 系统
 
-```forma
-#!/usr/bin/env -S forma exec --dry-run
+机器生成程序使 Forma 的约束更有价值。生成已经廉价，可信反馈和受控的外部意义仍然稀缺。
 
-import arrays from "@bim/std/array";
-import exec from "@bim/std/exec";
-import hash from "@bim/std/hash";
+Forma 可以成为类型化、来源可追踪的 Plan IR。Agent 生成或修改一个纯程序；Forma 返回完整计划值；Host 可以在产生任何效果之前校验、比较、review、签名或拒绝它。计划中的 action 词汇仍是 Host 定义的普通数据。
 
-type ExecSettings = exec.ExecSettings;
-type ExecRequest = exec.ExecRequest;
-type ExecEnv = exec.ExecEnv;
+Forma 也可以定义 Host 驱动 loop 的一个纯步骤：
 
-let main: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
-    let platform = `\{settings.platform.os}-\{settings.platform.arch}`;
-    let toolchain_url = `https://example.invalid/gcc-\{platform}.tar.gz`;
-    let sysroot_url = `https://example.invalid/sysroot-\{platform}.tar.gz`;
-    let toolchain = `\{settings.install_prefix}/\{hash.sha256(`gcc:\{toolchain_url}:unpack-v1`)}`;
-    let sysroot = `\{settings.install_prefix}/\{hash.sha256(`sysroot:\{sysroot_url}:unpack-v1`)}`;
-    let args: Array(String) = arrays.flat_map([
-        [
-            `--sysroot=\{sysroot}`,
-            `-isystem\{sysroot}/usr/include`,
-            `-ffile-prefix-map=\{request.cwd}=.`,
-        ],
-        request.args,
-    ], fn(part) { part });
-
-    {
-        install: [
-            'Unpack({dest: toolchain, ty: 'TarGzip, src: toolchain_url, strip: 1, digest: 'None}),
-            'Unpack({dest: sysroot, ty: 'TarGzip, src: sysroot_url, strip: 1, digest: 'None}),
-        ],
-        bin: `\{toolchain}/bin/gcc`,
-        args: args,
-        env: {FORMA_SYSROOT: sysroot},
-        cwd: 'Some(request.cwd),
-    }
-};
-
-main
+```text
+Context x State x Observation
+    -> Result(LoopDecision(State, Plan, Output), BlameError)
 ```
 
-`Unpack` 自己携带 `src`，因此协议不需要单独的 download 动作。效果层可以根据 `src` 和可选的 `digest` 自行获取、缓存并校验工件，最后解包到已经确定的 `dest`。
+Host 拥有观察、持久化、时间、效果、重试、审批和整个 loop 的预算。Forma 只计算一次确定且有限有界的状态转移。诊断可以同时指向 Agent 生成的 Forma、JSON/YAML/TOML 中的源值以及拒绝它的规则，由此形成精确的修复和审计闭环。
 
-当前的 `forma exec --dry-run` 只校验并输出这份计划，不下载、不安装，也不启动进程。即便效果层尚未实现，所有确定性决策已经可以被审查、纳入版本控制并独立测试。未来的宿主只需消费这份具体计划并执行效果。同一边界也适用于构建规则和 K8s 调谐：**纯函数生成计划，宿主执行效果**。
-
-同一边界现在也覆盖生成文本。模块可以返回 `Fn() -> build.OutputPlan`，声明有序的 `TextFile` artifact；`forma build --dry-run` 校验规范化的相对路径、拒绝重复目标，并在不写入任何文件的情况下输出 canonical JSON。raw String 和 concat 负责源码文本，`@bim/std/string` 提供行拆分/连接、缩进、显式 margin 裁剪和尾随换行规范化。这里没有第二门模板语言，也没有隐式布局状态。
-
-标准库直接服务于这个纯计算世界：泛型 Array 操作可以组合类型化集合并短路遍历；String 操作保证 UTF-8 安全；纯词法路径使用确定的 `/` 语义，不观察宿主文件系统；同构 Dict combinator 在映射和过滤后仍保留 `Dict<T>`。它们都是带显式契约的普通导入函数，不是启动器魔法。
-
-JSON、TOML 和 YAML 文件可以像源码一样进入同一个不可变模块图。TOML table 变成普通 Dict，四种时间标量则通过 `@bim/std/toml.DateTime` 保留为经过校验、类别明确的 Tagged String。YAML 保守地采用 1.2 Core Schema：旧式隐式布尔值和时间戳仍是 String，mapping key 必须是 String，并拒绝 custom tag 和 merge key。codec 失败时同时保留外部数据位置，以及施加约束的 Forma 类型声明位置。
-
-**一个保守的语言服务器。** 悬停看到的类型来自与运行时校验相同的元数据；遇到 `Any` 时，补全不会推测不存在的结构；残缺的源码仍然可以产生导航和诊断，并明确区分"未知、冲突、不可计算"等状态。
+这些用途不需要 Agent 专用语法，也不会赋予 Forma 新的权限。
 
 ## 设计取舍
 
-- **与 CUE 相比**：Forma 不以合一作为约束与组合的基础语义。类型是数据，校验和组合策略是显式函数。
-- **与 Dhall 相比**：两者都重视纯计算和可再生结果；Dhall 通过强规范化保证终止，Forma 允许递归并用执行燃料和资源配额建立边界。
-- **与 Starlark 相比**：两者都适合在宿主中执行受控代码；Forma 进一步让类型元数据参与普通计算，并让静态工具和运行时解释同一份元数据。
-- **与 Nickel 相比**：Nickel 把契约、合并和优先级作为配置领域的核心机制；Forma 倾向于把这些策略表达成可以检查、替换和组合的库函数。
+- **与 CUE 相比：**Forma 不以合一作为约束与组合的基础语义，政策是对数据的显式函数。
+- **与 Dhall 相比：**两者都重视纯粹、可重放的计算；Dhall 保证规范化，Forma 允许递归，并提供确定的 fuel 与资源边界。
+- **与 Starlark 相比：**两者都支持受控的宿主计算；Forma 还把可编程类型元数据、来源、部分语义事实和编辑器反馈纳入核心实验。
+- **与 Nickel 相比：**Nickel 把契约、合并和优先级作为配置核心机制；Forma 把这些政策留在可替换的库中。
+- **与沙箱脚本相比：**Forma 不仅有执行边界，还把静态数据、转化代码、规则、运行时校验和工具统一在一个来源可追踪的语义模型中。
 
-Forma 的取舍不是消除复杂度，而是尽量把领域复杂度放进库和数据。库可以被阅读、替换和扩展，语言核心则保持较小且一致。
+Forma 不会消除复杂度。它试图把领域复杂度留在普通库和数据中，让可信的语言语义保持较小且一致。
 
-## 诚实的边界
+## 当前边界
 
-Forma 是实验品。它今天没有效果系统、没有包获取（只有路径依赖）、没有 trait、没有类型收窄。静态推断宁可显式说"不知道"，也不猜测。这些不是疏忽，是刻意：先把"类型即元数据"这一个假设验证到根，再谈扩张。RFC 记录了每一步的取舍——包括每个被拒绝的替代方案。
+Forma 仍是实验品。它没有语言级效果、环境隐式 IO、动态导入、通用包获取、trait 或类型收窄。Host 可以提供狭窄 adapter，但效果并不是一项等待加入语言的功能。
 
-Forma 面向的场景也由此变得清晰：**构建规则的表达、K8s operator 的持续调谐、可复用的配置包**——宿主需要确定地执行外部提供的逻辑，并在失败时解释数据与规则来自何处。
+项目已经证明了核心纵向路径，包括可计算和递归类型元数据、派生 codec 与 schema、容错工作区语义、语言服务器、有界 rank-1 推断、安全动态观察，以及用户态参考 Equality 和 Show 解释器。它尚未证明生产规模 Host、长期兼容性或广泛外部使用。
+
+可能的应用包括可复用配置包、构建与工具链计划、持续调谐、政策驱动的数据管道、类型化 Agent Plan，以及 Host 驱动的 Agent Loop。
 
 ## 试一试
 
@@ -200,8 +169,8 @@ cargo run -p forma-lsp -- --help
 
 ## 文档
 
-- [VISION.md](VISION.md)：设计命题
-- [rfc/](rfc/)：65 份设计文档，每份含被拒方案与验收标准
+- [VISION.md](VISION.md)：设计命题与功能准入原则
+- [rfc/](rfc/)：带有验收证据的编号设计文档
 - [README.md](README.md)：English
 
 ## 验证
