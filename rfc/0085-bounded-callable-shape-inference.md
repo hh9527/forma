@@ -1,6 +1,6 @@
 # RFC 0085: Bounded callable-shape inference
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0080 through RFC 0084
 - Tracking issue: https://github.com/hh9527/forma/issues/3
 
@@ -229,3 +229,26 @@ shared criteria and an implementation-result section records any narrowed
 semantics. Adding field-shape inference, capabilities, subtyping, overloads,
 or higher-rank behavior requires a separate RFC rather than an implementation
 note.
+
+## Implementation result
+
+RFCs 0086 through 0088 implemented the bounded phase without crossing any
+stopping rule. One production inference step was sufficient: an unbound callee
+variable is bound to a fresh, exact-arity Function descriptor before entering
+the existing Function-call checker.
+
+Repeated calls, aliases, composition, and called call-results converge through
+the existing finite substitution graph. RFC 0087 required adversarial tests but
+no new solver mechanism. In particular, the phase added no worklist,
+backtracking, overload candidate, subtyping relation, open structural shape,
+trait search, or runtime representation.
+
+RFC 0088 separated completed non-callable descriptors from explicit `Any`.
+Static non-callable calls now fail with a descriptor-bearing diagnostic;
+authored dynamic calls retain their existing runtime behavior. Definition
+schemes and monomorphic call facts use the publication boundaries already
+audited by RFC 0084.
+
+The phase deliberately leaves field-shape inference and parameterized
+capabilities undesigned. Neither was needed to complete callable inference.
+Full workspace tests and strict static checks pass.

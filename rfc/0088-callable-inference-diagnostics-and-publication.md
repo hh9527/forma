@@ -1,6 +1,6 @@
 # RFC 0088: Callable-inference diagnostics and publication
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0086, RFC 0087
 - Tracking issue: https://github.com/hh9527/forma/issues/3
 
@@ -162,3 +162,20 @@ different problem.
 
 A provisional shell can have unresolved parameters or contradictory later
 uses. Existing atomic publication rules remain authoritative.
+
+## Implementation result
+
+Implemented by splitting the ordinary call checker's former fallback. Explicit
+`Any` still analyzes arguments and returns `Any`; every other completed
+non-Function and non-Atom descriptor analyzes its arguments and then reports
+`cannot call value of type ...`. Function and Atom paths are unchanged.
+
+Regression coverage includes Int, String, Array, Struct, and `TypeOf(Int)`
+callees; explicit dynamic calls; inferred-Function arity; module-interface
+scheme publication; binding facts; and concrete call-expression facts. The
+existing workspace recovery, cancellation, stale-revision, CLI, and LSP suites
+exercise the shared RFC 0084 publication machinery used by callable inference.
+
+No existing test required migration to `Any`, confirming that accepted dynamic
+call boundaries were already explicit. Full workspace tests and strict Clippy,
+formatting, and diff checks pass without bytecode or VM changes.

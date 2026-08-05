@@ -4831,11 +4831,20 @@ impl<'a> GenericInference<'a> {
                         }
                         result
                     }
-                    _ => {
+                    TypeDescriptor::Any => {
                         for argument in arguments {
                             self.infer(argument, environment, None)?;
                         }
                         TypeDescriptor::Any
+                    }
+                    descriptor => {
+                        for argument in arguments {
+                            self.infer(argument, environment, None)?;
+                        }
+                        return Err(format!(
+                            "cannot call value of type {}",
+                            descriptor.display_name()
+                        ));
                     }
                 }
             }
@@ -6517,7 +6526,12 @@ mod tests {
         let mut sources = SourceDatabase::default();
         let source_id = sources.add("generic-native.forma", source);
         let parsed = parse_registered(&sources, source_id);
-        let program = parsed.program.expect("generic native source parses");
+        let program = parsed.program.unwrap_or_else(|| {
+            panic!(
+                "generic native source parses: {source:?}: {:?}",
+                parsed.diagnostics
+            )
+        });
         let external_values = natives
             .iter()
             .map(|(name, arity)| {
@@ -7085,6 +7099,58 @@ mod tests {
         )
         .unwrap();
         assert_eq!(executed.display(executed.result_type), "String");
+    }
+
+    #[test]
+    fn callable_diagnostics_distinguish_static_values_from_explicit_any() {
+        for (source, expected) in [
+            ("let value = 1; value(2)", "Int"),
+            ("let value = \"text\"; value(1)", "String"),
+            ("let value = [1]; value(2)", "Array<Int>"),
+            ("let value = {item: 1}; value(2)", "{item: Int}"),
+            ("let value = Int; value(1)", "TypeOf(Int)"),
+        ] {
+            let error = analyze_with_natives(source, &[]).unwrap_err();
+            assert_eq!(
+                error.message,
+                format!("cannot call value of type {expected}")
+            );
+        }
+
+        let dynamic =
+            analyze_with_natives("let callable: Any = fn(value) { value }; callable(1)", &[])
+                .unwrap();
+        assert_eq!(dynamic.display(dynamic.result_type), "Any");
+
+        let arity = analyze_with_natives(
+            "let invoke = fn(callback) { (callback(1), callback(1, 2)) }; invoke",
+            &[],
+        )
+        .unwrap_err();
+        assert!(arity.message.contains("call expects 1 arguments, found 2"));
+    }
+
+    #[test]
+    fn inferred_callable_schemes_publish_separately_from_call_instances() {
+        let source = "let apply = fn(callback, value) { callback(value) };\
+                      let result = apply(fn(value) { value + 1 }, 41);\
+                      {apply: apply, result: result}";
+        let analysis = analyze_with_natives(source, &[]).unwrap();
+        assert_eq!(
+            analysis.module_interface.exports["apply"].display_name(),
+            "for(A, B) Fn(Fn(A) -> B, A) -> B"
+        );
+        assert_eq!(analysis.display(analysis.binding_types["result"]), "Int");
+
+        let call_start = source.find("apply(fn").unwrap();
+        let call = analysis
+            .hir
+            .expressions()
+            .iter()
+            .filter(|expression| expression.location.range().start == call_start)
+            .max_by_key(|expression| expression.location.range().end)
+            .unwrap();
+        assert_eq!(analysis.display(analysis.expression_types[&call.id]), "Int");
     }
 
     #[test]
