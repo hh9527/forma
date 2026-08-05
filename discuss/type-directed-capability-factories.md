@@ -32,9 +32,10 @@ library API, automatic derivation, or an implementation.
 
 The execution model is refined in
 `user-space-type-metadata-interpreters.md`. A type-directed factory does not
-generate code: it wraps a user-space TypeMetadata interpreter in a typed outer
-Function. That companion discussion defines the intended native/Forma parity,
-open-recursion dispatcher, fallback boundary, and current implementation gaps.
+generate code: the contextual `interpreter` keyword lifts an ordinary erased
+Forma interpreter into a typed outer Function. That companion discussion
+defines the intended native/Forma parity, explicit `$ref` model, opaque `Dyn`
+observation boundary, and current implementation gaps.
 
 ## Core observation
 
@@ -232,24 +233,23 @@ eq_fn(User) == eq_fn(User)
 being true unless a future API explicitly promises interning. Behavioral laws,
 not closure identity, define the capability.
 
-The factory may precompute a plan once and return a closure capturing that
-plan. This mirrors codec/schema planning while keeping invocation typed and
-ordinary.
+An optimized native factory may precompute a plan once and return a closure
+capturing that plan. This mirrors codec/schema planning while keeping
+invocation typed and ordinary. The initial user-space model does not require a
+plan: it recursively interprets a finite value together with `TypeDesc`.
 
 ## Recursive types
 
-Recursive TypeMetadata can produce a recursive capability plan, but factory
-construction must avoid eagerly expanding metadata forever. The existing
-codec/schema machinery suggests the appropriate implementation shape:
+The public descriptor is a finite graph with explicit `$ref` nodes. User-space
+interpreters do not eagerly expand it into a capability plan: they follow a
+finite runtime value and its matching descriptor together using ordinary Forma
+recursion. Because Forma has no cyclic runtime values today, the initial model
+needs neither visited sets nor framework-owned memoization.
 
-1. allocate or identify a plan node for the current metadata root;
-2. memoize it before descending;
-3. connect recursive references to the existing node; and
-4. seal the plan before returning the typed closure.
-
-Runtime cyclic values are a separate question. Structural equality already
-defines cycle behavior; a future hash contract must explicitly define it rather
-than inherit an accidental traversal limit.
+Functions are leaves in the first data-interpreter view; their parameter and
+result descriptors are not traversed. Runtime cycles and Function-signature
+reflection remain separate future questions rather than implicit requirements
+of capability construction.
 
 ## Capability bundles
 
@@ -340,9 +340,10 @@ Parameterized capability bundles remain a possible later motivation for
 parameterized data types, not evidence that Forma currently needs traits.
 
 The factory is only the typed adapter. Its usefulness depends on the companion
-interpreter ABI giving Forma code enough logical Value observation and nested
-recursion to define semantics comparable to native interpreters. Native-only
-derivation with a typed wrapper is not the full user-extensibility goal.
+interpreter ABI giving Forma code safe `TypeDesc` and opaque `Dyn` observation,
+explicit recursive references, and checked leaf projection. Nested traversal
+is ordinary Forma recursion; native-only derivation with a typed wrapper is not
+the full user-extensibility goal.
 
 ## Open questions
 
