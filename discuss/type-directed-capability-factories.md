@@ -30,6 +30,12 @@ parameter types are now known.
 This document explores that model. It does not propose syntax, a standard
 library API, automatic derivation, or an implementation.
 
+The execution model is refined in
+`user-space-type-metadata-interpreters.md`. A type-directed factory does not
+generate code: it wraps a user-space TypeMetadata interpreter in a typed outer
+Function. That companion discussion defines the intended native/Forma parity,
+open-recursion dispatcher, fallback boundary, and current implementation gaps.
+
 ## Core observation
 
 Forma already has the connection that a trait system would otherwise need to
@@ -332,6 +338,11 @@ should return `Result` rather than claim a capability for every `A`.
 
 Parameterized capability bundles remain a possible later motivation for
 parameterized data types, not evidence that Forma currently needs traits.
+
+The factory is only the typed adapter. Its usefulness depends on the companion
+interpreter ABI giving Forma code enough logical Value observation and nested
+recursion to define semantics comparable to native interpreters. Native-only
+derivation with a typed wrapper is not the full user-extensibility goal.
 
 ## Open questions
 

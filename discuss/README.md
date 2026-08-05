@@ -13,5 +13,7 @@ Current discussions:
 - `typed-accumulation-channels.md`: caller-selected typed accumulation;
 - `type-directed-capability-factories.md`: deriving typed `Eq`/`Hash`-like
   functions from `TypeOf(A)` without trait resolution; and
+- `user-space-type-metadata-interpreters.md`: open-recursion interpreter ABI,
+  native/Forma parity, fallback, and reflection gaps; and
 - `adversarial-validation-gaps-rank1-inference.md`: completed review inventory
   retained as validation history.
