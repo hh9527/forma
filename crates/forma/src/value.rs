@@ -136,6 +136,7 @@ pub(crate) enum CoreArrayFunction {
     Filter,
     FlatMap,
     Fold,
+    FoldControl,
     Any,
     All,
     Find,
@@ -230,6 +231,7 @@ impl CoreModelFunction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CoreBuiltinTypeFunction {
+    FoldControl,
     Option,
     Result,
 }
@@ -237,6 +239,7 @@ pub(crate) enum CoreBuiltinTypeFunction {
 impl CoreBuiltinTypeFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
+            Self::FoldControl => "FoldControl",
             Self::Option => "Option",
             Self::Result => "Result",
         }
@@ -245,7 +248,7 @@ impl CoreBuiltinTypeFunction {
     pub(crate) const fn arity(self) -> usize {
         match self {
             Self::Option => 1,
-            Self::Result => 2,
+            Self::FoldControl | Self::Result => 2,
         }
     }
 }
@@ -254,6 +257,21 @@ impl CoreBuiltinTypeFunction {
 pub(crate) enum CoreDebugFunction {
     Dbg,
     DbgWith,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreEqFunction {
+    Equal,
+}
+
+impl CoreEqFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        "@bim/std/eq.equal"
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        2
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -523,6 +541,7 @@ impl CoreArrayFunction {
             Self::Filter => "@bim/std/array.filter",
             Self::FlatMap => "@bim/std/array.flat_map",
             Self::Fold => "@bim/std/array.fold",
+            Self::FoldControl => "@bim/std/array.fold_control",
             Self::Any => "@bim/std/array.any",
             Self::All => "@bim/std/array.all",
             Self::Find => "@bim/std/array.find",
@@ -534,7 +553,7 @@ impl CoreArrayFunction {
             Self::Length | Self::Concat => 1,
             Self::Zip => 2,
             Self::Map | Self::Filter | Self::FlatMap | Self::Any | Self::All | Self::Find => 2,
-            Self::Fold => 3,
+            Self::Fold | Self::FoldControl => 3,
         }
     }
 }
@@ -554,6 +573,7 @@ pub(crate) enum NativeKind {
     CoreCodec(CoreCodecFunction),
     CoreTypeDesc(CoreTypeDescFunction),
     CoreDyn(CoreDynFunction),
+    CoreEq(CoreEqFunction),
     CoreResult(CoreResultFunction),
     CoreJson(CoreJsonFunction),
 }
@@ -681,6 +701,15 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreDyn(function),
+        }
+    }
+
+    pub(crate) const fn core_eq(function: CoreEqFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreEq(function),
         }
     }
 

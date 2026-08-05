@@ -155,3 +155,16 @@ module-loader cleanup, not an interpreter requirement.
 
 Full Forma tests pass with 287 passed and 1 ignored; all 13 CLI and 20 LSP tests
 pass, and strict workspace Clippy reports no warnings.
+
+## Amendment: standard placement
+
+RFC 0095 retains this implementation as the executable reference interpreter
+at `examples/reference-equality.forma`, rather than as the production standard
+equality module. `==` remains authoritative and `@bim/std/eq.equal` provides
+the same VM behavior as a first-class Function. The reference interpreter now
+uses `array.fold_control` for immediate inequality and blame exits.
+
+Accordingly, `@bim/std/equality`, its duplicated native declarations, and its
+legacy core export exception have been removed. This RFC's capability proof and
+supported reflection boundary remain implemented; only its standard-library
+placement was superseded.

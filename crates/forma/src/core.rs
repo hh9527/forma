@@ -1,7 +1,7 @@
 use crate::value::{
     CoreArrayFunction, CoreAttributesFunction, CoreCodecFunction, CoreDebugFunction,
-    CoreDictFunction, CoreDynFunction, CoreHashFunction, CoreJsonFunction, CorePathFunction,
-    CoreResultFunction, CoreStringFunction, CoreTypeDescFunction, NativeFunction,
+    CoreDictFunction, CoreDynFunction, CoreEqFunction, CoreHashFunction, CoreJsonFunction,
+    CorePathFunction, CoreResultFunction, CoreStringFunction, CoreTypeDescFunction, NativeFunction,
 };
 
 pub(crate) const ARRAY_MODULE: &str = "@bim/std/array";
@@ -20,7 +20,7 @@ pub(crate) const PATH_MODULE: &str = "@bim/std/path";
 pub(crate) const TOML_MODULE: &str = "@bim/std/toml";
 pub(crate) const TYPE_DESC_MODULE: &str = "@bim/std/type-desc";
 pub(crate) const DYN_MODULE: &str = "@bim/std/dyn";
-pub(crate) const EQUALITY_MODULE: &str = "@bim/std/equality";
+pub(crate) const EQ_MODULE: &str = "@bim/std/eq";
 
 pub(crate) struct CoreModuleSpec {
     pub(crate) name: &'static str,
@@ -30,6 +30,14 @@ pub(crate) struct CoreModuleSpec {
 
 pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
     vec![
+        CoreModuleSpec {
+            name: EQ_MODULE,
+            source: r#"
+native equal: for(A) Fn(A, A) -> Bool;
+{ equal: equal }
+"#,
+            functions: vec![("equal", NativeFunction::core_eq(CoreEqFunction::Equal))],
+        },
         CoreModuleSpec {
             name: DYN_MODULE,
             source: r#"
@@ -143,266 +151,6 @@ native resolve: Fn(Type) -> Result(Type, BlameError);
             ],
         },
         CoreModuleSpec {
-            name: EQUALITY_MODULE,
-            source: r#"
-@enum type TypeDescKind = {
-    Any: 'None, Never: 'None, Type: 'None, TypeOf: 'None,
-    Int: 'None, Float: 'None, String: 'None, Bytes: 'None,
-    Atom: 'None, Array: 'None, Dict: 'None, Tagged: 'None,
-    Tuple: 'None, Struct: 'None, Enum: 'None, Union: 'None,
-    Function: 'None, WithAttributes: 'None, Bound: 'None, Dyn: 'None, Ref: 'None,
-};
-native array_fold: for(A, B) Fn(Array(A), B, Fn(B, A) -> B) -> B;
-native array_zip: for(A, B) Fn(Array(A), Array(B)) -> Option(Array(Tuple(A, B)));
-native desc_kind: Fn(Type) -> TypeDescKind;
-native desc_children: Fn(Type) -> Array(Type);
-native desc_resolve: Fn(Type) -> Result(Type, BlameError);
-native dyn_desc: Fn(Dyn) -> Type;
-native dyn_check_int: Fn(Dyn) -> Option(Int);
-native dyn_check_float: Fn(Dyn) -> Option(Float);
-native dyn_check_string: Fn(Dyn) -> Option(String);
-native dyn_check_bytes: Fn(Dyn) -> Option(Bytes);
-native dyn_fields: Fn(Dyn) -> Result(Array(Tuple(String, Dyn)), BlameError);
-native dyn_array_items: Fn(Dyn) -> Result(Array(Dyn), BlameError);
-native dyn_tuple_items: Fn(Dyn) -> Result(Array(Dyn), BlameError);
-native dyn_tag: Fn(Dyn) -> Result(String, BlameError);
-native dyn_payload: Fn(Dyn) -> Result(Option(Dyn), BlameError);
-let desc = {kind: desc_kind, children: desc_children, resolve: desc_resolve};
-let dyn = {
-    desc: dyn_desc,
-    check_int: dyn_check_int,
-    check_float: dyn_check_float,
-    check_string: dyn_check_string,
-    check_bytes: dyn_check_bytes,
-    fields: dyn_fields,
-    array_items: dyn_array_items,
-    tuple_items: dyn_tuple_items,
-    tag: dyn_tag,
-    payload: dyn_payload,
-};
-
-def blame: Fn(Dyn, String) -> Result(Bool, BlameError) = fn(value, message) {
-    'Err({data: value, rule: "equality", message: message})
-};
-
-def logical_kind: Fn(Type) -> TypeDescKind = fn(ty) {
-    match desc.kind(ty) {
-        'WithAttributes => array_fold(desc.children(ty), 'Any, fn(ignored, child) {
-            logical_kind(child)
-        }),
-        'Ref => match desc.resolve(ty) {
-            'Ok(target) => logical_kind(target),
-            'Err(_) => 'Ref,
-        },
-        kind => kind,
-    }
-};
-
-def equal_options: Fn(Option(Dyn), Option(Dyn)) -> Result(Bool, BlameError) =
-    fn(left, right) {
-        match left {
-            'None => match right { 'None => 'Ok('True), 'Some(_) => 'Ok('False) },
-            'Some(left_value) => match right {
-                'None => 'Ok('False),
-                'Some(right_value) => equal_dyn(left_value, right_value),
-            },
-        }
-    };
-
-def equal_items: Fn(Array(Dyn), Array(Dyn)) -> Result(Bool, BlameError) =
-    fn(left, right) {
-        match array_zip(left, right) {
-            'None => 'Ok('False),
-            'Some(pairs) => array_fold(pairs, 'Ok('True), fn(state, pair) {
-                match state {
-                    'Err(error) => 'Err(error),
-                    'Ok('False) => 'Ok('False),
-                    'Ok('True) => match pair {
-                        (left_value, right_value) => equal_dyn(left_value, right_value),
-                    },
-                }
-            }),
-        }
-    };
-
-def equal_fields:
-    Fn(Array(Tuple(String, Dyn)), Array(Tuple(String, Dyn))) -> Result(Bool, BlameError) =
-    fn(left, right) {
-        match array_zip(left, right) {
-            'None => 'Ok('False),
-            'Some(pairs) => array_fold(pairs, 'Ok('True), fn(state, pair) {
-                match state {
-                    'Err(error) => 'Err(error),
-                    'Ok('False) => 'Ok('False),
-                    'Ok('True) => match pair {
-                        ((left_name, left_value), (right_name, right_value)) => {
-                            if left_name == right_name {
-                                equal_dyn(left_value, right_value)
-                            } else {
-                                'Ok('False)
-                            }
-                        },
-                    },
-                }
-            }),
-        }
-    };
-
-def equal_tagged: Fn(Dyn, Dyn) -> Result(Bool, BlameError) = fn(left, right) {
-    match dyn.tag(left) {
-        'Err(error) => 'Err(error),
-        'Ok(left_tag) => match dyn.tag(right) {
-            'Err(error) => 'Err(error),
-            'Ok(right_tag) => if left_tag == right_tag {
-                match dyn.payload(left) {
-                    'Err(error) => 'Err(error),
-                    'Ok(left_payload) => match dyn.payload(right) {
-                        'Err(error) => 'Err(error),
-                        'Ok(right_payload) => equal_options(left_payload, right_payload),
-                    },
-                }
-            } else {
-                'Ok('False)
-            },
-        },
-    }
-};
-
-def equal_dyn: Fn(Dyn, Dyn) -> Result(Bool, BlameError) = fn(left, right) {
-    let left_kind = logical_kind(dyn.desc(left));
-    let right_kind = logical_kind(dyn.desc(right));
-    if left_kind == right_kind {
-        match left_kind {
-            'Int => match dyn.check_int(left) {
-                'None => blame(left, "invalid Int package"),
-                'Some(a) => match dyn.check_int(right) {
-                    'None => blame(right, "invalid Int package"),
-                    'Some(b) => 'Ok(a == b),
-                },
-            },
-            'Float => match dyn.check_float(left) {
-                'None => blame(left, "invalid Float package"),
-                'Some(a) => match dyn.check_float(right) {
-                    'None => blame(right, "invalid Float package"),
-                    'Some(b) => 'Ok(a == b),
-                },
-            },
-            'String => match dyn.check_string(left) {
-                'None => blame(left, "invalid String package"),
-                'Some(a) => match dyn.check_string(right) {
-                    'None => blame(right, "invalid String package"),
-                    'Some(b) => 'Ok(a == b),
-                },
-            },
-            'Bytes => match dyn.check_bytes(left) {
-                'None => blame(left, "invalid Bytes package"),
-                'Some(a) => match dyn.check_bytes(right) {
-                    'None => blame(right, "invalid Bytes package"),
-                    'Some(b) => 'Ok(a == b),
-                },
-            },
-            'Array => match dyn.array_items(left) {
-                'Err(error) => 'Err(error),
-                'Ok(left_items) => match dyn.array_items(right) {
-                    'Err(error) => 'Err(error),
-                    'Ok(right_items) => equal_items(left_items, right_items),
-                },
-            },
-            'Tuple => match dyn.tuple_items(left) {
-                'Err(error) => 'Err(error),
-                'Ok(left_items) => match dyn.tuple_items(right) {
-                    'Err(error) => 'Err(error),
-                    'Ok(right_items) => equal_items(left_items, right_items),
-                },
-            },
-            'Struct => match dyn.fields(left) {
-                'Err(error) => 'Err(error),
-                'Ok(left_fields) => match dyn.fields(right) {
-                    'Err(error) => 'Err(error),
-                    'Ok(right_fields) => equal_fields(left_fields, right_fields),
-                },
-            },
-            'Dict => match dyn.fields(left) {
-                'Err(error) => 'Err(error),
-                'Ok(left_fields) => match dyn.fields(right) {
-                    'Err(error) => 'Err(error),
-                    'Ok(right_fields) => equal_fields(left_fields, right_fields),
-                },
-            },
-            'Atom => equal_tagged(left, right),
-            'Tagged => equal_tagged(left, right),
-            'Enum => equal_tagged(left, right),
-            kind => blame(left, `unsupported equality descriptor: \{kind}`),
-        }
-    } else {
-        'Ok('False)
-    }
-};
-
-def equal:
-    for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Result(Bool, BlameError) =
-    interpreter(equal_dyn);
-
-{ equal: equal, equal_dyn: equal_dyn }
-"#,
-            functions: vec![
-                (
-                    "array_fold",
-                    NativeFunction::core_array(CoreArrayFunction::Fold),
-                ),
-                (
-                    "array_zip",
-                    NativeFunction::core_array(CoreArrayFunction::Zip),
-                ),
-                (
-                    "desc_kind",
-                    NativeFunction::core_type_desc(CoreTypeDescFunction::Kind),
-                ),
-                (
-                    "desc_children",
-                    NativeFunction::core_type_desc(CoreTypeDescFunction::Children),
-                ),
-                (
-                    "desc_resolve",
-                    NativeFunction::core_type_desc(CoreTypeDescFunction::Resolve),
-                ),
-                ("dyn_desc", NativeFunction::core_dyn(CoreDynFunction::Desc)),
-                (
-                    "dyn_check_int",
-                    NativeFunction::core_dyn(CoreDynFunction::CheckInt),
-                ),
-                (
-                    "dyn_check_float",
-                    NativeFunction::core_dyn(CoreDynFunction::CheckFloat),
-                ),
-                (
-                    "dyn_check_string",
-                    NativeFunction::core_dyn(CoreDynFunction::CheckString),
-                ),
-                (
-                    "dyn_check_bytes",
-                    NativeFunction::core_dyn(CoreDynFunction::CheckBytes),
-                ),
-                (
-                    "dyn_fields",
-                    NativeFunction::core_dyn(CoreDynFunction::Fields),
-                ),
-                (
-                    "dyn_array_items",
-                    NativeFunction::core_dyn(CoreDynFunction::ArrayItems),
-                ),
-                (
-                    "dyn_tuple_items",
-                    NativeFunction::core_dyn(CoreDynFunction::TupleItems),
-                ),
-                ("dyn_tag", NativeFunction::core_dyn(CoreDynFunction::Tag)),
-                (
-                    "dyn_payload",
-                    NativeFunction::core_dyn(CoreDynFunction::Payload),
-                ),
-            ],
-        },
-        CoreModuleSpec {
             name: ATTRIBUTES_MODULE,
             source: r#"
 native normalize: Fn(Any) -> Any;
@@ -450,10 +198,11 @@ native map: for(A, B) Fn(Array(A), Fn(A) -> B) -> Array(B);
 native filter: for(A) Fn(Array(A), Fn(A) -> Bool) -> Array(A);
 native flat_map: for(A, B) Fn(Array(A), Fn(A) -> Array(B)) -> Array(B);
 native fold: for(A, B) Fn(Array(A), B, Fn(B, A) -> B) -> B;
+native fold_control: for(A, S, R) Fn(Array(A), S, Fn(S, A) -> FoldControl(S, R)) -> FoldControl(S, R);
 native any: for(A) Fn(Array(A), Fn(A) -> Bool) -> Bool;
 native all: for(A) Fn(Array(A), Fn(A) -> Bool) -> Bool;
 native find: for(A) Fn(Array(A), Fn(A) -> Bool) -> Option(A);
-{ length: length, concat: concat, zip: zip, map: map, filter: filter, flat_map: flat_map, fold: fold, any: any, all: all, find: find }
+{ length: length, concat: concat, zip: zip, map: map, filter: filter, flat_map: flat_map, fold: fold, fold_control: fold_control, any: any, all: all, find: find }
 "#,
             functions: vec![
                 ("all", NativeFunction::core_array(CoreArrayFunction::All)),
@@ -472,6 +221,10 @@ native find: for(A) Fn(Array(A), Fn(A) -> Bool) -> Option(A);
                     NativeFunction::core_array(CoreArrayFunction::FlatMap),
                 ),
                 ("fold", NativeFunction::core_array(CoreArrayFunction::Fold)),
+                (
+                    "fold_control",
+                    NativeFunction::core_array(CoreArrayFunction::FoldControl),
+                ),
                 ("find", NativeFunction::core_array(CoreArrayFunction::Find)),
                 (
                     "length",

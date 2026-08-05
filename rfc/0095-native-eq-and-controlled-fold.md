@@ -1,6 +1,6 @@
 # RFC 0095: Native equality Function and controlled Array fold
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0053, RFC 0089 through RFC 0094
 
 ## Summary
@@ -48,8 +48,8 @@ or an implicit equality capability.
 
 ## Fold control
 
-The standard Array module exports the generic control type constructor and
-operation:
+The prelude exposes the generic control type constructor alongside Option and
+Result. The standard Array module exports the operation:
 
 ```forma
 FoldControl(S, R) = enum {
@@ -135,3 +135,29 @@ interpreter. Native equality remains total over the domains already supported by
 5. remove the recursive equality core module and legacy projection fallback;
 6. add direct semantic, early-exit, quota, trace, and conformance tests; and
 7. run the full quality gate and record the implementation result.
+
+## Implementation result
+
+Implemented the global `FoldControl(S, R)` metadata constructor and
+`@bim/std/array.fold_control`. The operation reuses the Array native
+continuation: Continue replaces its accumulator, Break returns immediately,
+and natural completion allocates Continue around the final state. Regression
+coverage proves all-Continue accumulation, empty input without callback
+execution, and Break before a later division-by-zero callback input.
+
+Implemented `@bim/std/eq.equal` as `for(A) Fn(A, A) -> Bool`. Its native dispatch
+calls the same `HeapView::values_equal` primitive as the `==` bytecode operation.
+Tests compare both forms for scalars, nested structures, and same/different
+Function identities, and pass `eq.equal` through a higher-order Array API.
+
+Moved the recursive Forma interpreter to
+`examples/reference-equality.forma`. It imports only public Array, TypeDesc, and
+Dyn modules, uses fold_control to stop on inequality or blame, and remains
+lifted by `interpreter`. Conformance tests run the reference result, eq.equal,
+and `==` on the same primitive, sequence, Tuple, Dict, Enum, and recursive
+Struct inputs.
+
+Removed `@bim/std/equality`, its duplicated native declarations and
+TypeDescKind, and the equality-specific legacy Value fallback. Full Forma tests
+pass with 288 passed and 1 ignored; all 13 CLI and 20 LSP tests pass, and strict
+workspace Clippy reports no warnings.

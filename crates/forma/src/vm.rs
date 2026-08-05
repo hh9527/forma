@@ -5,9 +5,10 @@ use crate::heap::{
 use crate::lir::RegisterId;
 use crate::value::{
     BuiltinAtom, CoreArrayFunction, CoreAttributesFunction, CoreBuiltinTypeFunction,
-    CoreCodecFunction, CoreDebugFunction, CoreDictFunction, CoreDynFunction, CoreHashFunction,
-    CoreJsonFunction, CoreModelFunction, CorePathFunction, CoreResultFunction, CoreStringFunction,
-    CoreTypeDescFunction, Dict, NativeError, NativeKind, NativeLimit, Shape, Value,
+    CoreCodecFunction, CoreDebugFunction, CoreDictFunction, CoreDynFunction, CoreEqFunction,
+    CoreHashFunction, CoreJsonFunction, CoreModelFunction, CorePathFunction, CoreResultFunction,
+    CoreStringFunction, CoreTypeDescFunction, Dict, NativeError, NativeKind, NativeLimit, Shape,
+    Value,
 };
 use crate::{Diagnostic, Origin, SourceDatabase};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -2307,6 +2308,15 @@ fn drive_vm_action(
                                 background,
                                 account,
                             )?,
+                            NativeKind::CoreEq(operation) => run_core_eq(
+                                operation,
+                                &arguments,
+                                return_target,
+                                &call_function,
+                                call_pc,
+                                current,
+                                background,
+                            )?,
                             NativeKind::CoreResult(operation) => run_core_result(
                                 operation,
                                 &arguments,
@@ -2568,7 +2578,8 @@ fn start_array_continuation(
         });
     }
 
-    let callback_index = if function == CoreArrayFunction::Fold {
+    let controlled_fold = function == CoreArrayFunction::FoldControl;
+    let callback_index = if function == CoreArrayFunction::Fold || controlled_fold {
         2
     } else {
         1
@@ -2583,7 +2594,7 @@ fn start_array_continuation(
             call_pc,
         ));
     };
-    let expected_callback_arity = if function == CoreArrayFunction::Fold {
+    let expected_callback_arity = if function == CoreArrayFunction::Fold || controlled_fold {
         2
     } else {
         1
@@ -2608,7 +2619,8 @@ fn start_array_continuation(
         ));
     }
 
-    let accumulator = (function == CoreArrayFunction::Fold).then_some(arguments[1]);
+    let accumulator =
+        (function == CoreArrayFunction::Fold || controlled_fold).then_some(arguments[1]);
     let continuation = ArrayContinuation {
         function,
         source,
@@ -2625,7 +2637,7 @@ fn start_array_continuation(
         call_function,
         call_pc,
     };
-    next_array_action(continuation, current, background)
+    next_array_action(continuation, current, background, account)
 }
 
 fn resume_array_continuation(
@@ -2694,6 +2706,50 @@ fn resume_array_continuation(
             continuation.output.extend(values);
         }
         CoreArrayFunction::Fold => continuation.accumulator = Some(value),
+        CoreArrayFunction::FoldControl => {
+            let RuntimeValue::Tagged(handle) = value.value else {
+                return Err(error(
+                    RuntimeErrorKind::TypeMismatch,
+                    "@bim/std/array.fold_control callback must return 'Continue(value) or 'Break(value)",
+                    &continuation.call_function,
+                    continuation.call_pc,
+                ));
+            };
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            let (tag, payload) = view.tagged(handle).map_err(|heap_error| {
+                core_dict_heap_error(
+                    heap_error,
+                    &continuation.call_function,
+                    continuation.call_pc,
+                )
+            })?;
+            match view.atom_text(tag).map_err(|heap_error| {
+                core_dict_heap_error(
+                    heap_error,
+                    &continuation.call_function,
+                    continuation.call_pc,
+                )
+            })? {
+                Some("Continue") => continuation.accumulator = Some(payload),
+                Some("Break") => {
+                    return Ok(VmAction::Return {
+                        value,
+                        return_target: continuation.return_target,
+                    });
+                }
+                _ => {
+                    return Err(error(
+                        RuntimeErrorKind::TypeMismatch,
+                        "@bim/std/array.fold_control callback must return 'Continue(value) or 'Break(value)",
+                        &continuation.call_function,
+                        continuation.call_pc,
+                    ));
+                }
+            }
+        }
         CoreArrayFunction::Any | CoreArrayFunction::All | CoreArrayFunction::Find => {
             let matched = match value.value {
                 RuntimeValue::BuiltinAtom(BuiltinAtom::True) => true,
@@ -2757,13 +2813,14 @@ fn resume_array_continuation(
             }
         }
     }
-    next_array_action(continuation, current, background)
+    next_array_action(continuation, current, background, account)
 }
 
 fn next_array_action(
     mut continuation: ArrayContinuation,
     current: &mut Heap,
     background: &Heap,
+    account: &mut QuotaAccount,
 ) -> Result<VmAction, RuntimeError> {
     let RuntimeValue::Array(handle) = continuation.source.value else {
         unreachable!("validated Array continuation source")
@@ -2788,6 +2845,34 @@ fn next_array_action(
             CoreArrayFunction::Fold => continuation
                 .accumulator
                 .expect("fold continuation has an accumulator"),
+            CoreArrayFunction::FoldControl => {
+                let accumulator = continuation
+                    .accumulator
+                    .expect("controlled fold continuation has an accumulator");
+                charge_allocation(
+                    account,
+                    logical_value_bytes(2).map_err(|error| {
+                        allocation_error(
+                            error.message,
+                            &continuation.call_function,
+                            continuation.call_pc,
+                        )
+                    })?,
+                    &continuation.call_function,
+                    continuation.call_pc,
+                )?;
+                let continue_tag = current.intern("Continue");
+                RichValue::new(
+                    RuntimeValue::Tagged(current.allocate(Object::Tagged {
+                        tag: RichValue::new(
+                            RuntimeValue::Atom(continue_tag),
+                            instruction_location(&continuation.call_function, continuation.call_pc),
+                        ),
+                        payload: accumulator,
+                    })),
+                    instruction_location(&continuation.call_function, continuation.call_pc),
+                )
+            }
             CoreArrayFunction::Any => RichValue::new(
                 RuntimeValue::BuiltinAtom(BuiltinAtom::False),
                 instruction_location(&continuation.call_function, continuation.call_pc),
@@ -2827,7 +2912,10 @@ fn next_array_action(
         continuation.call_pc,
     )?;
     continuation.next_index += 1;
-    let arguments = if continuation.function == CoreArrayFunction::Fold {
+    let arguments = if matches!(
+        continuation.function,
+        CoreArrayFunction::Fold | CoreArrayFunction::FoldControl
+    ) {
         vec![
             continuation
                 .accumulator
@@ -4463,6 +4551,46 @@ fn run_core_dyn(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run_core_eq(
+    operation: CoreEqFunction,
+    arguments: &[RichValue],
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &Heap,
+    background: &Heap,
+) -> Result<VmAction, RuntimeError> {
+    match operation {
+        CoreEqFunction::Equal => {
+            let equal = HeapView {
+                current,
+                background: Some(background),
+            }
+            .values_equal(arguments[0], arguments[1])
+            .map_err(|heap_error| {
+                error(
+                    RuntimeErrorKind::InvalidBytecode,
+                    heap_error.to_string(),
+                    function,
+                    pc,
+                )
+            })?;
+            Ok(VmAction::Return {
+                value: RichValue::new(
+                    RuntimeValue::BuiltinAtom(if equal {
+                        BuiltinAtom::True
+                    } else {
+                        BuiltinAtom::False
+                    }),
+                    instruction_location(function, pc),
+                ),
+                return_target,
+            })
+        }
+    }
+}
+
 enum DynObservation {
     Child(RichValue, RichValue),
     Children(Vec<(RichValue, RichValue)>),
@@ -5151,6 +5279,10 @@ fn run_core_builtin_type(
     account: &mut QuotaAccount,
 ) -> Result<VmAction, RuntimeError> {
     let variants = match operation {
+        CoreBuiltinTypeFunction::FoldControl => vec![
+            ("Break".to_owned(), Some(arguments[1])),
+            ("Continue".to_owned(), Some(arguments[0])),
+        ],
         CoreBuiltinTypeFunction::Option => vec![
             ("None".to_owned(), None),
             ("Some".to_owned(), Some(arguments[0])),

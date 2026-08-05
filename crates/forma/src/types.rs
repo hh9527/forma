@@ -2685,6 +2685,7 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
         NativeFunction::core_model(CoreModelFunction::Union),
         NativeFunction::core_builtin_type(CoreBuiltinTypeFunction::Option),
         NativeFunction::core_builtin_type(CoreBuiltinTypeFunction::Result),
+        NativeFunction::core_builtin_type(CoreBuiltinTypeFunction::FoldControl),
         NativeFunction::new("Atom", 1, native_atom_type),
         NativeFunction::new("Array", 1, native_array_type),
         NativeFunction::new("Dict", 1, native_dict_type),
@@ -2785,6 +2786,10 @@ fn core_static_prelude() -> HashMap<String, TypeDescriptor> {
         function(vec![metadata.clone(), metadata.clone()], metadata.clone()),
     );
     prelude.insert(
+        "FoldControl".into(),
+        function(vec![metadata.clone(), metadata.clone()], metadata.clone()),
+    );
+    prelude.insert(
         "validate".into(),
         function(vec![metadata, TypeDescriptor::Any], TypeDescriptor::Any),
     );
@@ -2846,6 +2851,13 @@ fn core_static_schemes() -> HashMap<String, TypeScheme> {
             )),
         ),
         (
+            "FoldControl".into(),
+            scheme(function(
+                vec![witness(bound(0)), witness(bound(1))],
+                witness(fold_control_descriptor(bound(0), bound(1))),
+            )),
+        ),
+        (
             "validate".into(),
             scheme(function(
                 vec![witness(bound(0)), TypeDescriptor::Any],
@@ -2874,6 +2886,13 @@ fn result_descriptor(ok: TypeDescriptor, err: TypeDescriptor) -> TypeDescriptor 
     TypeDescriptor::Enum(BTreeMap::from([
         ("Err".into(), Some(Box::new(err))),
         ("Ok".into(), Some(Box::new(ok))),
+    ]))
+}
+
+fn fold_control_descriptor(state: TypeDescriptor, result: TypeDescriptor) -> TypeDescriptor {
+    TypeDescriptor::Enum(BTreeMap::from([
+        ("Break".into(), Some(Box::new(result))),
+        ("Continue".into(), Some(Box::new(state))),
     ]))
 }
 

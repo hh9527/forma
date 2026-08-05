@@ -1,0 +1,191 @@
+import arrays from "@bim/std/array";
+import desc from "@bim/std/type-desc";
+import dyn from "@bim/std/dyn";
+
+@enum type TypeDescKind = {
+    Any: 'None, Never: 'None, Type: 'None, TypeOf: 'None,
+    Int: 'None, Float: 'None, String: 'None, Bytes: 'None,
+    Atom: 'None, Array: 'None, Dict: 'None, Tagged: 'None,
+    Tuple: 'None, Struct: 'None, Enum: 'None, Union: 'None,
+    Function: 'None, WithAttributes: 'None, Bound: 'None, Dyn: 'None, Ref: 'None,
+};
+type EqualityResult = Result(Bool, BlameError);
+type DynPair = Tuple([Dyn, Dyn]);
+type Field = Tuple([String, Dyn]);
+type FieldPair = Tuple([Field, Field]);
+
+def blame: Fn(Dyn, String) -> Result(Bool, BlameError) = fn(value, message) {
+    'Err({data: value, rule: "equality", message: message})
+};
+
+def logical_kind: Fn(Type) -> TypeDescKind = fn(ty) {
+    match desc.kind(ty) {
+        'WithAttributes => arrays.fold(desc.children(ty), 'Any, fn(ignored, child) {
+            logical_kind(child)
+        }),
+        'Ref => match desc.resolve(ty) {
+            'Ok(target) => logical_kind(target),
+            'Err(_) => 'Ref,
+        },
+        kind => kind,
+    }
+};
+
+def equal_options: Fn(Option(Dyn), Option(Dyn)) -> Result(Bool, BlameError) =
+    fn(left, right) {
+        match left {
+            'None => match right { 'None => 'Ok('True), 'Some(_) => 'Ok('False) },
+            'Some(left_value) => match right {
+                'None => 'Ok('False),
+                'Some(right_value) => equal_dyn(left_value, right_value),
+            },
+        }
+    };
+
+def equal_items: Fn(Array(Dyn), Array(Dyn)) -> Result(Bool, BlameError) =
+    fn(left, right) {
+        match arrays.zip(left, right) {
+            'None => 'Ok('False),
+            'Some(pairs) => match arrays.fold_control[DynPair, EqualityResult, EqualityResult](pairs, 'Ok('True), fn(state, pair) {
+                match state {
+                    'Err(error) => 'Break('Err(error)),
+                    'Ok('False) => 'Break('Ok('False)),
+                    'Ok('True) => match pair {
+                        (left_value, right_value) => match equal_dyn(left_value, right_value) {
+                            'Ok('True) => 'Continue('Ok('True)),
+                            result => 'Break(result),
+                        },
+                    },
+                }
+            }) {
+                'Continue(result) => result,
+                'Break(result) => result,
+            },
+        }
+    };
+
+def equal_fields:
+    Fn(Array(Tuple(String, Dyn)), Array(Tuple(String, Dyn))) -> Result(Bool, BlameError) =
+    fn(left, right) {
+        match arrays.zip(left, right) {
+            'None => 'Ok('False),
+            'Some(pairs) => match arrays.fold_control[FieldPair, EqualityResult, EqualityResult](pairs, 'Ok('True), fn(state, pair) {
+                match state {
+                    'Err(error) => 'Break('Err(error)),
+                    'Ok('False) => 'Break('Ok('False)),
+                    'Ok('True) => match pair {
+                        ((left_name, left_value), (right_name, right_value)) => {
+                            if left_name == right_name {
+                                match equal_dyn(left_value, right_value) {
+                                    'Ok('True) => 'Continue('Ok('True)),
+                                    result => 'Break(result),
+                                }
+                            } else {
+                                'Break('Ok('False))
+                            }
+                        },
+                    },
+                }
+            }) {
+                'Continue(result) => result,
+                'Break(result) => result,
+            },
+        }
+    };
+
+def equal_tagged: Fn(Dyn, Dyn) -> Result(Bool, BlameError) = fn(left, right) {
+    match dyn.tag(left) {
+        'Err(error) => 'Err(error),
+        'Ok(left_tag) => match dyn.tag(right) {
+            'Err(error) => 'Err(error),
+            'Ok(right_tag) => if left_tag == right_tag {
+                match dyn.payload(left) {
+                    'Err(error) => 'Err(error),
+                    'Ok(left_payload) => match dyn.payload(right) {
+                        'Err(error) => 'Err(error),
+                        'Ok(right_payload) => equal_options(left_payload, right_payload),
+                    },
+                }
+            } else {
+                'Ok('False)
+            },
+        },
+    }
+};
+
+def equal_dyn: Fn(Dyn, Dyn) -> Result(Bool, BlameError) = fn(left, right) {
+    let left_kind = logical_kind(dyn.desc(left));
+    let right_kind = logical_kind(dyn.desc(right));
+    if left_kind == right_kind {
+        match left_kind {
+            'Int => match dyn.check_int(left) {
+                'None => blame(left, "invalid Int package"),
+                'Some(a) => match dyn.check_int(right) {
+                    'None => blame(right, "invalid Int package"),
+                    'Some(b) => 'Ok(a == b),
+                },
+            },
+            'Float => match dyn.check_float(left) {
+                'None => blame(left, "invalid Float package"),
+                'Some(a) => match dyn.check_float(right) {
+                    'None => blame(right, "invalid Float package"),
+                    'Some(b) => 'Ok(a == b),
+                },
+            },
+            'String => match dyn.check_string(left) {
+                'None => blame(left, "invalid String package"),
+                'Some(a) => match dyn.check_string(right) {
+                    'None => blame(right, "invalid String package"),
+                    'Some(b) => 'Ok(a == b),
+                },
+            },
+            'Bytes => match dyn.check_bytes(left) {
+                'None => blame(left, "invalid Bytes package"),
+                'Some(a) => match dyn.check_bytes(right) {
+                    'None => blame(right, "invalid Bytes package"),
+                    'Some(b) => 'Ok(a == b),
+                },
+            },
+            'Array => match dyn.array_items(left) {
+                'Err(error) => 'Err(error),
+                'Ok(left_items) => match dyn.array_items(right) {
+                    'Err(error) => 'Err(error),
+                    'Ok(right_items) => equal_items(left_items, right_items),
+                },
+            },
+            'Tuple => match dyn.tuple_items(left) {
+                'Err(error) => 'Err(error),
+                'Ok(left_items) => match dyn.tuple_items(right) {
+                    'Err(error) => 'Err(error),
+                    'Ok(right_items) => equal_items(left_items, right_items),
+                },
+            },
+            'Struct => match dyn.fields(left) {
+                'Err(error) => 'Err(error),
+                'Ok(left_fields) => match dyn.fields(right) {
+                    'Err(error) => 'Err(error),
+                    'Ok(right_fields) => equal_fields(left_fields, right_fields),
+                },
+            },
+            'Dict => match dyn.fields(left) {
+                'Err(error) => 'Err(error),
+                'Ok(left_fields) => match dyn.fields(right) {
+                    'Err(error) => 'Err(error),
+                    'Ok(right_fields) => equal_fields(left_fields, right_fields),
+                },
+            },
+            'Atom => equal_tagged(left, right),
+            'Tagged => equal_tagged(left, right),
+            'Enum => equal_tagged(left, right),
+            kind => blame(left, `unsupported equality descriptor: \{kind}`),
+        }
+    } else {
+        'Ok('False)
+    }
+};
+
+def equal:
+    for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Result(Bool, BlameError) =
+    interpreter(equal_dyn);
+
+{ equal: equal, equal_dyn: equal_dyn }
