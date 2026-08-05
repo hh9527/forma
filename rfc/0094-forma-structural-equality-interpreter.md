@@ -1,6 +1,6 @@
 # RFC 0094: Forma structural equality interpreter
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0089 through RFC 0093
 - Tracking issue: https://github.com/hh9527/forma/issues/4
 
@@ -28,10 +28,10 @@ Two general structural operations are still required for user-space traversal:
 
 ```forma
 native fields:
-    Fn(Dyn) -> Result(Array(Tuple([String, Dyn])), BlameError);
+    Fn(Dyn) -> Result(Array(Tuple(String, Dyn)), BlameError);
 
 native zip:
-    for(A, B) Fn(Array(A), Array(B)) -> Option(Array(Tuple([A, B])));
+    for(A, B) Fn(Array(A), Array(B)) -> Option(Array(Tuple(A, B)));
 ```
 
 `dyn.fields` accepts Struct and Dict. It returns canonical field order and each
@@ -129,3 +129,29 @@ Function leaf.
 5. add supported-domain native conformance and unsupported-domain tests;
 6. run the full quality gate and record the implementation result; and
 7. mark umbrella RFC 0089 Implemented only after all shared criteria hold.
+
+## Implementation result
+
+Implemented `array.zip`, canonical `dyn.fields`, and `@bim/std/equality`.
+`equal_dyn` and its descriptor normalization, sequence/field folds, payload
+comparison, and recursive dispatch are Forma definitions. The module receives
+the same typed native observer/combinator declarations as their public modules;
+there is no native equality dispatcher or new VM operation.
+
+The lifted `equal` capability covers Int, Float, String, Bytes, Array, Tuple,
+Struct, Dict, Atom, Tagged, Enum, attributes, and explicit recursive references.
+Tests exercise equal and unequal primitives, sequence lengths, Dict values,
+Enum tags/payloads, and finite recursive Struct values. Function descriptors
+and the other documented unsupported kinds return structured blame rather than
+falling back to native equality.
+
+Core modules still maintain a legacy tree-shaped `Value` projection alongside
+their authoritative persistent heap root. Recursive equality closures cannot be
+represented by that projection, so this module omits only that compatibility
+preview while retaining its persistent runtime export and `ModuleInterface`.
+Normal imports, execution, recovery, CLI, and LSP use those authoritative forms
+and pass their full suites. General removal of the legacy preview is separate
+module-loader cleanup, not an interpreter requirement.
+
+Full Forma tests pass with 287 passed and 1 ignored; all 13 CLI and 20 LSP tests
+pass, and strict workspace Clippy reports no warnings.

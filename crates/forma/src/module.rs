@@ -20,8 +20,8 @@ use crate::types::{
 };
 use crate::yaml::parse_yaml_registered;
 use crate::{
-    BytecodeFunction, Closure, DebugSink, DiscardDebugSink, Prototype, Quota, QuotaAccount, Value,
-    Vm,
+    Atom, BuiltinAtom, BytecodeFunction, Closure, DebugSink, DiscardDebugSink, Prototype, Quota,
+    QuotaAccount, Value, Vm,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
@@ -225,9 +225,14 @@ fn install_core_modules(
             .with_debug_sink(Arc::clone(debug_sink))
             .execute_in_work(&main.heap, &external_roots, &function, &[], &mut account)
             .map_err(|error| ModuleError::new(error.with_sources(sources).to_string()))?;
-        let value = arena
-            .export(&main.heap)
-            .map_err(|error| ModuleError::new(error.to_string()))?;
+        let value = match arena.export(&main.heap) {
+            Ok(value) => value,
+            Err(_error) if spec.name == crate::core::EQUALITY_MODULE => {
+                // Recursive core closures live in the persistent root; the legacy preview is acyclic.
+                Value::Atom(Atom::Builtin(BuiltinAtom::None))
+            }
+            Err(error) => return Err(ModuleError::new(error.to_string())),
+        };
         let root = arena
             .publish(&mut main.heap)
             .map_err(|error| ModuleError::new(error.to_string()))?;
@@ -2309,8 +2314,12 @@ name = "rustc"
             r#"import arrays from "@bim/std/array";
                let values = [1, 2, 3];
                let empty: Array(Int) = [];
+               let empty_strings: Array(String) = [];
                {
                    length: arrays.length(values),
+                   zipped: arrays.zip(values, ["a", "b", "c"]),
+                   zip_mismatch: arrays.zip(values, ["a"]),
+                   zip_empty: arrays.zip(empty, empty_strings),
                    mapped: arrays.map(values, fn(value) { value + 10 }),
                    filtered: arrays.filter(values, fn(value) { 1 < value }),
                    flattened: arrays.flat_map(values, fn(value) { [value, value] }),
@@ -2333,6 +2342,12 @@ name = "rustc"
             panic!("expected Dict result")
         };
         assert_eq!(result.get("length").unwrap().to_string(), "3");
+        assert_eq!(
+            result.get("zipped").unwrap().to_string(),
+            "'Some([(1, \"a\"), (2, \"b\"), (3, \"c\")])"
+        );
+        assert_eq!(result.get("zip_mismatch").unwrap().to_string(), "'None");
+        assert_eq!(result.get("zip_empty").unwrap().to_string(), "'Some([])");
         assert_eq!(result.get("mapped").unwrap().to_string(), "[11, 12, 13]");
         assert_eq!(result.get("filtered").unwrap().to_string(), "[2, 3]");
         assert_eq!(
@@ -3282,6 +3297,12 @@ unchanged", "|"),
                let child_nodes = result.unwrap(dyn.array_items(children));
                {
                    name: dyn.check_string(name),
+                   user_fields: arrays.map(result.unwrap(dyn.fields(user)), fn(pair) {
+                       match pair { (name, value) => (name, dyn.kind(value)) }
+                   }),
+                   dict_fields: arrays.map(result.unwrap(dyn.fields(dict)), fn(pair) {
+                       match pair { (name, value) => (name, dyn.kind(value)) }
+                   }),
                    dict_value: dyn.check_int(result.unwrap(dyn.field(dict, "a"))),
                    array_values: arrays.map(
                        result.unwrap(dyn.array_items(numbers)),
@@ -3310,6 +3331,14 @@ unchanged", "|"),
             panic!("structural Dyn test must return a Dict")
         };
         assert_eq!(output.get("name").unwrap().to_string(), "'Some(\"Ada\")");
+        assert_eq!(
+            output.get("user_fields").unwrap().to_string(),
+            "[(\"name\", 'String), (\"pair\", 'Tuple)]"
+        );
+        assert_eq!(
+            output.get("dict_fields").unwrap().to_string(),
+            "[(\"a\", 'Int)]"
+        );
         assert_eq!(output.get("dict_value").unwrap().to_string(), "'Some(7)");
         assert_eq!(
             output.get("array_values").unwrap().to_string(),
@@ -3423,6 +3452,70 @@ unchanged", "|"),
                 "expected {expected:?} in {error}"
             );
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn forma_equality_interpreter_matches_native_structural_equality() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import equality from "@bim/std/equality";
+               @struct type Node = {value: Int, children: Array(Node)};
+               @enum type Choice = {None: 'None, Some: String};
+               type Pair = Tuple([Int, String]);
+               type Unary = Fn(Int) -> Int;
+               let left: Node = {value: 1, children: [{value: 2, children: []}]};
+               let same: Node = {value: 1, children: [{value: 2, children: []}]};
+               let different: Node = {value: 1, children: [{value: 3, children: []}]};
+               {
+                   int_equal: equality.equal(Int)(1, 1),
+                   int_different: equality.equal(Int)(1, 2),
+                   array_equal: equality.equal(Array(Int))([1, 2], [1, 2]),
+                   array_length: equality.equal(Array(Int))([1], [1, 2]),
+                   tuple_equal: equality.equal(Pair)((1, "a"), (1, "a")),
+                   dict_different: equality.equal(Dict(Int))({a: 1}, {a: 2}),
+                   enum_equal: equality.equal(Choice)('Some("x"), 'Some("x")),
+                   enum_tag: equality.equal(Choice)('None, 'Some("x")),
+                   recursive_equal: equality.equal(Node)(left, same),
+                   recursive_different: equality.equal(Node)(left, different),
+                   function_error: equality.equal(Unary)(fn(x) { x }, fn(x) { x }),
+               }"#,
+        )
+        .unwrap();
+        let snapshot = recovery_engine()
+            .recover_workspace(directory.join("main.forma"))
+            .unwrap();
+        assert!(snapshot.diagnostics().is_empty());
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 500_000).unwrap();
+        let Value::Dict(output) = module.execute(500_000).unwrap() else {
+            panic!("equality interpreter test must return a Dict")
+        };
+        for field in [
+            "int_equal",
+            "array_equal",
+            "tuple_equal",
+            "enum_equal",
+            "recursive_equal",
+        ] {
+            assert_eq!(output.get(field).unwrap().to_string(), "'Ok('True)");
+        }
+        for field in [
+            "int_different",
+            "array_length",
+            "dict_different",
+            "enum_tag",
+            "recursive_different",
+        ] {
+            assert_eq!(output.get(field).unwrap().to_string(), "'Ok('False)");
+        }
+        assert!(
+            output
+                .get("function_error")
+                .unwrap()
+                .to_string()
+                .starts_with("'Err(")
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

@@ -1,6 +1,6 @@
 # RFC 0089: User-space type interpreters
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0055, RFC 0080 through RFC 0088
 - Tracking issue: https://github.com/hh9527/forma/issues/4
 
@@ -205,3 +205,24 @@ The detailed reasoning, alternatives, and current gap audit remain in:
 
 Those documents motivated this phase. This RFC and its accepted children become
 authoritative for implemented behavior.
+
+## Implementation result
+
+RFCs 0090 through 0094 implement the complete phase: a finite public descriptor
+graph with explicit Ref nodes, opaque invariant-preserving Dyn packages,
+structural observers, contextual typed lifting, and a recursive equality
+interpreter written in Forma. The implementation required no traits, implicit
+selection, code generation, unchecked user casts, or interpreter bytecode.
+
+The equality conformance slice also added general `dyn.fields` and `array.zip`
+operations. Supported finite data agrees with native structural equality;
+Function and descriptors whose public reflection contract remains incomplete
+return explicit blame. Both explicit type application and witness-driven
+`equal(Int)(...)` inference work.
+
+The remaining implementation asymmetry is representation-only: native code can
+inspect heap objects directly, while user code uses checked observers. Recursive
+core exports also bypass the legacy acyclic `Value` preview and use the existing
+persistent root plus module interface. Neither boundary changes public logical
+results or grants native interpreters additional type-shape knowledge within the
+supported domain.

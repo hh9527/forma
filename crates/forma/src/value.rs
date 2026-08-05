@@ -131,6 +131,7 @@ pub type NativeCallback = fn(&mut CallContext<'_, '_>) -> Result<(), NativeError
 pub(crate) enum CoreArrayFunction {
     Length,
     Concat,
+    Zip,
     Map,
     Filter,
     FlatMap,
@@ -293,6 +294,7 @@ pub(crate) enum CoreDynFunction {
     CheckString,
     CheckBytes,
     Field,
+    Fields,
     ArrayItems,
     TupleItems,
     Tag,
@@ -310,6 +312,7 @@ impl CoreDynFunction {
             Self::CheckString => "@bim/std/dyn.check_string",
             Self::CheckBytes => "@bim/std/dyn.check_bytes",
             Self::Field => "@bim/std/dyn.field",
+            Self::Fields => "@bim/std/dyn.fields",
             Self::ArrayItems => "@bim/std/dyn.array_items",
             Self::TupleItems => "@bim/std/dyn.tuple_items",
             Self::Tag => "@bim/std/dyn.tag",
@@ -515,6 +518,7 @@ impl CoreArrayFunction {
         match self {
             Self::Length => "@bim/std/array.length",
             Self::Concat => "@bim/std/array.concat",
+            Self::Zip => "@bim/std/array.zip",
             Self::Map => "@bim/std/array.map",
             Self::Filter => "@bim/std/array.filter",
             Self::FlatMap => "@bim/std/array.flat_map",
@@ -528,6 +532,7 @@ impl CoreArrayFunction {
     pub(crate) const fn arity(self) -> usize {
         match self {
             Self::Length | Self::Concat => 1,
+            Self::Zip => 2,
             Self::Map | Self::Filter | Self::FlatMap | Self::Any | Self::All | Self::Find => 2,
             Self::Fold => 3,
         }

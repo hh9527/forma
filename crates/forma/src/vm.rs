@@ -2506,6 +2506,67 @@ fn start_array_continuation(
             return_target,
         });
     }
+    if function == CoreArrayFunction::Zip {
+        let RuntimeValue::Array(right_handle) = arguments[1].value else {
+            return Err(runtime_type_error(
+                "Array",
+                &arguments[1],
+                &view,
+                &call_function,
+                call_pc,
+            ));
+        };
+        let left = view
+            .sequence(source_handle, false)
+            .map_err(|heap_error| core_dict_heap_error(heap_error, &call_function, call_pc))?;
+        let right = view
+            .sequence(right_handle, false)
+            .map_err(|heap_error| core_dict_heap_error(heap_error, &call_function, call_pc))?;
+        if left.len() != right.len() {
+            return Ok(VmAction::Return {
+                value: RichValue::new(
+                    RuntimeValue::BuiltinAtom(BuiltinAtom::None),
+                    instruction_location(&call_function, call_pc),
+                ),
+                return_target,
+            });
+        }
+        let pairs = left
+            .iter()
+            .copied()
+            .zip(right.iter().copied())
+            .collect::<Vec<_>>();
+        charge_allocation(
+            account,
+            logical_value_bytes(2 + pairs.len() * 3)
+                .map_err(|error| allocation_error(error.message, &call_function, call_pc))?,
+            &call_function,
+            call_pc,
+        )?;
+        let pairs = pairs
+            .into_iter()
+            .map(|(left, right)| {
+                RichValue::new(
+                    RuntimeValue::Tuple(current.allocate(Object::Tuple(vec![left, right].into()))),
+                    left.loc,
+                )
+            })
+            .collect();
+        let pairs = RichValue::new(
+            RuntimeValue::Array(current.allocate(Object::Array(pairs))),
+            source.loc,
+        );
+        return Ok(VmAction::Return {
+            value: RichValue::new(
+                RuntimeValue::Tagged(current.allocate(Object::Tagged {
+                    tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Some), source.loc),
+                    payload: pairs,
+                })),
+                source.loc,
+            ),
+            return_target,
+        });
+    }
 
     let callback_index = if function == CoreArrayFunction::Fold {
         2
@@ -2575,7 +2636,7 @@ fn resume_array_continuation(
     account: &mut QuotaAccount,
 ) -> Result<VmAction, RuntimeError> {
     match continuation.function {
-        CoreArrayFunction::Length | CoreArrayFunction::Concat => {
+        CoreArrayFunction::Length | CoreArrayFunction::Concat | CoreArrayFunction::Zip => {
             unreachable!("non-callback array operation does not suspend")
         }
         CoreArrayFunction::Map => {
@@ -2747,7 +2808,9 @@ fn next_array_action(
                     instruction_location(&continuation.call_function, continuation.call_pc),
                 )
             }
-            CoreArrayFunction::Length | CoreArrayFunction::Concat => unreachable!(),
+            CoreArrayFunction::Length | CoreArrayFunction::Concat | CoreArrayFunction::Zip => {
+                unreachable!()
+            }
         };
         return Ok(VmAction::Return {
             value,
@@ -4366,6 +4429,7 @@ fn run_core_dyn(
             })
         }
         CoreDynFunction::Field
+        | CoreDynFunction::Fields
         | CoreDynFunction::ArrayItems
         | CoreDynFunction::TupleItems
         | CoreDynFunction::Tag
@@ -4402,6 +4466,7 @@ fn run_core_dyn(
 enum DynObservation {
     Child(RichValue, RichValue),
     Children(Vec<(RichValue, RichValue)>),
+    NamedChildren(Vec<(String, RichValue, RichValue)>),
     Tag(String),
     Payload(Option<(RichValue, RichValue)>),
 }
@@ -4450,6 +4515,50 @@ fn observe_dyn_structure(
                 _ => return Err(format!("dyn.field does not support descriptor kind {kind}")),
             };
             Ok(DynObservation::Child(child_desc, child_value))
+        }
+        CoreDynFunction::Fields => {
+            let RuntimeValue::Dict(value_handle) = value.value else {
+                return Err(format!("dyn.fields expected {kind} runtime Dict"));
+            };
+            let (value_fields, values) = view
+                .dict_parts(value_handle)
+                .map_err(|error| error.to_string())?;
+            let descriptors = match kind {
+                "Struct" => {
+                    let RuntimeValue::Dict(fields) = type_field("fields")?.value else {
+                        return Err("Struct.fields descriptor must be a Dict".into());
+                    };
+                    let (names, descriptors) =
+                        view.dict_parts(fields).map_err(|error| error.to_string())?;
+                    if names != value_fields {
+                        return Err(
+                            "Struct descriptor and runtime value have different fields".into()
+                        );
+                    }
+                    descriptors.to_vec()
+                }
+                "Dict" => vec![type_field("item")?; values.len()],
+                _ => {
+                    return Err(format!(
+                        "dyn.fields does not support descriptor kind {kind}"
+                    ));
+                }
+            };
+            let fields = value_fields
+                .iter()
+                .zip(descriptors)
+                .zip(values)
+                .map(|((name, descriptor), value)| {
+                    Ok((
+                        view.text(*name)
+                            .map_err(|error| error.to_string())?
+                            .to_owned(),
+                        descriptor,
+                        *value,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(DynObservation::NamedChildren(fields))
         }
         CoreDynFunction::ArrayItems => {
             if kind != "Array" {
@@ -4640,6 +4749,12 @@ fn finish_dyn_observation(
             let units = match &observation {
                 DynObservation::Child(_, _) => 3,
                 DynObservation::Children(children) => 2 + children.len() * 3,
+                DynObservation::NamedChildren(children) => {
+                    2 + children
+                        .iter()
+                        .map(|(name, _, _)| 5 + name.len())
+                        .sum::<usize>()
+                }
                 DynObservation::Tag(tag) => 2 + tag.len(),
                 DynObservation::Payload(None) => 2,
                 DynObservation::Payload(Some(_)) => 5,
@@ -4670,6 +4785,33 @@ fn finish_dyn_observation(
                                     descriptor,
                                     value,
                                 })),
+                                value.loc,
+                            )
+                        })
+                        .collect();
+                    RichValue::new(
+                        RuntimeValue::Array(current.allocate(Object::Array(children))),
+                        input.loc,
+                    )
+                }
+                DynObservation::NamedChildren(children) => {
+                    let children = children
+                        .into_iter()
+                        .map(|(name, descriptor, value)| {
+                            let name =
+                                RichValue::new(current.string(Some(background), &name), input.loc);
+                            let child = RichValue::new(
+                                RuntimeValue::Dyn(current.allocate(Object::Dyn {
+                                    identity: Arc::new(()),
+                                    descriptor,
+                                    value,
+                                })),
+                                value.loc,
+                            );
+                            RichValue::new(
+                                RuntimeValue::Tuple(
+                                    current.allocate(Object::Tuple(vec![name, child].into())),
+                                ),
                                 value.loc,
                             )
                         })
