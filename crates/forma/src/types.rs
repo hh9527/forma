@@ -2314,41 +2314,98 @@ fn validate_interpreter_contract(
     type_parameters: &[crate::ast::Identifier],
     contract: Option<&TypeDescriptor>,
 ) -> Result<(), String> {
-    const EXPECTED: &str = "interpreter requires exactly for(A) Fn(TypeOf(A)) -> Fn(A, A) -> R where R does not contain A";
     if contract.is_none() {
-        return Err("interpreter requires an explicit for(A) Fn(TypeOf(A)) -> Fn(A, A) -> R definition contract".into());
+        return Err(
+            "interpreter requires an explicit for(A, ...) Fn(TypeOf(A), ...) -> Fn(...) -> R definition contract"
+                .into(),
+        );
     }
-    let [parameter] = type_parameters else {
-        return Err(EXPECTED.into());
-    };
+    if type_parameters.is_empty() {
+        return Err("interpreter requires at least one quantified type parameter".into());
+    }
     let Some(TypeDescriptor::Function {
         parameters: outer_parameters,
         result: outer_result,
     }) = contract
     else {
-        return Err(format!(
-            "interpreter requires an explicit for({}) Fn(TypeOf({})) -> Fn({}, {}) -> R definition contract",
-            parameter.value, parameter.value, parameter.value, parameter.value
-        ));
+        return Err(
+            "interpreter contract must return an inner Function from explicit TypeOf witnesses"
+                .into(),
+        );
     };
-    let bound = TypeDescriptor::Bound(TypeParameterId(0));
-    if outer_parameters != &[TypeDescriptor::TypeOf(Box::new(bound.clone()))] {
-        return Err(EXPECTED.into());
+
+    let mut witnesses = HashMap::new();
+    for (index, witness) in outer_parameters.iter().enumerate() {
+        let TypeDescriptor::TypeOf(parameter) = witness else {
+            return Err(format!(
+                "interpreter witness parameter {} must have type TypeOf(A)",
+                index + 1
+            ));
+        };
+        let TypeDescriptor::Bound(parameter) = parameter.as_ref() else {
+            return Err(format!(
+                "interpreter witness parameter {} must name a quantified type parameter",
+                index + 1
+            ));
+        };
+        let Some(name) = type_parameters.get(parameter.0 as usize) else {
+            return Err("interpreter witness refers to an unknown type parameter".into());
+        };
+        if witnesses.insert(*parameter, index).is_some() {
+            return Err(format!(
+                "interpreter type parameter {} has more than one TypeOf witness",
+                name.value
+            ));
+        }
     }
+    for (index, parameter) in type_parameters.iter().enumerate() {
+        if !witnesses.contains_key(&TypeParameterId(index as u32)) {
+            return Err(format!(
+                "interpreter type parameter {} has no TypeOf witness",
+                parameter.value
+            ));
+        }
+    }
+
     let TypeDescriptor::Function {
         parameters: inner_parameters,
         result,
     } = outer_result.as_ref()
     else {
-        return Err(EXPECTED.into());
+        return Err("interpreter TypeOf witnesses must return an inner Function".into());
     };
-    if inner_parameters != &[bound.clone(), bound.clone()] {
-        return Err(EXPECTED.into());
+    let interpreted = witnesses.keys().copied().collect::<HashSet<_>>();
+    for (index, parameter) in inner_parameters.iter().enumerate() {
+        if let TypeDescriptor::Bound(bound) = parameter
+            && interpreted.contains(bound)
+        {
+            continue;
+        }
+        let mut mentioned = Vec::new();
+        collect_bound_parameters(parameter, &mut mentioned);
+        if let Some(bound) = mentioned
+            .into_iter()
+            .find(|bound| interpreted.contains(bound))
+        {
+            let name = &type_parameters[bound.0 as usize].value;
+            return Err(format!(
+                "interpreter inner parameter {} contains type parameter {}; only a direct {} parameter can be lifted",
+                index + 1,
+                name,
+                name
+            ));
+        }
     }
     let mut result_parameters = Vec::new();
     collect_bound_parameters(result, &mut result_parameters);
-    if result_parameters.contains(&TypeParameterId(0)) {
-        return Err(EXPECTED.into());
+    if let Some(bound) = result_parameters
+        .into_iter()
+        .find(|bound| interpreted.contains(bound))
+    {
+        return Err(format!(
+            "interpreter result contains type parameter {}; lifted interpreters cannot return interpreted values",
+            type_parameters[bound.0 as usize].value
+        ));
     }
     Ok(())
 }

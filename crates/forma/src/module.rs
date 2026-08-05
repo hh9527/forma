@@ -3450,15 +3450,31 @@ unchanged", "|"),
             ),
             (
                 "def bad: for(A) Fn(A) -> Fn(A, A) -> Bool = interpreter(eq_i); 0",
-                "interpreter requires exactly",
+                "witness parameter 1",
             ),
             (
-                "def bad: for(A) Fn(TypeOf(A)) -> Fn(A) -> Bool = interpreter(eq_i); 0",
-                "interpreter requires exactly",
+                "def bad: for(A) Fn(TypeOf(A)) -> Fn(Array(A)) -> Bool = interpreter(eq_i); 0",
+                "inner parameter 1 contains type parameter A",
             ),
             (
                 "def bad: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> A = interpreter(eq_i); 0",
-                "interpreter requires exactly",
+                "result contains type parameter A",
+            ),
+            (
+                "def bad: for(A, B) Fn(TypeOf(A), TypeOf(A)) -> Fn(A) -> Bool = interpreter(eq_i); 0",
+                "type parameter A has more than one TypeOf witness",
+            ),
+            (
+                "def bad: for(A, B) Fn(TypeOf(A)) -> Fn(A) -> Bool = interpreter(eq_i); 0",
+                "type parameter B has no TypeOf witness",
+            ),
+            (
+                "def bad: for(A) Fn(TypeOf(A)) -> Fn(Fn(A) -> Bool) -> Bool = interpreter(eq_i); 0",
+                "inner parameter 1 contains type parameter A",
+            ),
+            (
+                "def bad: for(A) Fn(TypeOf(A)) -> Fn(A) -> Option(A) = interpreter(eq_i); 0",
+                "result contains type parameter A",
             ),
             (
                 "let bad = interpreter(eq_i); 0",
@@ -5421,6 +5437,49 @@ unchanged", "|"),
         fs::write(&main, "import helper from \"@src/helper.forma\"; helper").unwrap();
         let error = engine.load_module(&main, BTreeMap::new()).unwrap_err();
         assert!(error.message().contains("only allowed in @main"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn interpreter_lifts_parameters_independently() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.forma"),
+            r#"def unary_i: Fn(Dyn) -> String = fn(value) { "unary" };
+               def unary: for(A) Fn(TypeOf(A)) -> Fn(A) -> String = interpreter(unary_i);
+
+               def mixed_i: Fn(Dyn, Bool) -> String = fn(value, verbose) { "mixed" };
+               def mixed: for(A) Fn(TypeOf(A)) -> Fn(A, Bool) -> String = interpreter(mixed_i);
+
+               def many_i: Fn(String, Dyn, Bool, Dyn, Dyn) -> String =
+                   fn(prefix, a, flag, b, again_a) { prefix };
+               def many: for(A, B) Fn(TypeOf(B), TypeOf(A)) ->
+                   Fn(String, A, Bool, B, A) -> String = interpreter(many_i);
+
+               def metadata_i: Fn(Bool) -> String = fn(flag) { "metadata" };
+               def metadata: for(A) Fn(TypeOf(A)) -> Fn(Bool) -> String =
+                   interpreter(metadata_i);
+
+               {
+                   unary: unary(Int)(1),
+                   mixed: mixed(Int)(1, 'True),
+                   many: many(Int, String)("many", "a", 'False, 2, "b"),
+                   metadata: metadata(String)('True),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 200_000).unwrap();
+        let Value::Dict(output) = module.execute(200_000).unwrap() else {
+            panic!("parameter-wise interpreter test must return a Dict")
+        };
+        for (field, expected) in [
+            ("unary", "\"unary\""),
+            ("mixed", "\"mixed\""),
+            ("many", "\"many\""),
+            ("metadata", "\"metadata\""),
+        ] {
+            assert_eq!(output.get(field).unwrap().to_string(), expected);
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 }

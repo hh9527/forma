@@ -1,6 +1,6 @@
 # RFC 0098: Parameter-wise interpreter adapters
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0096, RFC 0097
 
 ## Summary
@@ -147,3 +147,31 @@ Generated adapter names are never displayed.
 5. add negative tests for every rejected boundary and diagnostic; and
 6. run the quality gate and record the implementation result.
 
+## Implementation result
+
+Implemented generalized hygienic elaboration from the explicit interpreter
+contract. Outer witness parameters receive stable generated positions; every
+direct inner type-parameter occurrence emits the existing trusted Dyn pack with
+its matching witness, while closed positions are forwarded unchanged. The
+original RFC 0093 binary shape now uses the same parameter-wise path.
+
+Semantic validation operates on evaluated TypeDescriptors. It requires at
+least one quantified parameter, exactly one `TypeOf` witness for each parameter,
+an inner Function result, direct-only interpreted input positions, and a result
+independent of every interpreted parameter. Diagnostics distinguish non-witness
+outer parameters, unknown/missing/duplicate witnesses, nested interpreted
+parameters, and interpreted results. Ordinary bidirectional checking of the
+elaboration enforces the derived erased operand arity, parameter types, and
+result.
+
+Execution coverage includes unary lifting, interleaved Dyn and Bool positions,
+two witnesses in non-type-parameter order, repeated use of one witness, and a
+metadata-only witness with no interpreted value input. Negative coverage
+includes Array and callback nesting, missing and duplicate witnesses, and
+direct or constructed interpreted results. Existing equality interpreter tests
+remain unchanged in behavior.
+
+Full Forma tests pass with 291 passed and 1 ignored; all 13 CLI and 20 LSP tests
+pass, and strict workspace Clippy reports no warnings. No bytecode instruction,
+VM callable, trait mechanism, callback bridge, or descriptor derivation was
+added.

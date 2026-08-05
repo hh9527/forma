@@ -8,6 +8,7 @@ use crate::lexer::{FrontendError, SourceLocation};
 use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
 use crate::syntax::forma::lexer::Token;
 use crate::syntax::forma::parser::{CstData, Node, NodeRef, Rule};
+use std::collections::HashMap;
 
 #[derive(Debug)]
 pub struct FrontendParse {
@@ -445,7 +446,7 @@ impl<'a> Lowerer<'a> {
                     .ok_or_else(|| self.error(node, "definition has no value"))?;
                 let interpreter_node = self.expression_head(value_node);
                 let value = if self.rule(interpreter_node) == Some(Rule::InterpreterExpr) {
-                    self.lower_interpreter(interpreter_node)?
+                    self.lower_interpreter(interpreter_node, &type_parameters, annotation.as_ref())?
                 } else {
                     self.expression(value_node)?
                 };
@@ -821,14 +822,25 @@ impl<'a> Lowerer<'a> {
         Ok(located(inner, location))
     }
 
-    fn lower_interpreter(&self, node: NodeRef) -> Result<Expr, Diagnostic> {
+    fn lower_interpreter(
+        &self,
+        node: NodeRef,
+        type_parameters: &[Identifier],
+        contract: Option<&Expr>,
+    ) -> Result<Expr, Diagnostic> {
         let operand = self
             .children(node)
             .find(|child| self.is_expression(*child))
             .ok_or_else(|| self.error(node, "interpreter has no operand"))?;
         let location = self.location(node);
         let operand = self.expression(operand)?;
-        let elaboration = interpreter_expansion(operand.clone(), location);
+        let plan = contract
+            .and_then(|contract| interpreter_syntax_plan(type_parameters, contract))
+            .unwrap_or_else(|| InterpreterSyntaxPlan {
+                witness_count: 1,
+                parameters: vec![Some(0), Some(0)],
+            });
+        let elaboration = interpreter_expansion(operand.clone(), location, &plan);
         Ok(located(
             ExprKind::Interpreter {
                 operand: Box::new(operand),
@@ -1656,29 +1668,108 @@ fn placeholder_parameter(index: usize) -> String {
     format!("\0xl_placeholder_{index}")
 }
 
-fn interpreter_expansion(operand: Expr, location: Location) -> Expr {
-    let type_name = "\0forma_interpreter_type";
-    let left_name = "\0forma_interpreter_left";
-    let right_name = "\0forma_interpreter_right";
+struct InterpreterSyntaxPlan {
+    witness_count: usize,
+    parameters: Vec<Option<usize>>,
+}
+
+fn interpreter_syntax_plan(
+    type_parameters: &[Identifier],
+    contract: &Expr,
+) -> Option<InterpreterSyntaxPlan> {
+    let (outer_parameters, outer_result) = function_contract_parts(contract)?;
+    let mut witnesses = HashMap::new();
+    for (index, witness) in outer_parameters.iter().enumerate() {
+        let ExprKind::Call { callee, arguments } = &witness.value else {
+            return None;
+        };
+        if !is_variable(callee, "TypeOf") {
+            return None;
+        }
+        let [argument] = arguments.as_slice() else {
+            return None;
+        };
+        let ExprKind::Variable(parameter) = &argument.value else {
+            return None;
+        };
+        if !type_parameters
+            .iter()
+            .any(|candidate| candidate.value == parameter.value)
+            || witnesses.insert(parameter.value.clone(), index).is_some()
+        {
+            return None;
+        }
+    }
+    if witnesses.len() != type_parameters.len() {
+        return None;
+    }
+    let (inner_parameters, _) = function_contract_parts(outer_result)?;
+    let parameters = inner_parameters
+        .iter()
+        .map(|parameter| match &parameter.value {
+            ExprKind::Variable(name) => witnesses.get(&name.value).copied(),
+            _ => None,
+        })
+        .collect();
+    Some(InterpreterSyntaxPlan {
+        witness_count: outer_parameters.len(),
+        parameters,
+    })
+}
+
+fn function_contract_parts(contract: &Expr) -> Option<(&[Expr], &Expr)> {
+    let ExprKind::Call { callee, arguments } = &contract.value else {
+        return None;
+    };
+    if !is_variable(callee, "Fn") {
+        return None;
+    }
+    let [parameters, result] = arguments.as_slice() else {
+        return None;
+    };
+    let ExprKind::Array(parameters) = &parameters.value else {
+        return None;
+    };
+    Some((parameters, result))
+}
+
+fn is_variable(expression: &Expr, expected: &str) -> bool {
+    matches!(&expression.value, ExprKind::Variable(name) if name.value == expected)
+}
+
+fn interpreter_expansion(operand: Expr, location: Location, plan: &InterpreterSyntaxPlan) -> Expr {
     let variable = |name: &str| {
         located(
             ExprKind::Variable(located(name.to_owned(), location)),
             location,
         )
     };
-    let pack = |value_name: &str| {
+    let pack = |witness_index: usize, value_name: &str| {
         located(
             ExprKind::Call {
                 callee: Box::new(variable("\0forma_pack_dyn")),
-                arguments: vec![variable(type_name), variable(value_name)],
+                arguments: vec![
+                    variable(&format!("\0forma_interpreter_type_{witness_index}")),
+                    variable(value_name),
+                ],
             },
             location,
         )
     };
+    let value_names = (0..plan.parameters.len())
+        .map(|index| format!("\0forma_interpreter_value_{index}"))
+        .collect::<Vec<_>>();
     let call = located(
         ExprKind::Call {
             callee: Box::new(operand),
-            arguments: vec![pack(left_name), pack(right_name)],
+            arguments: plan
+                .parameters
+                .iter()
+                .zip(&value_names)
+                .map(|(witness, value)| {
+                    witness.map_or_else(|| variable(value), |index| pack(index, value))
+                })
+                .collect(),
         },
         location,
     );
@@ -1688,7 +1779,7 @@ fn interpreter_expansion(operand: Expr, location: Location) -> Expr {
     };
     let inner = located(
         ExprKind::Closure {
-            parameters: vec![parameter(left_name), parameter(right_name)],
+            parameters: value_names.iter().map(|name| parameter(name)).collect(),
             result_annotation: None,
             body: located(
                 BlockKind {
@@ -1702,7 +1793,9 @@ fn interpreter_expansion(operand: Expr, location: Location) -> Expr {
     );
     located(
         ExprKind::Closure {
-            parameters: vec![parameter(type_name)],
+            parameters: (0..plan.witness_count)
+                .map(|index| parameter(&format!("\0forma_interpreter_type_{index}")))
+                .collect(),
             result_annotation: None,
             body: located(
                 BlockKind {
