@@ -1,6 +1,6 @@
 # RFC 0100: Source-aware best-effort evaluation
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0046, RFC 0056, RFC 0089 through RFC 0099
 
 ## Summary
@@ -269,3 +269,25 @@ commit containing tests and an implementation-result amendment. RFC 0100 stays
 Proposed until RFC 0106 demonstrates the complete imported-data-to-diagnostic
 path. The umbrella is then updated with final implementation evidence and only
 the semantics actually delivered by its children.
+
+## Implementation result
+
+RFCs 0101 through 0106 are implemented. Forma now has closed contextual
+intrinsics, structural Original/Generated provenance, bounded internal failure
+lineage, a deterministic best-effort scheduling contract, provenance-aware Dyn
+and `blame!`, and analysis-Host publication through the WorkspaceSnapshot used
+by CLI `show` and the LSP.
+
+Production recovery conservatively replays only independently closed top-level
+initializers after a recoverable strict runtime root. Failed dependencies are
+silent; later independent initializers continue in source order. Recursive
+groups, branches, nested calls, containers, and final results remain strict
+indivisible units. No partial module, export, cache entry, Never, FailureId, or
+provenance object is exposed to Forma.
+
+Imported JSON/TOML/YAML remains sourced through recovery heap import, so a
+user-space interpreter can return `blame!` with distinct imported-data and
+authored-rule labels. RuntimeError projects to ordinary structured Diagnostics;
+effectful and executable commands remain strict. The final gate passes with
+315 Forma library tests (1 ignored), 14 CLI tests, 20 LSP tests, documentation
+tests, formatting, and warning-denied Clippy.

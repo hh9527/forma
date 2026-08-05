@@ -687,7 +687,7 @@ impl RuntimeError {
         self.set_locations(data, self.rule_location());
     }
 
-    pub fn with_sources(mut self, sources: &SourceDatabase) -> Self {
+    pub(crate) fn diagnostic(&self) -> Option<Diagnostic> {
         let operation_location = self.origin().and_then(|origin| match origin {
             Origin::Source(location) => Some(location),
             Origin::Synthetic { derived_from } => derived_from,
@@ -698,7 +698,7 @@ impl RuntimeError {
         } else {
             "operation originated here"
         };
-        let diagnostic = match (self.data_location(), rule_location) {
+        match (self.data_location(), rule_location) {
             (Some(data), Some(rule)) if data != rule => Some(
                 Diagnostic::error(self.message.clone(), data)
                     .with_secondary(secondary_message, rule),
@@ -706,8 +706,11 @@ impl RuntimeError {
             (Some(data), _) => Some(Diagnostic::error(self.message.clone(), data)),
             (None, Some(rule)) => Some(Diagnostic::error(self.message.clone(), rule)),
             (None, None) => None,
-        };
-        if let Some(diagnostic) = diagnostic {
+        }
+    }
+
+    pub fn with_sources(mut self, sources: &SourceDatabase) -> Self {
+        if let Some(diagnostic) = self.diagnostic() {
             self.rendered = Some(sources.render(&diagnostic));
         }
         self

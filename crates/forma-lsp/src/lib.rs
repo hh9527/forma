@@ -1540,7 +1540,11 @@ mod tests {
             Workspace::new(&path, Engine::new(config())).expect("create document workspace"),
         );
         workspace
-            .open(&path, DocumentVersion(1), "let =")
+            .open(
+                &path,
+                DocumentVersion(1),
+                "let first = 1 / 0; let second = 2 / 0; 0",
+            )
             .expect("open invalid source");
         {
             let mut state = state.borrow_mut();
@@ -1549,7 +1553,14 @@ mod tests {
         }
         let context = workspace.context();
         let invalid = workspace.rebuild(&context).await.expect("invalid snapshot");
-        assert!(!invalid.diagnostics().is_empty());
+        assert_eq!(
+            invalid
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.message.contains("division by zero"))
+                .count(),
+            2
+        );
         publish_diagnostics(&state, &invalid).await;
 
         workspace

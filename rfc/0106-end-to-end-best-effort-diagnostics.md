@@ -1,6 +1,6 @@
 # RFC 0106: End-to-end best-effort diagnostics
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0100 through RFC 0105
 
 ## Summary
@@ -164,3 +164,30 @@ Work returns to discussion if completion requires:
 5. allowing effects in diagnostic sessions;
 6. weakening cancellation, quota, or stale-result terminal behavior; or
 7. changing strict execution semantics.
+
+## Implementation result
+
+Implemented with a conservative production-unit boundary. Workspace recovery
+first requires ordinary whole-module static analysis, then runs the strict
+module once. After a recoverable runtime root, it replays only source-ordered
+top-level `let` or `def` initializers that the existing compiler can close over
+imports and previously successful values. Failed dependencies are skipped
+transitively. Recursive groups, control flow, nested Function bodies,
+containers, and the final result are never split or speculated.
+
+Each replay uses a fresh strict VM world and one shared recovery quota account.
+Successful values remain in the local recovery environment; failed values are
+discarded and the deterministic diagnostic prefix is capped at 16. No partial
+module, export, cache entry, Never, or FailureId is published.
+
+RuntimeError now projects directly to structured Diagnostic labels. Recovery
+also retains imported SourcedValue objects until heap import, preserving
+Original JSON/TOML/YAML provenance. `show` enters recovery after a recoverable
+strict runtime failure, while async workspace/LSP rebuild retains its existing
+cancellation and stale-publication barrier.
+
+Tests prove two independent ordered failures with a silent dependent binding,
+strict `run` behavior, LSP publication and clearing, and a cross-source JSON to
+`blame!` path with separate data and rule labels. The full gate passes: 315
+Forma library tests passed with 1 ignored, 14 CLI tests passed, 20 LSP tests
+passed, documentation tests passed, and warning-denied workspace Clippy passed.

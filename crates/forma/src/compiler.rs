@@ -1558,7 +1558,7 @@ fn collect_runtime_names_block(block: &Block, names: &mut HashSet<String>) {
     collect_runtime_names(&block.value.result, names);
 }
 
-fn collect_runtime_names(expression: &Expr, names: &mut HashSet<String>) {
+pub(crate) fn collect_runtime_names(expression: &Expr, names: &mut HashSet<String>) {
     match &expression.value {
         ExprKind::Variable(name) => {
             names.insert(name.value.clone());

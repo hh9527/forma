@@ -1,7 +1,8 @@
 use crate::ast::{BindingKind, Expr, ExprKind, Program, StringPartKind, TypeArgumentKind};
 use crate::compiler::{
-    compile_metadata_initializer, compile_program_analyzed_in, compile_program_with_promoted_types,
-    function_contract_arity, type_link_key,
+    collect_runtime_names, compile_expression_with_bindings, compile_metadata_initializer,
+    compile_program_analyzed_in, compile_program_with_promoted_types, function_contract_arity,
+    type_link_key,
 };
 use crate::core::module_specs;
 use crate::heap::{Heap, PersistentValue, publish_root, publish_value};
@@ -395,7 +396,12 @@ impl Engine {
             .expect("local root has a path")
             .to_owned();
         if let Ok(module) = self.load_module(&root, BTreeMap::new()) {
-            return Ok(module.workspace);
+            match self.execute(&module) {
+                Ok(_) => return Ok(module.workspace),
+                Err(error)
+                    if error.failure_class() == crate::evaluation::FailureClass::Recoverable => {}
+                Err(_) => return Ok(module.workspace),
+            }
         }
         let mut main = MainWorld::building();
         let mut sources = SourceDatabase::default();
@@ -412,6 +418,7 @@ impl Engine {
             core_modules,
             inputs: BTreeMap::new(),
             values: HashMap::new(),
+            sourced_values: HashMap::new(),
             interfaces: HashMap::new(),
             visiting: Vec::new(),
             cycle_members: HashSet::new(),
@@ -460,6 +467,7 @@ impl Engine {
             core_modules,
             inputs: BTreeMap::new(),
             values: HashMap::new(),
+            sourced_values: HashMap::new(),
             interfaces: HashMap::new(),
             visiting: Vec::new(),
             cycle_members: HashSet::new(),
@@ -486,6 +494,7 @@ struct RecoverableWorkspaceBuilder<'a> {
     core_modules: HashMap<String, (Value, ModuleInterface)>,
     inputs: BTreeMap<String, SemanticModuleInput>,
     values: HashMap<ModuleId, Value>,
+    sourced_values: HashMap<ModuleId, SourcedValue>,
     interfaces: HashMap<ModuleId, ModuleInterface>,
     visiting: Vec<ModuleId>,
     cycle_members: HashSet<ModuleId>,
@@ -560,6 +569,7 @@ impl RecoverableWorkspaceBuilder<'_> {
             self.visiting.push(module_id.clone());
             let mut semantic_imports = Vec::new();
             let mut external_values = BTreeMap::new();
+            let mut external_sourced_values = BTreeMap::new();
             let mut external_interfaces = BTreeMap::new();
             let mut unavailable_imports = HashSet::new();
             let mut diagnostics = Vec::new();
@@ -627,6 +637,9 @@ impl RecoverableWorkspaceBuilder<'_> {
                     }
                 };
                 if let Some(value) = value {
+                    if let Some(sourced) = self.sourced_values.get(&target_module.id) {
+                        external_sourced_values.insert(name.clone(), sourced.clone());
+                    }
                     if let Some(interface) = self.interfaces.get(&target_module.id) {
                         external_interfaces.insert(name.clone(), interface.clone());
                     }
@@ -669,21 +682,43 @@ impl RecoverableWorkspaceBuilder<'_> {
                     query: self.query,
                 },
             );
+            let mut runtime_diagnostics = Vec::new();
             let strict = if self.cycle_members.contains(&module_id)
                 || has_manifest && module_id != ModuleId::Main
             {
                 None
             } else {
                 program.as_ref().and_then(|program| {
-                    self.analyze_and_evaluate(
+                    match self.analyze_and_evaluate(
                         source_id,
                         program,
                         &external_values,
+                        &external_sourced_values,
                         &external_interfaces,
-                    )
-                    .ok()
+                    ) {
+                        Ok(result) => Some(result),
+                        Err(RecoveryEvaluationError::Runtime(error))
+                            if error.failure_class()
+                                == crate::evaluation::FailureClass::Recoverable =>
+                        {
+                            if let Some(diagnostic) = error.diagnostic() {
+                                runtime_diagnostics.push(diagnostic);
+                            }
+                            self.evaluate_independent_bindings(
+                                source_id,
+                                program,
+                                &external_values,
+                                &mut runtime_diagnostics,
+                            );
+                            None
+                        }
+                        Err(
+                            RecoveryEvaluationError::Runtime(_) | RecoveryEvaluationError::Module,
+                        ) => None,
+                    }
                 })
             };
+            diagnostics.extend(runtime_diagnostics);
             let strict_value = strict.as_ref().map(|(_, value)| value);
             let state = if strict_value.is_some() {
                 WorkspaceModuleState::Known
@@ -756,7 +791,8 @@ impl RecoverableWorkspaceBuilder<'_> {
             .sources
             .add_document(path.display().to_string(), source);
         let parsed = parse_static_data_registered(module.format, &self.sources, source_id)?;
-        let value = parsed.value.map(|sourced| sourced.value);
+        let sourced = parsed.value;
+        let value = sourced.as_ref().map(|sourced| sourced.value.clone());
         self.inputs.insert(
             key.clone(),
             SemanticModuleInput {
@@ -777,7 +813,10 @@ impl RecoverableWorkspaceBuilder<'_> {
             },
         );
         if let Some(value) = &value {
-            self.values.insert(module_id, value.clone());
+            self.values.insert(module_id.clone(), value.clone());
+        }
+        if let Some(sourced) = sourced {
+            self.sourced_values.insert(module_id, sourced);
         }
         value
     }
@@ -787,8 +826,9 @@ impl RecoverableWorkspaceBuilder<'_> {
         source_id: crate::SourceId,
         program: &Program,
         external_values: &BTreeMap<String, Value>,
+        external_sourced_values: &BTreeMap<String, SourcedValue>,
         external_interfaces: &BTreeMap<String, ModuleInterface>,
-    ) -> Result<(crate::Analysis, Value), ModuleError> {
+    ) -> Result<(crate::Analysis, Value), RecoveryEvaluationError> {
         let mut account = QuotaAccount::new(self.engine.config.module_quota);
         if let Some(query) = self.query {
             account = account.with_query(query.clone());
@@ -805,27 +845,98 @@ impl RecoverableWorkspaceBuilder<'_> {
             external_interfaces,
             &self.engine.debug_sink,
         )
-        .map_err(|error| ModuleError::new(error.to_string()))?;
+        .map_err(|_| RecoveryEvaluationError::Module)?;
         let function = compile_program_analyzed_in(source, program, &analysis)
-            .map_err(|error| ModuleError::new(error.to_string()))?;
+            .map_err(|_| RecoveryEvaluationError::Module)?;
         let mut main = MainWorld::building();
         let mut external_roots = HashMap::new();
         for (name, value) in external_values {
-            external_roots.insert(
-                name.clone(),
-                publish_value(&mut main.heap, value)
-                    .map_err(|error| ModuleError::new(error.to_string()))?,
-            );
+            let root = if let Some(sourced) = external_sourced_values.get(name) {
+                let mut local = Heap::work();
+                let root = local
+                    .import_sourced_value(Some(&main.heap), sourced)
+                    .map_err(|_| RecoveryEvaluationError::Module)?;
+                publish_root(&mut main.heap, &local, root)
+                    .map_err(|_| RecoveryEvaluationError::Module)?
+            } else {
+                publish_value(&mut main.heap, value).map_err(|_| RecoveryEvaluationError::Module)?
+            };
+            external_roots.insert(name.clone(), root);
         }
         let arena = Vm::new()
             .with_debug_sink(Arc::clone(&self.engine.debug_sink))
             .execute_in_work(&main.heap, &external_roots, &function, &[], &mut account)
-            .map_err(|error| ModuleError::new(error.with_sources(&self.sources).to_string()))?;
+            .map_err(RecoveryEvaluationError::Runtime)?;
         let value = arena
             .export(&main.heap)
-            .map_err(|error| ModuleError::new(error.to_string()))?;
+            .map_err(|_| RecoveryEvaluationError::Module)?;
         Ok((analysis, value))
     }
+
+    fn evaluate_independent_bindings(
+        &self,
+        source_id: crate::SourceId,
+        program: &Program,
+        external_values: &BTreeMap<String, Value>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let source = self.sources.get(source_id);
+        let mut values = external_values.clone();
+        let mut failed = HashSet::new();
+        let mut account = QuotaAccount::new(self.engine.config.module_quota);
+        if let Some(query) = self.query {
+            account = account.with_query(query.clone());
+        }
+        const MAX_RUNTIME_DIAGNOSTICS: usize = 16;
+        for binding in &program.value.body.value.bindings {
+            if !matches!(binding.value.kind, BindingKind::Let | BindingKind::Def) {
+                continue;
+            }
+            if diagnostics.len() >= MAX_RUNTIME_DIAGNOSTICS {
+                return;
+            }
+            let mut dependencies = HashSet::new();
+            collect_runtime_names(&binding.value.value, &mut dependencies);
+            if dependencies.iter().any(|name| failed.contains(name)) {
+                failed.insert(binding.value.name.value.clone());
+                continue;
+            }
+            let Ok(function) = compile_expression_with_bindings(
+                &source.name,
+                &format!("<best-effort:{}>", binding.value.name.value),
+                &binding.value.value,
+                &values,
+                source,
+            ) else {
+                failed.insert(binding.value.name.value.clone());
+                continue;
+            };
+            match Vm::new()
+                .with_debug_sink(Arc::clone(&self.engine.debug_sink))
+                .execute_with_account(&function, &[], &mut account)
+            {
+                Ok(value) => {
+                    values.insert(binding.value.name.value.clone(), value);
+                }
+                Err(error)
+                    if error.failure_class() == crate::evaluation::FailureClass::Recoverable =>
+                {
+                    failed.insert(binding.value.name.value.clone());
+                    if let Some(diagnostic) = error.diagnostic()
+                        && !diagnostics.iter().any(|existing| existing == &diagnostic)
+                    {
+                        diagnostics.push(diagnostic);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+enum RecoveryEvaluationError {
+    Module,
+    Runtime(crate::RuntimeError),
 }
 
 fn block_on_recovery<F: std::future::Future>(future: F) -> F::Output {
@@ -5254,6 +5365,74 @@ unchanged", "|"),
             .unwrap();
         assert_eq!(item.ty.state, crate::FactState::Known);
         assert!(snapshot.diagnostics().is_empty());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recoverable_workspace_publishes_runtime_blame_with_data_and_rule_sources() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        let data = directory.join("data.json");
+        fs::write(&data, r#"{"name":"Forma"}"#).unwrap();
+        fs::write(
+            &main,
+            r#"import result from "@bim/std/result";
+               import data from "./data.json";
+               result.unwrap('Err(blame!(data.name, "invalid name")))"#,
+        )
+        .unwrap();
+
+        let snapshot = recovery_engine().recover_workspace(&main).unwrap();
+        let root = snapshot
+            .module_by_path(&canonicalize(&main).unwrap())
+            .unwrap();
+        assert_eq!(root.state, WorkspaceModuleState::Partial);
+        let diagnostic = snapshot
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.message == "invalid name")
+            .expect("runtime blame diagnostic");
+        assert_eq!(diagnostic.labels.len(), 2);
+        let data_source = snapshot
+            .module_by_path(&canonicalize(&data).unwrap())
+            .unwrap()
+            .source
+            .unwrap();
+        assert_eq!(diagnostic.labels[0].location.source, data_source);
+        assert_eq!(diagnostic.labels[1].location.source, root.source.unwrap());
+        assert!(diagnostic.labels[0].primary);
+        assert!(!diagnostic.labels[1].primary);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recoverable_workspace_continues_independent_runtime_bindings_without_cascades() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        fs::write(
+            &main,
+            "let first = 1 / 0;\n\
+             let blocked = first + 1;\n\
+             let second = 2 / 0;\n\
+             blocked + second",
+        )
+        .unwrap();
+
+        let snapshot = recovery_engine().recover_workspace(&main).unwrap();
+        let root = snapshot
+            .module_by_path(&canonicalize(&main).unwrap())
+            .unwrap();
+        assert_eq!(root.state, WorkspaceModuleState::Partial);
+        let division_errors = snapshot
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.message.contains("division by zero"))
+            .collect::<Vec<_>>();
+        assert_eq!(division_errors.len(), 2, "{division_errors:#?}");
+        assert!(
+            division_errors[0].labels[0].location.start
+                < division_errors[1].labels[0].location.start
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

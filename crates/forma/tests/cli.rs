@@ -92,6 +92,35 @@ fn run_accepts_external_json_and_failures_are_nonzero() {
 }
 
 #[test]
+fn show_reports_ordered_independent_runtime_failures_while_run_stays_strict() {
+    let directory = fixture_dir();
+    let main = directory.join("main.forma");
+    fs::write(
+        &main,
+        "let first = 1 / 0;\nlet blocked = first + 1;\nlet second = 2 / 0;\n0",
+    )
+    .unwrap();
+
+    let show = forma()
+        .args(["show", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(show.status.success());
+    let stdout = String::from_utf8_lossy(&show.stdout);
+    assert_eq!(stdout.matches("division by zero").count(), 2, "{stdout}");
+    assert!(stdout.find(":1:").unwrap() < stdout.find(":3:").unwrap());
+
+    let run = forma()
+        .args(["run", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!run.status.success());
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert_eq!(stderr.matches("division by zero").count(), 1, "{stderr}");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn run_evaluates_structured_string_interpolation() {
     let directory = fixture_dir();
     fs::write(
