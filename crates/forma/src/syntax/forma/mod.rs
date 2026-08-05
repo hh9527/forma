@@ -133,6 +133,23 @@ fn(settings, request) { {args: request.args} }"#;
     }
 
     #[test]
+    fn cst_preserves_interpreter_expressions_losslessly() {
+        let source = "def lift: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Bool = interpreter(eq_i); lift";
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("interpreter.forma", source);
+        let parsed = parse(id, source);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+        let program = Program::cast(&parsed.syntax, NodeRef::ROOT).unwrap();
+        let Some(Binding::Def(definition)) = program.body().unwrap().bindings().next() else {
+            panic!("expected definition");
+        };
+        assert!(definition.value().is_some());
+    }
+
+    #[test]
     fn cst_preserves_annotated_definitions_and_rejects_removed_function_forms() {
         let source = "def identity: for(A) Fn(A) -> A = fn(value) { value }; identity";
         let mut sources = crate::source::SourceDatabase::default();

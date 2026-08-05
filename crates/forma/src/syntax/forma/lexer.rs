@@ -30,6 +30,7 @@ pub enum Token {
     Type,
     Fn,
     FunctionType,
+    Interpreter,
     If,
     Else,
     Match,
@@ -96,6 +97,8 @@ enum NormalToken {
     Fn,
     #[token("Fn")]
     FunctionType,
+    #[token("interpreter")]
+    Interpreter,
     #[token("if")]
     If,
     #[token("else")]
@@ -523,6 +526,7 @@ impl From<NormalToken> for Token {
             NormalToken::Type => Self::Type,
             NormalToken::Fn => Self::Fn,
             NormalToken::FunctionType => Self::FunctionType,
+            NormalToken::Interpreter => Self::Interpreter,
             NormalToken::If => Self::If,
             NormalToken::Else => Self::Else,
             NormalToken::Match => Self::Match,

@@ -3340,6 +3340,93 @@ unchanged", "|"),
     }
 
     #[test]
+    fn interpreter_keyword_lifts_erased_binary_consumers() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import dyn from "@bim/std/dyn";
+               def int_eq_i: Fn(Dyn, Dyn) -> Bool = fn(left, right) {
+                   match dyn.check_int(left) {
+                       'Some(a) => match dyn.check_int(right) {
+                           'Some(b) => a == b,
+                           'None => 'False,
+                       },
+                       'None => 'False,
+                   }
+               };
+               def eq_fn: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Bool =
+                   interpreter(int_eq_i);
+               {
+                   equal: eq_fn[Int](Int)(1, 1),
+                   different: eq_fn[Int](Int)(1, 2),
+                   inferred: eq_fn(Int)(2, 2),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 200_000).unwrap();
+        assert_eq!(
+            module
+                .analysis
+                .display(module.analysis.binding_types["eq_fn"]),
+            "Fn(TypeOf(Any)) -> Fn(Any, Any) -> enum {False, True}"
+        );
+        let Value::Dict(output) = module.execute(200_000).unwrap() else {
+            panic!("interpreter test must return a Dict")
+        };
+        assert_eq!(output.get("equal").unwrap().to_string(), "'True");
+        assert_eq!(output.get("different").unwrap().to_string(), "'False");
+        assert_eq!(output.get("inferred").unwrap().to_string(), "'True");
+
+        fs::write(
+            directory.join("invalid.forma"),
+            r#"def bad_i: Fn(Dyn) -> Bool = fn(value) { 'True };
+               def bad: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Bool =
+                   interpreter(bad_i);
+               0"#,
+        )
+        .unwrap();
+        let error =
+            load_module(directory.join("invalid.forma"), BTreeMap::new(), 200_000).unwrap_err();
+        assert!(error.to_string().contains("expects 1 arguments, found 2"));
+
+        for (source, expected) in [
+            (
+                "def bad = interpreter(eq_i); 0",
+                "interpreter requires an explicit",
+            ),
+            (
+                "def bad: for(A) Fn(A) -> Fn(A, A) -> Bool = interpreter(eq_i); 0",
+                "interpreter requires exactly",
+            ),
+            (
+                "def bad: for(A) Fn(TypeOf(A)) -> Fn(A) -> Bool = interpreter(eq_i); 0",
+                "interpreter requires exactly",
+            ),
+            (
+                "def bad: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> A = interpreter(eq_i); 0",
+                "interpreter requires exactly",
+            ),
+            (
+                "let bad = interpreter(eq_i); 0",
+                "interpreter is only valid",
+            ),
+        ] {
+            fs::write(directory.join("invalid-shape.forma"), source).unwrap();
+            let error = load_module(
+                directory.join("invalid-shape.forma"),
+                BTreeMap::new(),
+                200_000,
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains(expected),
+                "expected {expected:?} in {error}"
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn homogeneous_dict_combinators_preserve_types_and_canonical_order() {
         let directory = fixture_dir();
         fs::write(

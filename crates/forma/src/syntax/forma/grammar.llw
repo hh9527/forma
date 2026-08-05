@@ -1,4 +1,4 @@
-token Let='let' Decl='decl' Def='def' Native='native' For='for' Type='type' Fn='fn' FunctionType='Fn' If='if' Else='else' Match='match';
+token Let='let' Decl='decl' Def='def' Native='native' For='for' Type='type' Fn='fn' FunctionType='Fn' Interpreter='interpreter' If='if' Else='else' Match='match';
 token Import='import' From='from';
 token SectionLParen='\\(' LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
 token Comma=',' Colon=':' Semicolon=';' Dot='.' At='@';
@@ -49,6 +49,7 @@ primary:
 | Bytes @bytes_expr
 | Atom @atom_expr
 | Identifier @variable_expr
+| interpreter_expr
 | '(' [expression (?1 ',' expression)* [',']] ')' @paren_expr
 | '[' [expression (?2 ',' expression)* [',']] ']' @array_expr
 | braced
@@ -67,6 +68,7 @@ decorator: '@' decorator_path [arguments];
 decorator_path: Identifier ('.' Identifier)*;
 block: '{' body '}';
 closure: 'fn' parameters ['->' expression] block;
+interpreter_expr: 'interpreter' '(' expression ')';
 function_contract: 'Fn' '(' [contract (?1 ',' contract)* [',']] ')' '->' contract;
 contract: Identifier [?1 '(' [contract (?2 ',' contract)* [',']] ')'] @contract_expr | function_contract;
 parameters: '(' [parameter (?1 ',' parameter)* [',']] ')';

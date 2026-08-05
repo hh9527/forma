@@ -1,6 +1,6 @@
 # RFC 0093: Contextual `interpreter` lifting
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0089 through RFC 0092
 - Tracking issue: https://github.com/hh9527/forma/issues/4
 
@@ -144,3 +144,26 @@ and publication use existing mechanisms.
    expansion errors are insufficient;
 5. test syntax, typing, execution, interfaces, CLI/LSP, and cancellation; and
 6. run the full quality gate and record the implementation result.
+
+## Implementation result
+
+Implemented `interpreter(expression)` as a reserved, lossless CST expression
+and a hygienic parser-level expansion. The expression is accepted only as the
+direct initializer of an explicitly contracted `def`; lowering audits the exact
+single-parameter scheme, witness, binary consumer, and result independence
+before introducing ordinary closures and calls. Invalid contexts receive a
+dedicated source-level diagnostic and never expose generated names.
+
+The compiler-owned prelude supplies Dyn packing through the existing
+`CoreDynFunction::Pack` implementation. No interpreter runtime Function,
+bytecode operation, dispatcher, or specialization path was added. The erased
+operand remains an ordinary `Fn(Dyn, Dyn) -> R`, so arity and result mismatches
+use existing static Function diagnostics.
+
+Regression coverage includes lossless/recoverable syntax, execution, operand
+arity rejection, missing and malformed contracts, returned-`A` rejection, and
+non-definition use. Both `eq_fn[Int](Int)(...)` and `eq_fn(Int)(...)` execute;
+the latter infers `A` from the TypeOf witness and subsequent arguments, so the
+RFC 0055 gap does not remain for this shape. Full Forma tests pass with 286
+passed and 1 ignored; all 13 CLI and 20 LSP tests pass, and strict workspace
+Clippy reports no warnings.

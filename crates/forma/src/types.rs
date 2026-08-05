@@ -15,7 +15,8 @@ use crate::semantic::{
 };
 use crate::source::{Diagnostic, SourceDatabase};
 use crate::value::{
-    Atom, Closure, CoreBuiltinTypeFunction, CoreModelFunction, NativeError, NativeFunction, Value,
+    Atom, Closure, CoreBuiltinTypeFunction, CoreDynFunction, CoreModelFunction, NativeError,
+    NativeFunction, Value,
 };
 use crate::{
     BuiltinAtom, CallContext, DebugSink, DiscardDebugSink, Quota, QuotaAccount, ValueKind,
@@ -2698,6 +2699,12 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
             Value::Func(std::sync::Arc::new(Closure::native(function))),
         );
     }
+    prelude.insert(
+        "\0forma_pack_dyn".into(),
+        Value::Func(Arc::new(Closure::native(NativeFunction::core_dyn(
+            CoreDynFunction::Pack,
+        )))),
+    );
     prelude
 }
 
@@ -2780,6 +2787,13 @@ fn core_static_prelude() -> HashMap<String, TypeDescriptor> {
     prelude.insert(
         "validate".into(),
         function(vec![metadata, TypeDescriptor::Any], TypeDescriptor::Any),
+    );
+    prelude.insert(
+        "\0forma_pack_dyn".into(),
+        function(
+            vec![TypeDescriptor::Type, TypeDescriptor::Any],
+            TypeDescriptor::Dyn,
+        ),
     );
     prelude
 }
