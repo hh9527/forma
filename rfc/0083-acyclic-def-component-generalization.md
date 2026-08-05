@@ -1,6 +1,6 @@
 # RFC 0083: Acyclic `def` component generalization
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0054, RFC 0078 through RFC 0080, RFC 0082
 - Tracking issue: https://github.com/hh9527/forma/issues/1
 
@@ -238,3 +238,23 @@ The HIR already owns the authoritative semantic identity.
 Then a harmless forward edge changes inference while the equivalent reversed
 program succeeds. `def` promises forward visibility, so static completion must
 respect dependencies rather than textual placement.
+
+## Implementation result
+
+Implemented using the resolved HIR definition and reference graph. Eligible
+closure-valued `def` initializers are identified by semantic definition IDs;
+reference expressions are assigned to their initializer through HIR parent
+links. Reachability classifies self and mutual recursion, and a stable
+dependency-first traversal orders the remaining acyclic nodes.
+
+Recursive nodes continue through the RFC 0078 monomorphic skeleton and equation
+solver. Acyclic nodes are inferred at a delayed initializer boundary and reuse
+RFC 0079's owned-variable generalization. Top-level schemes enter both
+definition facts and module interfaces; nested schemes remain in their lexical
+scheme scope. Ordinary aliases still instantiate once.
+
+Regression coverage includes independent definitions, forward and reverse
+acyclic chains, self and mutual recursion from the existing suite, parameter
+shadowing, nested blocks, monomorphic aliases, imported scheme instantiation,
+and execution of the single exported closure value. Runtime definition slots,
+bytecode, and VM behavior are unchanged.

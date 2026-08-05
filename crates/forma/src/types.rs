@@ -4,7 +4,7 @@ use crate::ast::{
 };
 use crate::compiler::compile_expression_with_bindings;
 use crate::heap::{Handle, Heap, PersistentValue};
-use crate::hir::{HirDefinitionId, HirDefinitionKind, HirExpressionId, HirProgram};
+use crate::hir::{HirDefinitionId, HirDefinitionKind, HirExpressionId, HirProgram, HirResolution};
 use crate::json::{Provenance, ValuePath, ValuePathSegment};
 use crate::lexer::{FrontendError, SourceLocation};
 use crate::lir::RegisterId;
@@ -1817,6 +1817,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
     )?;
     let mut inference = GenericInference::new(
         &binding_schemes,
+        &hir,
         external_interfaces,
         &local_annotations,
         account.query_context(),
@@ -1825,6 +1826,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
     let type_metadata_expected = TypeDescriptor::Type;
     let mut delayed_bindings = Vec::new();
     let mut recursive_skeletons = HashMap::new();
+    let component_plan = definition_component_plan(&program.value.body, &hir);
     let uncontracted_definition_names = program
         .value
         .body
@@ -1842,6 +1844,9 @@ pub(crate) fn analyze_program_with_bindings_observed(
         if binding.value.kind != BindingKind::Def
             || binding.value.annotation.is_some()
             || definition_contracts.contains_key(&binding.value.name.value)
+            || !component_plan
+                .recursive
+                .contains(&binding.value.name.location)
         {
             continue;
         }
@@ -1904,6 +1909,46 @@ pub(crate) fn analyze_program_with_bindings_observed(
     inference
         .solve_recursive_equations(&recursive_variables)
         .map_err(|message| frontend_error(source_name, message))?;
+    for location in &component_plan.acyclic {
+        let binding = program
+            .value
+            .body
+            .value
+            .bindings
+            .iter()
+            .find(|binding| binding.value.name.location == *location)
+            .expect("component binding exists");
+        let first_owned_variable = inference.next_variable;
+        inference.delayed_initializer_depth += 1;
+        let inferred = inference.infer(&binding.value.value, &checked_environment, None);
+        inference.delayed_initializer_depth -= 1;
+        let inferred = inferred.map_err(|message| {
+            FrontendError::from_diagnostic(
+                sources,
+                Diagnostic::error(message, binding.value.value.location),
+            )
+        })?;
+        let scheme = inference.generalize_local_closure(
+            &inferred,
+            first_owned_variable,
+            binding.value.name.location,
+        );
+        let descriptor = scheme.as_ref().map_or_else(
+            || inference.resolve(&inferred),
+            |scheme| scheme.body.clone(),
+        );
+        checked_environment.insert(binding.value.name.value.clone(), descriptor.clone());
+        binding_types.insert(binding.value.name.value.clone(), descriptor);
+        inference.set_local_scheme(binding.value.name.value.clone(), scheme.clone());
+        if let Some(scheme) = scheme {
+            inference
+                .inferred_schemes
+                .insert(binding.value.name.location, scheme.clone());
+            inference
+                .top_level_inferred_schemes
+                .insert(binding.value.name.value.clone(), scheme);
+        }
+    }
     for binding in &program.value.body.value.bindings {
         if matches!(
             binding.value.kind,
@@ -1915,6 +1960,12 @@ pub(crate) fn analyze_program_with_bindings_observed(
             continue;
         }
         if recursive_skeletons.contains_key(&binding.value.name.value) {
+            continue;
+        }
+        if component_plan
+            .acyclic
+            .contains(&binding.value.name.location)
+        {
             continue;
         }
         let expected = if binding.value.kind == BindingKind::Type {
@@ -3537,6 +3588,7 @@ struct GenericInference<'a> {
     top_level_inferred_schemes: HashMap<String, TypeScheme>,
     inferred_schemes: HashMap<crate::Location, TypeScheme>,
     placeholder_obligations: Vec<(InferenceVariableId, crate::Location, String)>,
+    hir: &'a HirProgram,
     external_interfaces: &'a BTreeMap<String, ModuleInterface>,
     local_annotations: &'a HashMap<crate::Location, TypeDescriptor>,
     query: Option<crate::query::QueryContext>,
@@ -3550,9 +3602,134 @@ struct GenericInference<'a> {
     records: HashMap<crate::Location, TypeDescriptor>,
 }
 
+#[derive(Default)]
+struct DefinitionComponentPlan {
+    recursive: HashSet<crate::Location>,
+    acyclic: Vec<crate::Location>,
+}
+
+fn definition_component_plan(block: &Block, hir: &HirProgram) -> DefinitionComponentPlan {
+    let candidates = block
+        .value
+        .bindings
+        .iter()
+        .filter(|binding| {
+            binding.value.kind == BindingKind::Def
+                && binding.value.annotation.is_none()
+                && binding.value.type_parameters.is_empty()
+                && matches!(binding.value.value.value, ExprKind::Closure { .. })
+                && !block.value.bindings.iter().any(|candidate| {
+                    candidate.value.kind == BindingKind::Decl
+                        && candidate.value.name.value == binding.value.name.value
+                })
+        })
+        .filter_map(|binding| {
+            hir.definitions()
+                .iter()
+                .find(|definition| {
+                    definition.kind == HirDefinitionKind::DefinitionSlot
+                        && definition.name == binding.value.name.value
+                        && definition.value.is_some_and(|value| {
+                            hir.expression(value).is_some_and(|expression| {
+                                expression.location == binding.value.value.location
+                            })
+                        })
+                })
+                .map(|definition| (definition.id, binding.value.name.location))
+        })
+        .collect::<Vec<_>>();
+    let indices = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, (definition, _))| (*definition, index))
+        .collect::<HashMap<_, _>>();
+    let mut edges = vec![Vec::new(); candidates.len()];
+    for (index, (definition, _)) in candidates.iter().enumerate() {
+        let Some(root) = hir
+            .definition(*definition)
+            .and_then(|definition| definition.value)
+        else {
+            continue;
+        };
+        for expression in hir.expressions() {
+            let Some(reference) = expression.reference.and_then(|id| hir.reference(id)) else {
+                continue;
+            };
+            let HirResolution::Definition(target) = reference.resolution else {
+                continue;
+            };
+            let Some(&target) = indices.get(&target) else {
+                continue;
+            };
+            let mut owner = Some(expression.id);
+            let mut contained = false;
+            while let Some(current) = owner {
+                if current == root {
+                    contained = true;
+                    break;
+                }
+                owner = hir
+                    .expression(current)
+                    .and_then(|expression| expression.parent);
+            }
+            if contained && !edges[index].contains(&target) {
+                edges[index].push(target);
+            }
+        }
+        edges[index].sort_unstable();
+    }
+
+    fn reaches(
+        current: usize,
+        target: usize,
+        edges: &[Vec<usize>],
+        visited: &mut HashSet<usize>,
+    ) -> bool {
+        visited.insert(current)
+            && edges[current]
+                .iter()
+                .any(|next| *next == target || reaches(*next, target, edges, visited))
+    }
+
+    let recursive_indices = (0..candidates.len())
+        .filter(|index| reaches(*index, *index, &edges, &mut HashSet::new()))
+        .collect::<HashSet<_>>();
+    let mut ordered = Vec::new();
+    let mut visited = HashSet::new();
+    fn visit(
+        node: usize,
+        edges: &[Vec<usize>],
+        recursive: &HashSet<usize>,
+        visited: &mut HashSet<usize>,
+        ordered: &mut Vec<usize>,
+    ) {
+        if recursive.contains(&node) || !visited.insert(node) {
+            return;
+        }
+        for dependency in &edges[node] {
+            visit(*dependency, edges, recursive, visited, ordered);
+        }
+        ordered.push(node);
+    }
+    for node in 0..candidates.len() {
+        visit(node, &edges, &recursive_indices, &mut visited, &mut ordered);
+    }
+    DefinitionComponentPlan {
+        recursive: recursive_indices
+            .into_iter()
+            .map(|index| candidates[index].1)
+            .collect(),
+        acyclic: ordered
+            .into_iter()
+            .map(|index| candidates[index].1)
+            .collect(),
+    }
+}
+
 impl<'a> GenericInference<'a> {
     fn new(
         schemes: &HashMap<String, TypeScheme>,
+        hir: &'a HirProgram,
         external_interfaces: &'a BTreeMap<String, ModuleInterface>,
         local_annotations: &'a HashMap<crate::Location, TypeDescriptor>,
         query: Option<crate::query::QueryContext>,
@@ -3563,6 +3740,7 @@ impl<'a> GenericInference<'a> {
             top_level_inferred_schemes: HashMap::new(),
             inferred_schemes: HashMap::new(),
             placeholder_obligations: Vec::new(),
+            hir,
             external_interfaces,
             local_annotations,
             query,
@@ -4703,6 +4881,7 @@ impl<'a> GenericInference<'a> {
         let mut environment = environment.clone();
         let mut delayed = Vec::new();
         let mut recursive_skeletons = HashMap::new();
+        let component_plan = definition_component_plan(block, self.hir);
         let uncontracted_definition_names = block
             .value
             .bindings
@@ -4714,6 +4893,12 @@ impl<'a> GenericInference<'a> {
             .collect::<HashSet<_>>();
         for binding in &block.value.bindings {
             if binding.value.kind != BindingKind::Def || binding.value.annotation.is_some() {
+                continue;
+            }
+            if !component_plan
+                .recursive
+                .contains(&binding.value.name.location)
+            {
                 continue;
             }
             let first_owned_variable = self.next_variable;
@@ -4762,8 +4947,41 @@ impl<'a> GenericInference<'a> {
             }
         }
         self.solve_recursive_equations(&recursive_variables)?;
+        for location in &component_plan.acyclic {
+            let binding = block
+                .value
+                .bindings
+                .iter()
+                .find(|binding| binding.value.name.location == *location)
+                .expect("component binding exists");
+            let first_owned_variable = self.next_variable;
+            self.delayed_initializer_depth += 1;
+            let inferred = self.infer(&binding.value.value, &environment, None);
+            self.delayed_initializer_depth -= 1;
+            let inferred = inferred?;
+            let scheme = self.generalize_local_closure(
+                &inferred,
+                first_owned_variable,
+                binding.value.name.location,
+            );
+            let descriptor = scheme
+                .as_ref()
+                .map_or_else(|| self.resolve(&inferred), |scheme| scheme.body.clone());
+            environment.insert(binding.value.name.value.clone(), descriptor);
+            self.set_local_scheme(binding.value.name.value.clone(), scheme.clone());
+            if let Some(scheme) = scheme {
+                self.inferred_schemes
+                    .insert(binding.value.name.location, scheme);
+            }
+        }
         for binding in &block.value.bindings {
             if recursive_skeletons.contains_key(&binding.value.name.value) {
+                continue;
+            }
+            if component_plan
+                .acyclic
+                .contains(&binding.value.name.location)
+            {
                 continue;
             }
             let annotated_expected = binding
@@ -6584,7 +6802,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             delayed.display(delayed.result_type),
-            "Fn(enum {False, True}, Int) -> Int"
+            "Fn(enum {False, True}, Any) -> Any | Int"
         );
 
         let dynamic =
@@ -6843,6 +7061,41 @@ mod tests {
     }
 
     #[test]
+    fn acyclic_definitions_generalize_in_dependency_order() {
+        for source in [
+            "def identity = fn(value) { value }; (identity(1), identity(\"x\"))",
+            "def identity = fn(value) { value }; def apply = fn(value) { identity(value) };\
+             (apply(1), apply(\"x\"))",
+            "def apply = fn(value) { identity(value) }; def identity = fn(value) { value };\
+             (apply(1), apply(\"x\"))",
+            "def outer = fn(value) {\
+                 { def identity = fn(item) { item }; (identity(value), identity(\"x\")) }\
+             }; outer(1)",
+        ] {
+            let analysis = analyze_with_natives(source, &[]).unwrap();
+            assert_eq!(analysis.display(analysis.result_type), "(Int, String)");
+        }
+
+        let shadowed = analyze_with_natives(
+            "def identity = fn(identity) { identity }; (identity(1), identity(\"x\"))",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(shadowed.display(shadowed.result_type), "(Int, String)");
+    }
+
+    #[test]
+    fn acyclic_definition_aliases_instantiate_once() {
+        let error = analyze_with_natives(
+            "def identity = fn(value) { value }; let alias = identity;\
+             (alias(1), alias(\"x\"))",
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.message.contains("cannot unify"), "{}", error.message);
+    }
+
+    #[test]
     fn recursive_inference_uses_partial_and_later_evidence_but_stays_monomorphic() {
         let partial = analyze_with_natives(
             "def countdown = fn(value: Int) -> Int {\
@@ -6882,7 +7135,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(direct.display(direct.result_type), "Fn(Int) -> Int");
+        assert_eq!(direct.display(direct.result_type), "Fn(Any) -> Any");
         assert_eq!(direct.display(direct.binding_types["number"]), "Int");
 
         let alias = analyze_with_natives(
@@ -6891,7 +7144,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(alias.display(alias.result_type), "Fn(Int) -> Int");
+        assert_eq!(alias.display(alias.result_type), "Fn(Any) -> Any");
 
         let callback = analyze_with_natives(
             "native map: for(A, B) Fn(Array(A), Fn(A) -> B) -> Array(B);\
@@ -6900,7 +7153,7 @@ mod tests {
             &[("map", 2)],
         )
         .unwrap();
-        assert_eq!(callback.display(callback.result_type), "Fn(Int) -> Int");
+        assert_eq!(callback.display(callback.result_type), "Fn(Any) -> Any");
 
         let field = analyze_with_natives(
             "let holder = {apply: fn(value) { value }};\
@@ -6921,26 +7174,20 @@ mod tests {
 
     #[test]
     fn delayed_bindings_reject_conflicts_and_underconstrained_results() {
-        let conflict = analyze_with_natives(
+        let independent = analyze_with_natives(
             "def identity = fn(value) { value };\
              let number = identity(1); identity(\"text\")",
             &[],
         )
-        .unwrap_err();
-        assert!(conflict.message.contains("cannot unify String with Int"));
+        .unwrap();
+        assert_eq!(independent.display(independent.result_type), "String");
 
-        for source in [
-            "def identity = fn(value) { value }; identity",
-            "let values = []; values",
-            "{ def identity = fn(value) { value }; identity }",
-        ] {
-            let error = analyze_with_natives(source, &[]).unwrap_err();
-            assert!(
-                error.message.contains("cannot infer monomorphic binding"),
-                "{}",
-                error.message
-            );
-        }
+        let error = analyze_with_natives("let values = []; values", &[]).unwrap_err();
+        assert!(
+            error.message.contains("cannot infer monomorphic binding"),
+            "{}",
+            error.message
+        );
 
         let explicit = analyze_with_natives(
             "let identity: Fn(Any) -> Any = fn(value) { value }; identity",
@@ -7126,7 +7373,8 @@ mod tests {
         let schemes = HashMap::new();
         let interfaces = BTreeMap::new();
         let annotations = HashMap::new();
-        let mut inference = GenericInference::new(&schemes, &interfaces, &annotations, None);
+        let hir = HirProgram::default();
+        let mut inference = GenericInference::new(&schemes, &hir, &interfaces, &annotations, None);
         let variable = TypeDescriptor::Inference(InferenceVariableId(0));
         assert!(
             inference
