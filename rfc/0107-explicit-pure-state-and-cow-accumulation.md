@@ -27,7 +27,7 @@ language-level uniqueness promise.
 
 The phase delivers two concrete applications:
 
-1. a dedicated opaque HashState and a user-space TypeDesc/Dyn structural hash
+1. a module-owned opaque HashState and a user-space TypeDesc/Dyn structural hash
    interpreter; and
 2. ordinary Array-based diagnostic records threaded explicitly through
    validation functions and higher-order combinators.
@@ -97,17 +97,19 @@ Fn(A, S) -> Result(S, E)          # failure returns no updated state
 Fn(A, S) -> Tuple(Result(A, E), S) # failure may retain accumulated state
 ```
 
-## Dedicated opaque HashState
+## Module-owned opaque HashState
 
-HashState is a nominal leaf type whose representation is unavailable to Forma
-code. It is not a Host resource and has no external identity or lifetime:
+HashState is declared and owned by `@bim/std/hash`; it is not a dedicated
+language primitive. Its representation is unavailable to Forma code. It is not
+a Host resource and has no external identity or lifetime:
 
 ```text
 HashState = heap-owned opaque HashContext
 ```
 
-The first implementation is dedicated rather than a general native-payload
-ABI. HashState may cross ordinary Function, Result, Tuple, Array, closure, heap
+RFC 0109 provides one narrow generic carrier for immutable module-owned opaque
+values. Adding another such library type does not extend the VM's closed value
+or type enums. HashState may cross ordinary Function, Result, Tuple, Array, closure, heap
 promotion, and module boundaries like any other value. Implementations may
 share an immutable context across heap copies, but update must produce an
 independent logical context and old aliases remain valid. The initial
@@ -223,8 +225,8 @@ No resource-table transaction log is needed.
 1. RFC 0108: add provenance-preserving persistent Array append, including
    alias, quota, heap-copy, and callback-boundary tests, without claiming a COW
    fast path in the current handle heap;
-2. RFC 0109: add the dedicated nominal opaque HashState runtime value and
-   TypeDesc leaf without a general native opaque ABI;
+2. RFC 0109: add a narrow module-owned opaque value boundary, nominal type
+   declaration, and generic TypeDesc leaf;
 3. RFC 0110: add `@bim/std/hash`, deterministic domain-separated update
    operations, finish, vectors, and quota contracts;
 4. RFC 0111: implement a reference user-space structural hash interpreter over
@@ -254,7 +256,7 @@ the full workspace quality gate.
 - Unsharable, Marker, AutoMarker, trait, interface, or effect rows;
 - hidden Function parameters, hidden returns, or automatic caller rebinding;
 - Host resource tables, Port IDs, generations, invalidation, or finalizers;
-- a general user-extensible native opaque payload ABI;
+- dynamic native loading or a general FFI ABI beyond immutable opaque payloads;
 - making diagnostic records emit Host diagnostics as a side effect;
 - hashing Functions, source provenance, physical paths, or runtime identities;
 - cryptographic signing, password hashing, or keyed MAC APIs; or
