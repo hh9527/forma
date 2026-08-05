@@ -33,7 +33,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             name: EQ_MODULE,
             source: r#"
-native equal: for(A) Fn(A, A) -> Bool;
+native equal: for(A, B) Fn(A, B) -> Bool;
 { equal: equal }
 "#,
             functions: vec![("equal", NativeFunction::core_eq(CoreEqFunction::Equal))],

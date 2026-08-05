@@ -3562,8 +3562,12 @@ unchanged", "|"),
                import eq from "@bim/std/eq";
                let function = fn(value) { value };
                let pairs = arrays.zip([1, 2, 3], [1, 2, 3]);
+               def accepts_int_eq: Fn(Fn(Int, Int) -> Bool) -> Bool = fn(compare) {
+                   compare(1, 1)
+               };
                {
                    scalar: (eq.equal(1, 1), 1 == 1),
+                   heterogeneous: (eq.equal(1, "1"), 1 == "1"),
                    nested: (eq.equal([{a: 1}], [{a: 1}]), [{a: 1}] == [{a: 1}]),
                    same_function: (eq.equal(function, function), function == function),
                    other_function: (eq.equal(function, fn(value) { value }), function == fn(value) { value }),
@@ -3573,6 +3577,7 @@ unchanged", "|"),
                            match pair { (left, right) => eq.equal(left, right) }
                        }),
                    },
+                   direct_callback: accepts_int_eq(eq.equal),
                }"#,
         )
         .unwrap();
@@ -3587,7 +3592,12 @@ unchanged", "|"),
             output.get("other_function").unwrap().to_string(),
             "('False, 'False)"
         );
+        assert_eq!(
+            output.get("heterogeneous").unwrap().to_string(),
+            "('False, 'False)"
+        );
         assert_eq!(output.get("higher_order").unwrap().to_string(), "'True");
+        assert_eq!(output.get("direct_callback").unwrap().to_string(), "'True");
         fs::remove_dir_all(directory).unwrap();
     }
 

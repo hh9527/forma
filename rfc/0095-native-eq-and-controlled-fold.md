@@ -33,18 +33,20 @@ standard equality implementation.
 `@bim/std/eq` exports:
 
 ```forma
-native equal: for(A) Fn(A, A) -> Bool;
+native equal: for(A, B) Fn(A, B) -> Bool;
 { equal: equal }
 ```
 
-`eq.equal(left, right)` and `left == right` call the same VM equality primitive.
-They therefore share structural behavior, Function identity behavior, internal
-cycle handling, quota behavior, and future semantic changes. The module does
-not use TypeOf, Dyn, reflection, or a second recursive implementation.
+`eq.equal(left, right)` and `left == right` accept independently typed operands
+and call the same VM equality primitive. They therefore share heterogeneous and
+structural behavior, Function identity behavior, internal cycle handling, quota
+behavior, and future semantic changes. The module does not use TypeOf, Dyn,
+reflection, or a second recursive implementation.
 
-The generic contract requires both operands to have one inferred `A`. This is
-the function-valued form for higher-order APIs; it is not overload resolution
-or an implicit equality capability.
+The generic contract retains each operand's static type without forcing them to
+unify and without erasing either to Any. In a homogeneous higher-order context,
+both parameters may instantiate to the same type. This is the function-valued
+form of the operator, not overload resolution or an implicit capability.
 
 ## Fold control
 
@@ -145,10 +147,11 @@ and natural completion allocates Continue around the final state. Regression
 coverage proves all-Continue accumulation, empty input without callback
 execution, and Break before a later division-by-zero callback input.
 
-Implemented `@bim/std/eq.equal` as `for(A) Fn(A, A) -> Bool`. Its native dispatch
+Implemented `@bim/std/eq.equal` as `for(A, B) Fn(A, B) -> Bool`. Its native dispatch
 calls the same `HeapView::values_equal` primitive as the `==` bytecode operation.
-Tests compare both forms for scalars, nested structures, and same/different
-Function identities, and pass `eq.equal` through a higher-order Array API.
+Tests compare both forms for homogeneous and heterogeneous scalars, nested
+structures, and same/different Function identities. They also instantiate the
+generic Function directly in a homogeneous callback position.
 
 Moved the recursive Forma interpreter to
 `examples/reference-equality.forma`. It imports only public Array, TypeDesc, and
