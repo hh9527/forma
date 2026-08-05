@@ -98,3 +98,4 @@ semantics from an earlier RFC.
 77. Explicit generic type application.
 78. Monomorphic recursive closure inference.
 79. Restricted local closure generalization.
+80. Usable rank-1 type inference umbrella.
