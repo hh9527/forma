@@ -198,6 +198,21 @@ fn(settings, request) { {args: request.args} }"#;
     }
 
     #[test]
+    fn native_type_slots_are_lossless_and_required() {
+        let source = "native type State = @3; State";
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("native-type.forma", source);
+        let parsed = parse(id, source);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+
+        let id = sources.add("legacy-native-type.forma", "native type State; State");
+        assert!(parse(id, "native type State; State").has_errors());
+    }
+
+    #[test]
     fn cst_preserves_type_and_field_decorators_losslessly() {
         let source = "@outer @factory(1) type T = Int; { @field value: 2 }";
         let mut sources = crate::source::SourceDatabase::default();

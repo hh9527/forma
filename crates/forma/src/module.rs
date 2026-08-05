@@ -132,13 +132,73 @@ struct FrozenMainWorld {
     heap: Heap,
 }
 
+fn declared_native_types(
+    program: &Program,
+    native_module: crate::value::NativeModuleId,
+    module_name: &str,
+    sources: &SourceDatabase,
+) -> Result<BTreeMap<u32, (String, crate::NativeType)>, ModuleError> {
+    let mut native_types = BTreeMap::new();
+    for binding in program
+        .value
+        .body
+        .value
+        .bindings
+        .iter()
+        .filter(|binding| binding.value.kind == BindingKind::NativeType)
+    {
+        let ExprKind::Int(slot) = binding.value.value.value else {
+            unreachable!("native type grammar supplies an integer slot")
+        };
+        let local = u32::try_from(slot).map_err(|_| {
+            ModuleError::new(sources.render(&crate::source::Diagnostic::error(
+                "native type slot must fit the u32 range",
+                binding.value.value.location,
+            )))
+        })?;
+        let name = binding.value.name.value.clone();
+        let native_type = crate::NativeType::bind(
+            crate::value::NativeTypeId {
+                module: native_module,
+                local,
+            },
+            format!("{module_name}#{name}"),
+        );
+        if native_types.insert(local, (name, native_type)).is_some() {
+            return Err(ModuleError::new(sources.render(
+                &crate::source::Diagnostic::error(
+                    format!("duplicate native type slot @{local} in {module_name}"),
+                    binding.value.value.location,
+                ),
+            )));
+        }
+    }
+    Ok(native_types)
+}
+
 fn install_core_modules(
     main: &mut MainWorld,
     sources: &mut SourceDatabase,
     debug_sink: &Arc<dyn DebugSink>,
 ) -> Result<HashMap<&'static str, (Value, PersistentValue, ModuleInterface)>, ModuleError> {
     let mut modules = HashMap::new();
-    for (module_index, spec) in module_specs().into_iter().enumerate() {
+    let specs = module_specs();
+    let mut native_module_ids = HashMap::new();
+    for spec in &specs {
+        if spec.native_id == 0 || spec.native_id > crate::value::RESERVED_NATIVE_MODULE_MAX {
+            return Err(ModuleError::new(format!(
+                "core module {} has invalid reserved native module ID {}",
+                spec.name, spec.native_id
+            )));
+        }
+        if let Some(previous) = native_module_ids.insert(spec.native_id, spec.name) {
+            return Err(ModuleError::new(format!(
+                "core modules {previous} and {} use duplicate native module ID {}",
+                spec.name, spec.native_id
+            )));
+        }
+    }
+    for spec in specs {
         let source_name = format!("<{}>", spec.name);
         let source_id = sources.add(source_name.clone(), spec.source);
         let parsed = parse_registered(sources, source_id);
@@ -155,40 +215,14 @@ fn install_core_modules(
         let implementations = spec.functions.into_iter().collect::<HashMap<_, _>>();
         let mut external_values = BTreeMap::new();
         let mut external_roots = HashMap::new();
-        let native_module = crate::value::NativeModuleId(module_index as u32);
-        let native_types = program
-            .value
-            .body
-            .value
-            .bindings
-            .iter()
-            .filter(|binding| binding.value.kind == BindingKind::NativeType)
-            .enumerate()
-            .map(|(local, binding)| {
-                crate::NativeType::bind(
-                    crate::value::NativeTypeId {
-                        module: native_module,
-                        local: local as u32,
-                    },
-                    format!("{}#{}", spec.name, binding.value.name.value),
-                )
-            })
-            .collect::<Vec<_>>();
-        for (binding, native_type) in program
-            .value
-            .body
-            .value
-            .bindings
-            .iter()
-            .filter(|binding| binding.value.kind == BindingKind::NativeType)
-            .zip(&native_types)
-        {
-            let name = binding.value.name.value.clone();
+        let native_module = crate::value::NativeModuleId(spec.native_id);
+        let native_types = declared_native_types(&program, native_module, spec.name, sources)?;
+        for (name, native_type) in native_types.values() {
             let value = Value::NativeType(native_type.clone());
             let root = publish_value(&mut main.heap, &value)
                 .map_err(|error| ModuleError::new(error.to_string()))?;
             external_values.insert(name.clone(), value);
-            external_roots.insert(name, root);
+            external_roots.insert(name.clone(), root);
         }
         for binding in &program.value.body.value.bindings {
             if binding.value.kind != BindingKind::Native {
@@ -222,9 +256,9 @@ fn install_core_modules(
                 )));
             }
             let value = if let Some(local) = implementation.native_type_local() {
-                let native_type = native_types.get(local as usize).ok_or_else(|| {
+                let (_, native_type) = native_types.get(&local).ok_or_else(|| {
                     ModuleError::new(format!(
-                        "native symbol {symbol:?} references missing native type index {local}"
+                        "native symbol {symbol:?} references undeclared native type slot @{local}"
                     ))
                 })?;
                 Value::Func(Arc::new(Closure::native_with_upvalues(
@@ -1642,6 +1676,66 @@ mod tests {
     }
 
     #[test]
+    fn core_native_module_ids_are_reserved_unique_and_order_independent() {
+        let specs = module_specs();
+        let identities = specs
+            .iter()
+            .map(|spec| (spec.name, spec.native_id))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(identities.len(), specs.len());
+        assert!(
+            identities
+                .values()
+                .all(|id| *id > 0 && *id <= crate::value::RESERVED_NATIVE_MODULE_MAX)
+        );
+        assert_eq!(
+            identities.values().copied().collect::<HashSet<_>>().len(),
+            specs.len()
+        );
+        let reordered = specs
+            .iter()
+            .rev()
+            .map(|spec| (spec.name, spec.native_id))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(identities, reordered);
+    }
+
+    #[test]
+    fn native_type_slots_are_explicit_unique_and_order_independent() {
+        fn declarations(
+            source: &str,
+        ) -> Result<BTreeMap<u32, (String, crate::NativeType)>, ModuleError> {
+            let mut sources = SourceDatabase::default();
+            let source_id = sources.add("<fixture>", source);
+            let program = parse_registered(&sources, source_id).program.unwrap();
+            declared_native_types(
+                &program,
+                crate::value::NativeModuleId(1024),
+                "host:fixture",
+                &sources,
+            )
+        }
+
+        let forward =
+            declarations("native type First = @7; native type Second = @2; First").unwrap();
+        let reversed =
+            declarations("native type Second = @2; native type First = @7; First").unwrap();
+        assert_eq!(forward.get(&2).unwrap().1, reversed.get(&2).unwrap().1);
+        assert_eq!(forward.get(&7).unwrap().1, reversed.get(&7).unwrap().1);
+
+        let duplicate =
+            declarations("native type First = @7; native type Second = @7; First").unwrap_err();
+        assert!(
+            duplicate
+                .to_string()
+                .contains("duplicate native type slot @7")
+        );
+
+        let overflow = declarations("native type Huge = @4294967296; Huge").unwrap_err();
+        assert!(overflow.to_string().contains("must fit the u32 range"));
+    }
+
+    #[test]
     fn core_debug_observes_values_without_changing_results() {
         let directory = fixture_dir();
         fs::write(
@@ -2265,7 +2359,7 @@ name = "rustc"
 
         fs::write(
             directory.join("missing-native-type.forma"),
-            "native type State; State",
+            "native type State = @1; State",
         )
         .unwrap();
         let missing_type = load_module(

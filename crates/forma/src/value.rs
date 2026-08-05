@@ -85,6 +85,8 @@ type OpaquePayload = dyn Any + Send + Sync;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct NativeModuleId(pub(crate) u32);
 
+pub(crate) const RESERVED_NATIVE_MODULE_MAX: u32 = 1023;
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct NativeTypeId {
     pub(crate) module: NativeModuleId,

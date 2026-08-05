@@ -9,7 +9,7 @@
 SHA-256 state transitions:
 
 ```forma
-native type HashState;
+native type HashState = @3;
 native new: Fn() -> HashState;
 native update_bytes: Fn(HashState, Bytes) -> HashState;
 native update_string: Fn(HashState, String) -> HashState;
@@ -89,7 +89,8 @@ call; input provenance does not become the new root provenance.
 
 ## Implementation result
 
-Implemented `HashState` as local native type index zero in `@bim/std/hash`.
+Implemented `HashState` as explicit local native type slot three in
+`@bim/std/hash`.
 The native module registry assigns an unobservable module ID, links the
 `NativeType` witness before contract analysis, and captures that witness as a
 hidden native closure upvalue. Hash callbacks neither hard-code nor reconstruct

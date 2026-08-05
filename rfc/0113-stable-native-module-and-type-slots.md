@@ -1,6 +1,6 @@
 # RFC 0113: Stable native module and type slots
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0059, RFC 0109
 
 ## Summary
@@ -42,6 +42,30 @@ crate manifests cannot claim a NativeModuleId.
 
 This RFC establishes the range and validation contract but does not add
 dynamic native module loading.
+
+The initial reserved assignments are:
+
+| ID | Module |
+|---:|:-------|
+| 1 | `@bim/std/eq` |
+| 2 | `@bim/std/dyn` |
+| 3 | `@bim/std/type-desc` |
+| 4 | `@bim/std/attributes` |
+| 5 | `@bim/std/array` |
+| 6 | `@bim/std/dict` |
+| 7 | `@bim/std/string` |
+| 8 | `@bim/std/path` |
+| 9 | `@bim/std/toml` |
+| 10 | `@bim/std/debug` |
+| 11 | `@bim/std/build` |
+| 12 | `@bim/std/exec` |
+| 13 | `@bim/std/codec` |
+| 14 | `@bim/std/option` |
+| 15 | `@bim/std/result` |
+| 16 | `@bim/std/hash` |
+| 17 | `@bim/std/json` |
+
+Removal of a module reserves its former ID; later modules do not fill holes.
 
 ## Local type slots
 
@@ -114,3 +138,18 @@ made persistent.
 - persistence format or cross-version cache compatibility; or
 - Host resources, finalizers, ownership, or invalidation.
 
+## Implementation result
+
+Implemented the required `native type T = @n;` surface and removed the
+order-derived form. The parser retains the exact slot location; the core
+linker validates the u32 range and duplicate declarations, constructs nominal
+identity from the fixed module ID and explicit slot, and resolves native
+closure witnesses through a slot map rather than a declaration vector.
+
+Every built-in module now carries the reserved ID recorded above. Registry
+initialization rejects zero, out-of-range, and duplicate core IDs. HashState is
+`@bim/std/hash` slot 3, while its qualified reflection name remains unchanged.
+Tests cover lossless syntax, rejection of the old form, reordered declaration
+identity, duplicate and overflowing slots, reserved module-ID uniqueness, the
+stateful hash path, and all prior opaque boundaries. Primary and structural
+type representations were not changed.

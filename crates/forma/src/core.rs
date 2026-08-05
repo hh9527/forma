@@ -23,6 +23,7 @@ pub(crate) const DYN_MODULE: &str = "@bim/std/dyn";
 pub(crate) const EQ_MODULE: &str = "@bim/std/eq";
 
 pub(crate) struct CoreModuleSpec {
+    pub(crate) native_id: u32,
     pub(crate) name: &'static str,
     pub(crate) source: &'static str,
     pub(crate) functions: Vec<(&'static str, NativeFunction)>,
@@ -31,6 +32,7 @@ pub(crate) struct CoreModuleSpec {
 pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
     vec![
         CoreModuleSpec {
+            native_id: 1,
             name: EQ_MODULE,
             source: r#"
 native equal: for(A, B) Fn(A, B) -> Bool;
@@ -39,6 +41,7 @@ native equal: for(A, B) Fn(A, B) -> Bool;
             functions: vec![("equal", NativeFunction::core_eq(CoreEqFunction::Equal))],
         },
         CoreModuleSpec {
+            native_id: 2,
             name: DYN_MODULE,
             source: r#"
 @enum type ValueKind = {
@@ -115,6 +118,7 @@ native payload: Fn(Dyn) -> Result(Option(Dyn), BlameError);
             ],
         },
         CoreModuleSpec {
+            native_id: 3,
             name: TYPE_DESC_MODULE,
             source: r#"
 @enum type TypeDescKind = {
@@ -157,6 +161,7 @@ native resolve: Fn(Type) -> Result(Type, BlameError);
             ],
         },
         CoreModuleSpec {
+            native_id: 4,
             name: ATTRIBUTES_MODULE,
             source: r#"
 native normalize: Fn(Any) -> Any;
@@ -195,6 +200,7 @@ native strip: Fn(Any) -> Any;
             ],
         },
         CoreModuleSpec {
+            native_id: 5,
             name: ARRAY_MODULE,
             source: r#"
 native length: for(A) Fn(Array(A)) -> Int;
@@ -242,6 +248,7 @@ native find: for(A) Fn(Array(A), Fn(A) -> Bool) -> Option(A);
             ],
         },
         CoreModuleSpec {
+            native_id: 6,
             name: DICT_MODULE,
             source: r#"
 native keys: Fn(Any) -> Array(String);
@@ -278,6 +285,7 @@ native fold: for(A, B) Fn(Dict(A), B, Fn(B, String, A) -> B) -> B;
             ],
         },
         CoreModuleSpec {
+            native_id: 7,
             name: STRING_MODULE,
             source: r#"
 native length: Fn(String) -> Int;
@@ -346,6 +354,7 @@ native trim_margin: Fn(String, String) -> String;
             ],
         },
         CoreModuleSpec {
+            native_id: 8,
             name: PATH_MODULE,
             source: r#"
 native join: Fn(Array(String)) -> String;
@@ -371,6 +380,7 @@ native file_name: Fn(String) -> Option(String);
             ],
         },
         CoreModuleSpec {
+            native_id: 9,
             name: TOML_MODULE,
             source: r#"
 @enum type DateTime = {
@@ -384,6 +394,7 @@ native file_name: Fn(String) -> Option(String);
             functions: vec![],
         },
         CoreModuleSpec {
+            native_id: 10,
             name: DEBUG_MODULE,
             source: r#"
 native dbg: for(A) Fn(A) -> A;
@@ -399,6 +410,7 @@ native dbg_with: for(A) Fn(String, A) -> A;
             ],
         },
         CoreModuleSpec {
+            native_id: 11,
             name: BUILD_MODULE,
             source: r#"
 @struct type TextFile = {
@@ -420,6 +432,7 @@ native dbg_with: for(A) Fn(String, A) -> A;
             functions: vec![],
         },
         CoreModuleSpec {
+            native_id: 12,
             name: EXEC_MODULE,
             source: r#"
 @struct type Platform = {
@@ -469,6 +482,7 @@ native dbg_with: for(A) Fn(String, A) -> A;
             functions: vec![],
         },
         CoreModuleSpec {
+            native_id: 13,
             name: CODEC_MODULE,
             source: r#"
 native decode: for(A) Fn(TypeOf(A), Any) -> Result(A, BlameError);
@@ -492,6 +506,7 @@ def format_error: Fn(BlameError) -> String = fn(error) { error.message };
             ],
         },
         CoreModuleSpec {
+            native_id: 14,
             name: OPTION_MODULE,
             source: r#"
 def map: for(A, B) Fn(Option(A), Fn(A) -> B) -> Option(B) = fn(option, function) {
@@ -511,6 +526,7 @@ def is_some: for(A) Fn(Option(A)) -> Bool = fn(option) {
             functions: vec![],
         },
         CoreModuleSpec {
+            native_id: 15,
             name: RESULT_MODULE,
             source: r#"
 native unwrap: for(A, E) Fn(Result(A, E)) -> A;
@@ -544,10 +560,11 @@ def is_ok: for(A, E) Fn(Result(A, E)) -> Bool = fn(result) {
             )],
         },
         CoreModuleSpec {
+            native_id: 16,
             name: HASH_MODULE,
             source: r#"
 native sha256: Fn(String) -> String;
-native type HashState;
+native type HashState = @3;
 native new: Fn() -> HashState;
 native update_bytes: Fn(HashState, Bytes) -> HashState;
 native update_string: Fn(HashState, String) -> HashState;
@@ -573,7 +590,7 @@ native finish: Fn(HashState) -> Bytes;
                     NativeFunction::new_with_native_type(
                         "@bim/std/hash.new",
                         0,
-                        0,
+                        3,
                         crate::sha256::native_new,
                     ),
                 ),
@@ -582,7 +599,7 @@ native finish: Fn(HashState) -> Bytes;
                     NativeFunction::new_with_native_type(
                         "@bim/std/hash.update_bytes",
                         2,
-                        0,
+                        3,
                         crate::sha256::native_update_bytes,
                     ),
                 ),
@@ -591,7 +608,7 @@ native finish: Fn(HashState) -> Bytes;
                     NativeFunction::new_with_native_type(
                         "@bim/std/hash.update_string",
                         2,
-                        0,
+                        3,
                         crate::sha256::native_update_string,
                     ),
                 ),
@@ -600,7 +617,7 @@ native finish: Fn(HashState) -> Bytes;
                     NativeFunction::new_with_native_type(
                         "@bim/std/hash.update_int",
                         2,
-                        0,
+                        3,
                         crate::sha256::native_update_int,
                     ),
                 ),
@@ -609,13 +626,14 @@ native finish: Fn(HashState) -> Bytes;
                     NativeFunction::new_with_native_type(
                         "@bim/std/hash.finish",
                         1,
-                        0,
+                        3,
                         crate::sha256::native_finish,
                     ),
                 ),
             ],
         },
         CoreModuleSpec {
+            native_id: 17,
             name: JSON_MODULE,
             source: r#"
 native parse: Fn(String) -> Result(Any, BlameError);

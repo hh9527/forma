@@ -403,17 +403,25 @@ impl<'a> Lowerer<'a> {
                     self.location(node),
                 ))
             }
-            Rule::NativeTypeBinding => Ok(located(
-                BindingData {
-                    decorators: Vec::new(),
-                    kind: BindingKind::NativeType,
-                    name,
-                    type_parameters: Vec::new(),
-                    annotation: None,
-                    value: located(ExprKind::Atom("None".into()), self.location(node)),
-                },
-                self.location(node),
-            )),
+            Rule::NativeTypeBinding => {
+                let slot = self.first_token(node, Token::Int)?;
+                Ok(located(
+                    BindingData {
+                        decorators: Vec::new(),
+                        kind: BindingKind::NativeType,
+                        name,
+                        type_parameters: Vec::new(),
+                        annotation: None,
+                        value: located(
+                            ExprKind::Int(self.text(slot).parse().map_err(|_| {
+                                self.error(slot, "native type slot is outside the i64 range")
+                            })?),
+                            self.location(slot),
+                        ),
+                    },
+                    self.location(node),
+                ))
+            }
             Rule::DefBinding => {
                 let equal = self.first_token(node, Token::Equal)?;
                 let scheme = self
@@ -2209,17 +2217,19 @@ mod tests {
     }
 
     #[test]
-    fn lowers_native_type_declarations_without_forgeable_metadata() {
+    fn lowers_native_type_declarations_with_explicit_slots() {
         let program = parse(
             "native-type.forma",
-            "native type State; native new: Fn() -> State; State",
+            "native type State = @3; native new: Fn() -> State; State",
         )
         .unwrap();
         let binding = &program.value.body.value.bindings[0];
         assert_eq!(binding.value.kind, BindingKind::NativeType);
         assert_eq!(binding.value.name.value, "State");
         assert!(binding.value.annotation.is_none());
-        assert_eq!(binding.location.range(), 0..18);
+        assert!(matches!(binding.value.value.value, ExprKind::Int(3)));
+        assert_eq!(binding.value.value.location.range(), 21..22);
+        assert_eq!(binding.location.range(), 0..23);
     }
 
     #[test]
