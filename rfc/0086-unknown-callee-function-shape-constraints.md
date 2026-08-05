@@ -1,6 +1,6 @@
 # RFC 0086: Unknown-callee Function-shape constraints
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0085
 - Tracking issue: https://github.com/hh9527/forma/issues/3
 
@@ -130,3 +130,22 @@ hiding conflicts.
 
 Call sites consume monomorphic instances. Generalization remains an owned
 binding-boundary operation under RFC 0079 and RFC 0083.
+
+## Implementation result
+
+Implemented in the ordinary call checker as one pre-processing step. After the
+callee is inferred and resolved, an `Inference` descriptor is bound to an
+exact-arity Function whose parameters and result are fresh variables. The
+existing Function-call branch then owns expected-result propagation, argument
+checking, `Never`, explicit `Any`, numeric obligations, placeholders, and
+completion.
+
+No parallel call solver or descriptor kind was added. Generic bindings, Atom
+constructors, known Functions, explicit dynamic calls, bytecode lowering, and
+VM execution remain on their previous paths.
+
+The implementation confirms the RFC 0084 publication distinction: an inferred
+higher-order definition publishes an authoritative scheme such as
+`for(A, B) Fn(Fn(A) -> B, A) -> B`, while its ordinary runtime result shape is
+still explicitly erased. Tests therefore inspect the definition scheme and
+the concrete types of call instances separately.

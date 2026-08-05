@@ -4749,7 +4749,18 @@ impl<'a> GenericInference<'a> {
                             .any(|argument| matches!(argument.value, TypeArgumentKind::Infer))
                 );
                 let callee = self.infer(callee, environment, None)?;
-                match self.resolve(&callee) {
+                let resolved_callee = self.resolve(&callee);
+                let resolved_callee = if let TypeDescriptor::Inference(variable) = resolved_callee {
+                    let function = TypeDescriptor::Function {
+                        parameters: arguments.iter().map(|_| self.fresh_variable()).collect(),
+                        result: Box::new(self.fresh_variable()),
+                    };
+                    self.bind_inference_variable(variable, &function)?;
+                    function
+                } else {
+                    resolved_callee
+                };
+                match resolved_callee {
                     TypeDescriptor::Atom(tag) => {
                         if arguments.len() != 1 {
                             return Err(format!(
@@ -6930,6 +6941,77 @@ mod tests {
         )
         .unwrap();
         assert_eq!(related.display(related.result_type), "Fn(Int, Int) -> Int");
+    }
+
+    #[test]
+    fn unknown_callee_calls_infer_closed_function_shapes() {
+        let apply = analyze_with_natives(
+            "let apply = fn(callback, value) { callback(value) }; apply",
+            &[],
+        )
+        .unwrap();
+        let apply_definition = apply
+            .hir
+            .definitions()
+            .iter()
+            .find(|definition| definition.name == "apply")
+            .unwrap();
+        assert_eq!(
+            apply.definition_schemes[&apply_definition.id].display_name(),
+            "for(A, B) Fn(Fn(A) -> B, A) -> B"
+        );
+
+        let called = analyze_with_natives(
+            "let apply = fn(callback, value) { callback(value) };\
+             apply(fn(value) { value + 1 }, 41)",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(called.display(called.result_type), "Int");
+
+        let intrinsic = analyze_with_natives(
+            "let use = fn(callback) { callback(1.0) + 2.0 };\
+             use(fn(value) { value })",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(intrinsic.display(intrinsic.result_type), "Float");
+    }
+
+    #[test]
+    fn unknown_callee_calls_use_expected_results_and_existing_completion() {
+        let expected = analyze_with_natives(
+            "let recover = fn(callback) { callback() };\
+             let value: String = recover(fn() { \"ok\" }); value",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(expected.display(expected.result_type), "String");
+
+        let conflict = analyze_with_natives(
+            "let apply = fn(callback) { callback(1) };\
+             apply(fn(value: String) { value })",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            conflict.message.contains("cannot unify"),
+            "{}",
+            conflict.message
+        );
+
+        let incomplete =
+            analyze_with_natives("let invoke = fn(callback) { callback() }; invoke", &[]).unwrap();
+        let invoke = incomplete
+            .hir
+            .definitions()
+            .iter()
+            .find(|definition| definition.name == "invoke")
+            .unwrap();
+        assert_eq!(
+            incomplete.definition_schemes[&invoke.id].display_name(),
+            "for(A) Fn(Fn() -> A) -> A"
+        );
     }
 
     #[test]
