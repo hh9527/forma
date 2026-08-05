@@ -106,3 +106,4 @@ semantics from an earlier RFC.
 85. Bounded callable-shape inference umbrella.
 86. Unknown-callee Function-shape constraints.
 87. Callable-obligation convergence.
+88. Callable-inference diagnostics and publication.
