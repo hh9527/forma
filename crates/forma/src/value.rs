@@ -1,5 +1,6 @@
 use crate::bytecode::BytecodeFunction;
 use crate::vm::CallContext;
+use std::any::Any;
 use std::fmt;
 use std::sync::Arc;
 
@@ -77,6 +78,53 @@ impl Shape {
 pub struct Dict {
     shape: Arc<Shape>,
     values: Arc<[Value]>,
+}
+
+type OpaquePayload = dyn Any + Send + Sync;
+
+#[derive(Clone)]
+pub struct OpaqueValue {
+    type_name: Arc<str>,
+    payload: Arc<OpaquePayload>,
+    equal: fn(&OpaquePayload, &OpaquePayload) -> bool,
+}
+
+impl OpaqueValue {
+    pub fn new<T>(type_name: impl Into<Arc<str>>, payload: T) -> Self
+    where
+        T: Any + Eq + Send + Sync,
+    {
+        Self {
+            type_name: type_name.into(),
+            payload: Arc::new(payload),
+            equal: |left, right| {
+                left.downcast_ref::<T>()
+                    .zip(right.downcast_ref::<T>())
+                    .is_some_and(|(left, right)| left == right)
+            },
+        }
+    }
+
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn downcast_ref<T: Any>(&self, expected_type: &str) -> Option<&T> {
+        (self.type_name.as_ref() == expected_type)
+            .then(|| self.payload.downcast_ref::<T>())
+            .flatten()
+    }
+
+    pub(crate) fn logical_eq(&self, other: &Self) -> bool {
+        self.type_name == other.type_name
+            && (self.equal)(self.payload.as_ref(), other.payload.as_ref())
+    }
+}
+
+impl fmt::Debug for OpaqueValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "<opaque {}>", self.type_name)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -300,6 +348,7 @@ pub(crate) enum CoreCodecFunction {
 pub(crate) enum CoreTypeDescFunction {
     Kind,
     Children,
+    OpaqueName,
     Resolve,
 }
 
@@ -352,6 +401,7 @@ impl CoreTypeDescFunction {
         match self {
             Self::Kind => "@bim/std/type-desc.kind",
             Self::Children => "@bim/std/type-desc.children",
+            Self::OpaqueName => "@bim/std/type-desc.opaque_name",
             Self::Resolve => "@bim/std/type-desc.resolve",
         }
     }
@@ -888,6 +938,7 @@ pub enum Value {
     Float(f64),
     String(Arc<str>),
     Bytes(Arc<[u8]>),
+    Opaque(OpaqueValue),
     Dict(Dict),
     Array(Arc<[Value]>),
     Atom(Atom),
@@ -931,6 +982,7 @@ impl Value {
             Self::Float(_) => "Float",
             Self::String(_) => "String",
             Self::Bytes(_) => "Bytes",
+            Self::Opaque(_) => "Opaque",
             Self::Dict(_) => "Dict",
             Self::Array(_) => "Array",
             Self::Atom(_) => "Atom",
@@ -961,6 +1013,7 @@ impl fmt::Display for Value {
                 }
                 write!(formatter, "\"")
             }
+            Self::Opaque(value) => write!(formatter, "{value:?}"),
             Self::Dict(dict) => {
                 write!(formatter, "{{")?;
                 for (index, (field, value)) in

@@ -119,6 +119,7 @@ pub enum ValueKind {
     Float,
     String,
     Bytes,
+    Opaque,
     Dict,
     Array,
     Atom,
@@ -156,6 +157,7 @@ impl<'a> ValueRef<'a> {
         match self.value.value {
             RuntimeValue::String(handle)
             | RuntimeValue::Bytes(handle)
+            | RuntimeValue::Opaque(handle)
             | RuntimeValue::Array(handle)
             | RuntimeValue::Tagged(handle)
             | RuntimeValue::Tuple(handle)
@@ -191,6 +193,7 @@ impl<'a> ValueRef<'a> {
             RuntimeValue::Float(_) => ValueKind::Float,
             RuntimeValue::ShortString(_) | RuntimeValue::String(_) => ValueKind::String,
             RuntimeValue::Bytes(_) => ValueKind::Bytes,
+            RuntimeValue::Opaque(_) => ValueKind::Opaque,
             RuntimeValue::Dict(_) => ValueKind::Dict,
             RuntimeValue::Array(_) => ValueKind::Array,
             RuntimeValue::BuiltinAtom(_) | RuntimeValue::Atom(_) => ValueKind::Atom,
@@ -226,6 +229,26 @@ impl<'a> ValueRef<'a> {
                 Object::String(value) => Some(value),
                 _ => None,
             },
+            _ => None,
+        }
+    }
+
+    pub fn as_opaque<T: std::any::Any>(self, expected_type: &str) -> Option<&'a T> {
+        let RuntimeValue::Opaque(handle) = self.value.value else {
+            return None;
+        };
+        match self.view.object(handle).ok()? {
+            Object::Opaque(value) => value.downcast_ref(expected_type),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn opaque_type_name(self) -> Option<&'a str> {
+        let RuntimeValue::Opaque(handle) = self.value.value else {
+            return None;
+        };
+        match self.view.object(handle).ok()? {
+            Object::Opaque(value) => Some(value.type_name()),
             _ => None,
         }
     }
@@ -440,6 +463,21 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
         self.charge_allocation(value.len())?;
         let value = self.current.string(self.background, &value).into();
         self.set(destination, value)
+    }
+
+    pub fn set_opaque<T>(
+        &mut self,
+        destination: RegisterId,
+        type_name: impl Into<std::sync::Arc<str>>,
+        payload: T,
+    ) -> Result<(), NativeError>
+    where
+        T: std::any::Any + Eq + Send + Sync,
+    {
+        self.charge_sequence(1)?;
+        let value = crate::OpaqueValue::new(type_name, payload);
+        let handle = self.current.allocate(Object::Opaque(value));
+        self.set(destination, RuntimeValue::Opaque(handle).into())
     }
 
     pub fn copy(&mut self, destination: RegisterId, source: RegisterId) -> Result<(), NativeError> {
@@ -4357,6 +4395,7 @@ fn run_core_type_desc(
                     "Float",
                     "String",
                     "Bytes",
+                    "Opaque",
                     "Atom",
                     "Array",
                     "Dict",
@@ -4400,6 +4439,45 @@ fn run_core_type_desc(
                     RuntimeValue::Array(current.allocate(Object::Array(children.into()))),
                     input.loc(),
                 ),
+                return_target,
+            })
+        }
+        CoreTypeDescFunction::OpaqueName => {
+            let name = if let RuntimeValue::Dict(handle) = input.value {
+                let kind = view
+                    .dict_get_text(handle, "kind")
+                    .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                    .and_then(|value| view.atom_text(value).ok().flatten());
+                if kind == Some("Opaque") {
+                    view.dict_get_text(handle, "name")
+                        .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                        .and_then(|value| view.string_text(value).ok().flatten())
+                        .map(str::to_owned)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let value = if let Some(name) = name {
+                charge_allocation(
+                    account,
+                    logical_value_bytes(2)
+                        .map_err(|error| allocation_error(error.message, function, pc))?
+                        .saturating_add(name.len() as u64),
+                    function,
+                    pc,
+                )?;
+                let payload = RichValue::new(current.string(Some(background), &name), input.loc());
+                RuntimeValue::Tagged(current.allocate(Object::Tagged {
+                    tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Some), input.loc()),
+                    payload,
+                }))
+            } else {
+                RuntimeValue::BuiltinAtom(BuiltinAtom::None)
+            };
+            Ok(VmAction::Return {
+                value: RichValue::new(value, input.loc()),
                 return_target,
             })
         }
@@ -4514,6 +4592,7 @@ fn run_core_dyn(
                 RuntimeValue::Float(_) => "Float",
                 RuntimeValue::ShortString(_) | RuntimeValue::String(_) => "String",
                 RuntimeValue::Bytes(_) => "Bytes",
+                RuntimeValue::Opaque(_) => "Opaque",
                 RuntimeValue::Dict(_) => "Dict",
                 RuntimeValue::Array(_) => "Array",
                 RuntimeValue::BuiltinAtom(_) | RuntimeValue::Atom(_) => "Atom",
@@ -5182,8 +5261,8 @@ fn type_desc_children(input: RichValue, view: &HeapView<'_>) -> Result<Vec<RichV
                 })
                 .collect()
         }
-        "Any" | "Never" | "Type" | "Dyn" | "Int" | "Float" | "String" | "Bytes" | "Atom"
-        | "Function" | "Bound" => Ok(Vec::new()),
+        "Any" | "Never" | "Type" | "Dyn" | "Int" | "Float" | "String" | "Bytes" | "Opaque"
+        | "Atom" | "Function" | "Bound" => Ok(Vec::new()),
         other => Err(format!("unknown Type metadata kind '{other}")),
     }
 }
@@ -5963,6 +6042,7 @@ fn decode_runtime_type_at(
         "Float" => CodecKind::Float,
         "String" => CodecKind::String,
         "Bytes" => CodecKind::Bytes,
+        "Opaque" => return Err(format!("{path} uses an unsupported opaque type")),
         "Atom" => {
             let tag = view
                 .dict_get_text(handle, "tag")
@@ -8023,7 +8103,9 @@ fn codec_node_bytes(node: &CodecNode) -> Result<u64, NativeError> {
 
 fn legacy_value_bytes(value: &Value) -> Result<u64, NativeError> {
     match value {
-        Value::Int(_) | Value::Float(_) | Value::Func(_) | Value::Dyn(_) => Ok(0),
+        Value::Int(_) | Value::Float(_) | Value::Opaque(_) | Value::Func(_) | Value::Dyn(_) => {
+            Ok(0)
+        }
         Value::String(value) => Ok(value.len() as u64),
         Value::Bytes(value) => Ok(value.len() as u64),
         Value::Atom(atom) => Ok(atom.name().len() as u64),
@@ -8710,6 +8792,7 @@ impl<'a> JsonWriter<'a> {
                 ));
             }
             RuntimeValue::Bytes(_) => return Err("JSON cannot encode Bytes".into()),
+            RuntimeValue::Opaque(_) => return Err("JSON cannot encode Opaque values".into()),
             RuntimeValue::Tuple(_) => {
                 return Err("JSON cannot encode Tuple; use a codec first".into());
             }
@@ -8949,6 +9032,10 @@ impl<'a> DebugValueFormatter<'a> {
                     self.push("\"");
                 }
                 _ => return Err(crate::heap::HeapError::new("invalid Bytes handle")),
+            },
+            RuntimeValue::Opaque(handle) => match self.view.object(handle)? {
+                Object::Opaque(value) => self.push(&format!("{value:?}")),
+                _ => return Err(crate::heap::HeapError::new("invalid Opaque handle")),
             },
             RuntimeValue::Array(handle) => self.sequence(handle, false, depth, "[", "]")?,
             RuntimeValue::Tuple(handle) => self.sequence(handle, true, depth, "(", ")")?,
@@ -9328,6 +9415,7 @@ fn runtime_shallow_type_error(
         RuntimeValue::BuiltinAtom(_) | RuntimeValue::Atom(_) => "Atom",
         RuntimeValue::ShortString(_) | RuntimeValue::String(_) => "String",
         RuntimeValue::Bytes(_) => "Bytes",
+        RuntimeValue::Opaque(_) => "Opaque",
         RuntimeValue::Array(_) => "Array",
         RuntimeValue::Tuple(_) => "Tuple",
         RuntimeValue::Tagged(_) => "Tagged",

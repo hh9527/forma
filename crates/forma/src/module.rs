@@ -142,7 +142,7 @@ fn install_core_modules(
         let source_name = format!("<{}>", spec.name);
         let source_id = sources.add(source_name.clone(), spec.source);
         let parsed = parse_registered(sources, source_id);
-        let program = parsed.program.ok_or_else(|| {
+        let mut program = parsed.program.ok_or_else(|| {
             ModuleError::new(
                 parsed
                     .diagnostics
@@ -152,6 +152,7 @@ fn install_core_modules(
                     .join("\n"),
             )
         })?;
+        qualify_opaque_type_bindings(&mut program, spec.name);
         let implementations = spec.functions.into_iter().collect::<HashMap<_, _>>();
         let mut external_values = BTreeMap::new();
         let mut external_roots = HashMap::new();
@@ -1212,7 +1213,7 @@ impl ModuleLoader {
                 "{source_name}: @@manifest is only allowed in @main"
             )));
         }
-        let program = parsed.program.ok_or_else(|| {
+        let mut program = parsed.program.ok_or_else(|| {
             ModuleError::new(
                 parsed
                     .diagnostics
@@ -1222,6 +1223,7 @@ impl ModuleLoader {
                     .join("\n"),
             )
         })?;
+        qualify_opaque_type_bindings(&mut program, &module_id.to_string());
         reject_nested_imports(&program, &source_name)?;
         let mut external_provenance = BTreeMap::new();
         let mut external_roots = HashMap::new();
@@ -1443,6 +1445,31 @@ impl ModuleLoader {
     fn leave(&mut self, module_id: &ModuleId) {
         let popped = self.visiting.pop();
         debug_assert_eq!(popped.as_ref(), Some(module_id));
+    }
+}
+
+fn qualify_opaque_type_bindings(program: &mut Program, owner: &str) {
+    for binding in &mut program.value.body.value.bindings {
+        if binding.value.kind != BindingKind::Type {
+            continue;
+        }
+        let ExprKind::Dict(fields) = &mut binding.value.value.value else {
+            continue;
+        };
+        let is_opaque = fields.iter().any(|field| {
+            field.value.name.value == "kind"
+                && matches!(&field.value.value.value, ExprKind::Atom(kind) if kind == "Opaque")
+        });
+        if !is_opaque {
+            continue;
+        }
+        if let Some(field) = fields
+            .iter_mut()
+            .find(|field| field.value.name.value == "name")
+        {
+            field.value.value.value =
+                ExprKind::String(format!("{owner}#{}", binding.value.name.value));
+        }
     }
 }
 
@@ -3440,6 +3467,40 @@ unchanged", "|"),
             error.get("message").unwrap().to_string(),
             "\"type descriptor is not a recursive reference\""
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn opaque_type_is_nominal_reflectable_and_not_codec_data() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import desc from "@bim/std/type-desc";
+               @opaque type Token;
+               {
+                   kind: desc.kind(Token),
+                   children: desc.children(Token),
+                   name: desc.opaque_name(Token),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(output) = module.execute(100_000).unwrap() else {
+            panic!("opaque type test must return a Dict")
+        };
+        assert_eq!(output.get("kind").unwrap().to_string(), "'Opaque");
+        assert_eq!(output.get("children").unwrap().to_string(), "[]");
+        assert!(output.get("name").unwrap().to_string().contains("#Token"));
+        fs::write(
+            directory.join("main.forma"),
+            r#"import json from "@bim/std/json";
+               @opaque type Token;
+               json.decode(Token, "1")"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        let error = module.execute(100_000).unwrap_err();
+        assert!(error.to_string().contains("unsupported opaque type"));
         fs::remove_dir_all(directory).unwrap();
     }
 

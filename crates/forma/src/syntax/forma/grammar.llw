@@ -25,7 +25,7 @@ def_binding: 'def' Identifier [':' type_scheme] '=' expression ';';
 native_binding: 'native' Identifier ':' type_scheme ';';
 type_scheme: ['for' type_parameters] contract;
 type_parameters: '(' Identifier (?1 ',' Identifier)* [','] ')';
-type_binding: decorator* 'type' Identifier '=' expression ';';
+type_binding: decorator* 'type' Identifier ['=' expression] ';';
 import_binding: 'import' Identifier 'from' string_literal ';';
 
 expression:

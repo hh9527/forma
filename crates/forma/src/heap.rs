@@ -45,6 +45,7 @@ pub(crate) enum RuntimeValue {
     ShortString(InternId),
     String(Handle),
     Bytes(Handle),
+    Opaque(Handle),
     Array(Handle),
     Tuple(Handle),
     Tagged(Handle),
@@ -176,6 +177,7 @@ pub(crate) enum Object {
     Reserved,
     String(Box<str>),
     Bytes(Box<[u8]>),
+    Opaque(crate::value::OpaqueValue),
     Array(Box<[RichValue]>),
     Tuple(Box<[RichValue]>),
     Tagged {
@@ -460,6 +462,9 @@ impl Heap {
             Value::Bytes(value) => {
                 RuntimeValue::Bytes(self.allocate(Object::Bytes(value.as_ref().into())))
             }
+            Value::Opaque(value) => {
+                RuntimeValue::Opaque(self.allocate(Object::Opaque(value.clone())))
+            }
             Value::Atom(Atom::Builtin(atom)) => RuntimeValue::BuiltinAtom(*atom),
             Value::Atom(Atom::Named(name)) => self.atom(background, name),
             Value::Tagged { tag, payload } => {
@@ -535,6 +540,9 @@ impl Heap {
             Value::String(value) => self.string(background, value),
             Value::Bytes(value) => {
                 RuntimeValue::Bytes(self.allocate(Object::Bytes(value.as_ref().into())))
+            }
+            Value::Opaque(value) => {
+                RuntimeValue::Opaque(self.allocate(Object::Opaque(value.clone())))
             }
             Value::Atom(Atom::Builtin(atom)) => RuntimeValue::BuiltinAtom(*atom),
             Value::Atom(Atom::Named(name)) => self.atom(background, name),
@@ -959,6 +967,18 @@ impl<'a> HeapView<'a> {
                 };
                 Ok(left == right)
             }
+            (RuntimeValue::Opaque(left), RuntimeValue::Opaque(right)) => {
+                if left == right {
+                    return Ok(true);
+                }
+                let Object::Opaque(left) = self.object(left)? else {
+                    return Err(HeapError("Opaque handle refers to another object kind"));
+                };
+                let Object::Opaque(right) = self.object(right)? else {
+                    return Err(HeapError("Opaque handle refers to another object kind"));
+                };
+                Ok(left.logical_eq(right))
+            }
             (RuntimeValue::Array(left), RuntimeValue::Array(right))
             | (RuntimeValue::Tuple(left), RuntimeValue::Tuple(right)) => {
                 self.sequence_handles_equal(left, right, visited)
@@ -1092,6 +1112,14 @@ impl<'a> HeapView<'a> {
                     return Err(HeapError("Bytes handle refers to another object kind"));
                 };
                 let value = Value::Bytes(value.clone().into());
+                visiting.remove(&handle);
+                value
+            }
+            RuntimeValue::Opaque(handle) => {
+                let Object::Opaque(value) = self.enter_object(handle, visiting)? else {
+                    return Err(HeapError("Opaque handle refers to another object kind"));
+                };
+                let value = Value::Opaque(value.clone());
                 visiting.remove(&handle);
                 value
             }
@@ -1364,6 +1392,9 @@ impl PendingCopy {
             RuntimeValue::Bytes(handle) => {
                 RuntimeValue::Bytes(self.copy_object(target, source, handle)?)
             }
+            RuntimeValue::Opaque(handle) => {
+                RuntimeValue::Opaque(self.copy_object(target, source, handle)?)
+            }
             RuntimeValue::Array(handle) => {
                 RuntimeValue::Array(self.copy_object(target, source, handle)?)
             }
@@ -1433,6 +1464,7 @@ impl PendingCopy {
             Object::Reserved => return Err(HeapError("cannot copy an uninitialized object")),
             Object::String(value) => Object::String(value.clone()),
             Object::Bytes(value) => Object::Bytes(value.clone()),
+            Object::Opaque(value) => Object::Opaque(value.clone()),
             Object::Array(values) => Object::Array(copy_values(self, values)?),
             Object::Tuple(values) => Object::Tuple(copy_values(self, values)?),
             Object::Tagged { tag, payload } => Object::Tagged {
@@ -1603,6 +1635,7 @@ fn value_contains_foreign(value: RuntimeValue, target: Storage) -> bool {
         RuntimeValue::Atom(id) | RuntimeValue::ShortString(id) => id.storage != target,
         RuntimeValue::String(handle)
         | RuntimeValue::Bytes(handle)
+        | RuntimeValue::Opaque(handle)
         | RuntimeValue::Array(handle)
         | RuntimeValue::Tuple(handle)
         | RuntimeValue::Tagged(handle)
@@ -1661,7 +1694,7 @@ fn object_contains_foreign(object: &Object, target: Storage) -> bool {
                     RuntimePrototype::Native(_) => false,
                 })
         }
-        Object::String(_) | Object::Bytes(_) => false,
+        Object::String(_) | Object::Bytes(_) | Object::Opaque(_) => false,
     }
 }
 
@@ -1960,6 +1993,30 @@ mod tests {
             .values_equal(local_bytes, persistent_bytes)
             .unwrap()
         );
+    }
+
+    #[test]
+    fn opaque_values_preserve_nominal_identity_and_logical_equality() {
+        let token = Value::Opaque(crate::OpaqueValue::new("fixture#Token", 42_u64));
+        let other_type = Value::Opaque(crate::OpaqueValue::new("fixture#Other", 42_u64));
+        let mut main = Heap::main();
+        let persistent = publish_value(&mut main, &token).unwrap().runtime();
+        let mut work = Heap::work();
+        let local = work.import_value(Some(&main), &token).unwrap();
+        let other = work.import_value(Some(&main), &other_type).unwrap();
+        let view = HeapView {
+            current: &work,
+            background: Some(&main),
+        };
+        assert!(view.values_equal(local, persistent).unwrap());
+        assert!(!view.values_equal(local, other).unwrap());
+        let exported = view.export_value(local).unwrap();
+        let Value::Opaque(exported) = exported else {
+            panic!("expected Opaque value")
+        };
+        assert_eq!(exported.type_name(), "fixture#Token");
+        assert_eq!(exported.downcast_ref::<u64>("fixture#Token"), Some(&42));
+        assert!(exported.downcast_ref::<u64>("fixture#Other").is_none());
     }
 
     #[test]

@@ -42,7 +42,7 @@ native equal: for(A, B) Fn(A, B) -> Bool;
             name: DYN_MODULE,
             source: r#"
 @enum type ValueKind = {
-    Int: 'None, Float: 'None, String: 'None, Bytes: 'None,
+    Int: 'None, Float: 'None, String: 'None, Bytes: 'None, Opaque: 'None,
     Dict: 'None, Array: 'None, Atom: 'None, Tagged: 'None,
     Tuple: 'None, Function: 'None, Dyn: 'None,
 };
@@ -122,16 +122,18 @@ native payload: Fn(Dyn) -> Result(Option(Dyn), BlameError);
     Int: 'None, Float: 'None, String: 'None, Bytes: 'None,
     Atom: 'None, Array: 'None, Dict: 'None, Tagged: 'None,
     Tuple: 'None, Struct: 'None, Enum: 'None, Union: 'None,
-    Function: 'None, WithAttributes: 'None, Bound: 'None, Dyn: 'None, Ref: 'None,
+    Function: 'None, Opaque: 'None, WithAttributes: 'None, Bound: 'None, Dyn: 'None, Ref: 'None,
 };
 native kind: Fn(Type) -> TypeDescKind;
 native children: Fn(Type) -> Array(Type);
+native opaque_name: Fn(Type) -> Option(String);
 native resolve: Fn(Type) -> Result(Type, BlameError);
 {
     TypeDesc: Type,
     TypeDescKind: TypeDescKind,
     kind: kind,
     children: children,
+    opaque_name: opaque_name,
     resolve: resolve,
 }
 "#,
@@ -143,6 +145,10 @@ native resolve: Fn(Type) -> Result(Type, BlameError);
                 (
                     "kind",
                     NativeFunction::core_type_desc(CoreTypeDescFunction::Kind),
+                ),
+                (
+                    "opaque_name",
+                    NativeFunction::core_type_desc(CoreTypeDescFunction::OpaqueName),
                 ),
                 (
                     "resolve",

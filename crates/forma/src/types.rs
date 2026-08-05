@@ -49,6 +49,7 @@ pub enum TypeNode {
     Float,
     String,
     Bytes,
+    Opaque(String),
     Atom(Atom),
     Array(TypeId),
     Dict(TypeId),
@@ -120,6 +121,7 @@ impl TypeGraph {
             TypeDescriptor::Float => TypeNode::Float,
             TypeDescriptor::String => TypeNode::String,
             TypeDescriptor::Bytes => TypeNode::Bytes,
+            TypeDescriptor::Opaque(name) => TypeNode::Opaque(name.clone()),
             TypeDescriptor::Atom(atom) => TypeNode::Atom(atom.clone()),
             TypeDescriptor::Array(item) => TypeNode::Array(self.intern_descriptor(item)),
             TypeDescriptor::Dict(item) => TypeNode::Dict(self.intern_descriptor(item)),
@@ -288,6 +290,14 @@ impl TypeGraph {
                 require(&["kind"])?;
                 TypeNode::Bytes
             }
+            "Opaque" => {
+                require(&["kind", "name"])?;
+                let name = value
+                    .dict_get("name")
+                    .and_then(ValueRef::as_str)
+                    .ok_or_else(|| format!("{path}.name must be a String"))?;
+                TypeNode::Opaque(name.into())
+            }
             "Atom" => {
                 require(&["kind", "tag"])?;
                 let tag = value
@@ -447,6 +457,7 @@ impl TypeGraph {
             TypeNode::Float => "Float".into(),
             TypeNode::String => "String".into(),
             TypeNode::Bytes => "Bytes".into(),
+            TypeNode::Opaque(name) => format!("opaque({name})"),
             TypeNode::Atom(atom) => format!("'{}", atom.name()),
             TypeNode::Array(item) => format!("Array<{}>", self.display_with(*item, active)),
             TypeNode::Dict(item) => format!("Dict<{}>", self.display_with(*item, active)),
@@ -639,6 +650,7 @@ pub enum TypeDescriptor {
     Float,
     String,
     Bytes,
+    Opaque(String),
     Atom(Atom),
     Array(Box<TypeDescriptor>),
     Dict(Box<TypeDescriptor>),
@@ -678,6 +690,10 @@ impl TypeDescriptor {
             Self::Float => vec![kind_entry("Float")],
             Self::String => vec![kind_entry("String")],
             Self::Bytes => vec![kind_entry("Bytes")],
+            Self::Opaque(name) => vec![
+                kind_entry("Opaque"),
+                ("name".into(), Value::string(name.as_str())),
+            ],
             Self::Atom(tag) => vec![kind_entry("Atom"), ("tag".into(), Value::Atom(tag.clone()))],
             Self::Array(item) => vec![kind_entry("Array"), ("item".into(), item.to_value(vm))],
             Self::Dict(item) => vec![kind_entry("Dict"), ("item".into(), item.to_value(vm))],
@@ -775,6 +791,7 @@ impl TypeDescriptor {
             Self::Float => "Float".into(),
             Self::String => "String".into(),
             Self::Bytes => "Bytes".into(),
+            Self::Opaque(name) => format!("opaque({name})"),
             Self::Atom(atom) => format!("'{}", atom.name()),
             Self::Array(item) => format!("Array<{}>", item.display_name()),
             Self::Dict(item) => format!("Dict<{}>", item.display_name()),
@@ -846,6 +863,7 @@ fn display_scheme_descriptor(
         TypeDescriptor::Float => "Float".into(),
         TypeDescriptor::String => "String".into(),
         TypeDescriptor::Bytes => "Bytes".into(),
+        TypeDescriptor::Opaque(name) => format!("opaque({name})"),
         TypeDescriptor::Atom(atom) => format!("'{}", atom.name()),
         TypeDescriptor::Array(item) => {
             format!("Array<{}>", display_scheme_descriptor(item, names))
@@ -2416,6 +2434,7 @@ pub(crate) fn infer_value(value: &Value) -> TypeDescriptor {
         Value::Float(_) => TypeDescriptor::Float,
         Value::String(_) => TypeDescriptor::String,
         Value::Bytes(_) => TypeDescriptor::Bytes,
+        Value::Opaque(value) => TypeDescriptor::Opaque(value.type_name().into()),
         Value::Atom(atom) => TypeDescriptor::Atom(atom.clone()),
         Value::Array(items) => {
             let item =
@@ -3277,6 +3296,14 @@ fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, St
             require(&["kind"])?;
             TypeDescriptor::Bytes
         }
+        "Opaque" => {
+            require(&["kind", "name"])?;
+            let name = value
+                .dict_get("name")
+                .and_then(ValueRef::as_str)
+                .ok_or_else(|| format!("{path}.name must be a String"))?;
+            TypeDescriptor::Opaque(name.into())
+        }
         "Atom" => {
             require(&["kind", "tag"])?;
             let tag = value
@@ -3469,6 +3496,14 @@ fn validate_value_ref(
         TypeDescriptor::Float if value.kind() == ValueKind::Float => Ok(()),
         TypeDescriptor::String if value.kind() == ValueKind::String => Ok(()),
         TypeDescriptor::Bytes if value.kind() == ValueKind::Bytes => Ok(()),
+        TypeDescriptor::Opaque(expected) if value.kind() == ValueKind::Opaque => {
+            let actual = value.opaque_type_name().expect("ValueKind checked");
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(format!("{path} must be {expected}, got {actual}"))
+            }
+        }
         TypeDescriptor::Atom(expected) if value.as_atom() == Some(expected.name()) => Ok(()),
         TypeDescriptor::Atom(expected) => Err(format!("{path} must be '{}", expected.name())),
         TypeDescriptor::Array(item) => {
@@ -3656,6 +3691,13 @@ fn decode_type(value: &Value, path: &str) -> Result<TypeDescriptor, String> {
         "Bytes" => {
             require_fields(metadata, path, &["kind"])?;
             TypeDescriptor::Bytes
+        }
+        "Opaque" => {
+            require_fields(metadata, path, &["kind", "name"])?;
+            let Value::String(name) = metadata.get("name").expect("required field") else {
+                return Err(format!("{path}.name must be a String"));
+            };
+            TypeDescriptor::Opaque(name.to_string())
         }
         "Atom" => {
             require_fields(metadata, path, &["kind", "tag"])?;
@@ -5456,6 +5498,7 @@ fn collect_inference_variables(
         | TypeDescriptor::Float
         | TypeDescriptor::String
         | TypeDescriptor::Bytes
+        | TypeDescriptor::Opaque(_)
         | TypeDescriptor::Atom(_) => {}
     }
 }
@@ -5506,6 +5549,7 @@ fn collect_bound_parameters(descriptor: &TypeDescriptor, parameters: &mut Vec<Ty
         | TypeDescriptor::Float
         | TypeDescriptor::String
         | TypeDescriptor::Bytes
+        | TypeDescriptor::Opaque(_)
         | TypeDescriptor::Atom(_) => {}
     }
 }
@@ -5648,6 +5692,7 @@ fn contains_runtime_never_leaf(descriptor: &TypeDescriptor) -> bool {
         | TypeDescriptor::Float
         | TypeDescriptor::String
         | TypeDescriptor::Bytes
+        | TypeDescriptor::Opaque(_)
         | TypeDescriptor::Atom(_)
         | TypeDescriptor::Enum(_)
         | TypeDescriptor::Union(_)
@@ -6173,6 +6218,7 @@ fn interpolation_type_supported(descriptor: &TypeDescriptor) -> bool {
         | TypeDescriptor::Dyn
         | TypeDescriptor::TypeOf(_)
         | TypeDescriptor::Bytes
+        | TypeDescriptor::Opaque(_)
         | TypeDescriptor::Array(_)
         | TypeDescriptor::Dict(_)
         | TypeDescriptor::Tagged { .. }

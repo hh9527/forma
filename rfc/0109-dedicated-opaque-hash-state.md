@@ -1,6 +1,6 @@
 # RFC 0109: Module-owned opaque value boundary
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0051, RFC 0090, RFC 0107
 
 ## Summary
@@ -98,3 +98,24 @@ arbitrary VM object or depend on heap handles.
 Work returns to discussion if implementation requires a resource table,
 observable alias mutation, unsafe unchecked downcasting, dynamic native
 loading, finalizers, or a general ownership/marker system.
+
+## Implementation result
+
+Implemented `@opaque type T;` as a top-level nominal type declaration whose
+identity is rewritten from the resolver's deterministic module ID and local
+name. Type metadata and TypeDesc use one generic `Opaque` node;
+`type-desc.opaque_name` exposes the qualified identity and `children` is empty.
+Function contracts and runtime validation compare that nominal identity.
+
+The runtime adds one `OpaqueValue` carrier. It stores an immutable `Arc`
+payload, checked Rust type projection, bounded representation-free debug
+output, and a logical equality function established at construction. Heap
+publication and legacy Value import/export clone the carrier without exposing
+heap handles. The public synchronous native API can construct and project
+typed opaque values without modifying VM dispatch enums for each library type.
+
+JSON and codec planning reject opaque values and types by default. Tests cover
+the declaration surface, deterministic qualified identity, TypeDesc
+observation, codec rejection, cross-heap sharing, logical equality, nominal
+separation, and checked projection. No resource table, invalidation, finalizer,
+dynamic loading, or ownership semantics were introduced.

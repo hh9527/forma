@@ -422,13 +422,15 @@ pub fn validate(source: SourceId, tree: &CstData) -> Vec<SyntaxIssue> {
                 Some(Token::Semicolon),
                 ExpectedSyntax::BindingValue,
             )),
-            Binding::Type(node) if node.value().is_none() => issues.push(missing_slot(
-                source,
-                node.value_slot(),
-                node.syntax,
-                Some(Token::Semicolon),
-                ExpectedSyntax::BindingValue,
-            )),
+            Binding::Type(node) if node.value().is_none() && node.decorators().next().is_none() => {
+                issues.push(missing_slot(
+                    source,
+                    node.value_slot(),
+                    node.syntax,
+                    Some(Token::Semicolon),
+                    ExpectedSyntax::BindingValue,
+                ))
+            }
             Binding::Import(node) if node.path().is_none() => {
                 issues.push(missing_at(source, node.syntax, ExpectedSyntax::ImportPath))
             }
