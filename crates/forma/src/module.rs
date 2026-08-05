@@ -5935,6 +5935,68 @@ unchanged", "|"),
     }
 
     #[test]
+    fn forma_hash_interpreter_threads_state_and_distinguishes_structure() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("reference-hash.forma"),
+            include_str!("../../../examples/reference-hash.forma"),
+        )
+        .unwrap();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import reference from "./reference-hash.forma";
+               import hash from "@bim/std/hash";
+               @struct type User = {name: String, scores: Array(Int)};
+               @struct type Renamed = {label: String, scores: Array(Int)};
+               @enum type Choice = {None: 'None, Some: String};
+               type Pair = Tuple([Int, Int]);
+               type Unary = Fn(Int) -> Int;
+               let user: User = {name: "Ada", scores: [2, 3]};
+               let changed: User = {name: "Ada", scores: [2, 4]};
+               let renamed: Renamed = {label: "Ada", scores: [2, 3]};
+               let state = hash.new();
+               let first = reference.my_hash(User)(user, state);
+               {
+                   equal: first == reference.my_hash(User)(user, state),
+                   changed: first == reference.my_hash(User)(changed, state),
+                   field_name: first == reference.my_hash(Renamed)(renamed, state),
+                   array_tuple: reference.my_hash(Array(Int))([1, 2], state) ==
+                       reference.my_hash(Pair)((1, 2), state),
+                   tag_payload: reference.my_hash(Choice)('None, state) ==
+                       reference.my_hash(Choice)('Some(""), state),
+                   alias_unchanged: hash.finish(state) == hash.finish(hash.new()),
+                   function_error: reference.my_hash(Unary)(fn(value) { value }, state),
+                   float_error: reference.my_hash(Float)(1.5, state),
+                   opaque_error: reference.my_hash(hash.HashState)(state, state),
+                   recursive_error: reference.my_hash(Array(Float))([1.0, 2.0], state),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 1_000_000).unwrap();
+        let Value::Dict(output) = module.execute(1_000_000).unwrap() else {
+            panic!("hash interpreter test must return a Dict")
+        };
+        for field in ["equal", "alias_unchanged"] {
+            assert_eq!(output.get(field).unwrap().to_string(), "'True", "{field}");
+        }
+        for field in ["changed", "field_name", "array_tuple", "tag_payload"] {
+            assert_eq!(output.get(field).unwrap().to_string(), "'False", "{field}");
+        }
+        for field in [
+            "function_error",
+            "float_error",
+            "opaque_error",
+            "recursive_error",
+        ] {
+            assert!(
+                output.get(field).unwrap().to_string().starts_with("'Err("),
+                "{field}"
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn blame_intrinsic_preserves_data_and_authored_rule_locations() {
         let directory = fixture_dir();
         fs::write(directory.join("user.json"), r#"{"age":42}"#).unwrap();

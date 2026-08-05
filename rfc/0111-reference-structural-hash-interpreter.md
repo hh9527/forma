@@ -1,6 +1,6 @@
 # RFC 0111: Reference structural hash interpreter
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0096 through RFC 0099, RFC 0107, RFC 0110
 
 ## Summary
@@ -65,3 +65,17 @@ derivation rule.
 3. lift `hash_dyn` through the existing parameter-wise interpreter adapter;
 4. add exact behavioral, scheme, alias, distinction, and failure tests;
 5. record the implementation result.
+
+## Implementation result
+
+Implemented in `examples/reference-hash.forma` using only public standard
+modules. The example normalizes attributed and linked descriptors, writes
+explicit structural boundaries, threads immutable HashState through
+`array.fold_control`, and lifts the erased worker with `interpreter!`.
+
+The integration test covers stable equality, changed values, field-name,
+Array/Tuple, and tag-payload distinctions, unchanged input-state aliases, and
+explicit Function, Float, Opaque, and recursively encountered Float failures.
+Native opaque descriptors are valid leaves in runtime type graphs, including
+inside Result, while JSON codecs and JSON Schema generation continue to reject
+them explicitly.

@@ -5623,6 +5623,7 @@ enum CodecKind {
     Float,
     String,
     Bytes,
+    Opaque,
     Atom(String),
     Array(Box<CodecType>),
     Dict(Box<CodecType>),
@@ -6013,6 +6014,7 @@ fn assert_codec_graph_ready(
             | CodecKind::Float
             | CodecKind::String
             | CodecKind::Bytes
+            | CodecKind::Opaque
             | CodecKind::Atom(_)
             | CodecKind::Function => Ok(()),
         }
@@ -6028,7 +6030,11 @@ fn decode_runtime_type_at(
     background: &Heap,
 ) -> Result<CodecType, String> {
     if matches!(value.value, RuntimeValue::NativeType(_)) {
-        return Err(format!("{path} uses an unsupported opaque type"));
+        return Ok(CodecType {
+            kind: CodecKind::Opaque,
+            rule: value,
+            attributes: BTreeMap::new(),
+        });
     }
     if let RuntimeValue::UpLink(handle) = value.value {
         return Ok(CodecType {
@@ -6639,6 +6645,11 @@ fn transform_codec(
         ),
         CodecKind::Bytes => Err(CodecFailure::new(
             format!("{path}: Bytes has no JSON codec"),
+            value,
+            schema.rule,
+        )),
+        CodecKind::Opaque => Err(CodecFailure::new(
+            format!("{path}: Opaque has no JSON codec"),
             value,
             schema.rule,
         )),
@@ -8033,7 +8044,7 @@ fn generate_json_schema_node(
             )],
             loc,
         )),
-        CodecKind::Bytes | CodecKind::Function => Err(CodecFailure::new(
+        CodecKind::Bytes | CodecKind::Opaque | CodecKind::Function => Err(CodecFailure::new(
             format!(
                 "Type {} has no JSON Schema mapping",
                 codec_type_name(schema)
@@ -8108,6 +8119,7 @@ fn codec_type_name(schema: &CodecType) -> &'static str {
         CodecKind::Float => "Float",
         CodecKind::String => "String",
         CodecKind::Bytes => "Bytes",
+        CodecKind::Opaque => "Opaque",
         CodecKind::Atom(_) => "Atom",
         CodecKind::Array(_) => "Array",
         CodecKind::Dict(_) => "Dict",
