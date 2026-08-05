@@ -664,4 +664,22 @@ mod tests {
         assert!(!names.iter().any(|name| name.contains("forma_interpreter")));
         assert!(!names.contains(&"\0forma_pack_dyn"));
     }
+
+    #[test]
+    fn blame_hir_indexes_arguments_but_not_the_intrinsic_name() {
+        let program = parse(
+            "hir.forma",
+            "let data = 1; let message = \"bad\"; blame!(data, message)",
+        )
+        .unwrap();
+        let hir = HirProgram::resolve(&program, std::iter::empty());
+        let names = hir
+            .references()
+            .iter()
+            .map(|reference| reference.name.as_str())
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"data"));
+        assert!(names.contains(&"message"));
+        assert!(!names.contains(&"blame"));
+    }
 }

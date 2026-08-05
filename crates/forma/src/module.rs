@@ -5494,7 +5494,50 @@ unchanged", "|"),
         let Value::Dict(error) = payload.as_ref() else {
             panic!("show error must contain BlameError")
         };
-        assert_eq!(error.get("rule").unwrap().to_string(), "\"my_show\"");
+        assert_eq!(error.get("rule").unwrap().to_string(), "\"blame!\"");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn blame_intrinsic_preserves_data_and_authored_rule_locations() {
+        let directory = fixture_dir();
+        fs::write(directory.join("user.json"), r#"{"age":42}"#).unwrap();
+        let source = r#"import user from "./user.json";
+import result from "@bim/std/result";
+import dyn from "@bim/std/dyn";
+@struct type User = {age: Int};
+type ProbeResult = Result(Int, BlameError);
+def inspect_i: Fn(Dyn) -> ProbeResult = fn(value) {
+    match dyn.field(value, "age") {
+        'Ok(age) => 'Err(blame!(age, "age rejected")),
+        'Err(error) => 'Err(error),
+    }
+};
+def inspect: for(A) Fn(TypeOf(A)) -> Fn(A) -> ProbeResult = interpreter!(inspect_i);
+let failure = inspect(User)(user);
+result.unwrap(failure)"#;
+        fs::write(directory.join("main.forma"), source).unwrap();
+
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        let error = module.execute(100_000).unwrap_err();
+        assert!(error.message.contains("age rejected"));
+        let data = error.data_location().expect("blame data location");
+        assert_eq!(
+            module.sources.get(data.source).name.as_ref(),
+            directory.join("user.json").display().to_string()
+        );
+        assert_eq!(
+            module.sources.get(data.source).slice(data).as_deref(),
+            Some("42")
+        );
+        let rule = error.rule_location().expect("blame rule location");
+        assert_eq!(
+            module.sources.get(rule.source).slice(rule).as_deref(),
+            Some("blame!(age, \"age rejected\")")
+        );
+        let rendered = error.to_string();
+        assert!(rendered.contains("user.json:1:8"), "{rendered}");
+        assert!(rendered.contains("main.forma:8:26"), "{rendered}");
         fs::remove_dir_all(directory).unwrap();
     }
 

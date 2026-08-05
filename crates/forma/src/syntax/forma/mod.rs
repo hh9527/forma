@@ -151,6 +151,18 @@ fn(settings, request) { {args: request.args} }"#;
     }
 
     #[test]
+    fn cst_preserves_blame_intrinsics_losslessly() {
+        let source = "blame!(data, \"bad\")";
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("blame.forma", source);
+        let parsed = parse(id, source);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+    }
+
+    #[test]
     fn cst_preserves_annotated_definitions_and_rejects_removed_function_forms() {
         let source = "def identity: for(A) Fn(A) -> A = fn(value) { value }; identity";
         let mut sources = crate::source::SourceDatabase::default();

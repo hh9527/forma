@@ -1,6 +1,6 @@
 # RFC 0105: Provenance-aware Dyn and `blame!`
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0089 through RFC 0099, RFC 0101, RFC 0102
 
 ## Summary
@@ -208,3 +208,32 @@ Work returns to discussion if implementation requires:
 5. unchecked Dyn casts or descriptor/value mismatch;
 6. a VM opcode, runtime intrinsic registry, or user macro system; or
 7. recursively relabeling child provenance at the blame site.
+
+## Implementation result
+
+Implemented without invoking a stopping rule.
+
+`blame!(data, message)` is accepted by the closed contextual-intrinsic parser
+and lowers directly to the canonical `{data, message, rule}` Dict. The rule
+marker is the String `"blame!"` sourced at the complete authored invocation;
+the data expression remains untouched, and ordinary Dict typing enforces a
+String message and compatibility with BlameError. Exact arity, reserved
+`file!`/`line!`, CST round trips, HIR reference indexing, and type errors have
+focused coverage. No opcode, native callback, source-reflection value, or
+diagnostic side effect was added.
+
+The Dyn audit found and fixed a provenance-kind loss: packing and structural
+observers previously rebuilt wrappers from `value.loc()`, which preserved the
+location but converted Original provenance into Generated provenance. Dyn
+wrappers now replace only the RuntimeValue while inheriting the payload's full
+RichValue provenance. Field, array, tuple, tag, and payload observers therefore
+retain the selected child's diagnostic identity through nested interpretation.
+
+Reference Show and Equality now construct failures with `blame!`. An
+end-to-end test imports JSON, passes it through `interpreter!`, Dyn field
+observation, `blame!`, and `result.unwrap`, and confirms that rendering anchors
+the data label in the JSON source and the rule label at the authored intrinsic.
+
+The full workspace gate passes: 313 Forma library tests passed with 1 ignored,
+13 CLI tests passed, 20 LSP tests passed, all documentation tests passed, and
+Clippy completed for every workspace target with warnings denied.

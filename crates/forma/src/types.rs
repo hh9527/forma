@@ -8547,6 +8547,27 @@ mod tests {
     }
 
     #[test]
+    fn blame_requires_a_string_message_in_its_canonical_shape() {
+        let analysis = analyze_source(
+            "blame.forma",
+            "let error: BlameError = blame!(1, \"bad\"); error",
+        )
+        .unwrap();
+        assert_eq!(
+            analysis.display(analysis.result_type),
+            "{data: Any, message: String, rule: Any}"
+        );
+
+        let error = analyze_source("blame.forma", "let error: BlameError = blame!(1, 2); error")
+            .unwrap_err();
+        assert!(
+            error.message.contains("Int") && error.message.contains("String"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
     fn program_bytecode_erases_or_retains_type_metadata_by_use() {
         let erased = crate::compile_source(
             "test",

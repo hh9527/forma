@@ -15,7 +15,7 @@ type ShowState = Result(Array(String), BlameError);
 type Field = Tuple([String, Dyn]);
 
 def blame: Fn(Dyn, String) -> ShowResult = fn(value, message) {
-    'Err({data: value, rule: "my_show", message: message})
+    'Err(blame!(value, message))
 };
 
 def logical_kind: Fn(Type) -> TypeDescKind = fn(ty) {

@@ -4442,14 +4442,11 @@ fn run_core_dyn(
             pc,
         )?;
         return Ok(VmAction::Return {
-            value: RichValue::new(
-                RuntimeValue::Dyn(current.allocate(Object::Dyn {
-                    identity: Arc::new(()),
-                    descriptor: arguments[0],
-                    value: arguments[1],
-                })),
-                arguments[1].loc(),
-            ),
+            value: arguments[1].with_value(RuntimeValue::Dyn(current.allocate(Object::Dyn {
+                identity: Arc::new(()),
+                descriptor: arguments[0],
+                value: arguments[1],
+            }))),
             return_target,
         });
     }
@@ -4934,26 +4931,22 @@ fn finish_dyn_observation(
                 pc,
             )?;
             let value = match observation {
-                DynObservation::Child(descriptor, value) => RichValue::new(
-                    RuntimeValue::Dyn(current.allocate(Object::Dyn {
+                DynObservation::Child(descriptor, value) => {
+                    value.with_value(RuntimeValue::Dyn(current.allocate(Object::Dyn {
                         identity: Arc::new(()),
                         descriptor,
                         value,
-                    })),
-                    value.loc(),
-                ),
+                    })))
+                }
                 DynObservation::Children(children) => {
                     let children = children
                         .into_iter()
                         .map(|(descriptor, value)| {
-                            RichValue::new(
-                                RuntimeValue::Dyn(current.allocate(Object::Dyn {
-                                    identity: Arc::new(()),
-                                    descriptor,
-                                    value,
-                                })),
-                                value.loc(),
-                            )
+                            value.with_value(RuntimeValue::Dyn(current.allocate(Object::Dyn {
+                                identity: Arc::new(()),
+                                descriptor,
+                                value,
+                            })))
                         })
                         .collect();
                     RichValue::new(
@@ -4969,14 +4962,13 @@ fn finish_dyn_observation(
                                 current.string(Some(background), &name),
                                 input.loc(),
                             );
-                            let child = RichValue::new(
-                                RuntimeValue::Dyn(current.allocate(Object::Dyn {
+                            let child = value.with_value(RuntimeValue::Dyn(current.allocate(
+                                Object::Dyn {
                                     identity: Arc::new(()),
                                     descriptor,
                                     value,
-                                })),
-                                value.loc(),
-                            );
+                                },
+                            )));
                             RichValue::new(
                                 RuntimeValue::Tuple(
                                     current.allocate(Object::Tuple(vec![name, child].into())),
@@ -4997,14 +4989,12 @@ fn finish_dyn_observation(
                     RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::None), input.loc())
                 }
                 DynObservation::Payload(Some((descriptor, value))) => {
-                    let child = RichValue::new(
-                        RuntimeValue::Dyn(current.allocate(Object::Dyn {
+                    let child =
+                        value.with_value(RuntimeValue::Dyn(current.allocate(Object::Dyn {
                             identity: Arc::new(()),
                             descriptor,
                             value,
-                        })),
-                        value.loc(),
-                    );
+                        })));
                     RichValue::new(
                         RuntimeValue::Tagged(current.allocate(Object::Tagged {
                             tag: RichValue::new(

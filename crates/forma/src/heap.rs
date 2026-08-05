@@ -114,7 +114,7 @@ impl RichValue {
         }
     }
 
-    const fn with_value(self, value: RuntimeValue) -> Self {
+    pub(crate) const fn with_value(self, value: RuntimeValue) -> Self {
         Self { value, ..self }
     }
 

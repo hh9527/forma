@@ -848,7 +848,18 @@ impl<'a> Lowerer<'a> {
                     .next()
                     .ok_or_else(|| self.error(node, "contextual intrinsic has no name"))?;
                 let name_text = self.text(name);
-                if matches!(name_text.as_ref(), "blame" | "file" | "line") {
+                if name_text == "blame" {
+                    let bang = self.first_token(node, Token::Bang)?;
+                    let arguments = self
+                        .children(node)
+                        .filter(|child| {
+                            self.is_expression(*child)
+                                && self.cst.span(*child).start > self.cst.span(bang).end
+                        })
+                        .map(|argument| self.expression(argument))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.lower_blame(arguments, node)
+                } else if matches!(name_text.as_ref(), "file" | "line") {
                     Err(self.error(
                         name,
                         format!("{name_text}! is reserved but not implemented"),
@@ -859,6 +870,37 @@ impl<'a> Lowerer<'a> {
             }
             _ => Err(self.error(node, "contextual intrinsic has no supported name")),
         }
+    }
+
+    fn lower_blame(&self, arguments: Vec<Expr>, node: NodeRef) -> Result<Expr, Diagnostic> {
+        if arguments.len() != 2 {
+            return Err(self.error(
+                node,
+                format!(
+                    "blame! expects exactly two arguments, found {}",
+                    arguments.len()
+                ),
+            ));
+        }
+        let location = self.location(node);
+        let mut arguments = arguments.into_iter();
+        let data = arguments.next().expect("blame arity was checked");
+        let message = arguments.next().expect("blame arity was checked");
+        let rule = located(ExprKind::String("blame!".into()), location);
+        let fields = [("data", data), ("message", message), ("rule", rule)]
+            .into_iter()
+            .map(|(name, value)| {
+                located(
+                    DictFieldKind {
+                        decorators: Vec::new(),
+                        name: located(name.into(), location),
+                        value,
+                    },
+                    location,
+                )
+            })
+            .collect();
+        Ok(located(ExprKind::Dict(fields), location))
     }
 
     fn lower_interpreter(
@@ -2248,7 +2290,7 @@ mod tests {
                 "interpreter(...) has been replaced by interpreter!(...)",
             ),
             ("unknown!(1)", "unknown contextual intrinsic unknown!"),
-            ("blame!(1)", "blame! is reserved but not implemented"),
+            ("blame!(1)", "blame! expects exactly two arguments, found 1"),
             ("file!()", "file! is reserved but not implemented"),
             ("line!()", "line! is reserved but not implemented"),
             (
@@ -2267,5 +2309,25 @@ mod tests {
                 error.message
             );
         }
+    }
+
+    #[test]
+    fn lowers_blame_to_the_canonical_sourced_record() {
+        let program = parse("blame.forma", "blame!(data, message)").unwrap();
+        let ExprKind::Dict(fields) = &program.value.body.value.result.value else {
+            panic!("expected blame record")
+        };
+        assert_eq!(
+            fields
+                .iter()
+                .map(|field| field.value.name.value.as_str())
+                .collect::<Vec<_>>(),
+            ["data", "message", "rule"]
+        );
+        assert!(matches!(
+            &fields[2].value.value.value,
+            ExprKind::String(marker) if marker == "blame!"
+        ));
+        assert_eq!(fields[2].value.value.location.range(), 0..21);
     }
 }

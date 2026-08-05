@@ -15,7 +15,7 @@ type Field = Tuple([String, Dyn]);
 type FieldPair = Tuple([Field, Field]);
 
 def blame: Fn(Dyn, String) -> Result(Bool, BlameError) = fn(value, message) {
-    'Err({data: value, rule: "equality", message: message})
+    'Err(blame!(value, message))
 };
 
 def logical_kind: Fn(Type) -> TypeDescKind = fn(ty) {
