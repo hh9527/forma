@@ -4419,6 +4419,12 @@ impl<'a> GenericInference<'a> {
         if matches!(actual, TypeDescriptor::Never) {
             return Ok(());
         }
+        if let TypeDescriptor::Inference(variable) = expected
+            && contains_runtime_never_leaf(&actual)
+        {
+            let evidence = self.freshen_runtime_never_leaves(&actual);
+            return self.bind_inference_variable(variable, &evidence);
+        }
         match (&actual, &expected) {
             (TypeDescriptor::Array(actual), TypeDescriptor::Array(expected))
             | (TypeDescriptor::Dict(actual), TypeDescriptor::Dict(expected))
@@ -4522,6 +4528,35 @@ impl<'a> GenericInference<'a> {
                 self.default_inference_variables_to_any(&result);
             }
             _ => {}
+        }
+    }
+
+    fn freshen_runtime_never_leaves(&mut self, descriptor: &TypeDescriptor) -> TypeDescriptor {
+        match descriptor {
+            TypeDescriptor::Never => self.fresh_variable(),
+            TypeDescriptor::Array(item) => {
+                TypeDescriptor::Array(Box::new(self.freshen_runtime_never_leaves(item)))
+            }
+            TypeDescriptor::Dict(item) => {
+                TypeDescriptor::Dict(Box::new(self.freshen_runtime_never_leaves(item)))
+            }
+            TypeDescriptor::Tagged { tag, payload } => TypeDescriptor::Tagged {
+                tag: tag.clone(),
+                payload: Box::new(self.freshen_runtime_never_leaves(payload)),
+            },
+            TypeDescriptor::Tuple(items) => TypeDescriptor::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.freshen_runtime_never_leaves(item))
+                    .collect(),
+            ),
+            TypeDescriptor::Struct(fields) => TypeDescriptor::Struct(
+                fields
+                    .iter()
+                    .map(|(name, field)| (name.clone(), self.freshen_runtime_never_leaves(field)))
+                    .collect(),
+            ),
+            descriptor => descriptor.clone(),
         }
     }
 
@@ -5391,6 +5426,30 @@ fn contains_type_variable(ty: &TypeDescriptor) -> bool {
             parameters.iter().any(contains_type_variable) || contains_type_variable(result)
         }
         _ => false,
+    }
+}
+
+fn contains_runtime_never_leaf(descriptor: &TypeDescriptor) -> bool {
+    match descriptor {
+        TypeDescriptor::Never => true,
+        TypeDescriptor::Array(item)
+        | TypeDescriptor::Dict(item)
+        | TypeDescriptor::Tagged { payload: item, .. } => contains_runtime_never_leaf(item),
+        TypeDescriptor::Tuple(items) => items.iter().any(contains_runtime_never_leaf),
+        TypeDescriptor::Struct(fields) => fields.values().any(contains_runtime_never_leaf),
+        TypeDescriptor::Any
+        | TypeDescriptor::Type
+        | TypeDescriptor::TypeOf(_)
+        | TypeDescriptor::Int
+        | TypeDescriptor::Float
+        | TypeDescriptor::String
+        | TypeDescriptor::Bytes
+        | TypeDescriptor::Atom(_)
+        | TypeDescriptor::Enum(_)
+        | TypeDescriptor::Union(_)
+        | TypeDescriptor::Function { .. }
+        | TypeDescriptor::Bound(_)
+        | TypeDescriptor::Inference(_) => false,
     }
 }
 
@@ -6733,6 +6792,42 @@ mod tests {
     }
 
     #[test]
+    fn adversarial_never_evidence_is_directional_through_structures_and_callbacks() {
+        for (name, source) in [
+            (
+                "never-first",
+                "native stop: Fn() -> Never; native choose: for(A) Fn(A, A) -> A;\
+                 choose([stop()], [1])",
+            ),
+            (
+                "never-last",
+                "native stop: Fn() -> Never; native choose: for(A) Fn(A, A) -> A;\
+                 choose([1], [stop()])",
+            ),
+        ] {
+            let analysis = analyze_with_natives(source, &[("stop", 0), ("choose", 2)])
+                .unwrap_or_else(|error| panic!("{name}: {}", error.message));
+            assert_eq!(analysis.display(analysis.result_type), "Array<Int>");
+        }
+
+        let callback = analyze_with_natives(
+            "native stop: Fn() -> Never;\
+             native apply: for(A, B) Fn(A, Fn(A) -> B, B) -> B;\
+             apply(1, fn(value) { stop() }, \"fallback\")",
+            &[("stop", 0), ("apply", 3)],
+        )
+        .unwrap();
+        assert_eq!(callback.display(callback.result_type), "String");
+
+        let reverse = analyze_with_natives(
+            "native produce: for(A) Fn() -> A; let impossible: Never = produce(); impossible",
+            &[("produce", 0)],
+        )
+        .unwrap();
+        assert_eq!(reverse.display(reverse.result_type), "Never");
+    }
+
+    #[test]
     fn never_is_bottom_for_expected_types_and_branch_results() {
         let analysis = analyze_with_natives(
             "native stop: Fn() -> Never;\
@@ -6897,6 +6992,45 @@ mod tests {
     }
 
     #[test]
+    fn adversarial_numeric_domains_do_not_generalize_or_merge() {
+        let conflict = analyze_with_natives(
+            "let add = fn(left, right) { left + right };\
+             let integer = add(1, 2); add(1.0, 2.0)",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            conflict.message.contains("cannot unify"),
+            "{}",
+            conflict.message
+        );
+
+        let callback = analyze_with_natives(
+            "native use: for(A) Fn(Fn(Float) -> A) -> A; use(fn(value) { value + 2.0 })",
+            &[("use", 1)],
+        )
+        .unwrap();
+        assert_eq!(callback.display(callback.result_type), "Float");
+
+        let explicit = analyze_with_natives(
+            "let negate = fn(value) { -value }; negate[String](\"x\")",
+            &[],
+        )
+        .unwrap_err();
+        assert!(
+            explicit
+                .message
+                .contains("cannot infer monomorphic binding")
+                || explicit.message.contains("monomorphic binding")
+                || explicit
+                    .message
+                    .contains("statically known generic binding"),
+            "{}",
+            explicit.message
+        );
+    }
+
+    #[test]
     fn branch_joins_are_canonical_pure_and_order_independent() {
         let left = analyze_with_natives("if 'True { 1 } else { \"x\" }", &[]).unwrap();
         let right = analyze_with_natives("if 'True { \"x\" } else { 1 }", &[]).unwrap();
@@ -6933,6 +7067,43 @@ mod tests {
         let dynamic =
             analyze_with_natives("let value: Any = 1; if 'True { value } else { 1 }", &[]).unwrap();
         assert_eq!(dynamic.display(dynamic.result_type), "Any");
+    }
+
+    #[test]
+    fn adversarial_branch_joins_are_pure_symmetric_and_canonical() {
+        for (left, right, expected) in [
+            (
+                "if 'True { if 'False { 1 } else { \"x\" } } else { 1.0 }",
+                "if 'True { 1.0 } else { if 'False { \"x\" } else { 1 } }",
+                "Float | Int | String",
+            ),
+            (
+                "let dynamic: Any = 1; if 'True { dynamic } else { \"x\" }",
+                "let dynamic: Any = 1; if 'True { \"x\" } else { dynamic }",
+                "Any",
+            ),
+            (
+                "if 'True { Int } else { Array(String) }",
+                "if 'True { Array(String) } else { Int }",
+                "Type",
+            ),
+        ] {
+            let left = analyze_with_natives(left, &[]).unwrap();
+            let right = analyze_with_natives(right, &[]).unwrap();
+            assert_eq!(left.display(left.result_type), expected);
+            assert_eq!(right.display(right.result_type), expected);
+        }
+
+        let no_leak = analyze_with_natives(
+            "let select = fn(flag, value) { if flag { value } else { 1 } };\
+             (select('True, \"x\"), select('False, 2.0))",
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            no_leak.display(no_leak.result_type),
+            "(Int | String, Float | Int)"
+        );
     }
 
     #[test]
@@ -7214,6 +7385,17 @@ mod tests {
         let error = analyze_with_natives(
             "def identity = fn(value) { value }; let alias = identity;\
              (alias(1), alias(\"x\"))",
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.message.contains("cannot unify"), "{}", error.message);
+    }
+
+    #[test]
+    fn adversarial_alias_chains_share_one_monomorphic_instance() {
+        let error = analyze_with_natives(
+            "let identity = fn(value) { value }; let first = identity; let second = first;\
+             let number = second(1); first(\"x\")",
             &[],
         )
         .unwrap_err();
