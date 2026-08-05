@@ -1,6 +1,6 @@
 # RFC 0090: Public `TypeDesc` graph
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0089
 - Tracking issue: https://github.com/hh9527/forma/issues/4
 
@@ -21,11 +21,14 @@ The initial API is provided by `@bim/std/type-desc`:
 def TypeDesc: Type = Type;
 
 native kind: Fn(TypeDesc) -> TypeDescKind;
+native children: Fn(TypeDesc) -> Array(TypeDesc);
 native resolve: Fn(TypeDesc) -> Result(TypeDesc, BlameError);
 ```
 
 `TypeDescKind` includes the public canonical kinds plus `'Ref`. `resolve`
 succeeds only for `'Ref` and returns its initialized target descriptor.
+`children` returns data-structure edges in canonical metadata order. It omits
+Function parameter/result edges and returns no edge for primitive or Ref nodes.
 
 ## Representation
 
@@ -60,6 +63,12 @@ WithAttributes Bound Ref
 Kind inspection does not implicitly strip `WithAttributes` or resolve `Ref`.
 An interpreter chooses when to normalize attributes and when to follow a
 recursive edge.
+
+`children` is graph-level observation, not an operation-specific field API. It
+returns Array/Dict/Tagged item or payload descriptors, Tuple/Union elements,
+Struct fields, Enum payloads, `TypeOf` instances, and the inner descriptor of
+`WithAttributes`. Names and runtime values are introduced by structural `Dyn`
+observers in RFC 0092.
 
 `Function` is a terminal public kind. Existing compiler and codec internals
 retain parameter and result metadata, but this module does not expose those
@@ -110,10 +119,35 @@ link or allows mutation.
 
 ## Implementation plan
 
-1. add `@bim/std/type-desc` with the erased alias and kind declarations;
+1. add `@bim/std/type-desc` with the erased alias and graph declarations;
 2. add a dedicated native operation family for graph observation;
 3. recognize hidden up-links before ordinary TypeMetadata decoding;
-4. map canonical metadata kind fields to `TypeDescKind`;
+4. map canonical metadata kind fields and child edges to the public view;
 5. resolve initialized links without exporting handles;
 6. add primitive, attributed, recursive, malformed, and Function tests; and
 7. run the full quality gate and record the implementation result.
+
+## Implementation result
+
+Implemented `@bim/std/type-desc` with `TypeDesc`, `TypeDescKind`, `kind`,
+`children`, and `resolve`. `TypeDesc` is exported as the existing canonical
+`Type` metadata value; native signatures use `Type` directly because Forma
+does not need a distinct alias declaration to preserve erasure.
+
+`kind` maps internal initialized up-links to `'Ref` before ordinary metadata
+inspection. `children` exposes canonical graph edges without stripping
+`WithAttributes`; recursive Struct/Array metadata therefore reaches a finite
+`'Ref` through explicit steps. `resolve` returns the initialized logical target
+as `Result(Type, BlameError)` and returns structured blame for non-reference
+inputs. No handle or reference identity crosses the module boundary.
+
+The existing runtime codec-schema decoder was extended with a `Type` domain so
+generic metadata such as `Result(Type, BlameError)` can itself be constructed
+and validated. Type metadata remains unsupported as JSON data or JSON Schema;
+the extension validates canonical metadata and does not add external encoding.
+
+Regression coverage exercises primitive and attributed kinds, finite recursive
+graph traversal, explicit reference resolution, non-reference blame, and the
+erased module export. Function is handled as a leaf by the implementation and
+has no child edge API. Full Forma tests pass with 282 passed and 1 ignored; all
+13 CLI integration tests pass.

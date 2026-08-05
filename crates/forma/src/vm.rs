@@ -6,8 +6,8 @@ use crate::lir::RegisterId;
 use crate::value::{
     BuiltinAtom, CoreArrayFunction, CoreAttributesFunction, CoreBuiltinTypeFunction,
     CoreCodecFunction, CoreDebugFunction, CoreDictFunction, CoreHashFunction, CoreJsonFunction,
-    CoreModelFunction, CorePathFunction, CoreResultFunction, CoreStringFunction, Dict, NativeError,
-    NativeKind, NativeLimit, Shape, Value,
+    CoreModelFunction, CorePathFunction, CoreResultFunction, CoreStringFunction,
+    CoreTypeDescFunction, Dict, NativeError, NativeKind, NativeLimit, Shape, Value,
 };
 use crate::{Diagnostic, Origin, SourceDatabase};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -2284,6 +2284,16 @@ fn drive_vm_action(
                                 background,
                                 account,
                             )?,
+                            NativeKind::CoreTypeDesc(operation) => run_core_type_desc(
+                                operation,
+                                &arguments,
+                                return_target,
+                                &call_function,
+                                call_pc,
+                                current,
+                                background,
+                                account,
+                            )?,
                             NativeKind::CoreResult(operation) => run_core_result(
                                 operation,
                                 &arguments,
@@ -4065,6 +4075,257 @@ fn run_core_model(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn run_core_type_desc(
+    operation: CoreTypeDescFunction,
+    arguments: &[RichValue],
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let input = arguments[0];
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    match operation {
+        CoreTypeDescFunction::Kind => {
+            let kind = if matches!(input.value, RuntimeValue::UpLink(_)) {
+                "Ref".to_owned()
+            } else {
+                let RuntimeValue::Dict(handle) = input.value else {
+                    return Err(error(
+                        RuntimeErrorKind::TypeMismatch,
+                        "@bim/std/type-desc.kind expects Type metadata",
+                        function,
+                        pc,
+                    ));
+                };
+                let kind = view
+                    .dict_get_text(handle, "kind")
+                    .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                    .and_then(|value| view.atom_text(value).ok().flatten())
+                    .ok_or_else(|| {
+                        error(
+                            RuntimeErrorKind::TypeMismatch,
+                            "@bim/std/type-desc.kind expects canonical Type metadata",
+                            function,
+                            pc,
+                        )
+                    })?;
+                const KINDS: &[&str] = &[
+                    "Any",
+                    "Never",
+                    "Type",
+                    "TypeOf",
+                    "Int",
+                    "Float",
+                    "String",
+                    "Bytes",
+                    "Atom",
+                    "Array",
+                    "Dict",
+                    "Tagged",
+                    "Tuple",
+                    "Struct",
+                    "Enum",
+                    "Union",
+                    "Function",
+                    "WithAttributes",
+                    "Bound",
+                ];
+                if !KINDS.contains(&kind) {
+                    return Err(error(
+                        RuntimeErrorKind::TypeMismatch,
+                        format!("unknown Type metadata kind '{kind}"),
+                        function,
+                        pc,
+                    ));
+                }
+                kind.to_owned()
+            };
+            Ok(VmAction::Return {
+                value: RichValue::new(RuntimeValue::Atom(current.intern(&kind)), input.loc),
+                return_target,
+            })
+        }
+        CoreTypeDescFunction::Children => {
+            let children = type_desc_children(input, &view)
+                .map_err(|message| error(RuntimeErrorKind::TypeMismatch, message, function, pc))?;
+            charge_allocation(
+                account,
+                logical_value_bytes(children.len())
+                    .map_err(|native_error| allocation_error(native_error.message, function, pc))?,
+                function,
+                pc,
+            )?;
+            Ok(VmAction::Return {
+                value: RichValue::new(
+                    RuntimeValue::Array(current.allocate(Object::Array(children.into()))),
+                    input.loc,
+                ),
+                return_target,
+            })
+        }
+        CoreTypeDescFunction::Resolve => {
+            let result = if let RuntimeValue::UpLink(handle) = input.value {
+                view.up_link(handle)
+                    .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+                    .ok_or_else(|| {
+                        error(
+                            RuntimeErrorKind::InvalidBytecode,
+                            "recursive Type reference is not initialized",
+                            function,
+                            pc,
+                        )
+                    })?
+            } else {
+                return type_desc_resolve_error(
+                    input,
+                    return_target,
+                    function,
+                    pc,
+                    current,
+                    background,
+                    account,
+                );
+            };
+            charge_allocation(
+                account,
+                logical_value_bytes(2)
+                    .map_err(|native_error| allocation_error(native_error.message, function, pc))?,
+                function,
+                pc,
+            )?;
+            Ok(VmAction::Return {
+                value: RichValue::new(
+                    RuntimeValue::Tagged(current.allocate(Object::Tagged {
+                        tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Ok), input.loc),
+                        payload: result,
+                    })),
+                    input.loc,
+                ),
+                return_target,
+            })
+        }
+    }
+}
+
+fn type_desc_children(input: RichValue, view: &HeapView<'_>) -> Result<Vec<RichValue>, String> {
+    if matches!(input.value, RuntimeValue::UpLink(_)) {
+        return Ok(Vec::new());
+    }
+    let RuntimeValue::Dict(handle) = input.value else {
+        return Err("@bim/std/type-desc.children expects Type metadata".into());
+    };
+    let kind = view
+        .dict_get_text(handle, "kind")
+        .map_err(|error| error.to_string())?
+        .and_then(|value| view.atom_text(value).ok().flatten())
+        .ok_or_else(|| "Type metadata is missing an Atom kind".to_owned())?;
+    let get = |field: &str| {
+        view.dict_get_text(handle, field)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("{kind} Type metadata is missing {field}"))
+    };
+    match kind {
+        "TypeOf" => Ok(vec![get("instance")?]),
+        "Array" | "Dict" => Ok(vec![get("item")?]),
+        "Tagged" => Ok(vec![get("payload")?]),
+        "WithAttributes" => Ok(vec![get("inner")?]),
+        "Tuple" | "Union" => {
+            let field = if kind == "Tuple" { "items" } else { "variants" };
+            let RuntimeValue::Array(items) = get(field)?.value else {
+                return Err(format!("{kind}.{field} must be an Array"));
+            };
+            view.sequence(items, false)
+                .map(|items| items.to_vec())
+                .map_err(|error| error.to_string())
+        }
+        "Struct" => {
+            let RuntimeValue::Dict(fields) = get("fields")?.value else {
+                return Err("Struct.fields must be a Dict".into());
+            };
+            view.dict_parts(fields)
+                .map(|(_, values)| values.to_vec())
+                .map_err(|error| error.to_string())
+        }
+        "Enum" => {
+            let RuntimeValue::Dict(variants) = get("variants")?.value else {
+                return Err("Enum.variants must be a Dict".into());
+            };
+            let (_, values) = view
+                .dict_parts(variants)
+                .map_err(|error| error.to_string())?;
+            values
+                .iter()
+                .filter_map(|value| {
+                    let stripped = strip_runtime_attributes(*value, "Type.variants", view);
+                    match stripped {
+                        Ok((inner, _)) if view.atom_text(inner).ok().flatten() == Some("None") => {
+                            None
+                        }
+                        Ok((inner, _)) => Some(Ok(inner)),
+                        Err(error) => Some(Err(error)),
+                    }
+                })
+                .collect()
+        }
+        "Any" | "Never" | "Type" | "Int" | "Float" | "String" | "Bytes" | "Atom" | "Function"
+        | "Bound" => Ok(Vec::new()),
+        other => Err(format!("unknown Type metadata kind '{other}")),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn type_desc_resolve_error(
+    input: RichValue,
+    return_target: ReturnTarget,
+    function: &BytecodeFunction,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let message = "type descriptor is not a recursive reference";
+    let rule = "type-desc.resolve";
+    let bytes = logical_value_bytes(6)
+        .and_then(|bytes| {
+            bytes
+                .checked_add(u64::try_from(message.len() + rule.len()).unwrap_or(u64::MAX))
+                .ok_or_else(|| NativeError::allocation_limit("TypeDesc error size overflowed"))
+        })
+        .map_err(|native_error| allocation_error(native_error.message, function, pc))?;
+    charge_allocation(account, bytes, function, pc)?;
+    let message = RichValue::new(current.string(Some(background), message), input.loc);
+    let rule = RichValue::new(current.string(Some(background), rule), input.loc);
+    let fields = ["data", "message", "rule"]
+        .into_iter()
+        .map(|field| current.intern(field))
+        .collect();
+    let shape = current.intern_shape(fields);
+    let blame = RichValue::new(
+        RuntimeValue::Dict(current.allocate(Object::Dict {
+            shape,
+            values: vec![input, message, rule].into(),
+        })),
+        input.loc,
+    );
+    Ok(VmAction::Return {
+        value: RichValue::new(
+            RuntimeValue::Tagged(current.allocate(Object::Tagged {
+                tag: RichValue::new(RuntimeValue::BuiltinAtom(BuiltinAtom::Err), input.loc),
+                payload: blame,
+            })),
+            input.loc,
+        ),
+        return_target,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_core_union_model(
     variants: RichValue,
     return_target: ReturnTarget,
@@ -4316,6 +4577,7 @@ struct CodecType {
 enum CodecKind {
     UpLink(Handle),
     Any,
+    Type,
     Int,
     Float,
     String,
@@ -4704,6 +4966,7 @@ fn assert_codec_graph_ready(
                 Ok(())
             }),
             CodecKind::Any
+            | CodecKind::Type
             | CodecKind::Int
             | CodecKind::Float
             | CodecKind::String
@@ -4779,6 +5042,7 @@ fn decode_runtime_type_at(
     let kind = match kind {
         "Bound" => CodecKind::Any,
         "Any" => CodecKind::Any,
+        "Type" => CodecKind::Type,
         "Int" => CodecKind::Int,
         "Float" => CodecKind::Float,
         "String" => CodecKind::String,
@@ -5083,6 +5347,9 @@ fn transform_codec(
             )
         }
         CodecKind::Any => Ok(CodecNode::Existing(value)),
+        CodecKind::Type => decode_runtime_type(value, current, background)
+            .map(|_| CodecNode::Existing(value))
+            .map_err(|message| CodecFailure::new(message, value, schema.rule)),
         CodecKind::Int if matches!(value.value, RuntimeValue::Int(_)) => {
             Ok(CodecNode::Existing(value))
         }
@@ -6507,6 +6774,11 @@ fn generate_json_schema_node(
             ))
         }
         CodecKind::Any => Ok(CodecNode::Dict(Vec::new(), loc)),
+        CodecKind::Type => Err(CodecFailure::new(
+            "JSON Schema cannot describe Type metadata",
+            schema.rule,
+            schema.rule,
+        )),
         CodecKind::Int => Ok(schema_dict(
             vec![("type", schema_string("integer", loc))],
             loc,
@@ -6772,6 +7044,7 @@ fn codec_type_name(schema: &CodecType) -> &'static str {
     match &schema.kind {
         CodecKind::UpLink(_) => "recursive Type",
         CodecKind::Any => "Any",
+        CodecKind::Type => "Type",
         CodecKind::Int => "Int",
         CodecKind::Float => "Float",
         CodecKind::String => "String",

@@ -276,6 +276,27 @@ pub(crate) enum CoreCodecFunction {
     Encode,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreTypeDescFunction {
+    Kind,
+    Children,
+    Resolve,
+}
+
+impl CoreTypeDescFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Kind => "@bim/std/type-desc.kind",
+            Self::Children => "@bim/std/type-desc.children",
+            Self::Resolve => "@bim/std/type-desc.resolve",
+        }
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        1
+    }
+}
+
 impl CoreCodecFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
@@ -484,6 +505,7 @@ pub(crate) enum NativeKind {
     CoreDebug(CoreDebugFunction),
     CoreHash(CoreHashFunction),
     CoreCodec(CoreCodecFunction),
+    CoreTypeDesc(CoreTypeDescFunction),
     CoreResult(CoreResultFunction),
     CoreJson(CoreJsonFunction),
 }
@@ -593,6 +615,15 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreCodec(function),
+        }
+    }
+
+    pub(crate) const fn core_type_desc(function: CoreTypeDescFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreTypeDesc(function),
         }
     }
 

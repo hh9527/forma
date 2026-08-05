@@ -1,7 +1,7 @@
 use crate::value::{
     CoreArrayFunction, CoreAttributesFunction, CoreCodecFunction, CoreDebugFunction,
     CoreDictFunction, CoreHashFunction, CoreJsonFunction, CorePathFunction, CoreResultFunction,
-    CoreStringFunction, NativeFunction,
+    CoreStringFunction, CoreTypeDescFunction, NativeFunction,
 };
 
 pub(crate) const ARRAY_MODULE: &str = "@bim/std/array";
@@ -18,6 +18,7 @@ pub(crate) const HASH_MODULE: &str = "@bim/std/hash";
 pub(crate) const STRING_MODULE: &str = "@bim/std/string";
 pub(crate) const PATH_MODULE: &str = "@bim/std/path";
 pub(crate) const TOML_MODULE: &str = "@bim/std/toml";
+pub(crate) const TYPE_DESC_MODULE: &str = "@bim/std/type-desc";
 
 pub(crate) struct CoreModuleSpec {
     pub(crate) name: &'static str,
@@ -27,6 +28,42 @@ pub(crate) struct CoreModuleSpec {
 
 pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
     vec![
+        CoreModuleSpec {
+            name: TYPE_DESC_MODULE,
+            source: r#"
+@enum type TypeDescKind = {
+    Any: 'None, Never: 'None, Type: 'None, TypeOf: 'None,
+    Int: 'None, Float: 'None, String: 'None, Bytes: 'None,
+    Atom: 'None, Array: 'None, Dict: 'None, Tagged: 'None,
+    Tuple: 'None, Struct: 'None, Enum: 'None, Union: 'None,
+    Function: 'None, WithAttributes: 'None, Bound: 'None, Ref: 'None,
+};
+native kind: Fn(Type) -> TypeDescKind;
+native children: Fn(Type) -> Array(Type);
+native resolve: Fn(Type) -> Result(Type, BlameError);
+{
+    TypeDesc: Type,
+    TypeDescKind: TypeDescKind,
+    kind: kind,
+    children: children,
+    resolve: resolve,
+}
+"#,
+            functions: vec![
+                (
+                    "children",
+                    NativeFunction::core_type_desc(CoreTypeDescFunction::Children),
+                ),
+                (
+                    "kind",
+                    NativeFunction::core_type_desc(CoreTypeDescFunction::Kind),
+                ),
+                (
+                    "resolve",
+                    NativeFunction::core_type_desc(CoreTypeDescFunction::Resolve),
+                ),
+            ],
+        },
         CoreModuleSpec {
             name: ATTRIBUTES_MODULE,
             source: r#"

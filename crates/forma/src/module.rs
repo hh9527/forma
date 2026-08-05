@@ -3135,6 +3135,63 @@ unchanged", "|"),
     }
 
     #[test]
+    fn core_type_desc_exposes_erased_kinds_and_structured_ref_errors() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import desc from "@bim/std/type-desc";
+               import attributes from "@bim/std/attributes";
+               import arrays from "@bim/std/array";
+               @struct type Node = {children: Array(Node)};
+               let struct_nodes = desc.children(Node);
+               let field_nodes = arrays.flat_map(struct_nodes, desc.children);
+               let array_nodes = arrays.flat_map(field_nodes, desc.children);
+               let refs = arrays.flat_map(array_nodes, desc.children);
+               {
+                   int_kind: desc.kind(Int),
+                   attributed_kind: desc.kind(attributes.add(Int, {doc: "number"})),
+                   resolve_int: desc.resolve(Int),
+                   ref_kinds: arrays.map(refs, desc.kind),
+                   resolved_kinds: arrays.map(refs, fn(reference) {
+                       match desc.resolve(reference) {
+                           'Ok(target) => desc.kind(target),
+                           'Err(_) => 'Never,
+                       }
+                   }),
+                   TypeDesc: desc.TypeDesc,
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        let Value::Dict(output) = module.execute(100_000).unwrap() else {
+            panic!("type descriptor test must return a Dict")
+        };
+        assert_eq!(output.get("int_kind").unwrap().to_string(), "'Int");
+        assert_eq!(
+            output.get("attributed_kind").unwrap().to_string(),
+            "'WithAttributes"
+        );
+        assert_eq!(output.get("TypeDesc").unwrap().to_string(), "{kind: 'Type}");
+        assert_eq!(output.get("ref_kinds").unwrap().to_string(), "['Ref]");
+        assert_eq!(
+            output.get("resolved_kinds").unwrap().to_string(),
+            "['WithAttributes]"
+        );
+        let Value::Tagged { tag, payload } = output.get("resolve_int").unwrap() else {
+            panic!("resolve must return a Result")
+        };
+        assert_eq!(tag.name(), "Err");
+        let Value::Dict(error) = payload.as_ref() else {
+            panic!("resolve error must be structured")
+        };
+        assert_eq!(
+            error.get("message").unwrap().to_string(),
+            "\"type descriptor is not a recursive reference\""
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn homogeneous_dict_combinators_preserve_types_and_canonical_order() {
         let directory = fixture_dir();
         fs::write(
