@@ -646,7 +646,7 @@ mod tests {
     fn interpreter_hir_indexes_only_authored_operand() {
         let program = parse(
             "hir.forma",
-            "def lift: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Bool = interpreter(eq_i); lift",
+            "def lift: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Bool = interpreter!(eq_i); lift",
         )
         .unwrap();
         let hir = HirProgram::resolve(

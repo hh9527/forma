@@ -1,6 +1,6 @@
 # RFC 0101: Contextual intrinsic syntax
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0097, RFC 0098, RFC 0100
 
 ## Summary
@@ -187,3 +187,23 @@ Work returns to discussion if implementation requires:
 4. changing the accepted interpreter scheme;
 5. implementing source provenance or blame ahead of RFC 0102 and RFC 0105; or
 6. accepting both interpreter spellings indefinitely.
+
+## Implementation result
+
+Forma now tokenizes `!` and parses contextual intrinsics through explicit
+two-token grammar predicates, keeping ordinary identifiers and calls
+unambiguous. `interpreter!(operand)` routes through the existing authored
+Interpreter AST and parameter-wise semantic elaboration, so HIR visibility,
+type validation, generated adapter isolation, and runtime behavior are
+unchanged.
+
+The old `interpreter(operand)` form remains only as a parser migration branch
+and reports its exact replacement. Unknown names receive a closed-intrinsic
+diagnostic; `blame!`, `file!`, and `line!` receive distinct reserved-but-not-yet-
+implemented diagnostics. Interpreter arity is checked before elaboration, and
+the lossless CST retains the authored bang and ordinary expression arguments.
+
+All current examples, README variants, and VISION use `interpreter!(...)`.
+Historical RFCs retain their original spelling as design records. Full Forma
+tests pass with 293 passed and 1 ignored; all 13 CLI and 20 LSP tests pass, and
+strict workspace Clippy reports no warnings.

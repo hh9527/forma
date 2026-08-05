@@ -151,7 +151,7 @@ The same metadata may support:
 
 `TypeOf(A)` retains the relationship between a metadata witness and the values
 it describes. `Dyn` permits safe existential packaging and structural
-observation without becoming an unchecked cast. `interpreter(...)` provides a
+observation without becoming an unchecked cast. `interpreter!(...)` provides a
 narrow, one-way bridge from statically witnessed values to user-space metadata
 interpreters. It must not allow an interpreter to manufacture or recover an
 arbitrary `A`.

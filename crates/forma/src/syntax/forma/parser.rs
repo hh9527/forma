@@ -90,6 +90,12 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
             lookahead += 1;
         }
     }
+    fn predicate_primary_4(&self) -> bool {
+        self.peek(1) == Token::Bang
+    }
+    fn predicate_primary_5(&self) -> bool {
+        self.peek(1) == Token::Bang
+    }
     fn predicate_braced_1(&self) -> bool {
         if self.peek(1) == Token::RBrace
             || self.peek(1) == Token::At
@@ -131,6 +137,12 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
         self.peek(1) != Token::RParen
     }
     fn predicate_arguments_1(&self) -> bool {
+        self.peek(1) != Token::RParen
+    }
+    fn predicate_interpreter_intrinsic_1(&self) -> bool {
+        self.peek(1) != Token::RParen
+    }
+    fn predicate_named_intrinsic_1(&self) -> bool {
         self.peek(1) != Token::RParen
     }
     fn predicate_pattern_2(&self) -> bool {

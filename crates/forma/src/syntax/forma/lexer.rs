@@ -48,6 +48,7 @@ pub enum Token {
     Semicolon,
     Dot,
     At,
+    Bang,
     Plus,
     Minus,
     Star,
@@ -133,6 +134,8 @@ enum NormalToken {
     Dot,
     #[token("@")]
     At,
+    #[token("!")]
+    Bang,
     #[token("+")]
     Plus,
     #[token("-")]
@@ -544,6 +547,7 @@ impl From<NormalToken> for Token {
             NormalToken::Semicolon => Self::Semicolon,
             NormalToken::Dot => Self::Dot,
             NormalToken::At => Self::At,
+            NormalToken::Bang => Self::Bang,
             NormalToken::Plus => Self::Plus,
             NormalToken::Minus => Self::Minus,
             NormalToken::Star => Self::Star,

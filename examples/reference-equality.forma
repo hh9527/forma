@@ -186,6 +186,6 @@ def equal_dyn: Fn(Dyn, Dyn) -> Result(Bool, BlameError) = fn(left, right) {
 
 def equal:
     for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Result(Bool, BlameError) =
-    interpreter(equal_dyn);
+    interpreter!(equal_dyn);
 
 { equal: equal, equal_dyn: equal_dyn }

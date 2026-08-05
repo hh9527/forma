@@ -138,6 +138,6 @@ def show_dyn: Fn(Dyn) -> ShowResult = fn(value) {
     }
 };
 
-def my_show: for(A) Fn(TypeOf(A)) -> Fn(A) -> ShowResult = interpreter(show_dyn);
+def my_show: for(A) Fn(TypeOf(A)) -> Fn(A) -> ShowResult = interpreter!(show_dyn);
 
 {my_show: my_show, show_dyn: show_dyn}

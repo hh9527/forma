@@ -134,7 +134,8 @@ fn(settings, request) { {args: request.args} }"#;
 
     #[test]
     fn cst_preserves_interpreter_expressions_losslessly() {
-        let source = "def lift: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Bool = interpreter(eq_i); lift";
+        let source =
+            "def lift: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Bool = interpreter!(eq_i); lift";
         let mut sources = crate::source::SourceDatabase::default();
         let id = sources.add("interpreter.forma", source);
         let parsed = parse(id, source);

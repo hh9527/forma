@@ -445,8 +445,15 @@ impl<'a> Lowerer<'a> {
                     })
                     .ok_or_else(|| self.error(node, "definition has no value"))?;
                 let interpreter_node = self.expression_head(value_node);
-                let value = if self.rule(interpreter_node) == Some(Rule::InterpreterExpr) {
-                    self.lower_interpreter(interpreter_node, &type_parameters, annotation.as_ref())?
+                let value = if matches!(
+                    self.rule(interpreter_node),
+                    Some(Rule::InterpreterIntrinsic | Rule::NamedIntrinsic)
+                ) {
+                    self.lower_contextual_intrinsic(
+                        interpreter_node,
+                        &type_parameters,
+                        annotation.as_ref(),
+                    )?
                 } else {
                     self.expression(value_node)?
                 };
@@ -655,10 +662,13 @@ impl<'a> Lowerer<'a> {
                     body: self.block_body(block)?,
                 }
             }
-            Rule::InterpreterExpr => {
+            Rule::InterpreterIntrinsic | Rule::NamedIntrinsic => {
+                return self.lower_contextual_intrinsic(node, &[], None);
+            }
+            Rule::LegacyInterpreterExpr => {
                 return Err(self.error(
                     node,
-                    "interpreter is only valid as the initializer of an explicitly contracted def",
+                    "interpreter(...) has been replaced by interpreter!(...)",
                 ));
             }
             Rule::FunctionContract => return self.contract_expression(node),
@@ -822,16 +832,55 @@ impl<'a> Lowerer<'a> {
         Ok(located(inner, location))
     }
 
+    fn lower_contextual_intrinsic(
+        &self,
+        node: NodeRef,
+        type_parameters: &[Identifier],
+        contract: Option<&Expr>,
+    ) -> Result<Expr, Diagnostic> {
+        match self.rule(node) {
+            Some(Rule::InterpreterIntrinsic) => {
+                self.lower_interpreter(node, type_parameters, contract)
+            }
+            Some(Rule::NamedIntrinsic) => {
+                let name = self
+                    .token_children(node, Token::Identifier)
+                    .next()
+                    .ok_or_else(|| self.error(node, "contextual intrinsic has no name"))?;
+                let name_text = self.text(name);
+                if matches!(name_text.as_ref(), "blame" | "file" | "line") {
+                    Err(self.error(
+                        name,
+                        format!("{name_text}! is reserved but not implemented"),
+                    ))
+                } else {
+                    Err(self.error(name, format!("unknown contextual intrinsic {name_text}!")))
+                }
+            }
+            _ => Err(self.error(node, "contextual intrinsic has no supported name")),
+        }
+    }
+
     fn lower_interpreter(
         &self,
         node: NodeRef,
         type_parameters: &[Identifier],
         contract: Option<&Expr>,
     ) -> Result<Expr, Diagnostic> {
-        let operand = self
+        let operands = self
             .children(node)
-            .find(|child| self.is_expression(*child))
-            .ok_or_else(|| self.error(node, "interpreter has no operand"))?;
+            .filter(|child| self.is_expression(*child))
+            .collect::<Vec<_>>();
+        if operands.len() != 1 {
+            return Err(self.error(
+                node,
+                format!(
+                    "interpreter! expects exactly one argument, found {}",
+                    operands.len()
+                ),
+            ));
+        }
+        let operand = operands[0];
         let location = self.location(node);
         let operand = self.expression(operand)?;
         let plan = contract
@@ -1266,7 +1315,9 @@ impl<'a> Lowerer<'a> {
                     | Rule::FloatExpr
                     | Rule::FunctionContract
                     | Rule::IfExpr
-                    | Rule::InterpreterExpr
+                    | Rule::InterpreterIntrinsic
+                    | Rule::NamedIntrinsic
+                    | Rule::LegacyInterpreterExpr
                     | Rule::IntExpr
                     | Rule::MatchExpr
                     | Rule::ParenExpr
@@ -2176,7 +2227,7 @@ mod tests {
     fn preserves_interpreter_operand_in_ast() {
         let program = parse(
             "interpreter.forma",
-            "def lift: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Bool = interpreter(eq_i); lift",
+            "def lift: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Bool = interpreter!(eq_i); lift",
         )
         .unwrap();
         let value = &program.value.body.value.bindings[0].value.value;
@@ -2187,5 +2238,34 @@ mod tests {
             &operand.value,
             ExprKind::Variable(name) if name.value == "eq_i"
         ));
+    }
+
+    #[test]
+    fn diagnoses_contextual_intrinsic_names_and_arity() {
+        for (source, expected) in [
+            (
+                "def lift: for(A) Fn(TypeOf(A)) -> Fn(A) -> Bool = interpreter(eq_i); lift",
+                "interpreter(...) has been replaced by interpreter!(...)",
+            ),
+            ("unknown!(1)", "unknown contextual intrinsic unknown!"),
+            ("blame!(1)", "blame! is reserved but not implemented"),
+            ("file!()", "file! is reserved but not implemented"),
+            ("line!()", "line! is reserved but not implemented"),
+            (
+                "def lift: for(A) Fn(TypeOf(A)) -> Fn(A) -> Bool = interpreter!(); lift",
+                "interpreter! expects exactly one argument, found 0",
+            ),
+            (
+                "def lift: for(A) Fn(TypeOf(A)) -> Fn(A) -> Bool = interpreter!(a, b); lift",
+                "interpreter! expects exactly one argument, found 2",
+            ),
+        ] {
+            let error = parse("intrinsic.forma", source).unwrap_err();
+            assert!(
+                error.message.contains(expected),
+                "expected {expected:?}, got {:?}",
+                error.message
+            );
+        }
     }
 }

@@ -1,7 +1,7 @@
 token Let='let' Decl='decl' Def='def' Native='native' For='for' Type='type' Fn='fn' FunctionType='Fn' Interpreter='interpreter' If='if' Else='else' Match='match';
 token Import='import' From='from';
 token SectionLParen='\\(' LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
-token Comma=',' Colon=':' Semicolon=';' Dot='.' At='@';
+token Comma=',' Colon=':' Semicolon=';' Dot='.' At='@' Bang='!';
 token Plus='+' Minus='-' Star='*' Slash='/' Less='<' EqualEqual='==' Equal='=';
 token Arrow='->' FatArrow='=>' Pipe='|>';
 token Int='<integer>' Float='<float>' Bytes='<bytes>';
@@ -48,8 +48,10 @@ primary:
 | concat_expression @string_expr
 | Bytes @bytes_expr
 | Atom @atom_expr
+| ?4 named_intrinsic
 | Identifier @variable_expr
-| interpreter_expr
+| ?5 interpreter_intrinsic
+| legacy_interpreter_expr
 | '(' [expression (?1 ',' expression)* [',']] ')' @paren_expr
 | '[' [expression (?2 ',' expression)* [',']] ']' @array_expr
 | braced
@@ -68,7 +70,9 @@ decorator: '@' decorator_path [arguments];
 decorator_path: Identifier ('.' Identifier)*;
 block: '{' body '}';
 closure: 'fn' parameters ['->' expression] block;
-interpreter_expr: 'interpreter' '(' expression ')';
+interpreter_intrinsic: 'interpreter' '!' '(' [expression (?1 ',' expression)* [',']] ')';
+named_intrinsic: Identifier '!' '(' [expression (?1 ',' expression)* [',']] ')';
+legacy_interpreter_expr: 'interpreter' '(' expression ')';
 function_contract: 'Fn' '(' [contract (?1 ',' contract)* [',']] ')' '->' contract;
 contract: Identifier [?1 '(' [contract (?2 ',' contract)* [',']] ')'] @contract_expr | function_contract;
 parameters: '(' [parameter (?1 ',' parameter)* [',']] ')';

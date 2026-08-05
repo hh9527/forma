@@ -3409,7 +3409,7 @@ unchanged", "|"),
                    }
                };
                def eq_fn: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Bool =
-                   interpreter(int_eq_i);
+                   interpreter!(int_eq_i);
                {
                    equal: eq_fn[Int](Int)(1, 1),
                    different: eq_fn[Int](Int)(1, 2),
@@ -3435,7 +3435,7 @@ unchanged", "|"),
             directory.join("invalid.forma"),
             r#"def bad_i: Fn(Dyn) -> Bool = fn(value) { 'True };
                def bad: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Bool =
-                   interpreter(bad_i);
+                   interpreter!(bad_i);
                0"#,
         )
         .unwrap();
@@ -3445,40 +3445,40 @@ unchanged", "|"),
 
         for (source, expected) in [
             (
-                "def bad = interpreter(eq_i); 0",
+                "def bad = interpreter!(eq_i); 0",
                 "interpreter requires an explicit",
             ),
             (
-                "def bad: for(A) Fn(A) -> Fn(A, A) -> Bool = interpreter(eq_i); 0",
+                "def bad: for(A) Fn(A) -> Fn(A, A) -> Bool = interpreter!(eq_i); 0",
                 "witness parameter 1",
             ),
             (
-                "def bad: for(A) Fn(TypeOf(A)) -> Fn(Array(A)) -> Bool = interpreter(eq_i); 0",
+                "def bad: for(A) Fn(TypeOf(A)) -> Fn(Array(A)) -> Bool = interpreter!(eq_i); 0",
                 "inner parameter 1 contains type parameter A",
             ),
             (
-                "def bad: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> A = interpreter(eq_i); 0",
+                "def bad: for(A) Fn(TypeOf(A)) -> Fn(A, A) -> A = interpreter!(eq_i); 0",
                 "result contains type parameter A",
             ),
             (
-                "def bad: for(A, B) Fn(TypeOf(A), TypeOf(A)) -> Fn(A) -> Bool = interpreter(eq_i); 0",
+                "def bad: for(A, B) Fn(TypeOf(A), TypeOf(A)) -> Fn(A) -> Bool = interpreter!(eq_i); 0",
                 "type parameter A has more than one TypeOf witness",
             ),
             (
-                "def bad: for(A, B) Fn(TypeOf(A)) -> Fn(A) -> Bool = interpreter(eq_i); 0",
+                "def bad: for(A, B) Fn(TypeOf(A)) -> Fn(A) -> Bool = interpreter!(eq_i); 0",
                 "type parameter B has no TypeOf witness",
             ),
             (
-                "def bad: for(A) Fn(TypeOf(A)) -> Fn(Fn(A) -> Bool) -> Bool = interpreter(eq_i); 0",
+                "def bad: for(A) Fn(TypeOf(A)) -> Fn(Fn(A) -> Bool) -> Bool = interpreter!(eq_i); 0",
                 "inner parameter 1 contains type parameter A",
             ),
             (
-                "def bad: for(A) Fn(TypeOf(A)) -> Fn(A) -> Option(A) = interpreter(eq_i); 0",
+                "def bad: for(A) Fn(TypeOf(A)) -> Fn(A) -> Option(A) = interpreter!(eq_i); 0",
                 "result contains type parameter A",
             ),
             (
-                "let bad = interpreter(eq_i); 0",
-                "interpreter is only valid",
+                "let bad = interpreter!(eq_i); 0",
+                "interpreter requires an explicit",
             ),
         ] {
             fs::write(directory.join("invalid-shape.forma"), source).unwrap();
@@ -5504,19 +5504,19 @@ unchanged", "|"),
         fs::write(
             directory.join("main.forma"),
             r#"def unary_i: Fn(Dyn) -> String = fn(value) { "unary" };
-               def unary: for(A) Fn(TypeOf(A)) -> Fn(A) -> String = interpreter(unary_i);
+               def unary: for(A) Fn(TypeOf(A)) -> Fn(A) -> String = interpreter!(unary_i);
 
                def mixed_i: Fn(Dyn, Bool) -> String = fn(value, verbose) { "mixed" };
-               def mixed: for(A) Fn(TypeOf(A)) -> Fn(A, Bool) -> String = interpreter(mixed_i);
+               def mixed: for(A) Fn(TypeOf(A)) -> Fn(A, Bool) -> String = interpreter!(mixed_i);
 
                def many_i: Fn(String, Dyn, Bool, Dyn, Dyn) -> String =
                    fn(prefix, a, flag, b, again_a) { prefix };
                def many: for(A, B) Fn(TypeOf(B), TypeOf(A)) ->
-                   Fn(String, A, Bool, B, A) -> String = interpreter(many_i);
+                   Fn(String, A, Bool, B, A) -> String = interpreter!(many_i);
 
                def metadata_i: Fn(Bool) -> String = fn(flag) { "metadata" };
                def metadata: for(A) Fn(TypeOf(A)) -> Fn(Bool) -> String =
-                   interpreter(metadata_i);
+                   interpreter!(metadata_i);
 
                {
                    unary: unary(Int)(1),

@@ -88,7 +88,7 @@ The same metadata can drive static checking, LSP information, runtime
 validation, normalization, codecs, documentation, schema generation, and
 user-space interpreters. `TypeOf(A)` preserves the relationship between a
 metadata witness and the values it describes; the narrow `Dyn` and
-`interpreter(...)` boundary supports heterogeneous interpretation without an
+`interpreter!(...)` boundary supports heterogeneous interpretation without an
 unchecked cast.
 
 Types are central to Forma, but they serve the larger goal: programmable data
