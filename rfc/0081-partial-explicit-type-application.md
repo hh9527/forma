@@ -1,6 +1,6 @@
 # RFC 0081: Partial explicit type application
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0018, RFC 0052, RFC 0070, RFC 0077, RFC 0079, RFC 0080
 - Tracking issue: https://github.com/hh9527/forma/issues/1
 
@@ -299,3 +299,27 @@ considered separately if they prove materially clearer.
 Type argument positions already identify distinct scheme parameters. `_0`
 would misleadingly suggest that two different parameters can share one
 inference identity without a relationship in the declared scheme.
+
+## Implementation result
+
+Implemented in the Forma parser, AST, HIR, module traversal, and rank-1
+inference engine. Direct `_` arguments retain their source identity without
+becoming metadata expressions or runtime values. The checker installs a fresh
+variable in the same substitution map as rigid arguments, records the resolved
+descriptor as an expression fact, and diagnoses any remaining obligation at
+the placeholder location before semantic facts or module interfaces are
+published.
+
+The implementation deliberately performs the unresolved-placeholder check at
+the completed program-analysis boundary. Expected types have therefore had a
+chance to flow through the containing lexical block, while an unresolved
+placeholder still cannot escape into a published result. Calls whose callee is
+a partial type application defer the older generic-result diagnostic so the
+more specific placeholder diagnostic remains authoritative.
+
+Regression coverage includes direct-only syntax, all rigid/inferred mixes,
+expected-result evidence, local inferred schemes, declared and inferred
+schemes crossing module interfaces, concrete HIR expression facts, `Never`,
+explicit `Any`, conflicts, unresolved source locations, and execution of
+erased imported applications. Existing query cancellation checkpoints and the
+compiler's callee-only lowering for every `TypeApply` remain unchanged.

@@ -1,6 +1,6 @@
 use crate::ast::{
     BinaryOperator, BindingKind, Block, Expr, ExprKind, Pattern, PatternKind, Program,
-    StringPartKind, located,
+    StringPartKind, TypeArgumentKind, located,
 };
 use crate::compiler::compile_expression_with_bindings;
 use crate::heap::{Handle, Heap, PersistentValue};
@@ -2036,6 +2036,12 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 Diagnostic::error(message, program.value.body.value.result.location),
             )
         })?;
+    if let Some((location, message)) = inference.unresolved_placeholder_since(0) {
+        return Err(FrontendError::from_diagnostic(
+            sources,
+            Diagnostic::error(message, location),
+        ));
+    }
     for (name, location, descriptor, first_owned_variable) in delayed_bindings {
         if let Some(query) = &inference.query {
             query.check().map_err(|error| {
@@ -2390,9 +2396,12 @@ fn collect_nested_annotation_types(
                 annotations,
             )?;
             for argument in arguments {
+                let TypeArgumentKind::Explicit(expression) = &argument.value else {
+                    continue;
+                };
                 let metadata = evaluate_tool_expression(
                     source_name,
-                    argument,
+                    expression,
                     bindings,
                     account,
                     sources,
@@ -2403,11 +2412,11 @@ fn collect_nested_annotation_types(
                         sources,
                         Diagnostic::error(
                             format!("type argument is invalid: {message}"),
-                            argument.location,
+                            expression.location,
                         ),
                     )
                 })?;
-                annotations.insert(argument.location, descriptor);
+                annotations.insert(expression.location, descriptor);
             }
         }
         ExprKind::If {
@@ -3527,6 +3536,7 @@ struct GenericInference<'a> {
     scheme_scopes: Vec<HashMap<String, Option<TypeScheme>>>,
     top_level_inferred_schemes: HashMap<String, TypeScheme>,
     inferred_schemes: HashMap<crate::Location, TypeScheme>,
+    placeholder_obligations: Vec<(InferenceVariableId, crate::Location, String)>,
     external_interfaces: &'a BTreeMap<String, ModuleInterface>,
     local_annotations: &'a HashMap<crate::Location, TypeDescriptor>,
     query: Option<crate::query::QueryContext>,
@@ -3552,6 +3562,7 @@ impl<'a> GenericInference<'a> {
             scheme_scopes: vec![HashMap::new()],
             top_level_inferred_schemes: HashMap::new(),
             inferred_schemes: HashMap::new(),
+            placeholder_obligations: Vec::new(),
             external_interfaces,
             local_annotations,
             query,
@@ -3671,6 +3682,21 @@ impl<'a> GenericInference<'a> {
             parameters,
             body: bind_inference_variables(&descriptor, &replacements),
         })
+    }
+
+    fn unresolved_placeholder_since(&self, start: usize) -> Option<(crate::Location, String)> {
+        self.placeholder_obligations[start..]
+            .iter()
+            .find_map(|(variable, location, parameter)| {
+                contains_type_variable(&self.resolve(&TypeDescriptor::Inference(*variable))).then(
+                    || {
+                        (
+                            *location,
+                            format!("cannot infer type argument `_` for parameter {parameter:?}"),
+                        )
+                    },
+                )
+            })
     }
 
     fn recursive_closure_skeleton(&mut self, expression: &Expr) -> Option<TypeDescriptor> {
@@ -4406,6 +4432,13 @@ impl<'a> GenericInference<'a> {
                 }
             }
             ExprKind::Call { callee, arguments } => {
+                let has_placeholder = matches!(
+                    &callee.value,
+                    ExprKind::TypeApply { arguments, .. }
+                        if arguments
+                            .iter()
+                            .any(|argument| matches!(argument.value, TypeArgumentKind::Infer))
+                );
                 let callee = self.infer(callee, environment, None)?;
                 match self.resolve(&callee) {
                     TypeDescriptor::Atom(tag) => {
@@ -4467,6 +4500,7 @@ impl<'a> GenericInference<'a> {
                         };
                         if contains_type_variable(&result)
                             && self.delayed_initializer_depth == 0
+                            && !has_placeholder
                             && !(self.closure_inference_depth > 0 && unresolved_argument_evidence)
                         {
                             return Err(format!(
@@ -4503,12 +4537,30 @@ impl<'a> GenericInference<'a> {
                 let type_expected = TypeDescriptor::Type;
                 let mut replacements = HashMap::new();
                 for (parameter, argument) in scheme.parameters.iter().zip(arguments) {
-                    self.infer(argument, environment, Some(&type_expected))?;
-                    let descriptor = self
-                        .local_annotations
-                        .get(&argument.location)
-                        .cloned()
-                        .ok_or_else(|| "type argument metadata was not evaluated".to_owned())?;
+                    let descriptor = match &argument.value {
+                        TypeArgumentKind::Explicit(expression) => {
+                            self.infer(expression, environment, Some(&type_expected))?;
+                            self.local_annotations
+                                .get(&expression.location)
+                                .cloned()
+                                .ok_or_else(|| {
+                                    "type argument metadata was not evaluated".to_owned()
+                                })?
+                        }
+                        TypeArgumentKind::Infer => {
+                            let descriptor = self.fresh_variable();
+                            let TypeDescriptor::Inference(variable) = &descriptor else {
+                                unreachable!("fresh variables are inference descriptors")
+                            };
+                            self.placeholder_obligations.push((
+                                *variable,
+                                argument.location,
+                                parameter.name.clone(),
+                            ));
+                            self.records.insert(argument.location, descriptor.clone());
+                            descriptor
+                        }
+                    };
                     replacements.insert(parameter.id, descriptor);
                 }
                 substitute_bound_parameters(&scheme.body, &replacements)
@@ -5035,11 +5087,20 @@ fn expression_references_names(
             expression_references_names(left, names, bound)
                 || expression_references_names(right, names, bound)
         }
-        ExprKind::Call { callee, arguments } | ExprKind::TypeApply { callee, arguments } => {
+        ExprKind::Call { callee, arguments } => {
             expression_references_names(callee, names, bound)
                 || arguments
                     .iter()
                     .any(|argument| expression_references_names(argument, names, bound))
+        }
+        ExprKind::TypeApply { callee, arguments } => {
+            expression_references_names(callee, names, bound)
+                || arguments.iter().any(|argument| match &argument.value {
+                    TypeArgumentKind::Explicit(argument) => {
+                        expression_references_names(argument, names, bound)
+                    }
+                    TypeArgumentKind::Infer => false,
+                })
         }
         ExprKind::Closure {
             parameters,
@@ -5274,7 +5335,14 @@ fn infer_expr_with(
         ExprKind::TypeApply { callee, arguments } => {
             infer_expr_with(callee, environment, record);
             for argument in arguments {
-                infer_expr_with(argument, environment, record);
+                match &argument.value {
+                    TypeArgumentKind::Explicit(argument) => {
+                        infer_expr_with(argument, environment, record);
+                    }
+                    TypeArgumentKind::Infer => {
+                        record(argument.location, &TypeDescriptor::Any);
+                    }
+                }
             }
             TypeDescriptor::Any
         }
@@ -5396,7 +5464,9 @@ fn check_interpolations(
         ExprKind::TypeApply { callee, arguments } => {
             check_interpolations(callee, environment, sources)?;
             for argument in arguments {
-                check_interpolations(argument, environment, sources)?;
+                if let TypeArgumentKind::Explicit(argument) = &argument.value {
+                    check_interpolations(argument, environment, sources)?;
+                }
             }
         }
         ExprKind::Closure {
@@ -6555,6 +6625,97 @@ mod tests {
         )
         .unwrap();
         assert_eq!(computed.display(computed.result_type), "Array<Int>");
+    }
+
+    #[test]
+    fn partial_type_application_combines_rigid_and_inferred_arguments() {
+        for (source, expected) in [
+            (
+                "native pair: for(A, B) Fn(A, B) -> Tuple(A, B); pair[Int, _](1, \"x\")",
+                "(Int, String)",
+            ),
+            (
+                "native pair: for(A, B) Fn(A, B) -> Tuple(A, B); pair[_, String](1, \"x\")",
+                "(Int, String)",
+            ),
+            (
+                "native pair: for(A, B) Fn(A, B) -> Tuple(A, B); pair[_, _](1, \"x\")",
+                "(Int, String)",
+            ),
+            (
+                "native empty: for(A) Fn() -> Array(A); let values: Array(Int) = empty[_](); values",
+                "Array<Int>",
+            ),
+            (
+                "let pair = fn(left, right) { (left, right) }; pair[Int, _](1, \"x\")",
+                "(Int, String)",
+            ),
+        ] {
+            let analysis = analyze_with_natives(source, &[("pair", 2), ("empty", 0)]).unwrap();
+            assert_eq!(analysis.display(analysis.result_type), expected);
+        }
+
+        let source = "native pair: for(A, B) Fn(A, B) -> Tuple(A, B); pair[Int, _](1, \"x\")";
+        let analysis = analyze_with_natives(source, &[("pair", 2)]).unwrap();
+        let placeholder = analysis
+            .hir
+            .expressions()
+            .iter()
+            .find(|expression| {
+                expression.location.range()
+                    == (source.find('_').unwrap()..source.find('_').unwrap() + 1)
+            })
+            .expect("placeholder expression");
+        assert_eq!(
+            analysis.display(analysis.expression_types[&placeholder.id]),
+            "String"
+        );
+    }
+
+    #[test]
+    fn partial_type_application_rejects_unresolved_and_conflicting_arguments() {
+        let unresolved_source = "native empty: for(A) Fn() -> Array(A); empty[_]()";
+        let unresolved = analyze_with_natives(unresolved_source, &[("empty", 0)]).unwrap_err();
+        assert!(
+            unresolved
+                .message
+                .contains("cannot infer type argument `_` for parameter \"A\""),
+            "{}",
+            unresolved.message
+        );
+        assert_eq!(
+            unresolved.location.offset,
+            unresolved_source.find('_').unwrap()
+        );
+
+        let never = analyze_with_natives(
+            "native stop: Fn() -> Never; native identity: for(A) Fn(A) -> A; identity[_](stop())",
+            &[("stop", 0), ("identity", 1)],
+        )
+        .unwrap_err();
+        assert!(
+            never.message.contains("cannot infer type argument `_`"),
+            "{}",
+            never.message
+        );
+
+        let explicit_any = analyze_with_natives(
+            "native empty: for(A) Fn() -> Array(A); empty[Any]()",
+            &[("empty", 0)],
+        )
+        .unwrap();
+        assert_eq!(explicit_any.display(explicit_any.result_type), "Array<Any>");
+
+        let conflict = analyze_with_natives(
+            "native identity: for(A) Fn(A) -> A; identity[Int](\"x\")",
+            &[("identity", 1)],
+        )
+        .unwrap_err();
+        assert!(
+            conflict.message.contains("cannot unify"),
+            "{}",
+            conflict.message
+        );
     }
 
     #[test]

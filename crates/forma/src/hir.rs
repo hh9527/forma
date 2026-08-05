@@ -1,6 +1,6 @@
 use crate::ast::{
     Binding, BindingKind, Block, Expr, ExprKind, MatchArm, Pattern, PatternKind, Program,
-    StringPartKind,
+    StringPartKind, TypeArgumentKind,
 };
 use crate::parser::RecoveredProgram;
 use crate::source::Location;
@@ -465,7 +465,20 @@ impl Resolver {
             ExprKind::TypeApply { callee, arguments } => {
                 self.index_expr(callee, scopes);
                 for argument in arguments {
-                    self.index_expr(argument, scopes);
+                    match &argument.value {
+                        TypeArgumentKind::Explicit(argument) => {
+                            self.index_expr(argument, scopes);
+                        }
+                        TypeArgumentKind::Infer => {
+                            let id = HirExpressionId(self.hir.expressions.len() as u32);
+                            self.hir.expressions.push(HirExpression {
+                                id,
+                                location: argument.location,
+                                parent: self.expression_stack.last().copied(),
+                                reference: None,
+                            });
+                        }
+                    }
                 }
                 None
             }
@@ -603,5 +616,25 @@ mod tests {
                 .iter()
                 .any(|expression| expression.parent.is_some())
         );
+    }
+
+    #[test]
+    fn retains_type_argument_placeholders_without_references() {
+        let source = "native pair: for(A, B) Fn(A, B) -> Tuple(A, B); pair[Int, _](1, \"x\")";
+        let program = parse("hir.forma", source).unwrap();
+        let hir = HirProgram::resolve(
+            &program,
+            ["for".into(), "Fn".into(), "Int".into(), "pair".into()],
+        );
+        let placeholder = hir
+            .expressions()
+            .iter()
+            .find(|expression| {
+                expression.location.range()
+                    == (source.find('_').unwrap()..source.find('_').unwrap() + 1)
+            })
+            .expect("placeholder expression");
+        assert!(placeholder.reference.is_none());
+        assert!(placeholder.parent.is_some());
     }
 }

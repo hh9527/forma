@@ -88,7 +88,7 @@ pub enum ExprKind {
     },
     TypeApply {
         callee: Box<Expr>,
-        arguments: Vec<Expr>,
+        arguments: Vec<TypeArgument>,
     },
     Closure {
         parameters: Vec<ClosureParameter>,
@@ -104,6 +104,14 @@ pub enum ExprKind {
         value: Box<Expr>,
         arms: Vec<MatchArm>,
     },
+}
+
+pub type TypeArgument = Located<TypeArgumentKind>;
+
+#[derive(Clone, Debug)]
+pub enum TypeArgumentKind {
+    Explicit(Expr),
+    Infer,
 }
 
 #[derive(Clone, Debug)]

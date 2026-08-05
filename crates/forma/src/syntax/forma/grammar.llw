@@ -72,7 +72,8 @@ contract: Identifier [?1 '(' [contract (?2 ',' contract)* [',']] ')'] @contract_
 parameters: '(' [parameter (?1 ',' parameter)* [',']] ')';
 parameter: Identifier [':' expression];
 arguments: '(' [expression (?1 ',' expression)* [',']] ')';
-type_arguments: '[' expression (?1 ',' expression)* [','] ']';
+type_arguments: '[' type_argument (?1 ',' type_argument)* [','] ']';
+type_argument: expression | Placeholder;
 section_arguments: '\\(' [argument (?1 ',' argument)* [',']] ')';
 argument: expression | Placeholder | IndexedPlaceholder;
 if_expr: 'if' expression block 'else' block;

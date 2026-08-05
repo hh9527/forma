@@ -1,4 +1,4 @@
-use crate::ast::{BindingKind, Expr, ExprKind, Program, StringPartKind};
+use crate::ast::{BindingKind, Expr, ExprKind, Program, StringPartKind, TypeArgumentKind};
 use crate::compiler::{
     compile_metadata_initializer, compile_program_analyzed_in, compile_program_with_promoted_types,
     function_contract_arity, type_link_key,
@@ -1385,7 +1385,11 @@ fn expression_has_import(expression: &Expr) -> bool {
             expression_has_import(callee) || arguments.iter().any(expression_has_import)
         }
         ExprKind::TypeApply { callee, arguments } => {
-            expression_has_import(callee) || arguments.iter().any(expression_has_import)
+            expression_has_import(callee)
+                || arguments.iter().any(|argument| match &argument.value {
+                    TypeArgumentKind::Explicit(argument) => expression_has_import(argument),
+                    TypeArgumentKind::Infer => false,
+                })
         }
         ExprKind::Closure { body, .. } => {
             body.value
@@ -2625,7 +2629,7 @@ unchanged", "|"),
         fs::write(
             directory.join("main.forma"),
             r#"import generic from "./identity.forma";
-               (generic.identity(1), generic.identity("x"), generic.identity[Int](2))"#,
+               (generic.identity(1), generic.identity("x"), generic.identity[_](2))"#,
         )
         .unwrap();
         let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
@@ -2652,7 +2656,7 @@ unchanged", "|"),
         fs::write(
             directory.join("main.forma"),
             r#"import generic from "./identity.forma";
-               (generic.identity(1), generic.identity("x"), generic.identity[Int](2))"#,
+               (generic.identity(1), generic.identity("x"), generic.identity[_](2))"#,
         )
         .unwrap();
         let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();

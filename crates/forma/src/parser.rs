@@ -1,7 +1,8 @@
 use crate::ast::{
     BinaryOperator, Binding, BindingData, BindingKind, Block, BlockKind, ClosureParameter,
     Decorator, DecoratorKind, DictFieldKind, Expr, ExprKind, Identifier, MatchArm, MatchArmKind,
-    Pattern, PatternKind, Program, ProgramKind, StringPartKind, UnaryOperator, located,
+    Pattern, PatternKind, Program, ProgramKind, StringPartKind, TypeArgument, TypeArgumentKind,
+    UnaryOperator, located,
 };
 use crate::lexer::{FrontendError, SourceLocation};
 use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
@@ -743,7 +744,7 @@ impl<'a> Lowerer<'a> {
                 let arguments = rules
                     .iter()
                     .find(|child| self.rule(**child) == Some(Rule::TypeArguments))
-                    .map_or(Ok(Vec::new()), |args| self.expression_children(*args))?;
+                    .map_or(Ok(Vec::new()), |args| self.type_arguments(*args))?;
                 ExprKind::TypeApply {
                     callee: Box::new(self.expression(callee_node)?),
                     arguments,
@@ -1134,6 +1135,25 @@ impl<'a> Lowerer<'a> {
         self.children(node)
             .filter(|child| self.is_expression(*child))
             .map(|child| self.expression(child))
+            .collect()
+    }
+
+    fn type_arguments(&self, node: NodeRef) -> Result<Vec<TypeArgument>, Diagnostic> {
+        self.rule_children(node)
+            .filter(|child| self.rule(*child) == Some(Rule::TypeArgument))
+            .map(|argument| {
+                if let Some(placeholder) = self.token_children(argument, Token::Placeholder).next()
+                {
+                    return Ok(located(TypeArgumentKind::Infer, self.location(placeholder)));
+                }
+                let expression = self
+                    .children(argument)
+                    .find(|child| self.is_expression(*child))
+                    .ok_or_else(|| self.error(argument, "type argument has no expression"))?;
+                let expression = self.expression(expression)?;
+                let location = expression.location;
+                Ok(located(TypeArgumentKind::Explicit(expression), location))
+            })
             .collect()
     }
 
@@ -1743,6 +1763,28 @@ mod tests {
                 .message
                 .contains("requires at least one placeholder")
         );
+    }
+
+    #[test]
+    fn lowers_only_direct_type_argument_placeholders() {
+        let program = parse("types.forma", "pair[Int, _](1, \"x\")").unwrap();
+        let ExprKind::Call { callee, .. } = &program.value.body.value.result.value else {
+            panic!("expected call");
+        };
+        let ExprKind::TypeApply { arguments, .. } = &callee.value else {
+            panic!("expected type application");
+        };
+        assert!(matches!(arguments[0].value, TypeArgumentKind::Explicit(_)));
+        assert!(matches!(arguments[1].value, TypeArgumentKind::Infer));
+        assert_eq!(arguments[1].location.range(), 10..11);
+
+        for source in ["pair[Int, _0](1, 2)", "pair[Array(_), Int](1, 2)"] {
+            let mut sources = SourceDatabase::default();
+            let id = sources.add("invalid.forma", source);
+            let parsed = parse_registered(&sources, id);
+            assert!(parsed.program.is_none(), "{source} unexpectedly parsed");
+            assert!(!parsed.diagnostics.is_empty(), "{source} has no diagnostic");
+        }
     }
 
     #[test]
