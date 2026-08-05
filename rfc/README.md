@@ -97,3 +97,4 @@ semantics from an earlier RFC.
 76. Partial closure contracts.
 77. Explicit generic type application.
 78. Monomorphic recursive closure inference.
+79. Restricted local closure generalization.
