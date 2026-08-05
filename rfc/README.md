@@ -100,3 +100,7 @@ semantics from an earlier RFC.
 79. Restricted local closure generalization.
 80. Usable rank-1 type inference umbrella.
 81. Partial explicit type application.
+82. Context-complete generic inference.
+83. Acyclic `def` component generalization.
+84. Inference diagnostics and boundary audit.
+85. Bounded callable-shape inference umbrella.
