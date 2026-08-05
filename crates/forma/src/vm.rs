@@ -630,6 +630,26 @@ pub struct RuntimeFrame {
 }
 
 impl RuntimeError {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) const fn failure_class(&self) -> crate::evaluation::FailureClass {
+        use crate::evaluation::FailureClass;
+        match self.kind {
+            RuntimeErrorKind::DivisionByZero
+            | RuntimeErrorKind::IntegerOverflow
+            | RuntimeErrorKind::MissingField
+            | RuntimeErrorKind::NoPatternMatched
+            | RuntimeErrorKind::TypeMismatch
+            | RuntimeErrorKind::UninitializedDefinition
+            | RuntimeErrorKind::DuplicateDefinition => FailureClass::Recoverable,
+            RuntimeErrorKind::Cancelled
+            | RuntimeErrorKind::FuelExhausted
+            | RuntimeErrorKind::AllocationQuotaExceeded
+            | RuntimeErrorKind::CallDepthExceeded
+            | RuntimeErrorKind::InvalidBytecode
+            | RuntimeErrorKind::StackLimitExceeded => FailureClass::Terminal,
+        }
+    }
+
     pub(crate) fn from_heap_error(
         function: &BytecodeFunction,
         heap_error: crate::heap::HeapError,
@@ -9646,6 +9666,40 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(division.kind, RuntimeErrorKind::DivisionByZero);
+    }
+
+    #[test]
+    fn runtime_error_recoverability_is_typed_and_exhaustive() {
+        use crate::evaluation::FailureClass;
+
+        let function = BytecodeFunction::new("classification", 0, vec![], vec![]);
+        for kind in [
+            RuntimeErrorKind::DivisionByZero,
+            RuntimeErrorKind::IntegerOverflow,
+            RuntimeErrorKind::MissingField,
+            RuntimeErrorKind::NoPatternMatched,
+            RuntimeErrorKind::TypeMismatch,
+            RuntimeErrorKind::UninitializedDefinition,
+            RuntimeErrorKind::DuplicateDefinition,
+        ] {
+            assert_eq!(
+                error(kind, "recoverable", &function, 0).failure_class(),
+                FailureClass::Recoverable
+            );
+        }
+        for kind in [
+            RuntimeErrorKind::Cancelled,
+            RuntimeErrorKind::FuelExhausted,
+            RuntimeErrorKind::AllocationQuotaExceeded,
+            RuntimeErrorKind::CallDepthExceeded,
+            RuntimeErrorKind::InvalidBytecode,
+            RuntimeErrorKind::StackLimitExceeded,
+        ] {
+            assert_eq!(
+                error(kind, "terminal", &function, 0).failure_class(),
+                FailureClass::Terminal
+            );
+        }
     }
 
     #[test]

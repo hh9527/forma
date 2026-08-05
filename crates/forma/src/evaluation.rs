@@ -33,6 +33,219 @@ pub(crate) enum FailureOperation {
     Other,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct EvaluationUnitId(u32);
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum EvaluationUnitKind {
+    Binding,
+    DefinitionGroup,
+    ContainerChild,
+    ModuleResult,
+    Metadata,
+}
+
+impl EvaluationUnitKind {
+    const fn failure_operation(self) -> FailureOperation {
+        match self {
+            Self::Binding | Self::DefinitionGroup | Self::Metadata => FailureOperation::Binding,
+            Self::ContainerChild => FailureOperation::Other,
+            Self::ModuleResult => FailureOperation::ModuleResult,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EvaluationUnit {
+    pub(crate) id: EvaluationUnitId,
+    pub(crate) kind: EvaluationUnitKind,
+    pub(crate) location: Location,
+    pub(crate) dependencies: Box<[EvaluationUnitId]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct EvaluationPlan {
+    units: Box<[EvaluationUnit]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum EvaluationPlanError {
+    Empty,
+    NonSequentialId,
+    DependencyNotPrior,
+    DuplicateDependency,
+    DependencyNotOrdered,
+    MissingModuleResult,
+    MultipleModuleResults,
+    ModuleResultNotLast,
+}
+
+impl EvaluationPlan {
+    pub(crate) fn new(units: Vec<EvaluationUnit>) -> Result<Self, EvaluationPlanError> {
+        if units.is_empty() {
+            return Err(EvaluationPlanError::Empty);
+        }
+        let mut module_result = None;
+        for (index, unit) in units.iter().enumerate() {
+            if unit.id.0 as usize != index {
+                return Err(EvaluationPlanError::NonSequentialId);
+            }
+            let mut previous = None;
+            for dependency in &unit.dependencies {
+                if dependency.0 as usize >= index {
+                    return Err(EvaluationPlanError::DependencyNotPrior);
+                }
+                if let Some(previous) = previous {
+                    if previous == *dependency {
+                        return Err(EvaluationPlanError::DuplicateDependency);
+                    }
+                    if previous > *dependency {
+                        return Err(EvaluationPlanError::DependencyNotOrdered);
+                    }
+                }
+                previous = Some(*dependency);
+            }
+            if unit.kind == EvaluationUnitKind::ModuleResult
+                && module_result.replace(index).is_some()
+            {
+                return Err(EvaluationPlanError::MultipleModuleResults);
+            }
+        }
+        let Some(module_result) = module_result else {
+            return Err(EvaluationPlanError::MissingModuleResult);
+        };
+        if module_result + 1 != units.len() {
+            return Err(EvaluationPlanError::ModuleResultNotLast);
+        }
+        Ok(Self {
+            units: units.into_boxed_slice(),
+        })
+    }
+
+    pub(crate) fn units(&self) -> &[EvaluationUnit] {
+        &self.units
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum EvaluationPolicy {
+    Strict,
+    BestEffort,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct UnitFailure<R> {
+    pub(crate) class: FailureClass,
+    pub(crate) failure: R,
+}
+
+impl<R> UnitFailure<R> {
+    pub(crate) const fn new(class: FailureClass, failure: R) -> Self {
+        Self { class, failure }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum EvaluationUnitState<V> {
+    Pending,
+    Value(V),
+    Never(FailureId),
+}
+
+#[derive(Debug)]
+pub(crate) struct BestEffortSession<V, R> {
+    states: Vec<EvaluationUnitState<V>>,
+    root_failures: Vec<FailureId>,
+    arena: FailureArena<R>,
+    root_budget_exhausted: bool,
+}
+
+impl<V, R> BestEffortSession<V, R> {
+    pub(crate) fn run(
+        plan: &EvaluationPlan,
+        limits: FailureLimits,
+        max_root_failures: usize,
+        mut checkpoint: impl FnMut() -> Result<(), R>,
+        mut execute: impl FnMut(&EvaluationUnit, &[&V]) -> Result<V, UnitFailure<R>>,
+    ) -> Result<Self, R> {
+        let mut session = Self {
+            states: Vec::with_capacity(plan.units.len()),
+            root_failures: Vec::new(),
+            arena: FailureArena::new(limits),
+            root_budget_exhausted: false,
+        };
+        for unit in plan.units() {
+            checkpoint()?;
+            let mut dependency_values = Vec::with_capacity(unit.dependencies.len());
+            let mut failed_dependencies = Vec::new();
+            for dependency in &unit.dependencies {
+                match &session.states[dependency.0 as usize] {
+                    EvaluationUnitState::Value(value) => dependency_values.push(value),
+                    EvaluationUnitState::Never(failure) => {
+                        failed_dependencies.push(*failure);
+                    }
+                    EvaluationUnitState::Pending => {
+                        unreachable!("validated plans only depend on completed prior units")
+                    }
+                }
+            }
+            if !failed_dependencies.is_empty() {
+                let failure = session.arena.propagate_causes(
+                    unit.kind.failure_operation(),
+                    Some(unit.location),
+                    failed_dependencies,
+                );
+                session.states.push(EvaluationUnitState::Never(failure));
+                continue;
+            }
+            if session.root_failures.len() >= max_root_failures {
+                session.root_budget_exhausted = true;
+                session
+                    .states
+                    .resize_with(plan.units.len(), || EvaluationUnitState::Pending);
+                break;
+            }
+            match execute(unit, &dependency_values) {
+                Ok(value) => session.states.push(EvaluationUnitState::Value(value)),
+                Err(UnitFailure { class, failure }) => {
+                    let outcome = session.arena.root(class, failure)?;
+                    let id = outcome.failure().expect("recoverable root returns Never");
+                    session.root_failures.push(id);
+                    session.states.push(EvaluationUnitState::Never(id));
+                }
+            }
+        }
+        checkpoint()?;
+        Ok(session)
+    }
+
+    pub(crate) fn states(&self) -> &[EvaluationUnitState<V>] {
+        &self.states
+    }
+
+    pub(crate) fn root_failures(&self) -> &[FailureId] {
+        &self.root_failures
+    }
+
+    pub(crate) const fn root_budget_exhausted(&self) -> bool {
+        self.root_budget_exhausted
+    }
+
+    pub(crate) fn output(&self) -> Option<&V> {
+        if !self.root_failures.is_empty() || self.root_budget_exhausted {
+            return None;
+        }
+        match self.states.last()? {
+            EvaluationUnitState::Value(value) => Some(value),
+            EvaluationUnitState::Pending | EvaluationUnitState::Never(_) => None,
+        }
+    }
+
+    pub(crate) fn arena(&self) -> &FailureArena<R> {
+        &self.arena
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct FailureLimits {
     pub(crate) max_propagated_nodes: usize,
@@ -367,6 +580,7 @@ mod tests {
 
     #[test]
     fn every_propagation_category_is_a_distinct_stable_value() {
+        assert_ne!(EvaluationPolicy::Strict, EvaluationPolicy::BestEffort);
         let operations = [
             FailureOperation::Unary,
             FailureOperation::Binary,
@@ -389,5 +603,176 @@ mod tests {
             .into_iter()
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(unique.len(), operations.len());
+    }
+
+    fn unit(id: u32, kind: EvaluationUnitKind, dependencies: &[u32]) -> EvaluationUnit {
+        EvaluationUnit {
+            id: EvaluationUnitId(id),
+            kind,
+            location: location(id),
+            dependencies: dependencies.iter().copied().map(EvaluationUnitId).collect(),
+        }
+    }
+
+    #[test]
+    fn plans_require_stable_prior_dependencies_and_one_final_result() {
+        assert_eq!(
+            EvaluationPlan::new(Vec::new()),
+            Err(EvaluationPlanError::Empty)
+        );
+        assert_eq!(
+            EvaluationPlan::new(vec![unit(1, EvaluationUnitKind::ModuleResult, &[])]),
+            Err(EvaluationPlanError::NonSequentialId)
+        );
+        assert_eq!(
+            EvaluationPlan::new(vec![
+                unit(0, EvaluationUnitKind::Binding, &[]),
+                unit(1, EvaluationUnitKind::ModuleResult, &[1]),
+            ]),
+            Err(EvaluationPlanError::DependencyNotPrior)
+        );
+        assert_eq!(
+            EvaluationPlan::new(vec![
+                unit(0, EvaluationUnitKind::Binding, &[]),
+                unit(1, EvaluationUnitKind::ModuleResult, &[0, 0]),
+            ]),
+            Err(EvaluationPlanError::DuplicateDependency)
+        );
+        assert_eq!(
+            EvaluationPlan::new(vec![
+                unit(0, EvaluationUnitKind::Binding, &[]),
+                unit(1, EvaluationUnitKind::Binding, &[]),
+                unit(2, EvaluationUnitKind::ModuleResult, &[1, 0]),
+            ]),
+            Err(EvaluationPlanError::DependencyNotOrdered)
+        );
+        assert_eq!(
+            EvaluationPlan::new(vec![unit(0, EvaluationUnitKind::Binding, &[])]),
+            Err(EvaluationPlanError::MissingModuleResult)
+        );
+        assert_eq!(
+            EvaluationPlan::new(vec![
+                unit(0, EvaluationUnitKind::ModuleResult, &[]),
+                unit(1, EvaluationUnitKind::Binding, &[]),
+            ]),
+            Err(EvaluationPlanError::ModuleResultNotLast)
+        );
+    }
+
+    #[test]
+    fn scheduler_continues_independent_units_and_skips_dependents() {
+        let plan = EvaluationPlan::new(vec![
+            unit(0, EvaluationUnitKind::Binding, &[]),
+            unit(1, EvaluationUnitKind::Binding, &[]),
+            unit(2, EvaluationUnitKind::ContainerChild, &[0]),
+            unit(3, EvaluationUnitKind::ModuleResult, &[1, 2]),
+        ])
+        .unwrap();
+        let mut executed = Vec::new();
+        let session = BestEffortSession::run(
+            &plan,
+            limits(),
+            4,
+            || Ok::<_, &'static str>(()),
+            |unit, dependencies| {
+                executed.push(unit.id.0);
+                if unit.id.0 == 0 {
+                    Err(UnitFailure::new(FailureClass::Recoverable, "bad zero"))
+                } else {
+                    Ok(dependencies.iter().map(|value| **value).sum::<i32>() + 1)
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(executed, vec![0, 1]);
+        assert_eq!(session.root_failures().len(), 1);
+        assert!(matches!(session.states()[0], EvaluationUnitState::Never(_)));
+        assert_eq!(session.states()[1], EvaluationUnitState::Value(1));
+        assert!(matches!(session.states()[2], EvaluationUnitState::Never(_)));
+        assert!(matches!(session.states()[3], EvaluationUnitState::Never(_)));
+        assert!(session.output().is_none());
+    }
+
+    #[test]
+    fn scheduler_exposes_only_a_clean_complete_result() {
+        let plan = EvaluationPlan::new(vec![
+            unit(0, EvaluationUnitKind::DefinitionGroup, &[]),
+            unit(1, EvaluationUnitKind::Metadata, &[0]),
+            unit(2, EvaluationUnitKind::ModuleResult, &[1]),
+        ])
+        .unwrap();
+        let session = BestEffortSession::run(
+            &plan,
+            limits(),
+            4,
+            || Ok::<_, &'static str>(()),
+            |unit, dependencies| {
+                Ok::<_, UnitFailure<&'static str>>(
+                    dependencies.first().map_or(unit.id.0, |value| **value + 1),
+                )
+            },
+        )
+        .unwrap();
+        assert_eq!(session.output(), Some(&2));
+        assert!(session.root_failures().is_empty());
+        assert!(
+            session
+                .arena()
+                .lineage(FailureId(99))
+                .contains(&LineageStep::Truncated)
+        );
+    }
+
+    #[test]
+    fn terminal_failure_and_cancellation_abort_the_session() {
+        let plan =
+            EvaluationPlan::new(vec![unit(0, EvaluationUnitKind::ModuleResult, &[])]).unwrap();
+        let terminal = BestEffortSession::<u32, _>::run(
+            &plan,
+            limits(),
+            1,
+            || Ok(()),
+            |_, _| Err(UnitFailure::new(FailureClass::Terminal, "quota")),
+        );
+        assert!(matches!(terminal, Err("quota")));
+
+        let mut checkpoints = 0;
+        let cancelled = BestEffortSession::<u32, _>::run(
+            &plan,
+            limits(),
+            1,
+            || {
+                checkpoints += 1;
+                Err("cancelled")
+            },
+            |_, _| Ok(0),
+        );
+        assert!(matches!(cancelled, Err("cancelled")));
+        assert_eq!(checkpoints, 1);
+    }
+
+    #[test]
+    fn root_budget_stops_before_starting_another_unit() {
+        let plan = EvaluationPlan::new(vec![
+            unit(0, EvaluationUnitKind::Binding, &[]),
+            unit(1, EvaluationUnitKind::ModuleResult, &[]),
+        ])
+        .unwrap();
+        let mut executions = 0;
+        let session = BestEffortSession::<u32, _>::run(
+            &plan,
+            limits(),
+            1,
+            || Ok(()),
+            |_, _| {
+                executions += 1;
+                Err(UnitFailure::new(FailureClass::Recoverable, "bad"))
+            },
+        )
+        .unwrap();
+        assert_eq!(executions, 1);
+        assert!(session.root_budget_exhausted());
+        assert!(matches!(session.states()[1], EvaluationUnitState::Pending));
+        assert!(session.output().is_none());
     }
 }

@@ -1,6 +1,6 @@
 # RFC 0104: Host best-effort evaluation
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0088, RFC 0100, RFC 0102, RFC 0103
 
 ## Summary
@@ -79,7 +79,8 @@ scrutinee unit must succeed before the selected branch is planned or executed.
 Strict compilation may continue producing the current monolithic program
 Function. Best-effort plans are additional compiler output, not a changed
 bytecode ABI or a requirement that ordinary execution schedule every binding
-separately.
+separately. This RFC defines and validates the plan/scheduler contract; RFC
+0106 makes the Forma compiler produce these units and connects them to CLI/LSP.
 
 ## Session world
 
@@ -216,26 +217,33 @@ completed by RFC 0106.
 4. dependent units are skipped and receive deterministic propagation lineage;
 5. later independent units execute and may produce additional root failures;
 6. recursive definition SCCs initialize atomically in one unit;
-7. direct container children may be diagnosed independently without producing
-   a partial container;
-8. conditions and matches never speculate branches after a blocked selector;
+7. plan kinds represent direct container children without permitting a partial
+   container;
+8. plan validation rejects dependencies that could require speculative or
+   out-of-order execution;
 9. terminal errors stop the session and cannot become Never;
 10. all units share quota, cancellation, provenance, native, and debug policy;
 11. no failed/stale/cancelled session root enters Main or a shared cache;
-12. a complete successful ModuleResult may be exported normally;
-13. deterministic root ordering and diagnostic budgets are tested; and
-14. full Forma, CLI, LSP, formatting, and strict static checks pass.
+12. a complete successful ModuleResult is represented as available for later
+    Host export;
+13. deterministic root ordering and diagnostic budgets are tested;
+14. compiler production and CLI/LSP consumption are explicitly deferred to RFC
+    0106; and
+15. full Forma, CLI, LSP, formatting, and strict static checks pass.
 
 ## Implementation plan
 
 1. add exhaustive RuntimeErrorKind recoverability classification;
 2. define evaluation-plan/unit/result structures and stable DAG validation;
-3. add compiler support for atomic binding/SCC/result units and external links;
-4. add an isolated session world with atomic successful-unit promotion;
-5. implement the deterministic Host scheduler using RFC 0103 outcomes;
-6. split safe direct container children without branch speculation;
-7. add strict-compatibility, independent-failure, dependency, recursive,
-   container, terminal, quota, cancellation, and publication tests; and
+3. validate stable IDs, prior dependencies, a single final ModuleResult, and
+   unit kinds without interpreting compiler internals;
+4. implement the deterministic Host scheduler over an atomic unit executor;
+5. keep successful session roots generic so RFC 0106 can supply persistent heap
+   roots without exposing them publicly;
+6. add strict-compatibility, independent-failure, dependency, terminal, root
+   budget, cancellation, and plan-validation tests;
+7. defer compiler unit production, session-heap wiring, and CLI/LSP consumption
+   to RFC 0106; and
 8. run the full quality gate and record the implementation result.
 
 ## Stopping rules
@@ -250,3 +258,32 @@ Work returns to discussion if implementation requires:
 6. resetting quota per unit or making order nondeterministic;
 7. splitting recursive SCC initialization; or
 8. permitting effectful commands to consume best-effort output.
+
+## Implementation result
+
+Forma now has a crate-private `EvaluationPolicy`, validated EvaluationPlan,
+typed unit kinds, and generic BestEffortSession scheduler. Plans require dense
+stable IDs, strictly ordered prior dependencies, and exactly one final
+ModuleResult. This makes scheduling and multi-cause lineage independent of map
+iteration or thread completion order.
+
+The scheduler runs only ready units, records recoverable failures as RFC 0103
+roots, skips blocked dependents with propagation lineage, and continues later
+independent units. Terminal failures and cancellation checkpoints return
+immediately. A shared root-error budget leaves the deterministic unscheduled
+suffix Pending, rather than inventing another Forma error. A result is exposed
+only when the final unit is Value, no root failure exists, and the budget was
+not exhausted.
+
+RuntimeErrorKind now has an exhaustive typed recoverability classification:
+data/program domain errors are recoverable, while cancellation, quotas, stack
+and call-depth exhaustion, and invalid bytecode are terminal. The scheduler's
+atomic executor remains generic, allowing RFC 0106 to supply strict VM
+WorkWorld execution and session-persistent heap roots without placing Never in
+VM registers or the native ABI.
+
+Compiler production of Forma evaluation units, session-heap promotion, and
+CLI/LSP consumption remain explicitly assigned to RFC 0106. Existing strict
+LoadedModule and VM entry points are unchanged. Full Forma tests pass with 308
+passed and 1 ignored; all 13 CLI and 20 LSP tests pass, and strict workspace
+Clippy reports no warnings.
