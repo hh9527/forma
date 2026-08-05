@@ -1,6 +1,6 @@
 # RFC 0080: Usable rank-1 type inference
 
-- Status: Accepted
+- Status: Implemented
 - Depends on: RFC 0048, RFC 0049, RFC 0052, RFC 0070 through RFC 0079
 - Tracking issue: https://github.com/hh9527/forma/issues/1
 
@@ -310,10 +310,8 @@ The mutable task list lives in GitHub issue #1. Each child RFC follows the
 repository rule: commit the accepted proposal before implementation, then
 commit its tested implementation separately.
 
-This RFC remains `Accepted` while child work is active. Once the shared exit
-criteria are satisfied, its status changes to `Implemented` and an
-Implementation result records the delivered model, any amendments, final test
-coverage, and explicitly deferred work.
+The RFC remained `Accepted` while child work was active. The completed phase is
+recorded below; the tracking issue retains the closed task history.
 
 ## Rejected alternatives
 
@@ -340,3 +338,45 @@ with visible restrictions instead of claiming full Hindley-Milner inference.
 Representing numeric domains or capabilities in `TypeScheme` leads toward
 interfaces, evidence passing, and associated-type questions. Those deserve a
 separate phase after unconstrained rank-1 behavior is complete.
+
+## Implementation result
+
+Completed by RFCs 0081 through 0084.
+
+RFC 0081 added direct `_` positions to explicit type application. Rigid and
+inferred arguments now share one substitution map, placeholders retain source
+identity and concrete expression facts, and unresolved placeholders fail at
+their own token before publication.
+
+RFC 0082 made generic calls context-complete within their rank-1 boundary. A
+surrounding expected result is installed before argument completion, and an
+inner generic result connected to an enclosing inference identity may remain
+pending until that enclosing boundary completes. This removes the former
+ordering difference between `choose(empty(), 1)` and its reversed form.
+
+RFC 0083 generalized eligible acyclic closure-valued `def` components. The
+checker builds dependencies from resolved HIR definition identities and
+initializer containment, retains monomorphic skeleton inference for self and
+mutual recursion, and analyzes acyclic definitions in dependency order.
+Forward source order no longer disables ordinary rank-1 reuse. Runtime slots
+and closure identity remain unchanged.
+
+RFC 0084 added an explicit scheme-publication audit. Inferred schemes are
+normalized through final substitutions; top-level definitions and module
+exports reject solver identities and unbound rigid parameters. Generic runtime
+Struct shapes remain erased separately from their authoritative exported
+schemes, and nested schemes may retain an outer rigid parameter from their
+enclosing checking context.
+
+The final model remains predicative rank-1. Eligible closure-valued `let` and
+acyclic `def` bindings may publish schemes; aliases instantiate once;
+recursive components remain monomorphic without an explicit contract;
+declared and imported schemes instantiate per direct use; complete and partial
+explicit application are erased before runtime.
+
+Final validation after the child implementations covered the full workspace,
+including core, CLI, LSP, recovery, cancellation, module interfaces, imported
+schemes, recursion, and runtime execution. Strict Clippy and formatting checks
+passed. Traits, interfaces, associated types, constrained generics,
+higher-rank inference, polymorphic recursion, and numeric defaulting remain
+explicitly deferred.
