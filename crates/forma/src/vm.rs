@@ -2510,6 +2510,33 @@ fn start_array_continuation(
             return_target,
         });
     }
+    if function == CoreArrayFunction::Push {
+        let source_values = view.sequence(source_handle, false).map_err(|heap_error| {
+            error(
+                RuntimeErrorKind::InvalidBytecode,
+                heap_error.to_string(),
+                &call_function,
+                call_pc,
+            )
+        })?;
+        let output_len = source_values.len().checked_add(1).ok_or_else(|| {
+            allocation_error("Array push length overflowed", &call_function, call_pc)
+        })?;
+        let bytes = logical_value_bytes(output_len).map_err(|native_error| {
+            allocation_error(native_error.message, &call_function, call_pc)
+        })?;
+        charge_allocation(account, bytes, &call_function, call_pc)?;
+        let mut output = Vec::with_capacity(output_len);
+        output.extend_from_slice(source_values);
+        output.push(arguments[1]);
+        return Ok(VmAction::Return {
+            value: RichValue::new(
+                RuntimeValue::Array(current.allocate(Object::Array(output.into()))),
+                instruction_location(&call_function, call_pc),
+            ),
+            return_target,
+        });
+    }
     if function == CoreArrayFunction::Concat {
         let arrays = view.sequence(source_handle, false).map_err(|heap_error| {
             error(
@@ -2682,7 +2709,10 @@ fn resume_array_continuation(
     account: &mut QuotaAccount,
 ) -> Result<VmAction, RuntimeError> {
     match continuation.function {
-        CoreArrayFunction::Length | CoreArrayFunction::Concat | CoreArrayFunction::Zip => {
+        CoreArrayFunction::Length
+        | CoreArrayFunction::Push
+        | CoreArrayFunction::Concat
+        | CoreArrayFunction::Zip => {
             unreachable!("non-callback array operation does not suspend")
         }
         CoreArrayFunction::Map => {
@@ -2927,7 +2957,10 @@ fn next_array_action(
                     instruction_location(&continuation.call_function, continuation.call_pc),
                 )
             }
-            CoreArrayFunction::Length | CoreArrayFunction::Concat | CoreArrayFunction::Zip => {
+            CoreArrayFunction::Length
+            | CoreArrayFunction::Push
+            | CoreArrayFunction::Concat
+            | CoreArrayFunction::Zip => {
                 unreachable!()
             }
         };

@@ -130,6 +130,7 @@ pub type NativeCallback = fn(&mut CallContext<'_, '_>) -> Result<(), NativeError
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CoreArrayFunction {
     Length,
+    Push,
     Concat,
     Zip,
     Map,
@@ -535,6 +536,7 @@ impl CoreArrayFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Length => "@bim/std/array.length",
+            Self::Push => "@bim/std/array.push",
             Self::Concat => "@bim/std/array.concat",
             Self::Zip => "@bim/std/array.zip",
             Self::Map => "@bim/std/array.map",
@@ -551,7 +553,7 @@ impl CoreArrayFunction {
     pub(crate) const fn arity(self) -> usize {
         match self {
             Self::Length | Self::Concat => 1,
-            Self::Zip => 2,
+            Self::Push | Self::Zip => 2,
             Self::Map | Self::Filter | Self::FlatMap | Self::Any | Self::All | Self::Find => 2,
             Self::Fold | Self::FoldControl => 3,
         }

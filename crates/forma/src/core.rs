@@ -192,6 +192,7 @@ native strip: Fn(Any) -> Any;
             name: ARRAY_MODULE,
             source: r#"
 native length: for(A) Fn(Array(A)) -> Int;
+native push: for(A) Fn(Array(A), A) -> Array(A);
 native concat: for(A) Fn(Array(Array(A))) -> Array(A);
 native zip: for(A, B) Fn(Array(A), Array(B)) -> Option(Array(Tuple(A, B)));
 native map: for(A, B) Fn(Array(A), Fn(A) -> B) -> Array(B);
@@ -202,11 +203,12 @@ native fold_control: for(A, S, R) Fn(Array(A), S, Fn(S, A) -> FoldControl(S, R))
 native any: for(A) Fn(Array(A), Fn(A) -> Bool) -> Bool;
 native all: for(A) Fn(Array(A), Fn(A) -> Bool) -> Bool;
 native find: for(A) Fn(Array(A), Fn(A) -> Bool) -> Option(A);
-{ length: length, concat: concat, zip: zip, map: map, filter: filter, flat_map: flat_map, fold: fold, fold_control: fold_control, any: any, all: all, find: find }
+{ length: length, push: push, concat: concat, zip: zip, map: map, filter: filter, flat_map: flat_map, fold: fold, fold_control: fold_control, any: any, all: all, find: find }
 "#,
             functions: vec![
                 ("all", NativeFunction::core_array(CoreArrayFunction::All)),
                 ("any", NativeFunction::core_array(CoreArrayFunction::Any)),
+                ("push", NativeFunction::core_array(CoreArrayFunction::Push)),
                 (
                     "concat",
                     NativeFunction::core_array(CoreArrayFunction::Concat),

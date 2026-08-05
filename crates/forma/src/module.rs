@@ -1991,7 +1991,7 @@ mod tests {
         assert_eq!(
             module
                 .execute_with_quota(Quota::new(100_000, 1_000, 1))
-                .unwrap_err()
+                .expect_err("allocation must be exhausted")
                 .kind,
             crate::RuntimeErrorKind::AllocationQuotaExceeded
         );
@@ -2424,6 +2424,9 @@ name = "rustc"
                let empty_strings: Array(String) = [];
                {
                    length: arrays.length(values),
+                   pushed: arrays.push(values, 4),
+                   pushed_empty: arrays.push(empty, 1),
+                   original: values,
                    zipped: arrays.zip(values, ["a", "b", "c"]),
                    zip_mismatch: arrays.zip(values, ["a"]),
                    zip_empty: arrays.zip(empty, empty_strings),
@@ -2466,6 +2469,9 @@ name = "rustc"
             panic!("expected Dict result")
         };
         assert_eq!(result.get("length").unwrap().to_string(), "3");
+        assert_eq!(result.get("pushed").unwrap().to_string(), "[1, 2, 3, 4]");
+        assert_eq!(result.get("pushed_empty").unwrap().to_string(), "[1]");
+        assert_eq!(result.get("original").unwrap().to_string(), "[1, 2, 3]");
         assert_eq!(
             result.get("zipped").unwrap().to_string(),
             "'Some([(1, \"a\"), (2, \"b\"), (3, \"c\")])"
@@ -2981,6 +2987,11 @@ unchanged", "|"),
                 .contains("cannot unify Int with Array")
         );
         assert!(
+            analysis_error("push.forma", "arrays.push([1], \"wrong\")")
+                .to_string()
+                .contains("cannot unify")
+        );
+        assert!(
             analysis_error("arity.forma", "arrays.map([1], fn(a, b) { a + b })")
                 .to_string()
                 .contains("cannot unify")
@@ -3033,6 +3044,96 @@ unchanged", "|"),
                 .unwrap_err()
                 .to_string()
                 .contains("unknown core module")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn array_push_preserves_existing_and_appended_value_provenance() {
+        let directory = fixture_dir();
+        let data = directory.join("data.json");
+        let main = directory.join("main.forma");
+        let source = r#"import arrays from "@bim/std/array";
+                        import result from "@bim/std/result";
+                        import data from "./data.json";
+                        let values = arrays.push(data, APPENDED);
+                        arrays.map(values, fn(value) {
+                            if value == TARGET {
+                                result.unwrap('Err(blame!(value, "selected value")))
+                            } else { value }
+                        })"#;
+
+        fs::write(&data, "[1]").unwrap();
+        fs::write(
+            &main,
+            source.replace("APPENDED", "2").replace("TARGET", "1"),
+        )
+        .unwrap();
+        let module = load_module(&main, BTreeMap::new(), 100_000).unwrap();
+        let existing = module
+            .execute(100_000)
+            .unwrap_err()
+            .with_sources(&module.sources)
+            .to_string();
+        assert!(existing.contains("data.json:1:2:"), "{existing}");
+
+        fs::write(
+            &main,
+            source.replace("APPENDED", "2").replace("TARGET", "2"),
+        )
+        .unwrap();
+        let module = load_module(&main, BTreeMap::new(), 100_000).unwrap();
+        let appended = module
+            .execute(100_000)
+            .unwrap_err()
+            .with_sources(&module.sources)
+            .to_string();
+        assert!(appended.contains("main.forma:4:"), "{appended}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn array_push_charges_the_complete_logical_result() {
+        let directory = fixture_dir();
+        fs::write(directory.join("values.json"), "[1, 2]").unwrap();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import arrays from "@bim/std/array";
+               import values from "./values.json";
+               arrays.push(values, 3)"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        let requested = 3 * std::mem::size_of::<Value>() as u64;
+        let mut exact = QuotaAccount::new(Quota::new(1, 1_000, requested));
+        let result = Vm::new()
+            .execute_in_work(
+                &module.runtime.main.heap,
+                &module.runtime.externals,
+                &module.function,
+                &[],
+                &mut exact,
+            )
+            .unwrap()
+            .export(&module.runtime.main.heap)
+            .unwrap();
+        assert_eq!(result.to_string(), "[1, 2, 3]");
+        assert_eq!(exact.requested_allocation_bytes(), requested);
+
+        let mut short = QuotaAccount::new(Quota::new(1, 1_000, requested - 1));
+        let failure = match Vm::new().execute_in_work(
+            &module.runtime.main.heap,
+            &module.runtime.externals,
+            &module.function,
+            &[],
+            &mut short,
+        ) {
+            Ok(_) => panic!("allocation must be exhausted"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            failure.kind,
+            crate::RuntimeErrorKind::AllocationQuotaExceeded
         );
         fs::remove_dir_all(directory).unwrap();
     }

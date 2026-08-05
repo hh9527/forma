@@ -1,6 +1,6 @@
 # RFC 0108: Persistent Array append
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0015, RFC 0053, RFC 0102, RFC 0107
 
 ## Summary
@@ -66,3 +66,21 @@ the existing generic native contract.
 Work returns to discussion if correctness requires observable mutation,
 Handle-uniqueness assumptions, provenance relabeling of children, or a general
 collection/storage redesign.
+
+## Implementation result
+
+Implemented without changing Array storage. `push` is a direct two-argument
+native operation in `@bim/std/array`; it validates the source Array, charges
+logical allocation for all `n + 1` output edges, copies existing RichValues,
+appends the supplied RichValue, and creates a result root at the authored call
+site. It does not enter the callback continuation machinery.
+
+Tests cover empty and repeated append, input alias preservation, generic type
+rejection, exact allocation success/failure, and both sides of provenance:
+an imported JSON element remains anchored in JSON after push, while an
+appended authored element remains anchored at its Forma expression after
+passing through an Array callback. Existing heap copy/promotion and Array
+behavior remain unchanged.
+
+The full gate passes with 317 Forma library tests and 1 ignored, 14 CLI tests,
+20 LSP tests, documentation tests, formatting, and warning-denied Clippy.
