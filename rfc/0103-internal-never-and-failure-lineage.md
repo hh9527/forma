@@ -1,6 +1,6 @@
 # RFC 0103: Internal Never and failure lineage
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0100, RFC 0102
 
 ## Summary
@@ -234,3 +234,29 @@ Work returns to discussion if implementation requires:
 6. treating cancellation, quotas, or invariants as recoverable;
 7. merging provenance, call stacks, and lineage into one structure; or
 8. unbounded graph retention.
+
+## Implementation result
+
+Forma now has a crate-private `EvalOutcome<T> = Value(T) | Never(FailureId)`
+model and generic `FailureArena<R>`. Recoverable roots retain their typed
+authoritative payload; terminal failures are returned to the caller and cannot
+enter the arena through the root API. No public Value, syntax, type, VM opcode,
+or module interface changed.
+
+The arena normalizes causes in stable operand order, removes duplicates, and
+interns identical operation/location/cause triples. Aliases retain their
+FailureId without allocation. A closed semantic operation enum covers unary,
+binary, selection, call, control, container, interpolation, binding, and module
+result dependencies without exposing bytecode or generated implementation
+names.
+
+Explicit propagation-node, direct-cause, and render-depth limits produce one
+stable Truncated node after budget exhaustion. Bounded lineage follows the
+first stable cause toward its root and marks truncation rather than expanding
+an unbounded tree. Unit coverage proves skipped mapping, alias identity,
+multi-cause normalization, DAG reuse, terminal rejection, all operation
+categories, and deterministic truncation.
+
+Strict VM and module behavior remains unchanged pending RFC 0104. Full Forma
+tests pass with 302 passed and 1 ignored; all 13 CLI and 20 LSP tests pass, and
+strict workspace Clippy reports no warnings.

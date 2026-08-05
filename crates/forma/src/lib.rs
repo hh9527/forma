@@ -3,6 +3,7 @@ pub mod bytecode;
 pub mod compiler;
 mod core;
 pub mod document;
+mod evaluation;
 mod heap;
 pub mod hir;
 pub mod json;
