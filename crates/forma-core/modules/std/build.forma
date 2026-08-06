@@ -1,0 +1,15 @@
+@struct type TextFile = {
+    path: String,
+    content: String,
+};
+@enum type Artifact = {
+    TextFile: TextFile,
+};
+@struct type OutputPlan = {
+    files: Array(Artifact),
+};
+{
+    TextFile: TextFile,
+    Artifact: Artifact,
+    OutputPlan: OutputPlan,
+}

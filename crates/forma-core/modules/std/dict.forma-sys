@@ -1,0 +1,9 @@
+native keys: Fn(Any) -> Array(String);
+native values: Fn(Any) -> Array(Any);
+native pairs: Fn(Any) -> Array(Tuple(String, Any));
+native from_pairs: Fn(Array(Tuple(String, Any))) -> Any;
+native merge: Fn(Any, Any) -> Any;
+native map_values: for(A, B) Fn(Dict(A), Fn(A) -> B) -> Dict(B);
+native filter: for(A) Fn(Dict(A), Fn(A) -> Bool) -> Dict(A);
+native fold: for(A, B) Fn(Dict(A), B, Fn(B, String, A) -> B) -> B;
+{ keys: keys, values: values, pairs: pairs, from_pairs: from_pairs, merge: merge, map_values: map_values, filter: filter, fold: fold }

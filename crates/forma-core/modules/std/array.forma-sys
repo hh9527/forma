@@ -1,0 +1,13 @@
+native length: for(A) Fn(Array(A)) -> Int;
+native push: for(A) Fn(Array(A), A) -> Array(A);
+native concat: for(A) Fn(Array(Array(A))) -> Array(A);
+native zip: for(A, B) Fn(Array(A), Array(B)) -> Option(Array(Tuple(A, B)));
+native map: for(A, B) Fn(Array(A), Fn(A) -> B) -> Array(B);
+native filter: for(A) Fn(Array(A), Fn(A) -> Bool) -> Array(A);
+native flat_map: for(A, B) Fn(Array(A), Fn(A) -> Array(B)) -> Array(B);
+native fold: for(A, B) Fn(Array(A), B, Fn(B, A) -> B) -> B;
+native fold_control: for(A, S, R) Fn(Array(A), S, Fn(S, A) -> FoldControl(S, R)) -> FoldControl(S, R);
+native any: for(A) Fn(Array(A), Fn(A) -> Bool) -> Bool;
+native all: for(A) Fn(Array(A), Fn(A) -> Bool) -> Bool;
+native find: for(A) Fn(Array(A), Fn(A) -> Bool) -> Option(A);
+{ length: length, push: push, concat: concat, zip: zip, map: map, filter: filter, flat_map: flat_map, fold: fold, fold_control: fold_control, any: any, all: all, find: find }

@@ -1,0 +1,3 @@
+native dbg: for(A) Fn(A) -> A;
+native dbg_with: for(A) Fn(String, A) -> A;
+{ dbg: dbg, dbg_with: dbg_with }

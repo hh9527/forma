@@ -34,52 +34,13 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 1,
             name: EQ_MODULE,
-            source: r#"
-native equal: for(A, B) Fn(A, B) -> Bool;
-{ equal: equal }
-"#,
+            source: include_str!("../modules/std/eq.forma-sys"),
             functions: vec![("equal", NativeFunction::core_eq(CoreEqFunction::Equal))],
         },
         CoreModuleSpec {
             native_id: 2,
             name: DYN_MODULE,
-            source: r#"
-@enum type ValueKind = {
-    Int: 'None, Float: 'None, String: 'None, Bytes: 'None, Type: 'None, Opaque: 'None,
-    Dict: 'None, Array: 'None, Atom: 'None, Tagged: 'None,
-    Tuple: 'None, Function: 'None, Dyn: 'None,
-};
-native pack: for(A) Fn(TypeOf(A), A) -> Dyn;
-native desc: Fn(Dyn) -> Type;
-native kind: Fn(Dyn) -> ValueKind;
-native check_int: Fn(Dyn) -> Option(Int);
-native check_float: Fn(Dyn) -> Option(Float);
-native check_string: Fn(Dyn) -> Option(String);
-native check_bytes: Fn(Dyn) -> Option(Bytes);
-native field: Fn(Dyn, String) -> Result(Dyn, BlameError);
-native fields: Fn(Dyn) -> Result(Array(Tuple(String, Dyn)), BlameError);
-native array_items: Fn(Dyn) -> Result(Array(Dyn), BlameError);
-native tuple_items: Fn(Dyn) -> Result(Array(Dyn), BlameError);
-native tag: Fn(Dyn) -> Result(String, BlameError);
-native payload: Fn(Dyn) -> Result(Option(Dyn), BlameError);
-{
-    Dyn: Dyn,
-    ValueKind: ValueKind,
-    pack: pack,
-    desc: desc,
-    kind: kind,
-    check_int: check_int,
-    check_float: check_float,
-    check_string: check_string,
-    check_bytes: check_bytes,
-    field: field,
-    fields: fields,
-    array_items: array_items,
-    tuple_items: tuple_items,
-    tag: tag,
-    payload: payload,
-}
-"#,
+            source: include_str!("../modules/std/dyn.forma-sys"),
             functions: vec![
                 ("pack", NativeFunction::core_dyn(CoreDynFunction::Pack)),
                 ("desc", NativeFunction::core_dyn(CoreDynFunction::Desc)),
@@ -120,27 +81,7 @@ native payload: Fn(Dyn) -> Result(Option(Dyn), BlameError);
         CoreModuleSpec {
             native_id: 3,
             name: TYPE_DESC_MODULE,
-            source: r#"
-@enum type TypeDescKind = {
-    Any: 'None, Never: 'None, Type: 'None, TypeOf: 'None,
-    Int: 'None, Float: 'None, String: 'None, Bytes: 'None,
-    Atom: 'None, Array: 'None, Dict: 'None, Tagged: 'None,
-    Tuple: 'None, Struct: 'None, Enum: 'None, Union: 'None,
-    Function: 'None, Opaque: 'None, WithAttributes: 'None, Bound: 'None, Dyn: 'None, Ref: 'None,
-};
-native kind: Fn(Type) -> TypeDescKind;
-native children: Fn(Type) -> Array(Type);
-native opaque_name: Fn(Type) -> Option(String);
-native resolve: Fn(Type) -> Result(Type, BlameError);
-{
-    TypeDesc: Type,
-    TypeDescKind: TypeDescKind,
-    kind: kind,
-    children: children,
-    opaque_name: opaque_name,
-    resolve: resolve,
-}
-"#,
+            source: include_str!("../modules/std/type-desc.forma-sys"),
             functions: vec![
                 (
                     "children",
@@ -163,15 +104,7 @@ native resolve: Fn(Type) -> Result(Type, BlameError);
         CoreModuleSpec {
             native_id: 4,
             name: ATTRIBUTES_MODULE,
-            source: r#"
-native normalize: Fn(Any) -> Any;
-native add: Fn(Any, Any) -> Any;
-native get: Fn(Any, String) -> Any;
-native has: Fn(Any, String) -> Any;
-native all: Fn(Any) -> Any;
-native strip: Fn(Any) -> Any;
-{ normalize: normalize, add: add, get: get, has: has, all: all, strip: strip }
-"#,
+            source: include_str!("../modules/std/attributes.forma-sys"),
             functions: vec![
                 (
                     "add",
@@ -202,21 +135,7 @@ native strip: Fn(Any) -> Any;
         CoreModuleSpec {
             native_id: 5,
             name: ARRAY_MODULE,
-            source: r#"
-native length: for(A) Fn(Array(A)) -> Int;
-native push: for(A) Fn(Array(A), A) -> Array(A);
-native concat: for(A) Fn(Array(Array(A))) -> Array(A);
-native zip: for(A, B) Fn(Array(A), Array(B)) -> Option(Array(Tuple(A, B)));
-native map: for(A, B) Fn(Array(A), Fn(A) -> B) -> Array(B);
-native filter: for(A) Fn(Array(A), Fn(A) -> Bool) -> Array(A);
-native flat_map: for(A, B) Fn(Array(A), Fn(A) -> Array(B)) -> Array(B);
-native fold: for(A, B) Fn(Array(A), B, Fn(B, A) -> B) -> B;
-native fold_control: for(A, S, R) Fn(Array(A), S, Fn(S, A) -> FoldControl(S, R)) -> FoldControl(S, R);
-native any: for(A) Fn(Array(A), Fn(A) -> Bool) -> Bool;
-native all: for(A) Fn(Array(A), Fn(A) -> Bool) -> Bool;
-native find: for(A) Fn(Array(A), Fn(A) -> Bool) -> Option(A);
-{ length: length, push: push, concat: concat, zip: zip, map: map, filter: filter, flat_map: flat_map, fold: fold, fold_control: fold_control, any: any, all: all, find: find }
-"#,
+            source: include_str!("../modules/std/array.forma-sys"),
             functions: vec![
                 ("all", NativeFunction::core_array(CoreArrayFunction::All)),
                 ("any", NativeFunction::core_array(CoreArrayFunction::Any)),
@@ -250,17 +169,7 @@ native find: for(A) Fn(Array(A), Fn(A) -> Bool) -> Option(A);
         CoreModuleSpec {
             native_id: 6,
             name: DICT_MODULE,
-            source: r#"
-native keys: Fn(Any) -> Array(String);
-native values: Fn(Any) -> Array(Any);
-native pairs: Fn(Any) -> Array(Tuple(String, Any));
-native from_pairs: Fn(Array(Tuple(String, Any))) -> Any;
-native merge: Fn(Any, Any) -> Any;
-native map_values: for(A, B) Fn(Dict(A), Fn(A) -> B) -> Dict(B);
-native filter: for(A) Fn(Dict(A), Fn(A) -> Bool) -> Dict(A);
-native fold: for(A, B) Fn(Dict(A), B, Fn(B, String, A) -> B) -> B;
-{ keys: keys, values: values, pairs: pairs, from_pairs: from_pairs, merge: merge, map_values: map_values, filter: filter, fold: fold }
-"#,
+            source: include_str!("../modules/std/dict.forma-sys"),
             functions: vec![
                 (
                     "filter",
@@ -287,21 +196,7 @@ native fold: for(A, B) Fn(Dict(A), B, Fn(B, String, A) -> B) -> B;
         CoreModuleSpec {
             native_id: 7,
             name: STRING_MODULE,
-            source: r#"
-native length: Fn(String) -> Int;
-native join: Fn(Array(String), String) -> String;
-native join_lines: Fn(Array(String)) -> String;
-native split: Fn(String, String) -> Array(String);
-native lines: Fn(String) -> Array(String);
-native starts_with: Fn(String, String) -> Bool;
-native ends_with: Fn(String, String) -> Bool;
-native contains: Fn(String, String) -> Bool;
-native replace: Fn(String, String, String) -> String;
-native indent: Fn(String, Int) -> String;
-native ensure_trailing_newline: Fn(String) -> String;
-native trim_margin: Fn(String, String) -> String;
-{ length: length, join: join, join_lines: join_lines, split: split, lines: lines, starts_with: starts_with, ends_with: ends_with, contains: contains, replace: replace, indent: indent, ensure_trailing_newline: ensure_trailing_newline, trim_margin: trim_margin }
-"#,
+            source: include_str!("../modules/std/string.forma-sys"),
             functions: vec![
                 (
                     "contains",
@@ -356,13 +251,7 @@ native trim_margin: Fn(String, String) -> String;
         CoreModuleSpec {
             native_id: 8,
             name: PATH_MODULE,
-            source: r#"
-native join: Fn(Array(String)) -> String;
-native normalize: Fn(String) -> String;
-native parent: Fn(String) -> Option(String);
-native file_name: Fn(String) -> Option(String);
-{ join: join, normalize: normalize, parent: parent, file_name: file_name }
-"#,
+            source: include_str!("../modules/std/path.forma-sys"),
             functions: vec![
                 (
                     "file_name",
@@ -382,25 +271,13 @@ native file_name: Fn(String) -> Option(String);
         CoreModuleSpec {
             native_id: 9,
             name: TOML_MODULE,
-            source: r#"
-@enum type DateTime = {
-    OffsetDateTime: String,
-    LocalDateTime: String,
-    LocalDate: String,
-    LocalTime: String,
-};
-{DateTime: DateTime}
-"#,
+            source: include_str!("../modules/std/toml.forma"),
             functions: vec![],
         },
         CoreModuleSpec {
             native_id: 10,
             name: DEBUG_MODULE,
-            source: r#"
-native dbg: for(A) Fn(A) -> A;
-native dbg_with: for(A) Fn(String, A) -> A;
-{ dbg: dbg, dbg_with: dbg_with }
-"#,
+            source: include_str!("../modules/std/debug.forma-sys"),
             functions: vec![
                 ("dbg", NativeFunction::core_debug(CoreDebugFunction::Dbg)),
                 (
@@ -412,88 +289,19 @@ native dbg_with: for(A) Fn(String, A) -> A;
         CoreModuleSpec {
             native_id: 11,
             name: BUILD_MODULE,
-            source: r#"
-@struct type TextFile = {
-    path: String,
-    content: String,
-};
-@enum type Artifact = {
-    TextFile: TextFile,
-};
-@struct type OutputPlan = {
-    files: Array(Artifact),
-};
-{
-    TextFile: TextFile,
-    Artifact: Artifact,
-    OutputPlan: OutputPlan,
-}
-"#,
+            source: include_str!("../modules/std/build.forma"),
             functions: vec![],
         },
         CoreModuleSpec {
             native_id: 12,
             name: EXEC_MODULE,
-            source: r#"
-@struct type Platform = {
-    os: String,
-    arch: String,
-};
-@struct type ExecSettings = {
-    platform: Platform,
-    install_prefix: String,
-};
-@struct type ExecRequest = {
-    args: Array(String),
-    env: Dict(String),
-    cwd: String,
-};
-@enum type UnpackType = {
-    TarGzip: 'None,
-    Tar: 'None,
-};
-@struct type UnpackOpt = {
-    dest: String,
-    ty: UnpackType,
-    src: String,
-    strip: Int,
-    digest: Option(String),
-};
-@enum type Install = {
-    Unpack: UnpackOpt,
-};
-@struct type ExecEnv = {
-    install: Array(Install),
-    cwd: Option(String),
-    bin: String,
-    args: Array(String),
-    env: Dict(String),
-};
-{
-    Platform: Platform,
-    ExecSettings: ExecSettings,
-    ExecRequest: ExecRequest,
-    UnpackType: UnpackType,
-    UnpackOpt: UnpackOpt,
-    Install: Install,
-    ExecEnv: ExecEnv,
-}
-"#,
+            source: include_str!("../modules/std/exec.forma"),
             functions: vec![],
         },
         CoreModuleSpec {
             native_id: 13,
             name: CODEC_MODULE,
-            source: r#"
-native decode: for(A) Fn(TypeOf(A), Any) -> Result(A, BlameError);
-native encode: for(A) Fn(TypeOf(A), A) -> Result(Any, BlameError);
-def format_error: Fn(BlameError) -> String = fn(error) { error.message };
-{
-    decode: decode,
-    encode: encode,
-    format_error: format_error,
-}
-"#,
+            source: include_str!("../modules/std/codec.forma-sys"),
             functions: vec![
                 (
                     "decode",
@@ -508,52 +316,13 @@ def format_error: Fn(BlameError) -> String = fn(error) { error.message };
         CoreModuleSpec {
             native_id: 14,
             name: OPTION_MODULE,
-            source: r#"
-def map: for(A, B) Fn(Option(A), Fn(A) -> B) -> Option(B) = fn(option, function) {
-    match option { 'None => 'None, 'Some(value) => 'Some(function(value)) }
-};
-def flat_map: for(A, B) Fn(Option(A), Fn(A) -> Option(B)) -> Option(B) = fn(option, function) {
-    match option { 'None => 'None, 'Some(value) => function(value) }
-};
-def unwrap_or: for(A) Fn(Option(A), A) -> A = fn(option, fallback) {
-    match option { 'None => fallback, 'Some(value) => value }
-};
-def is_some: for(A) Fn(Option(A)) -> Bool = fn(option) {
-    match option { 'None => 'False, 'Some(_) => 'True }
-};
-{ map: map, flat_map: flat_map, unwrap_or: unwrap_or, is_some: is_some }
-"#,
+            source: include_str!("../modules/std/option.forma"),
             functions: vec![],
         },
         CoreModuleSpec {
             native_id: 15,
             name: RESULT_MODULE,
-            source: r#"
-native unwrap: for(A, E) Fn(Result(A, E)) -> A;
-def map: for(A, E, B) Fn(Result(A, E), Fn(A) -> B) -> Result(B, E) = fn(result, function) {
-    match result { 'Ok(value) => 'Ok(function(value)), 'Err(error) => 'Err(error) }
-};
-def flat_map: for(A, E, B) Fn(Result(A, E), Fn(A) -> Result(B, E)) -> Result(B, E) = fn(result, function) {
-    match result { 'Ok(value) => function(value), 'Err(error) => 'Err(error) }
-};
-def map_err: for(A, E, F) Fn(Result(A, E), Fn(E) -> F) -> Result(A, F) = fn(result, function) {
-    match result { 'Ok(value) => 'Ok(value), 'Err(error) => 'Err(function(error)) }
-};
-def unwrap_or: for(A, E) Fn(Result(A, E), A) -> A = fn(result, fallback) {
-    match result { 'Ok(value) => value, 'Err(_) => fallback }
-};
-def is_ok: for(A, E) Fn(Result(A, E)) -> Bool = fn(result) {
-    match result { 'Ok(_) => 'True, 'Err(_) => 'False }
-};
-{
-    unwrap: unwrap,
-    map: map,
-    flat_map: flat_map,
-    map_err: map_err,
-    unwrap_or: unwrap_or,
-    is_ok: is_ok,
-}
-"#,
+            source: include_str!("../modules/std/result.forma-sys"),
             functions: vec![(
                 "unwrap",
                 NativeFunction::core_result(CoreResultFunction::Unwrap),
@@ -562,24 +331,7 @@ def is_ok: for(A, E) Fn(Result(A, E)) -> Bool = fn(result) {
         CoreModuleSpec {
             native_id: 16,
             name: HASH_MODULE,
-            source: r#"
-native sha256: Fn(String) -> String;
-native type HashState = @3;
-native new: Fn() -> HashState;
-native update_bytes: Fn(HashState, Bytes) -> HashState;
-native update_string: Fn(HashState, String) -> HashState;
-native update_int: Fn(HashState, Int) -> HashState;
-native finish: Fn(HashState) -> Bytes;
-{
-    HashState: HashState,
-    sha256: sha256,
-    new: new,
-    update_bytes: update_bytes,
-    update_string: update_string,
-    update_int: update_int,
-    finish: finish,
-}
-"#,
+            source: include_str!("../modules/std/hash.forma-sys"),
             functions: vec![
                 (
                     "sha256",
@@ -635,32 +387,7 @@ native finish: Fn(HashState) -> Bytes;
         CoreModuleSpec {
             native_id: 17,
             name: JSON_MODULE,
-            source: r#"
-native parse: Fn(String) -> Result(Any, BlameError);
-native decode: for(A) Fn(TypeOf(A), String) -> Result(A, BlameError);
-native stringify: Fn(Any) -> String;
-native stringify_pretty: Fn(Int) -> Fn(Any) -> String;
-native rename: Fn(String) -> Fn(Any, Any) -> Any;
-native rename_all: Fn(Any) -> Fn(Any, Any) -> Any;
-native flatten: Fn(Any, Any) -> Any;
-native untagged: Fn(Any, Any) -> Any;
-native schema: Fn(Any) -> Any;
-native default: Fn(Any) -> Fn(Any, Any) -> Any;
-native skip_serializing_if: Fn(Any) -> Fn(Any, Any) -> Any;
-{
-    parse: parse,
-    decode: decode,
-    stringify: stringify,
-    stringify_pretty: stringify_pretty,
-    rename: rename,
-    rename_all: rename_all,
-    flatten: flatten,
-    untagged: untagged,
-    schema: schema,
-    default: default,
-    skip_serializing_if: skip_serializing_if,
-}
-"#,
+            source: include_str!("../modules/std/json.forma-sys"),
             functions: vec![
                 ("parse", NativeFunction::core_json(CoreJsonFunction::Parse)),
                 (

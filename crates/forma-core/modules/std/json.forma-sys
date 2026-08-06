@@ -1,0 +1,24 @@
+native parse: Fn(String) -> Result(Any, BlameError);
+native decode: for(A) Fn(TypeOf(A), String) -> Result(A, BlameError);
+native stringify: Fn(Any) -> String;
+native stringify_pretty: Fn(Int) -> Fn(Any) -> String;
+native rename: Fn(String) -> Fn(Any, Any) -> Any;
+native rename_all: Fn(Any) -> Fn(Any, Any) -> Any;
+native flatten: Fn(Any, Any) -> Any;
+native untagged: Fn(Any, Any) -> Any;
+native schema: Fn(Any) -> Any;
+native default: Fn(Any) -> Fn(Any, Any) -> Any;
+native skip_serializing_if: Fn(Any) -> Fn(Any, Any) -> Any;
+{
+    parse: parse,
+    decode: decode,
+    stringify: stringify,
+    stringify_pretty: stringify_pretty,
+    rename: rename,
+    rename_all: rename_all,
+    flatten: flatten,
+    untagged: untagged,
+    schema: schema,
+    default: default,
+    skip_serializing_if: skip_serializing_if,
+}

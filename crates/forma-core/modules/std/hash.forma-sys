@@ -1,0 +1,16 @@
+native sha256: Fn(String) -> String;
+native type HashState = @3;
+native new: Fn() -> HashState;
+native update_bytes: Fn(HashState, Bytes) -> HashState;
+native update_string: Fn(HashState, String) -> HashState;
+native update_int: Fn(HashState, Int) -> HashState;
+native finish: Fn(HashState) -> Bytes;
+{
+    HashState: HashState,
+    sha256: sha256,
+    new: new,
+    update_bytes: update_bytes,
+    update_string: update_string,
+    update_int: update_int,
+    finish: finish,
+}

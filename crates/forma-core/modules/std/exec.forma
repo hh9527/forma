@@ -1,0 +1,43 @@
+@struct type Platform = {
+    os: String,
+    arch: String,
+};
+@struct type ExecSettings = {
+    platform: Platform,
+    install_prefix: String,
+};
+@struct type ExecRequest = {
+    args: Array(String),
+    env: Dict(String),
+    cwd: String,
+};
+@enum type UnpackType = {
+    TarGzip: 'None,
+    Tar: 'None,
+};
+@struct type UnpackOpt = {
+    dest: String,
+    ty: UnpackType,
+    src: String,
+    strip: Int,
+    digest: Option(String),
+};
+@enum type Install = {
+    Unpack: UnpackOpt,
+};
+@struct type ExecEnv = {
+    install: Array(Install),
+    cwd: Option(String),
+    bin: String,
+    args: Array(String),
+    env: Dict(String),
+};
+{
+    Platform: Platform,
+    ExecSettings: ExecSettings,
+    ExecRequest: ExecRequest,
+    UnpackType: UnpackType,
+    UnpackOpt: UnpackOpt,
+    Install: Install,
+    ExecEnv: ExecEnv,
+}

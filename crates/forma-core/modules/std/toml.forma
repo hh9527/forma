@@ -1,0 +1,7 @@
+@enum type DateTime = {
+    OffsetDateTime: String,
+    LocalDateTime: String,
+    LocalDate: String,
+    LocalTime: String,
+};
+{DateTime: DateTime}
