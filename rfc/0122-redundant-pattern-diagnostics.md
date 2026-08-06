@@ -1,6 +1,6 @@
 # RFC 0122: Redundant pattern diagnostics
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0121
 
 ## Summary
@@ -74,4 +74,16 @@ coverage accumulated strictly before it.
 
 ## Implementation result
 
-Pending.
+Typed pattern analysis now records possible outer Enum variants separately
+from whole-variant coverage. Match inference compares each arm's possible set
+with only the whole coverage accumulated before that arm, and separately tracks
+whether prior arms cover every value through an irrefutable pattern or a
+complete closed Enum.
+
+The implementation diagnoses arms after catch-alls, repeated unit variants,
+payload patterns after an irrefutable Tagged variant, catch-alls after complete
+Enum coverage, and arms after irrefutable known Struct/Tuple patterns. It leaves
+distinct refutable payload literals alone. Focused tests cover every proof and
+the existing arm-order join test now uses two reachable Int literals rather
+than deliberately placing an arm after a catch-all. The full core suite and
+strict Clippy pass with no bytecode or evaluation-order changes.

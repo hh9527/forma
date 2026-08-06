@@ -37,6 +37,7 @@ pub(crate) struct PatternAnalysis {
     pub(crate) compatibility: PatternCompatibility,
     pub(crate) irrefutable: bool,
     pub(crate) covered_variants: BTreeSet<String>,
+    pub(crate) possible_variants: BTreeSet<String>,
 }
 
 pub(crate) fn analyze_pattern(pattern: &Pattern, matched: &TypeDescriptor) -> PatternAnalysis {
@@ -49,6 +50,7 @@ pub(crate) fn analyze_pattern(pattern: &Pattern, matched: &TypeDescriptor) -> Pa
         compatibility: shape.compatibility,
         irrefutable: shape.irrefutable,
         covered_variants: shape.covered_variants,
+        possible_variants: shape.possible_variants,
     }
 }
 
@@ -64,6 +66,7 @@ struct PatternShape {
     compatibility: PatternCompatibility,
     irrefutable: bool,
     covered_variants: BTreeSet<String>,
+    possible_variants: BTreeSet<String>,
 }
 
 impl PatternShape {
@@ -72,6 +75,7 @@ impl PatternShape {
             compatibility,
             irrefutable,
             covered_variants: BTreeSet::new(),
+            possible_variants: BTreeSet::new(),
         }
     }
 }
@@ -148,9 +152,11 @@ impl AnalysisContext {
                 );
                 if matches!(matched, TypeDescriptor::Enum(_))
                     && outer_compatibility == PatternCompatibility::Compatible
-                    && payload.irrefutable
                 {
-                    shape.covered_variants.insert(tag.clone());
+                    shape.possible_variants.insert(tag.clone());
+                    if payload.irrefutable {
+                        shape.covered_variants.insert(tag.clone());
+                    }
                 }
                 shape
             }
@@ -234,6 +240,7 @@ impl AnalysisContext {
         let mut shape = PatternShape::new(PatternCompatibility::Compatible, true);
         if let TypeDescriptor::Enum(variants) = matched {
             shape.covered_variants.extend(variants.keys().cloned());
+            shape.possible_variants.extend(variants.keys().cloned());
         }
         shape
     }
@@ -281,6 +288,7 @@ fn atom_shape(matched: &TypeDescriptor, tag: &str) -> PatternShape {
             );
             if compatible {
                 shape.covered_variants.insert(tag.to_owned());
+                shape.possible_variants.insert(tag.to_owned());
             }
             shape
         }

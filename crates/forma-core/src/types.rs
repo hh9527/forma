@@ -5252,6 +5252,7 @@ impl<'a> GenericInference<'a> {
                 let resolved_value_type = self.resolve(&value_type);
                 let mut arm_types = Vec::with_capacity(arms.len());
                 let mut covered_variants = BTreeSet::new();
+                let mut all_values_covered = false;
                 for arm in arms {
                     if let Some(query) = &self.query {
                         query.check().map_err(|error| error.to_string())?;
@@ -5259,7 +5260,39 @@ impl<'a> GenericInference<'a> {
                     let mut arm_environment = environment.clone();
                     let analysis =
                         crate::pattern::analyze_pattern(&arm.value.pattern, &resolved_value_type);
+                    let redundant_variants = analysis
+                        .possible_variants
+                        .iter()
+                        .filter(|variant| covered_variants.contains(*variant))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let unreachable = all_values_covered
+                        || !analysis.possible_variants.is_empty()
+                            && redundant_variants.len() == analysis.possible_variants.len();
+                    if unreachable {
+                        let message = if all_values_covered {
+                            "unreachable match arm; prior arms cover every value".to_owned()
+                        } else {
+                            format!(
+                                "unreachable match arm; prior arms cover {}",
+                                redundant_variants
+                                    .iter()
+                                    .map(|variant| format!("'{variant}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            )
+                        };
+                        self.pattern_diagnostics
+                            .entry(arm.value.pattern.location)
+                            .or_insert(message);
+                    }
                     covered_variants.extend(analysis.covered_variants.iter().cloned());
+                    all_values_covered |= analysis.irrefutable;
+                    if let TypeDescriptor::Enum(variants) = &resolved_value_type {
+                        all_values_covered |= variants
+                            .keys()
+                            .all(|variant| covered_variants.contains(variant));
+                    }
                     for problem in analysis.problems {
                         self.pattern_diagnostics
                             .entry(problem.location)
@@ -7625,10 +7658,8 @@ mod tests {
 
     #[test]
     fn match_joins_are_stable_across_arm_order_and_absorb_never() {
-        let first =
-            analyze_with_natives("match 'True { 'True => 1, other => \"x\" }", &[]).unwrap();
-        let reversed =
-            analyze_with_natives("match 'True { other => \"x\", 'True => 1 }", &[]).unwrap();
+        let first = analyze_with_natives("match 0 { 0 => 1, 1 => \"x\" }", &[]).unwrap();
+        let reversed = analyze_with_natives("match 0 { 1 => \"x\", 0 => 1 }", &[]).unwrap();
         assert_eq!(
             first.display(first.result_type),
             reversed.display(reversed.result_type)
@@ -8545,6 +8576,72 @@ mod tests {
             "let inspect: Fn(Any) -> Int = fn(value) { match value { 'None => 0 } }; inspect",
         );
         assert!(dynamic.is_ok());
+    }
+
+    #[test]
+    fn redundant_match_arms_require_certain_prior_coverage() {
+        let after_catch_all = analyze_source(
+            "match.forma",
+            "let option: Option(Int) = 'None; match option { _ => 0, 'None => 1 }",
+        )
+        .unwrap_err();
+        assert!(
+            after_catch_all
+                .to_string()
+                .contains("prior arms cover every value"),
+            "{after_catch_all}"
+        );
+
+        let repeated = analyze_source(
+            "match.forma",
+            "let option: Option(Int) = 'None;\
+             match option { 'None => 0, 'None => 1, 'Some(_) => 2 }",
+        )
+        .unwrap_err();
+        assert!(repeated.to_string().contains("cover 'None"), "{repeated}");
+
+        let covered_payload = analyze_source(
+            "match.forma",
+            "let option: Option(Int) = 'Some(1);\
+             match option { 'Some(_) => 0, 'Some(1) => 1, 'None => 2 }",
+        )
+        .unwrap_err();
+        assert!(
+            covered_payload.to_string().contains("cover 'Some"),
+            "{covered_payload}"
+        );
+
+        let distinct_partial = analyze_source(
+            "match.forma",
+            "let option: Option(Int) = 'Some(1);\
+             match option { 'None => 0, 'Some(1) => 1, 'Some(2) => 2, 'Some(_) => 3 }",
+        );
+        assert!(distinct_partial.is_ok(), "{distinct_partial:?}");
+
+        let complete_then_catch_all = analyze_source(
+            "match.forma",
+            "let option: Option(Int) = 'None;\
+             match option { 'None => 0, 'Some(_) => 1, _ => 2 }",
+        )
+        .unwrap_err();
+        assert!(
+            complete_then_catch_all
+                .to_string()
+                .contains("prior arms cover every value"),
+            "{complete_then_catch_all}"
+        );
+
+        let struct_then_arm = analyze_source(
+            "match.forma",
+            "let user = {name: \"Ada\"}; match user { {name} => name, _ => \"none\" }",
+        )
+        .unwrap_err();
+        assert!(
+            struct_then_arm
+                .to_string()
+                .contains("prior arms cover every value"),
+            "{struct_then_arm}"
+        );
     }
 
     #[test]
