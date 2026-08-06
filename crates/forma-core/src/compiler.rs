@@ -2120,14 +2120,15 @@ let decorators = {
 
     #[test]
     fn match_destructures_tagged_tuples() {
-        let value = run("match ('Ok, 42) { ('Err, _) => 0, ('Ok, value) => value }").unwrap();
+        let value = run("match ('Ok, 42) { ('Ok, value) => value }").unwrap();
         assert!(matches!(value, Value::Int(42)));
     }
 
     #[test]
     fn atom_call_constructs_tagged_value_and_pattern_destructures_it() {
-        let value =
-            run("let Some = 'Some; match Some(42) { 'None => 0, 'Some(value) => value }").unwrap();
+        let value = run("let Some = 'Some; let option: Option(Int) = Some(42);\
+             match option { 'None => 0, 'Some(value) => value }")
+        .unwrap();
         assert!(matches!(value, Value::Int(42)));
     }
 
@@ -2165,7 +2166,9 @@ let decorators = {
 
     #[test]
     fn non_exhaustive_match_has_a_dedicated_error() {
-        let error = run("match 'None { 'Some => 1 }").unwrap_err();
+        let error =
+            run("let fail: Fn(Any) -> Int = fn(value) { match value { 'Some => 1 } }; fail('None)")
+                .unwrap_err();
         let ExecutionError::Runtime(error) = error else {
             panic!("expected runtime error");
         };

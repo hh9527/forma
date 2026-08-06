@@ -105,6 +105,53 @@ pub(crate) fn first_refutable_location(
     }
 }
 
+pub(crate) fn first_incompatible_location(
+    pattern: &Pattern,
+    matched: &TypeDescriptor,
+) -> Option<Location> {
+    if analyze_pattern(pattern, matched).compatibility != PatternCompatibility::Incompatible {
+        return None;
+    }
+    match (&pattern.value, matched) {
+        (PatternKind::Tuple(items), TypeDescriptor::Tuple(matched_items))
+            if items.len() == matched_items.len() =>
+        {
+            items
+                .iter()
+                .zip(matched_items)
+                .find_map(|(item, matched)| first_incompatible_location(item, matched))
+                .or(Some(pattern.location))
+        }
+        (PatternKind::Struct(fields), TypeDescriptor::Struct(matched_fields)) => fields
+            .iter()
+            .find_map(|field| {
+                matched_fields
+                    .get(&field.name.value)
+                    .and_then(|matched| first_incompatible_location(&field.pattern, matched))
+                    .or_else(|| {
+                        (!matched_fields.contains_key(&field.name.value))
+                            .then_some(field.name.location)
+                    })
+            })
+            .or(Some(pattern.location)),
+        (
+            PatternKind::Tagged { tag, payload },
+            TypeDescriptor::Tagged {
+                tag: matched_tag,
+                payload: matched_payload,
+            },
+        ) if matched_tag.name() == tag => {
+            first_incompatible_location(payload, matched_payload).or(Some(pattern.location))
+        }
+        (PatternKind::Tagged { tag, payload }, TypeDescriptor::Enum(variants)) => variants
+            .get(tag)
+            .and_then(Option::as_deref)
+            .and_then(|matched| first_incompatible_location(payload, matched))
+            .or(Some(pattern.location)),
+        _ => Some(pattern.location),
+    }
+}
+
 #[derive(Default)]
 struct AnalysisContext {
     names: HashSet<String>,

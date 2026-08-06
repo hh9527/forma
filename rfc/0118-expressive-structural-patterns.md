@@ -1,6 +1,6 @@
 # RFC 0118: Expressive structural patterns
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0054, RFC 0067 through RFC 0079, RFC 0102, RFC 0103
 
 ## Summary
@@ -8,7 +8,7 @@
 Forma develops its existing `match` expression into a statically checked,
 structural way to consume the data that the language already constructs. The
 phase adds Struct patterns, closed-Enum exhaustiveness and redundancy
-diagnostics, and irrefutable destructuring in `let` bindings:
+diagnostics, and irrefutable destructuring in local `let` bindings:
 
 ```forma
 match result {
@@ -26,8 +26,8 @@ completes the most valuable structural and static gaps in that existing model.
 
 RFCs 0119 through 0123 define the shared pattern-checking foundation, Struct
 patterns, exhaustiveness, redundancy diagnostics, and irrefutable `let`
-destructuring. This RFC becomes Implemented only after those child RFCs are
-implemented and its result is amended with acceptance evidence.
+destructuring. All five are implemented, and this result records their shared
+acceptance evidence and retained boundaries.
 
 ## Motivation
 
@@ -186,6 +186,34 @@ Cancellation remains checked during pattern analysis and workspace queries.
 Each child RFC is proposed and implemented independently. A child may refine
 internal representation choices, but it must preserve this umbrella's surface
 boundary and stopping rules.
+
+## Implementation result
+
+RFCs 0119 through 0123 complete the phase. One shared typed pattern analysis
+now supplies precise binding types, compatibility, irrefutability, possible
+Enum variants, whole-variant coverage, duplicate facts, and focused authored
+locations. Struct patterns add recursive shorthand and renamed field selection
+without open-record semantics, while HIR and semantic facts expose their
+bindings at selected field types.
+
+Known closed Enums require conservative whole-variant coverage. The checker
+diagnoses omitted variants, known-incompatible patterns, arms after catch-alls,
+repeated whole variants, and catch-alls after complete coverage without a
+general pattern-matrix algorithm. Refutable payload literals are deliberately
+not combined; authors add an irrefutable payload arm or nest a match.
+
+Local Tuple/Struct destructuring lets elaborate into one-arm matches marked as
+requiring irrefutability. This reuses compiler, HIR, VM, provenance, and
+best-effort behavior while preserving single initializer evaluation and lexical
+scope. Module-top-level destructuring, binder annotations, and polymorphic
+generalization inside destructured values remain deferred. Plain identifier
+lets and their closure generalization are unchanged.
+
+Implementation also fixed generic scheme shadowing inside match arms: a local
+pattern binding now masks a same-named outer polymorphic definition during type
+inference, matching HIR and runtime scope. No row polymorphism, flow-sensitive
+narrowing, effects, new value representation, or general usefulness proof was
+introduced.
 
 ## Goals
 

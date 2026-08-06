@@ -83,7 +83,10 @@ complete closed Enum.
 The implementation diagnoses arms after catch-alls, repeated unit variants,
 payload patterns after an irrefutable Tagged variant, catch-alls after complete
 Enum coverage, and arms after irrefutable known Struct/Tuple patterns. It leaves
-distinct refutable payload literals alone. Focused tests cover every proof and
-the existing arm-order join test now uses two reachable Int literals rather
-than deliberately placing an arm after a catch-all. The full core suite and
-strict Clippy pass with no bytecode or evaluation-order changes.
+distinct refutable payload literals alone. Known-incompatible patterns are also
+certainly unreachable; their diagnostic recursively points at the smallest
+incompatible child while the VM's defensive no-match path remains tested
+through an Any scrutinee. Focused tests cover every proof and the existing
+arm-order join test now uses two reachable Int literals rather than deliberately
+placing an arm after a catch-all. The full core suite and strict Clippy pass
+with no bytecode or evaluation-order changes.

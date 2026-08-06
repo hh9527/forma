@@ -5260,6 +5260,22 @@ impl<'a> GenericInference<'a> {
                     let mut arm_environment = environment.clone();
                     let analysis =
                         crate::pattern::analyze_pattern(&arm.value.pattern, &resolved_value_type);
+                    if analysis.compatibility == crate::pattern::PatternCompatibility::Incompatible
+                        && !arm.value.irrefutable_required
+                        && analysis.problems.is_empty()
+                    {
+                        let location = crate::pattern::first_incompatible_location(
+                            &arm.value.pattern,
+                            &resolved_value_type,
+                        )
+                        .unwrap_or(arm.value.pattern.location);
+                        self.pattern_diagnostics.entry(location).or_insert_with(|| {
+                            format!(
+                                "pattern cannot match {}",
+                                resolved_value_type.display_name()
+                            )
+                        });
+                    }
                     if arm.value.irrefutable_required && !analysis.irrefutable {
                         let location = crate::pattern::first_refutable_location(
                             &arm.value.pattern,
@@ -5318,12 +5334,16 @@ impl<'a> GenericInference<'a> {
                                 format!("duplicate pattern binding {:?}", duplicate.name)
                             });
                     }
+                    self.scheme_scopes.push(HashMap::new());
                     for binding in analysis.bindings {
                         self.pattern_binding_types
                             .insert(binding.location, binding.ty.clone());
+                        self.set_local_scheme(binding.name.clone(), None);
                         arm_environment.insert(binding.name, binding.ty);
                     }
-                    arm_types.push(self.infer(&arm.value.value, &arm_environment, expected)?);
+                    let arm_type = self.infer(&arm.value.value, &arm_environment, expected);
+                    self.scheme_scopes.pop();
+                    arm_types.push(arm_type?);
                 }
                 if let TypeDescriptor::Enum(variants) = &resolved_value_type {
                     let missing = variants
@@ -8593,6 +8613,15 @@ mod tests {
 
     #[test]
     fn redundant_match_arms_require_certain_prior_coverage() {
+        let incompatible =
+            analyze_source("match.forma", "match (1, \"x\") { (left, 2) => left }").unwrap_err();
+        assert!(
+            incompatible
+                .to_string()
+                .contains("pattern cannot match (Int, String)"),
+            "{incompatible}"
+        );
+
         let after_catch_all = analyze_source(
             "match.forma",
             "let option: Option(Int) = 'None; match option { _ => 0, 'None => 1 }",
