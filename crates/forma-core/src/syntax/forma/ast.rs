@@ -504,6 +504,7 @@ fn is_expression_slot(syntax: SyntaxNode<'_>) -> bool {
                 | Rule::ParenExpr
                 | Rule::PipelineExpr
                 | Rule::PropagateExpr
+                | Rule::ReturnExpr
                 | Rule::SectionExpr
                 | Rule::StringExpr
                 | Rule::UnaryExpr

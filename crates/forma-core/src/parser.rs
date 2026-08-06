@@ -812,6 +812,17 @@ impl<'a> Lowerer<'a> {
                     )?,
                 ),
             },
+            Rule::ReturnExpr => ExprKind::Return {
+                value: Box::new(
+                    self.expression(
+                        rules
+                            .iter()
+                            .copied()
+                            .find(|child| self.is_expression(*child))
+                            .ok_or_else(|| self.error(node, "return has no value"))?,
+                    )?,
+                ),
+            },
             Rule::BinaryExpr => {
                 let comparison = self.token_children(node, Token::Less).next().is_some()
                     || self
@@ -1511,6 +1522,7 @@ impl<'a> Lowerer<'a> {
                     | Rule::ParenExpr
                     | Rule::PipelineExpr
                     | Rule::PropagateExpr
+                    | Rule::ReturnExpr
                     | Rule::SectionExpr
                     | Rule::StringExpr
                     | Rule::TypeApplyExpr

@@ -452,6 +452,10 @@ impl Resolver {
                 self.index_expr(operand, scopes);
                 None
             }
+            ExprKind::Return { value } => {
+                self.index_expr(value, scopes);
+                None
+            }
             ExprKind::Binary { left, right, .. } => {
                 self.index_expr(left, scopes);
                 self.index_expr(right, scopes);

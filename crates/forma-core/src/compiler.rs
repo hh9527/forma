@@ -839,6 +839,11 @@ impl<'a> Compiler<'a> {
                 Ok(dst)
             }
             ExprKind::Propagate { operand } => self.compile_propagate(operand, expression.location),
+            ExprKind::Return { value } => {
+                let value = self.compile_expr(value)?;
+                self.emit(Operation::Return { src: value }, expression.location);
+                Ok(value)
+            }
             ExprKind::Binary {
                 operator,
                 left,
@@ -924,6 +929,9 @@ impl<'a> Compiler<'a> {
             } => self.compile_tail_if(condition, then_branch, else_branch)?,
             ExprKind::Match { value, arms } => {
                 self.compile_tail_match(value, arms, expression.location)?
+            }
+            ExprKind::Return { .. } => {
+                self.compile_expr(expression)?;
             }
             _ => {
                 let result = self.compile_expr(expression)?;
@@ -1594,6 +1602,7 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
         ExprKind::Unary { operand, .. } | ExprKind::Propagate { operand } => {
             free_expr(operand, bound, free)
         }
+        ExprKind::Return { value } => free_expr(value, bound, free),
         ExprKind::Binary { left, right, .. } => {
             free_expr(left, bound, free);
             free_expr(right, bound, free);
@@ -1708,6 +1717,7 @@ pub(crate) fn collect_runtime_names(expression: &Expr, names: &mut HashSet<Strin
         ExprKind::Unary { operand, .. } | ExprKind::Propagate { operand } => {
             collect_runtime_names(operand, names)
         }
+        ExprKind::Return { value } => collect_runtime_names(value, names),
         ExprKind::Binary { left, right, .. } => {
             collect_runtime_names(left, names);
             collect_runtime_names(right, names);
@@ -2272,6 +2282,26 @@ let decorators = {
             "{}",
             unsupported.message
         );
+    }
+
+    #[test]
+    fn returns_values_from_the_nearest_function() {
+        let value = run("let choose = fn(condition: Bool, value: Int, fallback: Int) { if condition { return value; } else { fallback } }; (choose('True, 1, 2), choose('False, 1, 2))").unwrap();
+        assert_eq!(value.to_string(), "(1, 2)");
+
+        let nested =
+            run("let outer = fn() { let inner = fn() { return 1; }; inner() + 1 }; outer()")
+                .unwrap();
+        assert_eq!(nested.to_string(), "2");
+    }
+
+    #[test]
+    fn rejects_return_outside_functions_and_wrong_result_types() {
+        let module = compile_source("test", "return 1;").unwrap_err();
+        assert!(module.message.contains("only inside a Function"));
+
+        let wrong = compile_source("test", "let f: Fn(Bool) -> Int = fn(condition) { if condition { return \"wrong\"; } else { 1 } }; f").unwrap_err();
+        assert!(wrong.message.contains("String") && wrong.message.contains("Int"));
     }
 
     #[test]

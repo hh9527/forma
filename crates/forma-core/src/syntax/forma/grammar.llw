@@ -1,4 +1,4 @@
-token Let='let' Decl='decl' Def='def' Native='native' For='for' Type='type' Fn='fn' FunctionType='Fn' Interpreter='interpreter' If='if' Else='else' Match='match';
+token Let='let' Decl='decl' Def='def' Native='native' For='for' Type='type' Fn='fn' FunctionType='Fn' Interpreter='interpreter' If='if' Else='else' Match='match' Return='return';
 token Import='import' From='from';
 token SectionLParen='\\(' LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
 token Comma=',' Colon=':' Semicolon=';' Dot='.' At='@' Bang='!' Question='?';
@@ -62,6 +62,7 @@ primary:
 | ?t closure
 | if_expr
 | match_expr
+| return_expr
 ;
 
 braced:
@@ -87,6 +88,7 @@ section_arguments: '\\(' [argument (?1 ',' argument)* [',']] ')';
 argument: expression | Placeholder | IndexedPlaceholder;
 if_expr: 'if' expression block 'else' block;
 match_expr: 'match' expression '{' match_arm (?1 ',' match_arm)* [','] '}';
+return_expr: 'return' expression Semicolon @return_expr;
 match_arm: pattern '=>' expression;
 pattern:
   (Identifier | Placeholder) @identifier_pattern

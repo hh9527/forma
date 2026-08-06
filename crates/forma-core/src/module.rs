@@ -1743,6 +1743,7 @@ fn expression_has_import(expression: &Expr) -> bool {
         ExprKind::Unary { operand, .. } | ExprKind::Propagate { operand } => {
             expression_has_import(operand)
         }
+        ExprKind::Return { value } => expression_has_import(value),
         ExprKind::Binary { left, right, .. } => {
             expression_has_import(left) || expression_has_import(right)
         }

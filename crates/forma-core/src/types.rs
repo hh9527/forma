@@ -2678,6 +2678,15 @@ fn collect_nested_annotation_types(
                 annotations,
             )?;
         }
+        ExprKind::Return { value } => collect_nested_annotation_types(
+            source_name,
+            value,
+            bindings,
+            account,
+            sources,
+            debug_sink,
+            annotations,
+        )?,
         ExprKind::Binary { left, right, .. } => {
             for expression in [left.as_ref(), right.as_ref()] {
                 collect_nested_annotation_types(
@@ -3971,12 +3980,18 @@ struct GenericInference<'a> {
     pattern_diagnostics: BTreeMap<crate::Location, String>,
     pattern_binding_types: HashMap<crate::Location, TypeDescriptor>,
     propagation_boundaries: Vec<Option<PropagationRequirement>>,
+    return_boundaries: Vec<Option<ReturnBoundary>>,
 }
 
 #[derive(Clone)]
 enum PropagationRequirement {
     Option,
     Result(Vec<TypeDescriptor>),
+}
+
+struct ReturnBoundary {
+    expected: Option<TypeDescriptor>,
+    values: Vec<TypeDescriptor>,
 }
 
 #[derive(Default)]
@@ -4161,7 +4176,25 @@ impl<'a> GenericInference<'a> {
             pattern_diagnostics: BTreeMap::new(),
             pattern_binding_types: HashMap::new(),
             propagation_boundaries: vec![None],
+            return_boundaries: vec![None],
         }
+    }
+
+    fn finish_return_boundary(
+        &mut self,
+        tail: TypeDescriptor,
+        boundary: ReturnBoundary,
+    ) -> Result<TypeDescriptor, String> {
+        if let Some(expected) = boundary.expected {
+            for value in &boundary.values {
+                self.check(value, &expected)?;
+            }
+            self.check(&tail, &expected)?;
+            return Ok(expected);
+        }
+        let mut values = boundary.values;
+        values.push(tail);
+        Ok(common_type(values).unwrap_or(TypeDescriptor::Never))
     }
 
     fn record_propagation(&mut self, requirement: PropagationRequirement) -> Result<(), String> {
@@ -5112,6 +5145,23 @@ impl<'a> GenericInference<'a> {
                     }
                 }
             }
+            ExprKind::Return { value } => {
+                let expected = self
+                    .return_boundaries
+                    .last()
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| "return is allowed only inside a Function".to_owned())?
+                    .expected
+                    .clone();
+                let value = self.infer(value, environment, expected.as_ref())?;
+                self.return_boundaries
+                    .last_mut()
+                    .and_then(Option::as_mut)
+                    .expect("Function return boundary exists")
+                    .values
+                    .push(value);
+                TypeDescriptor::Never
+            }
             ExprKind::Binary {
                 operator,
                 left,
@@ -5373,7 +5423,16 @@ impl<'a> GenericInference<'a> {
                     self.closure_inference_depth += 1;
                 }
                 self.propagation_boundaries.push(None);
+                self.return_boundaries.push(Some(ReturnBoundary {
+                    expected: result_expected.cloned(),
+                    values: Vec::new(),
+                }));
                 let result = self.infer_block(body, &closure_environment, result_expected);
+                let return_boundary = self
+                    .return_boundaries
+                    .pop()
+                    .and_then(|boundary| boundary)
+                    .expect("closure return boundary exists");
                 let requirement = self
                     .propagation_boundaries
                     .pop()
@@ -5383,6 +5442,8 @@ impl<'a> GenericInference<'a> {
                 }
                 let inferred_result =
                     self.finish_propagation_boundary(result?, result_expected, requirement)?;
+                let inferred_result =
+                    self.finish_return_boundary(inferred_result, return_boundary)?;
                 let function = TypeDescriptor::Function {
                     parameters: parameter_types,
                     result: Box::new(local_result.unwrap_or(inferred_result)),
@@ -6050,6 +6111,7 @@ fn expression_references_names(
         | ExprKind::Field {
             receiver: operand, ..
         } => expression_references_names(operand, names, bound),
+        ExprKind::Return { value } => expression_references_names(value, names, bound),
         ExprKind::Binary { left, right, .. } => {
             expression_references_names(left, names, bound)
                 || expression_references_names(right, names, bound)
@@ -6274,6 +6336,10 @@ fn infer_expr_with(
         ExprKind::Unary { operand, .. } | ExprKind::Propagate { operand } => {
             infer_expr_with(operand, environment, record)
         }
+        ExprKind::Return { value } => {
+            infer_expr_with(value, environment, record);
+            TypeDescriptor::Never
+        }
         ExprKind::Binary {
             operator,
             left,
@@ -6421,6 +6487,7 @@ fn check_interpolations(
         ExprKind::Unary { operand, .. } | ExprKind::Propagate { operand } => {
             check_interpolations(operand, environment, sources)?;
         }
+        ExprKind::Return { value } => check_interpolations(value, environment, sources)?,
         ExprKind::Binary { left, right, .. } => {
             check_interpolations(left, environment, sources)?;
             check_interpolations(right, environment, sources)?;

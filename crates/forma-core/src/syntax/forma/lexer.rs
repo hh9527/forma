@@ -34,6 +34,7 @@ pub enum Token {
     If,
     Else,
     Match,
+    Return,
     Import,
     From,
     SectionLParen,
@@ -107,6 +108,8 @@ enum NormalToken {
     Else,
     #[token("match")]
     Match,
+    #[token("return")]
+    Return,
     #[token("import")]
     Import,
     #[token("from")]
@@ -536,6 +539,7 @@ impl From<NormalToken> for Token {
             NormalToken::If => Self::If,
             NormalToken::Else => Self::Else,
             NormalToken::Match => Self::Match,
+            NormalToken::Return => Self::Return,
             NormalToken::Import => Self::Import,
             NormalToken::From => Self::From,
             NormalToken::SectionLParen => Self::SectionLParen,
