@@ -59,9 +59,38 @@ impl Elaborator<'_> {
             }
             ExprKind::Return { value } => self.expression(value),
             ExprKind::Panic { message } => self.expression(message),
-            ExprKind::Binary { left, right, .. } => {
+            ExprKind::Binary {
+                operator,
+                left,
+                right,
+            } => {
                 self.expression(left);
                 self.expression(right);
+                if matches!(operator.value, BinaryOperator::And | BinaryOperator::Or) {
+                    let left = left.clone();
+                    let right = right.clone();
+                    let atom =
+                        |name: &str| located(ExprKind::Atom(name.into()), expression.location);
+                    let (then_result, else_result) = match operator.value {
+                        BinaryOperator::And => ((*right).clone(), atom("False")),
+                        BinaryOperator::Or => (atom("True"), (*right).clone()),
+                        _ => unreachable!(),
+                    };
+                    let block = |result: Expr| {
+                        located(
+                            BlockKind {
+                                bindings: Vec::new(),
+                                result: Box::new(result),
+                            },
+                            expression.location,
+                        )
+                    };
+                    expression.value = ExprKind::If {
+                        condition: left,
+                        then_branch: block(then_result),
+                        else_branch: block(else_result),
+                    };
+                }
             }
             ExprKind::Field { receiver, .. } => self.expression(receiver),
             ExprKind::Call { callee, arguments } => {

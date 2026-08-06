@@ -58,6 +58,8 @@ pub enum Token {
     Less,
     EqualEqual,
     Equal,
+    AndAnd,
+    OrOr,
     Arrow,
     FatArrow,
     Pipe,
@@ -158,6 +160,10 @@ enum NormalToken {
     Arrow,
     #[token("=")]
     Equal,
+    #[token("&&")]
+    AndAnd,
+    #[token("||")]
+    OrOr,
     #[token("=>")]
     FatArrow,
     #[token("|>")]
@@ -564,6 +570,8 @@ impl From<NormalToken> for Token {
             NormalToken::EqualEqual => Self::EqualEqual,
             NormalToken::Arrow => Self::Arrow,
             NormalToken::Equal => Self::Equal,
+            NormalToken::AndAnd => Self::AndAnd,
+            NormalToken::OrOr => Self::OrOr,
             NormalToken::FatArrow => Self::FatArrow,
             NormalToken::Pipe => Self::Pipe,
             NormalToken::Int => Self::Int,

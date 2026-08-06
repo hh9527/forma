@@ -939,6 +939,10 @@ impl<'a> Lowerer<'a> {
                         (BinaryOperator::Divide, operator)
                     } else if let Some(operator) = self.token_children(node, Token::Less).next() {
                         (BinaryOperator::LessThan, operator)
+                    } else if let Some(operator) = self.token_children(node, Token::AndAnd).next() {
+                        (BinaryOperator::And, operator)
+                    } else if let Some(operator) = self.token_children(node, Token::OrOr).next() {
+                        (BinaryOperator::Or, operator)
                     } else {
                         (
                             BinaryOperator::Equal,

@@ -5249,6 +5249,12 @@ impl<'a> GenericInference<'a> {
                 left,
                 right,
             } => match operator.value {
+                BinaryOperator::And | BinaryOperator::Or => {
+                    let bool_type = normalized_bool_descriptor();
+                    self.infer(left, environment, Some(&bool_type))?;
+                    self.infer(right, environment, Some(&bool_type))?;
+                    bool_type
+                }
                 BinaryOperator::Equal => {
                     self.infer(left, environment, None)?;
                     self.infer(right, environment, None)?;

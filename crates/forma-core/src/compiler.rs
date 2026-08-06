@@ -867,6 +867,12 @@ impl<'a> Compiler<'a> {
                     BinaryOperator::Divide => Operation::Divide { dst, left, right },
                     BinaryOperator::LessThan => Operation::LessThan { dst, left, right },
                     BinaryOperator::Equal => Operation::Equal { dst, left, right },
+                    BinaryOperator::And | BinaryOperator::Or => {
+                        return Err(self.error_at(
+                            expression.location,
+                            "unelaborated short-circuit expression",
+                        ));
+                    }
                 };
                 self.emit(operation, expression.location);
                 Ok(dst)
@@ -2369,6 +2375,17 @@ let decorators = {
             "{}",
             irrefutable.message
         );
+    }
+
+    #[test]
+    fn boolean_operators_short_circuit_and_preserve_precedence() {
+        let value =
+            run("('False && (1 / 0 == 0), 'True || (1 / 0 == 0), 'False || 'True && 'True)")
+                .unwrap();
+        assert_eq!(value.to_string(), "('False, 'True, 'True)");
+
+        let error = compile_source("test", "'True && 1").unwrap_err();
+        assert!(error.message.contains("Int"), "{}", error.message);
     }
 
     #[test]

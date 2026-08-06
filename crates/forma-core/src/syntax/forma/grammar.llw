@@ -3,6 +3,7 @@ token Import='import' From='from';
 token SectionLParen='\\(' LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
 token Comma=',' Colon=':' Semicolon=';' Dot='.' At='@' Bang='!' Question='?';
 token Plus='+' Minus='-' Star='*' Slash='/' Less='<' EqualEqual='==' Equal='=';
+token AndAnd='&&' OrOr='||';
 token Arrow='->' FatArrow='=>' Pipe='|>';
 token Int='<integer>' Float='<float>' Bytes='<bytes>';
 token DoubleQuote='"' Backtick='`' RawString='<raw string>' StringText='<string text>' EscapeSequence='<escape>';
@@ -41,6 +42,8 @@ expression:
 | expression ('*' | '/') expression @binary_expr
 | expression ('+' | '-') expression @binary_expr
 | expression ('<' | '==') expression @binary_expr
+| expression '&&' expression @binary_expr
+| expression '||' expression @binary_expr
 | expression '|>' expression @pipeline_expr
 | primary ^
 ;

@@ -159,6 +159,8 @@ pub enum BinaryOperator {
     Divide,
     LessThan,
     Equal,
+    And,
+    Or,
 }
 
 #[derive(Clone, Debug)]
