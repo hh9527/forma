@@ -1,6 +1,6 @@
 use crate::ast::{
-    BinaryOperator, BindingKind, Block, Expr, ExprKind, Pattern, PatternKind, Program,
-    StringPartKind, TypeArgumentKind, located,
+    BinaryOperator, BindingKind, Block, Expr, ExprKind, Pattern, Program, StringPartKind,
+    TypeArgumentKind, located,
 };
 use crate::compiler::compile_expression_with_bindings;
 use crate::heap::{Handle, Heap, PersistentValue};
@@ -6286,38 +6286,8 @@ fn bind_pattern_types_from(
     matched: &TypeDescriptor,
     environment: &mut HashMap<String, TypeDescriptor>,
 ) {
-    match &pattern.value {
-        PatternKind::Binding(name) => {
-            environment.insert(name.value.clone(), matched.clone());
-        }
-        PatternKind::Tuple(items) => {
-            if let TypeDescriptor::Tuple(matched_items) = matched
-                && matched_items.len() == items.len()
-            {
-                for (item, matched) in items.iter().zip(matched_items) {
-                    bind_pattern_types_from(item, matched, environment);
-                }
-            } else {
-                for item in items {
-                    bind_pattern_types_from(item, &TypeDescriptor::Any, environment);
-                }
-            }
-        }
-        PatternKind::Tagged { tag, payload } => {
-            let payload_type = match matched {
-                TypeDescriptor::Tagged {
-                    tag: matched_tag,
-                    payload,
-                } if matched_tag.name() == tag => payload.as_ref(),
-                TypeDescriptor::Enum(variants) => variants
-                    .get(tag)
-                    .and_then(Option::as_deref)
-                    .unwrap_or(&TypeDescriptor::Any),
-                _ => &TypeDescriptor::Any,
-            };
-            bind_pattern_types_from(payload, payload_type, environment);
-        }
-        _ => {}
+    for binding in crate::pattern::analyze_pattern(pattern, matched).bindings {
+        environment.insert(binding.name, binding.ty);
     }
 }
 

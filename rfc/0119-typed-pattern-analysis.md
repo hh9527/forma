@@ -1,6 +1,6 @@
 # RFC 0119: Typed pattern analysis
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0118
 
 ## Summary
@@ -84,4 +84,14 @@ child RFC that defines their user-visible diagnostic.
 
 ## Implementation result
 
-Pending.
+Added a dedicated pure pattern-analysis module over the existing AST and
+`TypeDescriptor`. It reports ordered first bindings, duplicate occurrences,
+three-state compatibility, irrefutability, and conservative whole-variant Enum
+coverage. Focused tests cover precise nested Tuple/Tagged selection, unknown
+shape fallback, payload-sensitive Enum coverage, and duplicate preservation.
+
+Type inference now builds match-arm environments from the shared binding facts
+instead of its former private recursive helper. The other facts remain inert
+until their owning child RFC enables diagnostics or syntax. All existing core
+tests and strict Clippy pass, confirming no language or runtime behavior
+changed in this foundation phase.

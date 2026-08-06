@@ -12,6 +12,7 @@ pub mod lir;
 pub mod module;
 pub mod module_id;
 pub mod parser;
+mod pattern;
 pub mod query;
 pub mod semantic;
 mod sha256;
