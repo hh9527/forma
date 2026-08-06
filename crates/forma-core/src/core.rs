@@ -1,9 +1,11 @@
 use crate::value::{
     CoreArrayFunction, CoreAttributesFunction, CoreCodecFunction, CoreDebugFunction,
     CoreDictFunction, CoreDynFunction, CoreEqFunction, CoreHashFunction, CoreJsonFunction,
-    CorePathFunction, CoreResultFunction, CoreStringFunction, CoreTypeDescFunction, NativeFunction,
+    CoreModelFunction, CorePathFunction, CoreResultFunction, CoreStringFunction,
+    CoreTypeDescFunction, NativeFunction,
 };
 
+pub(crate) const PRELUDE_MODULE: &str = "core/prelude";
 pub(crate) const ARRAY_MODULE: &str = "std/array";
 pub(crate) const ATTRIBUTES_MODULE: &str = "std/attributes";
 pub(crate) const DICT_MODULE: &str = "std/dict";
@@ -429,6 +431,26 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
                 (
                     "stringify_pretty",
                     NativeFunction::core_json(CoreJsonFunction::StringifyPretty),
+                ),
+            ],
+        },
+        CoreModuleSpec {
+            native_id: 18,
+            name: PRELUDE_MODULE,
+            source: include_str!("../modules/core/prelude.forma-sys"),
+            functions: vec![
+                (
+                    "struct",
+                    NativeFunction::core_model(CoreModelFunction::Struct),
+                ),
+                ("enum", NativeFunction::core_model(CoreModelFunction::Enum)),
+                (
+                    "union",
+                    NativeFunction::core_model(CoreModelFunction::Union),
+                ),
+                (
+                    "validate",
+                    NativeFunction::new("validate", 2, crate::types::native_validate),
                 ),
             ],
         },

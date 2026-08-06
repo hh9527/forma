@@ -1,6 +1,6 @@
 # RFC 0138: Core prelude system module
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0137
 
 ## Summary
@@ -62,3 +62,17 @@ fuel behavior do not change.
 5. Explicit calls preserve existing model and validation behavior.
 6. Host registration cannot replace `core/prelude`.
 7. Existing implicit calls remain compatible pending RFC 0139.
+
+## Implementation result
+
+`core/prelude.forma-sys` is embedded and registered as reserved native module
+18. Its four declarations bind the existing VM-managed model constructors and
+validation boundary. The native-module compiler now omits linked symbols from
+the inherited prelude projection, allowing a system module to authoritatively
+declare a capability that existed in its bootstrap input without creating two
+outer bindings.
+
+Tests cover reserved ID uniqueness, normal built-in installation, explicit
+generic validation, model construction through an imported prelude record, and
+unchanged implicit behavior. RFC 0139 will remove the compatibility injection
+and project implicit bindings from this module interface.

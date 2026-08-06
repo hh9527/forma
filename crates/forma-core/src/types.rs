@@ -1115,6 +1115,7 @@ pub(crate) fn analyze_partial_types_recovered_with_query(
         recovered,
         prelude
             .visible_names()
+            .filter(|name| !external_values.contains_key(*name))
             .chain(external_values.keys())
             .cloned()
             .collect::<Vec<_>>(),
@@ -1471,11 +1472,17 @@ pub(crate) fn analyze_program_with_bindings_observed(
         program,
         prelude
             .visible_names()
+            .filter(|name| !external_values.contains_key(*name))
             .chain(external_values.keys())
             .cloned()
             .collect::<Vec<_>>(),
     );
-    let prelude_values = prelude.values.clone();
+    let prelude_values = prelude
+        .values
+        .iter()
+        .filter(|(name, _)| !external_values.contains_key(*name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
     let BootstrapPrelude {
         values: mut tool_values,
         types: mut static_environment,
@@ -3398,7 +3405,7 @@ fn write_native_type_record(
     context.make_dict(context.result(), &fields)
 }
 
-fn native_validate(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+pub(crate) fn native_validate(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
     let type_register = context.argument(0)?;
     let value_register = context.argument(1)?;
     let descriptor = decode_native_type(context.value(type_register)?)?;
