@@ -3214,6 +3214,31 @@ fn core_prelude_schemes() -> HashMap<String, TypeScheme> {
     ])
 }
 
+pub(crate) fn audit_default_prelude_interface(interface: &ModuleInterface) -> Result<(), String> {
+    let expected = ["enum", "struct", "union", "validate"]
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let actual = interface
+        .exports
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err("core/prelude must export exactly enum, struct, union, and validate".into());
+    }
+    let bootstrap = core_prelude_schemes();
+    let expected_validate = &bootstrap["validate"];
+    let declared_validate = &interface.exports["validate"];
+    if declared_validate.body != expected_validate.body {
+        return Err(format!(
+            "core/prelude validate scheme {} differs from bootstrap {}",
+            declared_validate.display_name(),
+            expected_validate.display_name()
+        ));
+    }
+    Ok(())
+}
+
 fn option_descriptor(item: TypeDescriptor) -> TypeDescriptor {
     TypeDescriptor::Enum(BTreeMap::from([
         ("None".into(), None),

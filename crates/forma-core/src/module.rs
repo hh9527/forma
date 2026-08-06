@@ -4,7 +4,7 @@ use crate::compiler::{
     compile_program_analyzed_in, compile_program_with_promoted_types, function_contract_arity,
     type_link_key,
 };
-use crate::core::module_specs;
+use crate::core::{PRELUDE_MODULE, module_specs};
 use crate::heap::{Heap, PersistentValue, publish_root, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
 use crate::module_id::{ModuleAuthority, ModuleFormat, ModuleId, ModuleResolver, ResolvedModule};
@@ -220,6 +220,7 @@ fn install_native_modules(
         functions: spec.functions.clone(),
         core: false,
     }));
+    specs.sort_by_key(|spec| u8::from(spec.name != PRELUDE_MODULE));
     let mut native_module_ids = HashMap::new();
     for spec in &specs {
         let valid_id = if spec.core {
@@ -242,6 +243,7 @@ fn install_native_modules(
             )));
         }
     }
+    let mut default_prelude = None;
     for spec in specs {
         let source_name = format!("<{}>", spec.name);
         let source_id = sources.add(source_name.clone(), &spec.source);
@@ -328,7 +330,7 @@ fn install_native_modules(
             )));
         }
         let mut account = QuotaAccount::new(Quota::new(100_000, 1_000, u64::MAX));
-        let analysis = analyze_program_with_bindings_observed(
+        let mut analysis = analyze_program_with_bindings_observed(
             &source_name,
             &program,
             &mut account,
@@ -345,6 +347,9 @@ fn install_native_modules(
                 |diagnostic| ModuleError::new(sources.render(diagnostic)),
             )
         })?;
+        if let Some(exports) = &default_prelude {
+            project_default_prelude(&mut analysis, exports);
+        }
         let function = compile_program_analyzed_in(sources.get(source_id), &program, &analysis)
             .map_err(|error| ModuleError::new(error.to_string()))?;
         let arena = Vm::new()
@@ -357,9 +362,44 @@ fn install_native_modules(
         let root = arena
             .publish(&mut main.heap)
             .map_err(|error| ModuleError::new(error.to_string()))?;
+        if spec.name == PRELUDE_MODULE {
+            crate::types::audit_default_prelude_interface(&analysis.module_interface)
+                .map_err(ModuleError::new)?;
+            default_prelude = Some(default_prelude_exports(&value, &analysis.module_interface)?);
+        }
         modules.insert(spec.name, (value, root, analysis.module_interface));
     }
     Ok(modules)
+}
+
+fn default_prelude_exports(
+    value: &Value,
+    interface: &ModuleInterface,
+) -> Result<BTreeMap<String, Value>, ModuleError> {
+    let Value::Dict(exports) = value else {
+        return Err(ModuleError::new("core/prelude must export a Dict"));
+    };
+    let values = exports
+        .shape()
+        .fields()
+        .iter()
+        .cloned()
+        .zip(exports.values().iter().cloned())
+        .collect::<BTreeMap<_, _>>();
+    let value_names = values.keys().collect::<BTreeSet<_>>();
+    let interface_names = interface.exports.keys().collect::<BTreeSet<_>>();
+    if value_names != interface_names {
+        return Err(ModuleError::new(
+            "core/prelude value and interface exports differ",
+        ));
+    }
+    Ok(values)
+}
+
+fn project_default_prelude(analysis: &mut Analysis, exports: &BTreeMap<String, Value>) {
+    for (name, value) in exports {
+        analysis.prelude.insert(name.clone(), value.clone());
+    }
 }
 
 impl fmt::Debug for ModuleRuntime {
@@ -1640,6 +1680,10 @@ impl ModuleLoader {
                 |diagnostic| ModuleError::new(self.sources.render(diagnostic)),
             )
         })?;
+        if let Some((value, _, interface)) = self.core_modules.get(PRELUDE_MODULE) {
+            let exports = default_prelude_exports(value, interface)?;
+            project_default_prelude(&mut analysis, &exports);
+        }
         let source_file = self.sources.get(source_id);
         let mut promoted_types = HashSet::new();
         let mut promoted_type_roots = BTreeMap::new();
@@ -1977,14 +2021,14 @@ mod tests {
 import result from "std/result";
 type User = prelude.struct('None, {name: String});
 let user: User = {name: result.unwrap(prelude.validate(String, "forma"))};
-user"#,
+(user, struct == prelude.struct, enum == prelude.enum, union == prelude.union, validate == prelude.validate)"#,
         )
         .unwrap();
 
         let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(
             module.execute(100_000).unwrap().to_string(),
-            "{name: \"forma\"}"
+            "({name: \"forma\"}, 'True, 'True, 'True, 'True)"
         );
         fs::remove_dir_all(directory).unwrap();
     }

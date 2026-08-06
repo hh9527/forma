@@ -1,6 +1,6 @@
 # RFC 0136: Kernel and default prelude
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0028, RFC 0048, RFC 0114, RFC 0134
 - Child RFCs: RFC 0137 through RFC 0139
 
@@ -142,3 +142,23 @@ removes superseded prelude assembly paths.
    prelude artifact.
 7. The prelude cannot depend on itself or on later module layers.
 8. Full workspace tests and static checks pass after each child RFC.
+
+## Implementation result
+
+RFCs 0137 through 0139 establish the two-level boundary. Analysis owns a
+single bootstrap artifact; `core/prelude.forma-sys` declares the four ordinary
+capabilities in a resolver-registered module; and each `MainWorld` installs
+that module first and projects its exact exported closures into later
+bytecode.
+
+The implementation keeps heap ownership local to `MainWorld` rather than
+moving it into `Engine`. Consequently, a prelude is executed once per module
+world, not globally once per `Engine`; strict loading and each recovery build
+already create distinct worlds. This is the correct lifetime for
+`PersistentValue` in the current layered-heap architecture.
+
+Runtime Dict exports and the analyzed module interface must have the same
+field set. The precise generic `validate` scheme is audited against the
+bootstrap projection. Explicit and implicit access share opaque closure
+identity for all four capabilities. Direct parser/type-analysis entry points
+without a module world retain the deterministic kernel bootstrap fallback.

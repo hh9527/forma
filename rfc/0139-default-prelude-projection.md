@@ -1,6 +1,6 @@
 # RFC 0139: Default prelude projection
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0138
 
 ## Summary
@@ -61,3 +61,20 @@ order.
    module set and interface.
 7. Direct frontend analysis retains a deterministic kernel bootstrap when no
    module world exists.
+
+## Implementation result
+
+Native installation now orders `core/prelude` first, audits its exact export
+set and `validate` body scheme, and retains its exported function values as the
+default projection for every later built-in. User-module analysis replaces the
+four bootstrap runtime entries with those same exported closures before
+metadata and program bytecode are compiled.
+
+The projection validates that runtime Dict fields and `ModuleInterface`
+exports are identical. Tests exercise explicit typed model construction and
+generic validation, then compare every explicit function with its implicit
+counterpart using opaque function identity; all four comparisons are true.
+
+Strict and recoverable worlds share the same native installer and resolver
+registration. Standalone frontend analysis, which has no `MainWorld` or module
+registry, intentionally retains the deterministic RFC 0137 bootstrap fallback.
