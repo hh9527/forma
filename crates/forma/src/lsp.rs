@@ -12,7 +12,7 @@ use async_lsp::{
     AnyEvent, AnyNotification, AnyRequest, ClientSocket, ErrorCode, LspService, RequestId,
     ResponseError,
 };
-use forma::{
+use forma_core::{
     CancellationToken, CompletionKind, DocumentVersion, Engine, EngineConfig, FactState, Location,
     PositionEncoding, QueryError, TextEdit, TextPosition, TextRange, Workspace, WorkspaceSnapshot,
 };
@@ -20,6 +20,31 @@ use lsp::notification::Notification as _;
 use lsp::request::Request as _;
 use serde::de::DeserializeOwned;
 use tower_service::Service;
+
+pub fn run_stdio(root: PathBuf, config: EngineConfig) -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let local = tokio::task::LocalSet::new();
+    runtime.block_on(local.run_until(async move {
+        let (main_loop, _) =
+            async_lsp::MainLoop::new_server(|client| Server::new(root, config, client));
+
+        #[cfg(unix)]
+        let (stdin, stdout) = (
+            async_lsp::stdio::PipeStdin::lock_tokio()?,
+            async_lsp::stdio::PipeStdout::lock_tokio()?,
+        );
+        #[cfg(not(unix))]
+        let (stdin, stdout) = (
+            tokio_util::compat::TokioAsyncReadCompatExt::compat(tokio::io::stdin()),
+            tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(tokio::io::stdout()),
+        );
+
+        main_loop.run_buffered(stdin, stdout).await
+    }))?;
+    Ok(())
+}
 
 type RequestFuture =
     Pin<Box<dyn Future<Output = Result<serde_json::Value, ResponseError>> + 'static>>;
@@ -101,7 +126,7 @@ impl LspService for Server {
                 async_lsp::Error::Protocol("exit received before shutdown".to_owned()),
             )),
             Err(error) => {
-                eprintln!("forma-lsp notification error: {error}");
+                eprintln!("forma lsp notification error: {error}");
                 ControlFlow::Continue(())
             }
         }
@@ -339,7 +364,7 @@ fn initialize(
             ..lsp::ServerCapabilities::default()
         },
         server_info: Some(lsp::ServerInfo {
-            name: "forma-lsp".to_owned(),
+            name: "forma".to_owned(),
             version: Some(env!("CARGO_PKG_VERSION").to_owned()),
         }),
     })
@@ -535,8 +560,8 @@ async fn publish_diagnostics(state: &Rc<RefCell<State>>, snapshot: &WorkspaceSna
                 Some(lsp::Diagnostic {
                     range: to_lsp_range(snapshot, primary.location, encoding)?,
                     severity: Some(match diagnostic.severity {
-                        forma::source::Severity::Error => lsp::DiagnosticSeverity::ERROR,
-                        forma::source::Severity::Warning => lsp::DiagnosticSeverity::WARNING,
+                        forma_core::source::Severity::Error => lsp::DiagnosticSeverity::ERROR,
+                        forma_core::source::Severity::Warning => lsp::DiagnosticSeverity::WARNING,
                     }),
                     message: diagnostic.message.clone(),
                     related_information: Some(
@@ -567,9 +592,9 @@ async fn publish_diagnostics(state: &Rc<RefCell<State>>, snapshot: &WorkspaceSna
 
 async fn definition_at<'a>(
     snapshot: &'a WorkspaceSnapshot,
-    context: &forma::QueryContext,
+    context: &forma_core::QueryContext,
     location: Location,
-) -> Result<Option<&'a forma::Definition>, ResponseError> {
+) -> Result<Option<&'a forma_core::Definition>, ResponseError> {
     if let Some(reference) = snapshot
         .query_reference_at(context, location)
         .await
@@ -725,7 +750,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::*;
-    use forma::Quota;
+    use forma_core::Quota;
 
     fn config() -> EngineConfig {
         EngineConfig {
@@ -739,7 +764,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("forma-lsp-{unique}"));
+        let root = std::env::temp_dir().join(format!("forma-lsp-test-{unique}"));
         std::fs::create_dir_all(&root).expect("create fixture root");
         let captured = Rc::new(RefCell::new(None));
         let (main_loop, _) = async_lsp::MainLoop::new_server({
@@ -1605,7 +1630,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("forma-lsp-loop-{unique}"));
+        let root = std::env::temp_dir().join(format!("forma-lsp-loop-test-{unique}"));
         std::fs::create_dir_all(&root).expect("create fixture root");
         let uri = lsp::Url::from_directory_path(&root).expect("fixture URI");
         let mut input = Vec::new();

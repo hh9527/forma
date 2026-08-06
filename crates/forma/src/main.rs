@@ -1,4 +1,4 @@
-use forma::{
+use forma_core::{
     DebugEvent, DebugSink, DefinitionKind, Engine, EngineConfig, Location, Quota, TextRange, Value,
     Vm, WorkspaceSnapshot, WorkspaceTypeId, parse_json,
 };
@@ -14,12 +14,15 @@ const EVALUATION_FUEL: usize = 1_000_000;
 const STACK_SLOTS: usize = 65_536;
 const ALLOCATION_BYTES: u64 = 256 * 1024 * 1024;
 
-fn engine() -> Engine {
-    Engine::new(EngineConfig {
+fn engine_config() -> EngineConfig {
+    EngineConfig {
         module_quota: Quota::new(EVALUATION_FUEL, STACK_SLOTS, ALLOCATION_BYTES),
         session_quota: Quota::new(EVALUATION_FUEL, STACK_SLOTS, ALLOCATION_BYTES),
-    })
-    .with_debug_sink(Arc::new(StderrDebugSink))
+    }
+}
+
+fn engine() -> Engine {
+    Engine::new(engine_config()).with_debug_sink(Arc::new(StderrDebugSink))
 }
 
 struct StderrDebugSink;
@@ -51,12 +54,22 @@ fn run_cli(arguments: Vec<String>) -> Result<(), String> {
         "check" => check_command(&arguments[1..]),
         "types" => types_command(&arguments[1..]),
         "show" => show_command(&arguments[1..]),
+        "lsp" => lsp_command(&arguments[1..]),
         "help" | "--help" | "-h" => {
             println!("{}", usage());
             Ok(())
         }
         other => Err(format!("unknown command {other:?}\n{}", usage())),
     }
+}
+
+fn lsp_command(arguments: &[String]) -> Result<(), String> {
+    if !arguments.is_empty() {
+        return Err(format!("lsp does not accept arguments\n{}", usage()));
+    }
+    let root = env::current_dir()
+        .map_err(|error| format!("cannot determine current directory: {error}"))?;
+    forma::lsp::run_stdio(root, engine_config()).map_err(|error| error.to_string())
 }
 
 fn run_command(arguments: &[String]) -> Result<(), String> {
@@ -135,7 +148,7 @@ fn canonical_build_json(value: &Value) -> Result<String, String> {
         value: &'a Value,
         path: &str,
         fields: &[&str],
-    ) -> Result<&'a forma::Dict, String> {
+    ) -> Result<&'a forma_core::Dict, String> {
         let Value::Dict(dict) = value else {
             return Err(format!(
                 "{path} must be a Dict, found {}",
@@ -303,7 +316,7 @@ fn canonical_exec_json(value: &Value) -> Result<String, String> {
         value: &'a Value,
         path: &str,
         fields: &[&str],
-    ) -> Result<&'a forma::Dict, String> {
+    ) -> Result<&'a forma_core::Dict, String> {
         let Value::Dict(dict) = value else {
             return Err(format!(
                 "{path} must be a Dict, found {}",
@@ -805,5 +818,5 @@ fn read_input(path: &str) -> Result<Value, String> {
 }
 
 fn usage() -> String {
-    "usage:\n  forma run <module.forma> [--input <file|->]\n  forma exec --dry-run <module.forma> [-- <arguments>...]\n  forma build --dry-run <module.forma>\n  forma check <module.forma>\n  forma types <module.forma>\n  forma show <module.forma> [at <source> <line> <column>]".into()
+    "usage:\n  forma run <module.forma> [--input <file|->]\n  forma exec --dry-run <module.forma> [-- <arguments>...]\n  forma build --dry-run <module.forma>\n  forma check <module.forma>\n  forma types <module.forma>\n  forma show <module.forma> [at <source> <line> <column>]\n  forma lsp".into()
 }

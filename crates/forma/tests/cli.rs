@@ -8,13 +8,20 @@ fn fixture_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("forma-cli-test-{unique}"));
+    let path = std::env::temp_dir().join(format!("forma-test-{unique}"));
     fs::create_dir(&path).unwrap();
     path
 }
 
 fn forma() -> Command {
     Command::new(env!("CARGO_BIN_EXE_forma"))
+}
+
+#[test]
+fn help_exposes_the_lsp_subcommand() {
+    let output = forma().arg("help").output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("forma lsp"));
 }
 
 #[test]
