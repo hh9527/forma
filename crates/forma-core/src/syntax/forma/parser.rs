@@ -70,6 +70,9 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
     fn predicate_binding_2(&self) -> bool {
         self.current == Token::Native && self.peek(1) != Token::Type
     }
+    fn predicate_binding_3(&self) -> bool {
+        self.current == Token::Let && matches!(self.peek(1), Token::LParen | Token::LBrace)
+    }
     fn predicate_manifest_dict_1(&self) -> bool {
         self.peek(1) != Token::RBrace
     }

@@ -151,6 +151,7 @@ pub struct DictFieldKind {
 pub struct MatchArmKind {
     pub pattern: Pattern,
     pub value: Expr,
+    pub irrefutable_required: bool,
 }
 
 #[derive(Clone, Debug)]

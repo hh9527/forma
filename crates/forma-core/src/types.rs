@@ -5260,6 +5260,19 @@ impl<'a> GenericInference<'a> {
                     let mut arm_environment = environment.clone();
                     let analysis =
                         crate::pattern::analyze_pattern(&arm.value.pattern, &resolved_value_type);
+                    if arm.value.irrefutable_required && !analysis.irrefutable {
+                        let location = crate::pattern::first_refutable_location(
+                            &arm.value.pattern,
+                            &resolved_value_type,
+                        )
+                        .unwrap_or(arm.value.pattern.location);
+                        self.pattern_diagnostics.entry(location).or_insert_with(|| {
+                            format!(
+                                "refutable let pattern for {}",
+                                resolved_value_type.display_name()
+                            )
+                        });
+                    }
                     let redundant_variants = analysis
                         .possible_variants
                         .iter()
@@ -8641,6 +8654,59 @@ mod tests {
                 .to_string()
                 .contains("prior arms cover every value"),
             "{struct_then_arm}"
+        );
+    }
+
+    #[test]
+    fn destructuring_let_requires_irrefutable_known_shapes() {
+        let valid = analyze_source(
+            "let.forma",
+            "{ let (count, {name}) = (1, {name: \"Ada\"}); (count, name) }",
+        )
+        .unwrap();
+        assert_eq!(valid.display(valid.result_type), "(Int, String)");
+        let name = valid
+            .hir
+            .definitions()
+            .iter()
+            .find(|definition| {
+                definition.kind == HirDefinitionKind::Pattern && definition.name == "name"
+            })
+            .unwrap();
+        assert_eq!(valid.display(valid.definition_types[&name.id]), "String");
+
+        let wrong_arity =
+            analyze_source("let.forma", "{ let (left, right) = (1,); left }").unwrap_err();
+        assert!(
+            wrong_arity
+                .to_string()
+                .contains("refutable let pattern for (Int)"),
+            "{wrong_arity}"
+        );
+
+        let dynamic = analyze_source(
+            "let.forma",
+            "let pair: Any = (1, 2); { let (left, right) = pair; left }",
+        )
+        .unwrap_err();
+        assert!(
+            dynamic
+                .to_string()
+                .contains("refutable let pattern for Any"),
+            "{dynamic}"
+        );
+
+        let nested = analyze_source(
+            "let.forma",
+            "let option: Option(Int) = 'Some(1);\
+             { let (first, 'Some(value)) = (0, option); value }",
+        )
+        .unwrap_err();
+        assert!(
+            nested
+                .to_string()
+                .contains("refutable let pattern for (Int, enum"),
+            "{nested}"
         );
     }
 

@@ -101,6 +101,15 @@ struct Lowerer<'a> {
     cst: &'a CstData,
 }
 
+enum BlockEntry {
+    Binding(Binding),
+    Destructure {
+        pattern: Pattern,
+        value: Expr,
+        location: Location,
+    },
+}
+
 enum CallArgument {
     Expression(Expr),
     Bare {
@@ -172,7 +181,7 @@ impl<'a> Lowerer<'a> {
         Ok(located(
             ProgramKind {
                 manifest: self.manifest()?,
-                body: self.block_body(body_node)?,
+                body: self.block_body_with_destructuring(body_node, false)?,
             },
             self.location(root),
         ))
@@ -235,6 +244,14 @@ impl<'a> Lowerer<'a> {
     }
 
     fn block_body(&self, node: NodeRef) -> Result<Block, Diagnostic> {
+        self.block_body_with_destructuring(node, true)
+    }
+
+    fn block_body_with_destructuring(
+        &self,
+        node: NodeRef,
+        allow_destructuring: bool,
+    ) -> Result<Block, Diagnostic> {
         let body = if self.rule(node) == Some(Rule::Block) {
             self.rule_children(node)
                 .find(|child| self.rule(*child) == Some(Rule::Body))
@@ -243,7 +260,7 @@ impl<'a> Lowerer<'a> {
             node
         };
         let children = self.children(body).collect::<Vec<_>>();
-        let mut bindings = Vec::new();
+        let mut entries = Vec::new();
         let mut result = None;
         for child in children {
             match self.rule(child) {
@@ -255,12 +272,41 @@ impl<'a> Lowerer<'a> {
                     | Rule::NativeTypeBinding
                     | Rule::TypeBinding
                     | Rule::ImportBinding,
-                ) => bindings.push(self.binding(child)?),
+                ) => entries.push(BlockEntry::Binding(self.binding(child)?)),
+                Some(Rule::LetPatternBinding) => {
+                    if !allow_destructuring {
+                        return Err(self.error(
+                            child,
+                            "destructuring let is allowed only inside a local block",
+                        ));
+                    }
+                    let (pattern, value) = self.let_pattern_binding(child)?;
+                    entries.push(BlockEntry::Destructure {
+                        pattern,
+                        value,
+                        location: self.location(child),
+                    });
+                }
                 Some(Rule::Binding) => {
                     let inner = self
                         .first_rule(child)
                         .ok_or_else(|| self.error(child, "empty binding"))?;
-                    bindings.push(self.binding(inner)?);
+                    if self.rule(inner) == Some(Rule::LetPatternBinding) {
+                        if !allow_destructuring {
+                            return Err(self.error(
+                                inner,
+                                "destructuring let is allowed only inside a local block",
+                            ));
+                        }
+                        let (pattern, value) = self.let_pattern_binding(inner)?;
+                        entries.push(BlockEntry::Destructure {
+                            pattern,
+                            value,
+                            location: self.location(inner),
+                        });
+                    } else {
+                        entries.push(BlockEntry::Binding(self.binding(inner)?));
+                    }
                 }
                 Some(_) => result = Some(self.expression(child)?),
                 None if self.is_expression(child) => result = Some(self.expression(child)?),
@@ -269,13 +315,63 @@ impl<'a> Lowerer<'a> {
         }
         let result =
             result.ok_or_else(|| self.error(body, "a block requires a result expression"))?;
-        Ok(located(
+        let block_location = self.location(node);
+        let mut block = located(
             BlockKind {
-                bindings,
+                bindings: Vec::new(),
                 result: Box::new(result),
             },
-            self.location(node),
-        ))
+            block_location,
+        );
+        for entry in entries.into_iter().rev() {
+            match entry {
+                BlockEntry::Binding(binding) => block.value.bindings.insert(0, binding),
+                BlockEntry::Destructure {
+                    pattern,
+                    value,
+                    location,
+                } => {
+                    let body_location = block.location;
+                    let body = located(ExprKind::Block(block), body_location);
+                    let arm = located(
+                        MatchArmKind {
+                            pattern,
+                            value: body,
+                            irrefutable_required: true,
+                        },
+                        location,
+                    );
+                    block = located(
+                        BlockKind {
+                            bindings: Vec::new(),
+                            result: Box::new(located(
+                                ExprKind::Match {
+                                    value: Box::new(value),
+                                    arms: vec![arm],
+                                },
+                                location,
+                            )),
+                        },
+                        block_location,
+                    );
+                }
+            }
+        }
+        Ok(block)
+    }
+
+    fn let_pattern_binding(&self, node: NodeRef) -> Result<(Pattern, Expr), Diagnostic> {
+        let equal = self.first_token(node, Token::Equal)?;
+        let equal_start = self.cst.span(equal).start;
+        let pattern = self
+            .children(node)
+            .find(|child| self.is_pattern(*child) && self.cst.span(*child).end <= equal_start)
+            .ok_or_else(|| self.error(node, "destructuring let has no pattern"))?;
+        let value = self
+            .children(node)
+            .find(|child| self.is_expression(*child) && self.cst.span(*child).start > equal_start)
+            .ok_or_else(|| self.error(node, "destructuring let has no value"))?;
+        Ok((self.pattern(pattern)?, self.expression(value)?))
     }
 
     fn binding(&self, node: NodeRef) -> Result<Binding, Diagnostic> {
@@ -976,6 +1072,7 @@ impl<'a> Lowerer<'a> {
             MatchArmKind {
                 pattern: self.pattern(pattern)?,
                 value: self.expression(value)?,
+                irrefutable_required: false,
             },
             self.location(node),
         ))
@@ -2018,6 +2115,34 @@ mod tests {
         assert_eq!(fields[0].name.value, "name");
         assert!(matches!(fields[0].pattern.value, PatternKind::Binding(_)));
         assert!(matches!(fields[1].pattern.value, PatternKind::Struct(_)));
+    }
+
+    #[test]
+    fn elaborates_local_destructuring_let_into_an_irrefutable_match() {
+        let program = parse(
+            "test.forma",
+            "{ let (left, {name}) = (1, {name: \"Ada\"}); (left, name) }",
+        )
+        .unwrap();
+        let ExprKind::Block(block) = &program.value.body.value.result.value else {
+            panic!("expected source block");
+        };
+        let ExprKind::Match { arms, .. } = &block.value.result.value else {
+            panic!("expected elaborated match");
+        };
+        assert_eq!(arms.len(), 1);
+        assert!(arms[0].value.irrefutable_required);
+        assert!(matches!(arms[0].value.pattern.value, PatternKind::Tuple(_)));
+    }
+
+    #[test]
+    fn rejects_module_level_destructuring_let() {
+        let error = parse("test.forma", "let (left, right) = (1, 2); left").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("destructuring let is allowed only inside a local block")
+        );
     }
 
     #[test]

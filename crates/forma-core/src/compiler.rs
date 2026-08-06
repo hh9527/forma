@@ -2152,6 +2152,18 @@ let decorators = {
     }
 
     #[test]
+    fn local_destructuring_let_preserves_order_scope_and_nested_selection() {
+        let value = run("let outer = \"outer\"; {
+            let (left, user) = (1, {name: \"Ada\", address: {city: \"London\"}});
+            let {name, address: {city}} = user;
+            let outer = name;
+            (left, outer, city)
+        }")
+        .unwrap();
+        assert_eq!(value.to_string(), "(1, \"Ada\", \"London\")");
+    }
+
+    #[test]
     fn non_exhaustive_match_has_a_dedicated_error() {
         let error = run("match 'None { 'Some => 1 }").unwrap_err();
         let ExecutionError::Runtime(error) = error else {

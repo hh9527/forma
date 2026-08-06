@@ -1,6 +1,6 @@
 # RFC 0123: Irrefutable `let` destructuring
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0120, RFC 0121, RFC 0122
 
 ## Summary
@@ -111,4 +111,21 @@ Plain identifier lets retain their existing optional annotation.
 
 ## Implementation result
 
-Pending.
+Added a dedicated parser branch for Tuple/Struct destructuring lets inside
+local blocks. The lowerer folds block entries from the end and elaborates each
+destructuring binding into a one-arm Match whose body contains the exact
+remaining block. Ordinary bindings on either side retain source order and
+plain identifier lets retain their existing AST and generalization path.
+
+Match arms now carry one internal irrefutability requirement bit. Inference
+uses the shared analysis and reports the first authored refutable nested
+location for unknown shapes, Tuple arity mismatches, missing Struct fields, or
+refutable children. Successful pattern definitions receive precise semantic
+types through the existing pattern fact path. Compiler, HIR, selection
+provenance, and VM behavior are reused without new bytecode.
+
+Tests cover parser elaboration, the module-level restriction, nested Tuple and
+Struct execution, sequential scope and shadowing, semantic binding types,
+wrong arity, Any input, and a refutable Enum payload. The complete core suite
+passes. Binder annotations, module-top-level destructuring, and polymorphic
+generalization inside destructured values remain deferred as specified.
