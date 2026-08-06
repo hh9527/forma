@@ -254,6 +254,22 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
                     "parse",
                     NativeFunction::new("std/string.parse", 2, crate::regex::native_parse),
                 ),
+                (
+                    "decode_by_parse",
+                    NativeFunction::new(
+                        "std/string.decode_by_parse",
+                        2,
+                        crate::regex::native_decode_by_parse,
+                    ),
+                ),
+                (
+                    "encode_by_display",
+                    NativeFunction::new(
+                        "std/string.encode_by_display",
+                        2,
+                        crate::regex::native_encode_by_display,
+                    ),
+                ),
             ],
         },
         CoreModuleSpec {

@@ -123,6 +123,19 @@ fmt.display(Endpoint, { host: "localhost", port: 8080 })
 
 模板在类型构造阶段完成校验和编译。字段替换会递归使用字段类型的 Display capability，因此嵌套的修饰 struct 可以自然组合，运行时不需要重新解析模板。面向诊断的 `Debug` 输出仍是另一项后续能力。
 
+类型可以显式选择将这套文本表示作为结构化 codec 的容器表示：
+
+```forma
+@string.decode_by_parse
+@string.encode_by_display
+@fmt.display_by("{host}:{port}")
+@re.parse_by(re.compile(r"^(?P<host>[^:]+):(?P<port>\d+)$"))
+@struct
+type Endpoint = { host: String, port: Int };
+```
+
+此后 `codec.decode` 接受 String，`codec.encode` 产生 String；即使 `Endpoint` 嵌套在其他结构中，JSON Schema 也会将它描述为 string。两个 bridge 声明必须成对，并且目前只作用于类型容器；field 级别的覆盖策略明确留待后续。
+
 ### 确定的执行与输出计划
 
 模块没有默认返回值；它显式导出命名值，Host 再按运行模式选择入口。执行入口是一个普通函数：

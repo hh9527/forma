@@ -6537,6 +6537,54 @@ fn is_bool_enum(variants: &BTreeMap<String, CodecEnumVariant>) -> bool {
             .is_some_and(|variant| variant.payload.is_none())
 }
 
+fn text_codec_bridge(schema: &CodecType, view: &HeapView<'_>) -> Result<bool, String> {
+    let decode = schema.attributes.get("std/string.decode_by_parse");
+    let encode = schema.attributes.get("std/string.encode_by_display");
+    if decode.is_none() && encode.is_none() {
+        return Ok(false);
+    }
+    if decode.is_none() || encode.is_none() {
+        return Err(
+            "std/string.decode_by_parse and std/string.encode_by_display must be used together"
+                .into(),
+        );
+    }
+    for (name, marker) in [
+        ("std/string.decode_by_parse", decode.expect("checked")),
+        ("std/string.encode_by_display", encode.expect("checked")),
+    ] {
+        if view.atom_text(*marker).map_err(|error| error.to_string())? != Some("True") {
+            return Err(format!("{name} must be 'True"));
+        }
+    }
+    Ok(true)
+}
+
+fn parsed_codec_node(value: crate::regex::ParsedValue, loc: Option<crate::Loc>) -> CodecNode {
+    match value {
+        crate::regex::ParsedValue::String(value) => CodecNode::String(value, loc),
+        crate::regex::ParsedValue::Int(value) => {
+            CodecNode::Existing(RichValue::new(RuntimeValue::Int(value), loc))
+        }
+        crate::regex::ParsedValue::Float(value) => {
+            CodecNode::Existing(RichValue::new(RuntimeValue::Float(value), loc))
+        }
+        crate::regex::ParsedValue::None => CodecNode::Atom(BuiltinAtom::None, loc),
+        crate::regex::ParsedValue::Some(value) => CodecNode::Tagged {
+            tag: Box::new(CodecNode::Atom(BuiltinAtom::Some, loc)),
+            payload: Box::new(parsed_codec_node(*value, loc)),
+            loc,
+        },
+        crate::regex::ParsedValue::Struct(fields) => CodecNode::Dict(
+            fields
+                .into_iter()
+                .map(|(name, value)| (name, parsed_codec_node(value, loc)))
+                .collect(),
+            loc,
+        ),
+    }
+}
+
 fn transform_codec(
     schema: &CodecType,
     value: RichValue,
@@ -6561,6 +6609,47 @@ fn transform_codec(
         current,
         background: Some(background),
     };
+    if !matches!(schema.kind, CodecKind::UpLink(_)) {
+        let bridged = text_codec_bridge(schema, &view).map_err(|message| {
+            CodecFailure::new(format!("{path}: {message}"), value, schema.rule)
+        })?;
+        if bridged {
+            let metadata = ValueRef {
+                value: schema.rule,
+                view,
+            };
+            return match direction {
+                CodecDirection::Decode => {
+                    let source = view
+                        .string_text(value)
+                        .map_err(|error| CodecFailure::new(error.to_string(), value, schema.rule))?
+                        .ok_or_else(|| {
+                            CodecFailure::new(
+                                format!("{path}: expected String text representation"),
+                                value,
+                                schema.rule,
+                            )
+                        })?;
+                    crate::regex::parse_value(metadata, source)
+                        .map(|parsed| parsed_codec_node(parsed, value.loc()))
+                        .map_err(|message| {
+                            CodecFailure::new(format!("{path}: {message}"), value, schema.rule)
+                        })
+                }
+                CodecDirection::Encode => {
+                    crate::fmt::display_value(metadata, ValueRef { value, view })
+                        .map(|text| CodecNode::String(text, value.loc()))
+                        .map_err(|error| {
+                            CodecFailure::new(
+                                format!("{path}: {}", error.message),
+                                value,
+                                schema.rule,
+                            )
+                        })
+                }
+            };
+        }
+    }
     match &schema.kind {
         CodecKind::UpLink(handle) => {
             let resolved = view
@@ -7961,6 +8050,19 @@ fn generate_json_schema_node(
     definitions: &mut BTreeMap<String, CodecNode>,
 ) -> Result<CodecNode, CodecFailure> {
     let loc = schema.rule.loc();
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    if !matches!(schema.kind, CodecKind::UpLink(_))
+        && text_codec_bridge(schema, &view)
+            .map_err(|message| CodecFailure::new(message, data, schema.rule))?
+    {
+        return Ok(schema_dict(
+            vec![("type", schema_string("string", loc))],
+            loc,
+        ));
+    }
     if let Some(item) = option_item(schema) {
         return Ok(schema_dict(
             vec![(

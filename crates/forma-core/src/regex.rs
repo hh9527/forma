@@ -35,6 +35,15 @@ struct FieldPlan {
     optional: bool,
 }
 
+pub(crate) enum ParsedValue {
+    String(String),
+    Int(i64),
+    Float(f64),
+    None,
+    Some(Box<Self>),
+    Struct(Vec<(String, Self)>),
+}
+
 fn regex_type(context: &CallContext<'_, '_>) -> Result<NativeType, NativeError> {
     context
         .value(context.upvalue(0)?)?
@@ -338,32 +347,17 @@ fn set_error(context: &mut CallContext<'_, '_>, message: String) -> Result<(), N
     context.make_tagged(context.result(), tag, error)
 }
 
-fn execute_plan(
-    context: &mut CallContext<'_, '_>,
-    plan: &ParsePlan,
-    input: &str,
-    output: crate::lir::RegisterId,
-) -> Result<(), String> {
+fn execute_plan(plan: &ParsePlan, input: &str) -> Result<ParsedValue, String> {
     match plan {
-        ParsePlan::String => context
-            .set_string(output, input)
-            .map_err(|error| error.message),
+        ParsePlan::String => Ok(ParsedValue::String(input.to_owned())),
         ParsePlan::Int => input
             .parse::<i64>()
             .map_err(|_| "input is not a valid Int".to_owned())
-            .and_then(|value| {
-                context
-                    .set_int(output, value)
-                    .map_err(|error| error.message)
-            }),
+            .map(ParsedValue::Int),
         ParsePlan::Float => input
             .parse::<f64>()
             .map_err(|_| "input is not a valid Float".to_owned())
-            .and_then(|value| {
-                context
-                    .set_float(output, value)
-                    .map_err(|error| error.message)
-            }),
+            .map(ParsedValue::Float),
         ParsePlan::Regex { compiled, fields } => {
             let captures = compiled
                 .regex
@@ -371,55 +365,119 @@ fn execute_plan(
                 .ok_or_else(|| "input does not match regular expression".to_owned())?;
             let mut values = Vec::with_capacity(fields.len());
             for (name, field) in fields {
-                let register = context.scratch().map_err(|error| error.message)?;
-                match captures.name(name).map(|capture| capture.as_str()) {
+                let value = match captures.name(name).map(|capture| capture.as_str()) {
                     Some(text) => {
-                        let value = context.scratch().map_err(|error| error.message)?;
-                        execute_plan(context, &field.plan, text, value)
+                        let value = execute_plan(&field.plan, text)
                             .map_err(|message| format!("capture {name:?}: {message}"))?;
                         if field.optional {
-                            let tag = context.scratch().map_err(|error| error.message)?;
-                            context
-                                .set_atom(tag, "Some")
-                                .map_err(|error| error.message)?;
-                            context
-                                .make_tagged(register, tag, value)
-                                .map_err(|error| error.message)?;
+                            ParsedValue::Some(Box::new(value))
                         } else {
-                            context
-                                .copy(register, value)
-                                .map_err(|error| error.message)?;
+                            value
                         }
                     }
-                    None if field.optional => {
-                        context.set_none(register).map_err(|error| error.message)?
-                    }
+                    None if field.optional => ParsedValue::None,
                     None => return Err(format!("required capture {name:?} is absent")),
-                }
-                values.push((name.clone(), register));
+                };
+                values.push((name.clone(), value));
             }
-            context
-                .make_dict(output, &values)
-                .map_err(|error| error.message)
+            Ok(ParsedValue::Struct(values))
+        }
+    }
+}
+
+pub(crate) fn parse_value(
+    metadata: crate::ValueRef<'_>,
+    input: &str,
+) -> Result<ParsedValue, String> {
+    let plan = parse_plan(metadata).map_err(|error| error.message)?;
+    execute_plan(&plan, input)
+}
+
+fn materialize(
+    context: &mut CallContext<'_, '_>,
+    value: ParsedValue,
+    output: crate::lir::RegisterId,
+) -> Result<(), NativeError> {
+    match value {
+        ParsedValue::String(value) => context.set_string(output, value),
+        ParsedValue::Int(value) => context.set_int(output, value),
+        ParsedValue::Float(value) => context.set_float(output, value),
+        ParsedValue::None => context.set_none(output),
+        ParsedValue::Some(value) => {
+            let payload = context.scratch()?;
+            materialize(context, *value, payload)?;
+            let tag = context.scratch()?;
+            context.set_atom(tag, "Some")?;
+            context.make_tagged(output, tag, payload)
+        }
+        ParsedValue::Struct(fields) => {
+            let mut registers = Vec::with_capacity(fields.len());
+            for (name, value) in fields {
+                let register = context.scratch()?;
+                materialize(context, value, register)?;
+                registers.push((name, register));
+            }
+            context.make_dict(output, &registers)
         }
     }
 }
 
 pub(crate) fn native_parse(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
-    let plan = match parse_plan(context.value(context.argument(0)?)?) {
-        Ok(plan) => plan,
-        Err(error) => return set_error(context, error.message),
-    };
+    let metadata = context.value(context.argument(0)?)?;
     let input = context
         .value(context.argument(1)?)?
         .as_str()
         .ok_or_else(|| NativeError::new("std/string.parse expects String"))?
         .to_owned();
+    let parsed = match parse_value(metadata, &input) {
+        Ok(value) => value,
+        Err(message) => return set_error(context, message),
+    };
     let value = context.scratch()?;
-    if let Err(message) = execute_plan(context, &plan, &input, value) {
-        return set_error(context, message);
-    }
+    materialize(context, parsed, value)?;
     let tag = context.scratch()?;
     context.set_atom(tag, "Ok")?;
     context.make_tagged(context.result(), tag, value)
+}
+
+fn native_text_codec_marker(
+    context: &mut CallContext<'_, '_>,
+    key: &str,
+) -> Result<(), NativeError> {
+    let decorator_context = context.value(context.argument(0)?)?;
+    if decorator_context
+        .dict_get("kind")
+        .and_then(|kind| kind.as_atom())
+        != Some("Type")
+    {
+        return Err(NativeError::new(format!(
+            "{key} is only supported on a type container"
+        )));
+    }
+    let marker = context.scratch()?;
+    context.set_atom(marker, "True")?;
+    let attributes = context.scratch()?;
+    context.make_dict(attributes, &[(key.into(), marker)])?;
+    let kind = context.scratch()?;
+    context.set_atom(kind, "WithAttributes")?;
+    let inner = context.scratch()?;
+    context.copy(inner, context.argument(1)?)?;
+    context.make_dict(
+        context.result(),
+        &[
+            ("kind".into(), kind),
+            ("inner".into(), inner),
+            ("attributes".into(), attributes),
+        ],
+    )
+}
+
+pub(crate) fn native_decode_by_parse(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+    native_text_codec_marker(context, "std/string.decode_by_parse")
+}
+
+pub(crate) fn native_encode_by_display(
+    context: &mut CallContext<'_, '_>,
+) -> Result<(), NativeError> {
+    native_text_codec_marker(context, "std/string.encode_by_display")
 }

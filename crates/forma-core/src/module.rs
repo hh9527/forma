@@ -7342,6 +7342,93 @@ unchanged", "|"),
     }
 
     #[test]
+    fn container_text_codec_bridge_round_trips_nested_values_and_schema() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        fs::write(
+            &main,
+            r#"import "std/codec" as codec;
+               import "std/fmt" as fmt;
+               import "std/json" as json;
+               import "std/regex" as re;
+               import "std/result" as result;
+               import "std/string" as string;
+
+               @string.decode_by_parse
+               @string.encode_by_display
+               @fmt.display_by("{host}:{port}")
+               @re.parse_by(re.compile(r"^(?P<host>[^:]+):(?P<port>\d+)$"))
+               @struct type Endpoint = { host: String, port: Int };
+
+               @struct type Config = { endpoint: Endpoint, name: String };
+               let decoded = result.unwrap(codec.decode(Config, {
+                   endpoint: "localhost:8080",
+                   name: "dev",
+               }));
+               export let output = {
+                   decoded,
+                   encoded: result.unwrap(codec.encode(Config, decoded)),
+                   direct: result.unwrap(codec.decode(Endpoint, "example.com:443")),
+                   schema: json.schema(Config),
+               };"#,
+        )
+        .unwrap();
+        let engine = recovery_engine();
+        let module = engine.load_module(&main, BTreeMap::new()).unwrap();
+        let output = named_output(engine.execute(&module).unwrap()).to_string();
+        assert!(
+            output
+                .contains("decoded: {endpoint: {host: \"localhost\", port: 8080}, name: \"dev\"}"),
+            "{output}"
+        );
+        assert!(
+            output.contains("encoded: {endpoint: \"localhost:8080\", name: \"dev\"}"),
+            "{output}"
+        );
+        assert!(
+            output.contains("direct: {host: \"example.com\", port: 443}"),
+            "{output}"
+        );
+        assert!(output.contains("endpoint: {type: \"string\"}"), "{output}");
+
+        fs::write(
+            &main,
+            r#"import "std/codec" as codec;
+               import "std/regex" as re;
+               import "std/string" as string;
+               @string.decode_by_parse
+               @re.parse_by(re.compile(r"^(?P<value>\d+)$"))
+               @struct type Bad = { value: Int };
+               export let output = codec.decode(Bad, "42");"#,
+        )
+        .unwrap();
+        let engine = recovery_engine();
+        let module = engine.load_module(&main, BTreeMap::new()).unwrap();
+        let output = named_output(engine.execute(&module).unwrap()).to_string();
+        assert!(output.contains("must be used together"), "{output}");
+
+        fs::write(
+            &main,
+            r#"import "std/string" as string;
+               @struct type Bad = {
+                   @string.decode_by_parse
+                   value: String,
+               };
+               export { Bad };"#,
+        )
+        .unwrap();
+        let error = recovery_engine()
+            .load_module(&main, BTreeMap::new())
+            .unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("only supported on a type container")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn dependency_imports_preserve_identity_across_relative_edges() {
         let directory = fixture_dir();
         let app = directory.join("app");

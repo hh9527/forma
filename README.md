@@ -177,6 +177,23 @@ substitutions recursively use their types' Display capabilities, so nested
 decorated structs compose without reparsing templates at runtime. Diagnostic
 `Debug` output remains a separate future capability.
 
+Types can explicitly make that text representation their structured-codec
+container form:
+
+```forma
+@string.decode_by_parse
+@string.encode_by_display
+@fmt.display_by("{host}:{port}")
+@re.parse_by(re.compile(r"^(?P<host>[^:]+):(?P<port>\d+)$"))
+@struct
+type Endpoint = { host: String, port: Int };
+```
+
+`codec.decode` then accepts a String, `codec.encode` produces a String, and
+JSON Schema describes `Endpoint` as a string even when nested. The two bridge
+declarations are paired and currently apply only to a type container; field
+overrides are intentionally deferred.
+
 ### Deterministic executable and output plans
 
 A module has no default result. It explicitly exports named values, and the
