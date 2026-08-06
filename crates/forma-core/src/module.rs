@@ -7261,6 +7261,26 @@ unchanged", "|"),
         let error = module.execute(500_000).unwrap_err();
         assert!(error.message.contains("invalid regular expression"));
 
+        fs::write(
+            &main,
+            r#"import "std/regex" as re;
+               import "std/result" as result;
+               import "std/string" as string;
+               @re.parse_by(re.compile(r"^(?P<host>[^:]+):(?P<port>\d+)$"))
+               @struct type Endpoint = { host: String, port: Int };
+               @re.parse_by(re.compile(r"^(?P<name>\w+)@(?P<endpoint>.+)$"))
+               @struct type Service = { name: String, endpoint: Endpoint };
+               export let output = result.unwrap(string.parse(Service, "api@localhost:8080"));"#,
+        )
+        .unwrap();
+        let engine = recovery_engine();
+        let module = engine.load_module(&main, BTreeMap::new()).unwrap();
+        let output = named_output(engine.execute(&module).unwrap()).to_string();
+        assert!(
+            output.contains("{endpoint: {host: \"localhost\", port: 8080}, name: \"api\"}"),
+            "{output}"
+        );
+
         fs::remove_dir_all(directory).unwrap();
     }
 

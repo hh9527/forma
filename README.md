@@ -156,7 +156,8 @@ type Rec = { name: String, value: Int };
 `string.parse(Rec, "answer=42")` has type `Result(Rec, BlameError)`. The type
 is the authoritative contract; the regex only matches and splits a validated
 textual representation. Captured fields are parsed recursively through the
-same `std/string.parse` capability, so regex does not own their conversions.
+same `std/string.parse` capability, so nested decorated struct types compose
+without regex owning their conversions.
 
 ### Deterministic executable and output plans
 

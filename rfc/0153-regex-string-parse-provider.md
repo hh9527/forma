@@ -48,7 +48,8 @@ re.decode(ty, source) -> string.parse(ty, source)
 ## Acceptance criteria
 
 1. Regex owns matching and capture extraction, not scalar conversion.
-2. Field conversion delegates to the shared recursive parse dispatcher.
+2. Field conversion delegates to the shared recursive parse dispatcher,
+   including provider-backed named struct fields reached through type links.
 3. `Option(T)` capture semantics distinguish absence from a failed parse.
 4. The old regex-specific decode entry point is no longer exported.
 5. Match and field-conversion failures return `BlameError` from
@@ -57,4 +58,5 @@ re.decode(ty, source) -> string.parse(ty, source)
 ## Implementation result
 
 Implemented in August 2026. Regex metadata now implements the shared string
-parse protocol, and regex no longer owns scalar conversion.
+parse protocol, named nested struct providers follow ordinary TypeDesc links,
+and regex no longer owns scalar conversion.

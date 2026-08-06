@@ -139,10 +139,20 @@ pub(crate) fn native_is_match(context: &mut CallContext<'_, '_>) -> Result<(), N
 fn stripped_metadata(
     mut metadata: crate::ValueRef<'_>,
 ) -> Result<crate::ValueRef<'_>, NativeError> {
+    if metadata.is_hidden_up_link() {
+        metadata = metadata
+            .resolve_hidden_up_link()
+            .map_err(NativeError::new)?;
+    }
     while metadata.dict_get("kind").and_then(|kind| kind.as_atom()) == Some("WithAttributes") {
         metadata = metadata
             .dict_get("inner")
             .ok_or_else(|| NativeError::new("attributed type has no inner metadata"))?;
+        if metadata.is_hidden_up_link() {
+            metadata = metadata
+                .resolve_hidden_up_link()
+                .map_err(NativeError::new)?;
+        }
     }
     Ok(metadata)
 }
@@ -167,6 +177,11 @@ fn option_payload(metadata: crate::ValueRef<'_>) -> Option<crate::ValueRef<'_>> 
 fn attached_regex(metadata: crate::ValueRef<'_>) -> Result<Option<CompiledRegex>, NativeError> {
     let mut metadata = metadata;
     loop {
+        if metadata.is_hidden_up_link() {
+            metadata = metadata
+                .resolve_hidden_up_link()
+                .map_err(NativeError::new)?;
+        }
         if let Some(provider) = metadata
             .dict_get("attributes")
             .and_then(|attributes| attributes.dict_get("std/string.parse"))
