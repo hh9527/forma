@@ -1468,7 +1468,7 @@ mod tests {
         let model = directory.join("model.forma");
         let main = directory.join("main.forma");
         fs::write(&model, "{alpha: 1, beta: \"x\"}").unwrap();
-        fs::write(&main, "import model from \"./model.forma\"; model.alpha").unwrap();
+        fs::write(&main, "import \"./model.forma\" as model; model.alpha").unwrap();
         let snapshot = engine().recover_workspace(&main).unwrap();
         let completion = completion_at(&snapshot, "model.alpha").expect("module context");
         assert_eq!(completion.candidates.len(), 1);
@@ -1507,8 +1507,8 @@ mod tests {
         fs::write(&data, "{\"value\":1}").unwrap();
         fs::write(
             &main,
-            "import model from \"./model.forma\";\n\
-             import data from \"./data.json\";\n\
+            "import \"./model.forma\" as model;\n\
+             import \"./data.json\" as data;\n\
              let f = fn(x) { let y = x; y };\n\
              let count = 1 + 2;\n\
              {model: model, data: data, f: f, count: count}",

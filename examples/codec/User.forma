@@ -1,5 +1,5 @@
-import codec from "core:codec";
-import result from "core:result";
+import "core:codec" as codec;
+import "core:result" as result;
 
 @struct
 type Type = {v: Option(String)};

@@ -1,6 +1,6 @@
 # RFC 0141: Path-first module binding
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0140
 
 ## Summary
@@ -33,3 +33,14 @@ completion is introduced by RFC 0142.
 5. All active repository source, examples, tests, and current documentation
    use the path-first form.
 6. Module resolution identity and execution behavior do not change.
+
+## Implementation result
+
+The grammar and lossless lexer now reserve `as`, return `from` to ordinary
+identifiers, and lower the path-first form into the existing module binding.
+All active Forma sources, Rust fixtures, CLI/LSP tests, examples, and current
+README files have been migrated. Historical RFCs retain their authored syntax.
+
+Tests cover lossless reconstruction, use of `from` as a local identifier,
+rejection of the removed grammar, unchanged resolver behavior, and updated
+path-first diagnostic locations.

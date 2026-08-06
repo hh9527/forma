@@ -30,7 +30,7 @@ fn check_run_and_types_cover_the_closed_world_loop() {
     fs::write(directory.join("data.json"), r#"{"name":"Ada","age":36}"#).unwrap();
     fs::write(
         directory.join("main.forma"),
-        "import data from \"./data.json\";\
+        "import \"./data.json\" as data;\
          @struct type User = {name: String, age: Int};\
          let user: User = data;\
          validate(User, user)",
@@ -160,7 +160,7 @@ fn run_writes_debug_events_only_to_stderr() {
     let directory = fixture_dir();
     fs::write(
         directory.join("debug.forma"),
-        r#"import debug from "std/debug";
+        r#"import "std/debug" as debug;
            42 |> debug.dbg_with\("answer\nlabel", _)"#,
     )
     .unwrap();
@@ -187,9 +187,9 @@ fn exec_dry_run_invokes_explicit_pure_entry() {
     fs::write(
         &main,
         r#"#!/usr/bin/env -S forma exec --dry-run
-import arrays from "std/array";
-import exec from "std/exec";
-import hash from "std/hash";
+import "std/array" as arrays;
+import "std/exec" as exec;
+import "std/hash" as hash;
 type ExecSettings = exec.ExecSettings;
 type ExecRequest = exec.ExecRequest;
 type ExecEnv = exec.ExecEnv;
@@ -370,8 +370,8 @@ fn build_dry_run_validates_and_prints_text_artifacts_without_writing() {
     let main = directory.join("build.forma");
     fs::write(
         &main,
-        r####"import build from "std/build";
-import strings from "std/string";
+        r####"import "std/build" as build;
+import "std/string" as strings;
 type OutputPlan = build.OutputPlan;
 let main: Fn() -> OutputPlan = fn() {
     {
@@ -643,7 +643,7 @@ fn show_recovers_types_and_causes_across_failed_modules() {
     .unwrap();
     fs::write(
         &main,
-        "import model from \"./model.forma\";\
+        "import \"./model.forma\" as model;\
          type Local = String;\
          type Uses = model.Good;\
          type Down = Array(Uses);\

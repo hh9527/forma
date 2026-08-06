@@ -83,7 +83,7 @@ Forma 不定义通用 action ABI。进程启动器、构建系统、Kubernetes c
 Decorator 是函数，attribute 是数据，codec 是元数据解释器：
 
 ```forma
-import json from "std/json";
+import "std/json" as json;
 
 @json.rename_all('CamelCase)
 @struct

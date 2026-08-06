@@ -36,7 +36,7 @@ pub enum Token {
     Match,
     Return,
     Import,
-    From,
+    As,
     SectionLParen,
     LParen,
     RParen,
@@ -115,8 +115,8 @@ enum NormalToken {
     Return,
     #[token("import")]
     Import,
-    #[token("from")]
-    From,
+    #[token("as")]
+    As,
     #[token("\\(")]
     SectionLParen,
     #[token("(")]
@@ -550,7 +550,7 @@ impl From<NormalToken> for Token {
             NormalToken::Match => Self::Match,
             NormalToken::Return => Self::Return,
             NormalToken::Import => Self::Import,
-            NormalToken::From => Self::From,
+            NormalToken::As => Self::As,
             NormalToken::SectionLParen => Self::SectionLParen,
             NormalToken::LParen => Self::LParen,
             NormalToken::RParen => Self::RParen,

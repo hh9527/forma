@@ -812,7 +812,7 @@ mod tests {
         std::fs::write(
             &main,
             r#"@@manifest {name: "tool", dependencies: {dep: {path: "../dependency"}}};
-import value from "dep/value.forma";
+import "dep/value.forma" as value;
 value"#,
         )
         .unwrap();

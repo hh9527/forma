@@ -1,5 +1,5 @@
 token Let='let' Decl='decl' Def='def' Native='native' For='for' Type='type' Fn='fn' FunctionType='Fn' Interpreter='interpreter' If='if' Else='else' Match='match' Return='return';
-token Import='import' From='from';
+token Import='import' As='as';
 token SectionLParen='\\(' LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
 token Comma=',' Colon=':' Semicolon=';' Ellipsis='...' Dot='.' At='@' Bang='!' Question='?';
 token Plus='+' Minus='-' Star='*' Slash='/' Less='<' EqualEqual='==' Equal='=';
@@ -30,7 +30,7 @@ native_type_binding: 'native' 'type' Identifier '=' '@' Int ';';
 type_scheme: ['for' type_parameters] contract;
 type_parameters: '(' Identifier (?1 ',' Identifier)* [','] ')';
 type_binding: decorator* 'type' Identifier '=' expression ';';
-import_binding: 'import' Identifier 'from' string_literal ';';
+import_binding: 'import' string_literal 'as' Identifier ';';
 
 expression:
   expression Question @propagate_expr

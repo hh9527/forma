@@ -114,6 +114,22 @@ fn(settings, request) { {args: request.args} }"#;
     }
 
     #[test]
+    fn cst_preserves_path_first_module_bindings() {
+        let source = "import \"std/array\" as arrays; let from = 1; (arrays, from)";
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("imports.forma", source);
+        let parsed = parse(id, source);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+
+        let removed = "import arrays from \"std/array\"; arrays";
+        let id = sources.add("removed-import.forma", removed);
+        assert!(parse(id, removed).has_errors());
+    }
+
+    #[test]
     fn cst_preserves_dict_field_shorthand_losslessly() {
         let source = "let name = \"forma\"; { name, explicit: 1, ...extra }";
         let mut sources = crate::source::SourceDatabase::default();

@@ -2017,8 +2017,8 @@ mod tests {
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import prelude from "core/prelude";
-import result from "std/result";
+            r#"import "core/prelude" as prelude;
+import "std/result" as result;
 type User = prelude.struct('None, {name: String});
 let user: User = {name: result.unwrap(prelude.validate(String, "forma"))};
 (user, struct == prelude.struct, enum == prelude.enum, union == prelude.union, validate == prelude.validate)"#,
@@ -2197,8 +2197,8 @@ let user: User = {name: result.unwrap(prelude.validate(String, "forma"))};
         let main = directory.join("main.forma");
         fs::write(
             &main,
-            r#"import host from "acme/runtime";
-import desc from "std/type-desc";
+            r#"import "acme/runtime" as host;
+import "std/type-desc" as desc;
 {answer: host.answer(), name: desc.opaque_name(host.Token)}"#,
         )
         .unwrap();
@@ -2259,7 +2259,7 @@ import desc from "std/type-desc";
             .load_module(&main, BTreeMap::new())
             .unwrap_err();
         assert!(isolated.to_string().contains("unknown dependency"));
-        assert!(isolated.to_string().contains("main.forma:1:18"));
+        assert!(isolated.to_string().contains("main.forma:1:8"));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2269,7 +2269,7 @@ import desc from "std/type-desc";
         let main = directory.join("main.forma");
         fs::write(
             &main,
-            r#"import missing from "acme/missing";
+            r#"import "acme/missing" as missing;
 type Independent = String;
 {Independent: Independent}"#,
         )
@@ -2277,7 +2277,7 @@ type Independent = String;
         let snapshot = recovery_engine().recover_workspace(&main).unwrap();
         assert!(snapshot.diagnostics().iter().any(|diagnostic| {
             diagnostic.message.contains("unknown dependency")
-                && diagnostic.labels[0].location.start == 20
+                && diagnostic.labels[0].location.start == 7
         }));
         let root = snapshot
             .module_by_path(&fs::canonicalize(&main).unwrap())
@@ -2296,7 +2296,7 @@ type Independent = String;
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import debug from "std/debug";
+            r#"import "std/debug" as debug;
                let identity: Fn(Any) -> Any = fn(value) { value };
                let data = { text: "line\nnext", items: [1, 'Ok, (2,)] };
                let observed = debug.dbg_with("loaded\nvalue", data);
@@ -2333,7 +2333,7 @@ type Independent = String;
 
         fs::write(
             directory.join("bad-label.forma"),
-            r#"import debug from "std/debug"; debug.dbg_with(1, 42)"#,
+            r#"import "std/debug" as debug; debug.dbg_with(1, 42)"#,
         )
         .unwrap();
         let bad = engine
@@ -2349,14 +2349,14 @@ type Independent = String;
         fs::write(directory.join("data.json"), r#"{"value":42}"#).unwrap();
         fs::write(
             directory.join("dependency.forma"),
-            r#"import debug from "std/debug"; debug.dbg_with("tool", 41)"#,
+            r#"import "std/debug" as debug; debug.dbg_with("tool", 41)"#,
         )
         .unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import debug from "std/debug";
-               import dependency from "./dependency.forma";
-               import data from "./data.json";
+            r#"import "std/debug" as debug;
+               import "./dependency.forma" as dependency;
+               import "./data.json" as data;
                type Observed = debug.dbg(Int);
                debug.dbg(data)"#,
         )
@@ -2436,7 +2436,7 @@ type Independent = String;
         let directory = fixture_dir();
         fs::write(
             directory.join("erased.forma"),
-            r#"import debug from "std/debug";
+            r#"import "std/debug" as debug;
                def observe: Fn(Any) -> Any = fn(value) { debug.dbg_with("metadata", value) };
                type Observed = observe(Int);
                0"#,
@@ -2462,7 +2462,7 @@ type Independent = String;
 
         fs::write(
             directory.join("retained.forma"),
-            r#"import debug from "std/debug";
+            r#"import "std/debug" as debug;
                def observe: Fn(Any) -> Any = fn(value) { debug.dbg_with("observed", value) };
                type Observed = observe(Int);
                observe(1)"#,
@@ -2488,7 +2488,7 @@ type Independent = String;
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import debug from "std/debug";
+            r#"import "std/debug" as debug;
                type Observed = debug.dbg(Int);
                0"#,
         )
@@ -2514,8 +2514,8 @@ type Independent = String;
         let directory = fixture_dir();
         fs::write(
             directory.join("User.forma"),
-            r#"import codec from "std/codec";
-               import result from "std/result";
+            r#"import "std/codec" as codec;
+               import "std/result" as result;
                @struct type User = {v: Option(String)};
                let decode = fn(value) { codec.decode(User, value) };
                let encode = fn(value) {
@@ -2526,10 +2526,10 @@ type Independent = String;
         .unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import data from "./abc.json";
-               import User from "./User.forma";
-               import result from "std/result";
-               import json from "std/json";
+            r#"import "./abc.json" as data;
+               import "./User.forma" as User;
+               import "std/result" as result;
+               import "std/json" as json;
                let user = data |> User.decode |> result.unwrap;
                user |> User.encode |> json.stringify_pretty(2)"#,
         )
@@ -2580,8 +2580,8 @@ type Independent = String;
 
         fs::write(
             directory.join("inspect.forma"),
-            r#"import data from "./abc.json";
-               import User from "./User.forma";
+            r#"import "./abc.json" as data;
+               import "./User.forma" as User;
                data |> User.decode"#,
         )
         .unwrap();
@@ -2608,9 +2608,9 @@ type Independent = String;
         fs::write(directory.join("data.json"), r#"{"v":"plain"}"#).unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import data from "./data.json";
-               import codec from "std/codec";
-               import result from "std/result";
+            r#"import "./data.json" as data;
+               import "std/codec" as codec;
+               import "std/result" as result;
                type StringRule = {kind: 'String};
                type UserRule = {kind: 'Struct, fields: {v: StringRule}};
                codec.decode(UserRule, data) |> result.unwrap"#,
@@ -2625,7 +2625,7 @@ type Independent = String;
 
         fs::write(
             directory.join("legacy.forma"),
-            r#"import result from "std/result"; result.unwrap('Err("legacy"))"#,
+            r#"import "std/result" as result; result.unwrap('Err("legacy"))"#,
         )
         .unwrap();
         let legacy = load_module(directory.join("legacy.forma"), BTreeMap::new(), 100_000)
@@ -2641,25 +2641,25 @@ type Independent = String;
         let directory = fixture_dir();
         let cases = [
             (
-                r#"import codec from "std/codec";
-                   import result from "std/result";
+                r#"import "std/codec" as codec;
+                   import "std/result" as result;
                    @struct type T = {name: String};
                    codec.decode(T, {}) |> result.unwrap"#,
                 "$.name: missing required field",
             ),
             (
-                r#"import codec from "std/codec";
-                   import result from "std/result";
+                r#"import "std/codec" as codec;
+                   import "std/result" as result;
                    @struct type T = {name: String};
                    codec.decode(T, {name: "Ada", extra: 1}) |> result.unwrap"#,
                 "$.extra: unknown field",
             ),
             (
-                r#"import json from "std/json"; json.stringify((1, 2))"#,
+                r#"import "std/json" as json; json.stringify((1, 2))"#,
                 "JSON cannot encode Tuple",
             ),
             (
-                r#"import json from "std/json"; json.stringify_pretty(17)"#,
+                r#"import "std/json" as json; json.stringify_pretty(17)"#,
                 "indent must be between 0 and 16",
             ),
         ];
@@ -2674,7 +2674,7 @@ type Independent = String;
         let path = directory.join("compact.forma");
         fs::write(
             &path,
-            r#"import json from "std/json";
+            r#"import "std/json" as json;
                json.stringify({z: [1, 'True], a: "line\nnext"})"#,
         )
         .unwrap();
@@ -2700,8 +2700,8 @@ type Independent = String;
         fs::write(directory.join("answer.forma"), "40 + 2").unwrap();
         fs::write(
             directory.join("main.forma"),
-            "import user from \"./user.json\";\
-             import answer from \"./answer.forma\";\
+            "import \"./user.json\" as user;\
+             import \"./answer.forma\" as answer;\
              @struct type User = {name: String, age: Int};\
              let checked: User = user;\
              (checked.name, answer)",
@@ -2735,9 +2735,9 @@ name = "rustc"
         .unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import config from "./config.toml";
-               import same from "./sub/../config.toml";
-               import toml from "std/toml";
+            r#"import "./config.toml" as config;
+               import "./sub/../config.toml" as same;
+               import "std/toml" as toml;
                type TomlDate = toml.DateTime;
                @struct type Tool = {name: String};
                @struct type Config = {
@@ -2776,7 +2776,7 @@ name = "rustc"
         .unwrap();
         fs::write(
             directory.join("main.forma"),
-            "import user from \"./user.toml\";\n\
+            "import \"./user.toml\" as user;\n\
              @struct type User = {name: String, age: Int};\n\
              let checked: User = user;\n\
              checked",
@@ -2796,9 +2796,9 @@ name = "rustc"
 
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "std/codec";
-               import result from "std/result";
-               import user from "./user.toml";
+            r#"import "std/codec" as codec;
+               import "std/result" as result;
+               import "./user.toml" as user;
                @struct type User = {name: String, age: Int};
                codec.decode(User, user) |> result.unwrap"#,
         )
@@ -2817,7 +2817,7 @@ name = "rustc"
         let main = directory.join("main.forma");
         let config = directory.join("config.toml");
         fs::write(&config, "name = \"first\"\nname = \"second\"\n").unwrap();
-        fs::write(&main, "import config from \"./config.toml\"; config").unwrap();
+        fs::write(&main, "import \"./config.toml\" as config; config").unwrap();
 
         let snapshot = recovery_engine().recover_workspace(&main).unwrap();
         let config = snapshot
@@ -2848,7 +2848,7 @@ name = "rustc"
         .unwrap();
         fs::write(
             &main,
-            "import config from \"./config.yaml\"; (config.name, config.features, config.legacy)",
+            "import \"./config.yaml\" as config; (config.name, config.features, config.legacy)",
         )
         .unwrap();
 
@@ -2883,13 +2883,9 @@ name = "rustc"
     #[test]
     fn rejects_module_cycles() {
         let directory = fixture_dir();
-        fs::write(
-            directory.join("main.forma"),
-            "import a from \"./a.forma\"; a",
-        )
-        .unwrap();
-        fs::write(directory.join("a.forma"), "import b from \"./b.forma\"; b").unwrap();
-        fs::write(directory.join("b.forma"), "import a from \"./a.forma\"; a").unwrap();
+        fs::write(directory.join("main.forma"), "import \"./a.forma\" as a; a").unwrap();
+        fs::write(directory.join("a.forma"), "import \"./b.forma\" as b; b").unwrap();
+        fs::write(directory.join("b.forma"), "import \"./a.forma\" as a; a").unwrap();
         let error =
             load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap_err();
         assert!(error.message().contains("cycle"));
@@ -2946,7 +2942,7 @@ name = "rustc"
         .unwrap();
         fs::write(
             directory.join("system-user.forma"),
-            "import system from \"./system.forma-sys\"; system",
+            "import \"./system.forma-sys\" as system; system",
         )
         .unwrap();
         let system = load_module(
@@ -2991,7 +2987,7 @@ name = "rustc"
         .unwrap();
         fs::write(
             directory.join("main.forma"),
-            "import countdown from \"./countdown.forma\"; countdown(4)",
+            "import \"./countdown.forma\" as countdown; countdown(4)",
         )
         .unwrap();
 
@@ -3028,7 +3024,7 @@ name = "rustc"
         fs::write(directory.join("user.json"), r#"{"name":"Ada","age":"old"}"#).unwrap();
         fs::write(
             directory.join("main.forma"),
-            "import user from \"./user.json\";\n\
+            "import \"./user.json\" as user;\n\
              @struct type User = {name: String, age: Int};\n\
              let checked: User = user;\n\
              checked",
@@ -3144,7 +3140,7 @@ name = "rustc"
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import arrays from "std/array"; arrays.map([1, 2], fn(x) { x + 1 })"#,
+            r#"import "std/array" as arrays; arrays.map([1, 2], fn(x) { x + 1 })"#,
         )
         .unwrap();
         let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
@@ -3162,7 +3158,7 @@ name = "rustc"
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import arrays from "std/array";
+            r#"import "std/array" as arrays;
                let values = [1, 2, 3];
                let empty: Array(Int) = [];
                let empty_strings: Array(String) = [];
@@ -3255,9 +3251,9 @@ name = "rustc"
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import arrays from "std/array";
-               import paths from "std/path";
-               import strings from "std/string";
+            r#"import "std/array" as arrays;
+               import "std/path" as paths;
+               import "std/string" as strings;
                {
                    concat: arrays.concat([[1, 2], [], [3]]),
                    any: arrays.any([1, 0], fn(value) {
@@ -3357,11 +3353,11 @@ unchanged", "|"),
 
         for (source, expected) in [
             (
-                "import strings from \"std/string\"; strings.indent(\"x\", -1)",
+                "import \"std/string\" as strings; strings.indent(\"x\", -1)",
                 "indentation width must be non-negative",
             ),
             (
-                "import strings from \"std/string\"; strings.trim_margin(\"x\", \"\")",
+                "import \"std/string\" as strings; strings.trim_margin(\"x\", \"\")",
                 "margin marker must not be empty",
             ),
         ] {
@@ -3380,10 +3376,10 @@ unchanged", "|"),
         let main = directory.join("main.forma");
         fs::write(
             &main,
-            r#"import codec from "std/codec";
-               import dicts from "std/dict";
-               import json from "std/json";
-               import result from "std/result";
+            r#"import "std/codec" as codec;
+               import "std/dict" as dicts;
+               import "std/json" as json;
+               import "std/result" as result;
                type Env = Dict(String);
                let env: Env = {PATH: "/bin", HOME: "/tmp"};
                let decoded = codec.decode(Env, {SHELL: "/bin/sh"}) |> result.unwrap;
@@ -3473,7 +3469,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import json from "std/json";
+            r#"import "std/json" as json;
                @struct type Node = {children: Dict(Node)};
                json.schema(Node)"#,
         )
@@ -3492,7 +3488,7 @@ unchanged", "|"),
         let main = directory.join("main.forma");
         fs::write(
             &main,
-            r#"import arrays from "std/array";
+            r#"import "std/array" as arrays;
                {
                    ints: arrays.map([1, 2], fn(value) { value + 1 }),
                    strings: arrays.map(["a"], fn(value) { value }),
@@ -3507,7 +3503,7 @@ unchanged", "|"),
 
         fs::write(
             &main,
-            r#"import arrays from "std/array";
+            r#"import "std/array" as arrays;
                let map = arrays.map;
                (map([1], fn(value) { value }), map(["a"], fn(value) { value }))"#,
         )
@@ -3529,7 +3525,7 @@ unchanged", "|"),
         .unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import generic from "./identity.forma";
+            r#"import "./identity.forma" as generic;
                (generic.identity(1), generic.identity("x"), generic.identity[_](2))"#,
         )
         .unwrap();
@@ -3556,7 +3552,7 @@ unchanged", "|"),
         .unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import generic from "./identity.forma";
+            r#"import "./identity.forma" as generic;
                (generic.identity(1), generic.identity("x"), generic.identity[_](2))"#,
         )
         .unwrap();
@@ -3583,7 +3579,7 @@ unchanged", "|"),
         .unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import generic from "./identity.forma";
+            r#"import "./identity.forma" as generic;
                (generic.identity(1), generic.identity("x"))"#,
         )
         .unwrap();
@@ -3607,7 +3603,7 @@ unchanged", "|"),
         .unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import constructors from "./constructors.forma";
+            r#"import "./constructors.forma" as constructors;
                type MaybeInt = constructors.Maybe(Int);
                let value: MaybeInt = 'None;
                value"#,
@@ -3630,8 +3626,8 @@ unchanged", "|"),
         fs::write(directory.join("values.json"), data).unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import arrays from "std/array";
-               import values from "./values.json";
+            r#"import "std/array" as arrays;
+               import "./values.json" as values;
                arrays.map(values, fn(value) { value + 1 })"#,
         )
         .unwrap();
@@ -3691,7 +3687,7 @@ unchanged", "|"),
 
         fs::write(
             directory.join("types.forma"),
-            r#"import arrays from "std/array";
+            r#"import "std/array" as arrays;
                type Pair = Tuple(arrays.map([Int, String], fn(item) { item }));
                let pair: Pair = (1, "one");
                pair"#,
@@ -3709,7 +3705,7 @@ unchanged", "|"),
             let path = directory.join(name);
             fs::write(
                 &path,
-                format!("import arrays from \"std/array\"; {expression}"),
+                format!("import \"std/array\" as arrays; {expression}"),
             )
             .unwrap();
             load_module(path, BTreeMap::new(), 100_000).unwrap_err()
@@ -3718,7 +3714,7 @@ unchanged", "|"),
             let path = directory.join(name);
             fs::write(
                 &path,
-                format!("import arrays from \"std/array\"; {expression}"),
+                format!("import \"std/array\" as arrays; {expression}"),
             )
             .unwrap();
             let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
@@ -3778,11 +3774,7 @@ unchanged", "|"),
         );
 
         let unknown_path = directory.join("unknown-core.forma");
-        fs::write(
-            &unknown_path,
-            "import unknown from \"std/unknown\"; unknown",
-        )
-        .unwrap();
+        fs::write(&unknown_path, "import \"std/unknown\" as unknown; unknown").unwrap();
         assert!(
             load_module(unknown_path, BTreeMap::new(), 100_000)
                 .unwrap_err()
@@ -3797,9 +3789,9 @@ unchanged", "|"),
         let directory = fixture_dir();
         let data = directory.join("data.json");
         let main = directory.join("main.forma");
-        let source = r#"import arrays from "std/array";
-                        import result from "std/result";
-                        import data from "./data.json";
+        let source = r#"import "std/array" as arrays;
+                        import "std/result" as result;
+                        import "./data.json" as data;
                         let values = arrays.push(data, APPENDED);
                         arrays.map(values, fn(value) {
                             if value == TARGET {
@@ -3842,8 +3834,8 @@ unchanged", "|"),
         fs::write(directory.join("values.json"), "[1, 2]").unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import arrays from "std/array";
-               import values from "./values.json";
+            r#"import "std/array" as arrays;
+               import "./values.json" as values;
                arrays.push(values, 3)"#,
         )
         .unwrap();
@@ -3887,8 +3879,8 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import options from "std/option";
-               import results from "std/result";
+            r#"import "std/option" as options;
+               import "std/result" as results;
                let ok: Result(Int, String) = 'Ok(3);
                let err: Result(Int, String) = 'Err("bad");
                {
@@ -3944,8 +3936,8 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "std/codec";
-               import result from "std/result";
+            r#"import "std/codec" as codec;
+               import "std/result" as result;
                @struct type User = {name: String};
                let decoded = codec.decode(User, {name: "Ada"});
                let encoded = codec.encode(User, {name: "Lin"});
@@ -4056,7 +4048,7 @@ unchanged", "|"),
 
         fs::write(
             directory.join("wrong-encode.forma"),
-            r#"import codec from "std/codec";
+            r#"import "std/codec" as codec;
                @struct type User = {name: String};
                codec.encode(User, {name: 1})"#,
         )
@@ -4085,7 +4077,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import dicts from "std/dict";
+            r#"import "std/dict" as dicts;
                let source = { z: 3, a: 1, middle: 2 };
                {
                    keys: dicts.keys(source),
@@ -4135,9 +4127,9 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import desc from "std/type-desc";
-               import attributes from "std/attributes";
-               import arrays from "std/array";
+            r#"import "std/type-desc" as desc;
+               import "std/attributes" as attributes;
+               import "std/array" as arrays;
                @struct type Node = {children: Array(Node)};
                let struct_nodes = desc.children(Node);
                let field_nodes = arrays.flat_map(struct_nodes, desc.children);
@@ -4192,8 +4184,8 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import desc from "std/type-desc";
-               import hash from "std/hash";
+            r#"import "std/type-desc" as desc;
+               import "std/hash" as hash;
                {
                    kind: desc.kind(hash.HashState),
                    children: desc.children(hash.HashState),
@@ -4213,8 +4205,8 @@ unchanged", "|"),
         );
         fs::write(
             directory.join("main.forma"),
-            r#"import json from "std/json";
-               import hash from "std/hash";
+            r#"import "std/json" as json;
+               import "std/hash" as hash;
                json.decode(hash.HashState, "1")"#,
         )
         .unwrap();
@@ -4232,8 +4224,8 @@ unchanged", "|"),
         );
         fs::write(
             directory.join("main.forma"),
-            r#"import json from "std/json";
-               import hash from "std/hash";
+            r#"import "std/json" as json;
+               import "std/hash" as hash;
                json.schema(hash.HashState)"#,
         )
         .unwrap();
@@ -4252,7 +4244,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import hash from "std/hash";
+            r#"import "std/hash" as hash;
                let empty = hash.new();
                let string = hash.update_string(empty, "abc");
                let bytes = hash.update_bytes(empty, b"abc");
@@ -4308,7 +4300,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import dyn from "std/dyn";
+            r#"import "std/dyn" as dyn;
                let int_value = dyn.pack(Int, 41);
                let string_value = dyn.pack(String, "text");
                let float_value = dyn.pack(Float, 1.5);
@@ -4360,7 +4352,7 @@ unchanged", "|"),
 
         fs::write(
             directory.join("invalid.forma"),
-            r#"import dyn from "std/dyn";
+            r#"import "std/dyn" as dyn;
                dyn.pack[Int](Int, "wrong")"#,
         )
         .unwrap();
@@ -4375,9 +4367,9 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import dyn from "std/dyn";
-               import result from "std/result";
-               import arrays from "std/array";
+            r#"import "std/dyn" as dyn;
+               import "std/result" as result;
+               import "std/array" as arrays;
                @struct type User = {name: String, pair: Tuple([Int, String])};
                @struct type Node = {value: Int, children: Array(Node)};
                @enum type Maybe = {None: 'None, Some: Int};
@@ -4470,7 +4462,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import dyn from "std/dyn";
+            r#"import "std/dyn" as dyn;
                def int_eq_i: Fn(Dyn, Dyn) -> Bool = fn(left, right) {
                    match dyn.check_int(left) {
                        'Some(a) => match dyn.check_int(right) {
@@ -4578,8 +4570,8 @@ unchanged", "|"),
         .unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import equality from "./reference-equality.forma";
-               import eq from "std/eq";
+            r#"import "./reference-equality.forma" as equality;
+               import "std/eq" as eq;
                @struct type Node = {value: Int, children: Array(Node)};
                @enum type Choice = {None: 'None, Some: String};
                type Pair = Tuple([Int, String]);
@@ -4647,8 +4639,8 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import arrays from "std/array";
-               import eq from "std/eq";
+            r#"import "std/array" as arrays;
+               import "std/eq" as eq;
                let function = fn(value) { value };
                let pairs = arrays.zip([1, 2, 3], [1, 2, 3]);
                def accepts_int_eq: Fn(Fn(Int, Int) -> Bool) -> Bool = fn(compare) {
@@ -4695,7 +4687,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import dicts from "std/dict";
+            r#"import "std/dict" as dicts;
                let source: Dict(Int) = {z: 3, a: 1, middle: 2};
                let empty: Dict(Int) = {};
                {
@@ -4745,7 +4737,7 @@ unchanged", "|"),
         let main = directory.join("main.forma");
         fs::write(
             &main,
-            r#"import dicts from "std/dict";
+            r#"import "std/dict" as dicts;
                dicts.filter({a: 1}, fn(value) { value })"#,
         )
         .unwrap();
@@ -4758,7 +4750,7 @@ unchanged", "|"),
 
         fs::write(
             &main,
-            r#"import dicts from "std/dict";
+            r#"import "std/dict" as dicts;
                let mixed = {number: 1, text: "two"};
                dicts.map_values(mixed, fn(value) { value })"#,
         )
@@ -4768,7 +4760,7 @@ unchanged", "|"),
 
         fs::write(
             &main,
-            r#"import dicts from "std/dict";
+            r#"import "std/dict" as dicts;
                let source: Dict(Int) = {a: 1};
                dicts.map_values(source, fn(value) { value / 0 })"#,
         )
@@ -4791,8 +4783,8 @@ unchanged", "|"),
         fs::write(directory.join("data.json"), r#"{"a":1,"long":2}"#).unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import dicts from "std/dict";
-               import data from "./data.json";
+            r#"import "std/dict" as dicts;
+               import "./data.json" as data;
                dicts.keys(data)"#,
         )
         .unwrap();
@@ -4832,7 +4824,7 @@ unchanged", "|"),
 
         fs::write(
             directory.join("types.forma"),
-            r#"import dicts from "std/dict";
+            r#"import "std/dict" as dicts;
                type Pair = Tuple(dicts.values({ first: Int, second: String }));
                let pair: Pair = (1, "one");
                pair"#,
@@ -4848,7 +4840,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import attributes from "std/attributes";
+            r#"import "std/attributes" as attributes;
                let nested = {
                    kind: 'WithAttributes,
                    inner: {
@@ -4913,8 +4905,8 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import attributes from "std/attributes";
-               import codec from "std/codec";
+            r#"import "std/attributes" as attributes;
+               import "std/codec" as codec;
                let rename = fn(name) {
                    let decorate: Fn(Any, Any) -> Any = fn(ctx, value) {
                        attributes.add(value, { "std/json.rename": name })
@@ -4995,7 +4987,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import attributes from "std/attributes";
+            r#"import "std/attributes" as attributes;
                let annotate = fn(key, payload) {
                    let decorate: Fn(Any, Any) -> Any = fn(ctx, value) { attributes.add(value, { marker: (key, payload) }) };
                    decorate
@@ -5143,7 +5135,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "std/codec";
+            r#"import "std/codec" as codec;
                @enum
                type Choice = { None: 'None, Number: Int };
                {
@@ -5171,9 +5163,9 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "std/codec";
-               import json from "std/json";
-               import result from "std/result";
+            r#"import "std/codec" as codec;
+               import "std/json" as json;
+               import "std/result" as result;
                @struct type User = {name: String};
                @json.rename_all('CamelCase)
                @enum type Event = {
@@ -5221,8 +5213,8 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "std/codec";
-               import json from "std/json";
+            r#"import "std/codec" as codec;
+               import "std/json" as json;
                @json.untagged @enum type Scalar = {Text: String, Count: Int};
                @json.untagged @enum type Ambiguous = {Anything: Any, Text: String};
                {
@@ -5262,10 +5254,10 @@ unchanged", "|"),
         .unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import data from "./data.json";
-               import codec from "std/codec";
-               import json from "std/json";
-               import result from "std/result";
+            r#"import "./data.json" as data;
+               import "std/codec" as codec;
+               import "std/json" as json;
+               import "std/result" as result;
                @struct type User = {name: String};
                @struct type Details = {city_name: String};
                @json.rename_all('CamelCase)
@@ -5367,7 +5359,7 @@ unchanged", "|"),
         let path = directory.join("main.forma");
         fs::write(
             &path,
-            r#"import json from "std/json";
+            r#"import "std/json" as json;
                json.schema(union('None, [Int, Array(String), {kind: 'Tuple, items: [Int, String]}]))"#,
         )
         .unwrap();
@@ -5397,9 +5389,9 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "std/codec";
-               import json from "std/json";
-               import result from "std/result";
+            r#"import "std/codec" as codec;
+               import "std/json" as json;
+               import "std/result" as result;
                {
                    boolean: codec.decode(Bool, 'True) |> result.unwrap,
                    none: codec.decode(Option(Int), 'None) |> result.unwrap,
@@ -5426,7 +5418,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("Types.forma"),
-            r#"import json from "std/json";
+            r#"import "std/json" as json;
                @struct type Node = {
                    value: Int,
                    children: Array(Node),
@@ -5458,10 +5450,10 @@ unchanged", "|"),
 
         fs::write(
             directory.join("main.forma"),
-            r#"import Types from "./Types.forma";
-               import codec from "std/codec";
-               import json from "std/json";
-               import result from "std/result";
+            r#"import "./Types.forma" as Types;
+               import "std/codec" as codec;
+               import "std/json" as json;
+               import "std/result" as result;
                let node = codec.decode(Types.Node, {
                    value: 1,
                    children: [{value: 2, children: []}],
@@ -5499,10 +5491,10 @@ unchanged", "|"),
         .unwrap();
         fs::write(
             directory.join("bad.forma"),
-            r#"import data from "./bad.json";
-               import Types from "./Types.forma";
-               import codec from "std/codec";
-               import result from "std/result";
+            r#"import "./bad.json" as data;
+               import "./Types.forma" as Types;
+               import "std/codec" as codec;
+               import "std/result" as result;
                codec.decode(Types.Node, data) |> result.unwrap"#,
         )
         .unwrap();
@@ -5514,8 +5506,8 @@ unchanged", "|"),
 
         fs::write(
             directory.join("leak.forma"),
-            r#"import Types from "./Types.forma";
-               import json from "std/json";
+            r#"import "./Types.forma" as Types;
+               import "std/json" as json;
                json.stringify(Types.Node)"#,
         )
         .unwrap();
@@ -5534,7 +5526,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "std/codec";
+            r#"import "std/codec" as codec;
                @struct type Forward = {next: Later};
                let premature = codec.decode(Forward, {next: 1});
                type Later = Int;
@@ -5554,7 +5546,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import attributes from "std/attributes";
+            r#"import "std/attributes" as attributes;
                type Maybe = Option(attributes.add(Int, { marker: "payload" }));
                type Outcome = Result(String, Int);
                let compared: Bool = 1 < 2;
@@ -5736,7 +5728,7 @@ unchanged", "|"),
         let path = directory.join("main.forma");
         fs::write(
             &path,
-            r#"import attributes from "std/attributes";
+            r#"import "std/attributes" as attributes;
                attributes.normalize({kind: 'WithAttributes, inner: 1, attributes: []})"#,
         )
         .unwrap();
@@ -5746,7 +5738,7 @@ unchanged", "|"),
 
         fs::write(
             &path,
-            r#"import attributes from "std/attributes";
+            r#"import "std/attributes" as attributes;
                attributes.normalize(1)"#,
         )
         .unwrap();
@@ -5771,7 +5763,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import json from "std/json";
+            r#"import "std/json" as json;
                @json.rename_all('CamelCase)
                @struct
                type Model = {
@@ -5849,9 +5841,9 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "std/codec";
-               import json from "std/json";
-               import result from "std/result";
+            r#"import "std/codec" as codec;
+               import "std/json" as json;
+               import "std/result" as result;
 
                @struct type Coordinates = {
                    latitude: Int,
@@ -5906,9 +5898,9 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "std/codec";
-               import debug from "std/debug";
-               import json from "std/json";
+            r#"import "std/codec" as codec;
+               import "std/debug" as debug;
+               import "std/json" as json;
                let zero = 0;
                def is_zero: Fn(Int) -> Bool = fn(value) { value == zero };
                @struct type Model = {
@@ -5949,7 +5941,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("arity.forma"),
-            r#"import json from "std/json";
+            r#"import "std/json" as json;
                def wrong: Fn(Any, Any) -> Bool = fn(left, right) { 'False };
                @struct type Model = {
                    @json.skip_serializing_if(wrong) value: Int,
@@ -5963,8 +5955,8 @@ unchanged", "|"),
 
         fs::write(
             directory.join("result.forma"),
-            r#"import codec from "std/codec";
-               import json from "std/json";
+            r#"import "std/codec" as codec;
+               import "std/json" as json;
                def identity: Fn(Any) -> Any = fn(value) { value };
                @struct type Model = {
                    @json.skip_serializing_if(identity) value: Int,
@@ -5985,8 +5977,8 @@ unchanged", "|"),
 
         fs::write(
             directory.join("callback.forma"),
-            r#"import codec from "std/codec";
-               import json from "std/json";
+            r#"import "std/codec" as codec;
+               import "std/json" as json;
                def fails: Fn(Any) -> Int = fn(value) { 1 / 0 };
                @struct type Model = {
                    @json.skip_serializing_if(fails) value: Int,
@@ -6018,8 +6010,8 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "std/codec";
-               import json from "std/json";
+            r#"import "std/codec" as codec;
+               import "std/json" as json;
                def is_zero: Fn(Int) -> Bool = fn(value) { value == 0 };
                def always: Fn(Any) -> Bool = fn(value) { 'True };
                @struct type Item = {
@@ -6051,8 +6043,8 @@ unchanged", "|"),
         let cases = [
             (
                 "collision.forma",
-                r#"import codec from "std/codec";
-                   import json from "std/json";
+                r#"import "std/codec" as codec;
+                   import "std/json" as json;
                    @struct type T = {
                        @json.rename("same") first: Int,
                        @json.rename("same") second: Int,
@@ -6062,16 +6054,16 @@ unchanged", "|"),
             ),
             (
                 "flatten-type.forma",
-                r#"import codec from "std/codec";
-                   import json from "std/json";
+                r#"import "std/codec" as codec;
+                   import "std/json" as json;
                    @struct type T = {@json.flatten value: Int};
                    codec.decode(T, {})"#,
                 "flatten requires Struct metadata",
             ),
             (
                 "flatten-rename.forma",
-                r#"import codec from "std/codec";
-                   import json from "std/json";
+                r#"import "std/codec" as codec;
+                   import "std/json" as json;
                    @struct type Inner = {value: Int};
                    @struct type T = {
                        @json.flatten @json.rename("x") inner: Inner,
@@ -6081,8 +6073,8 @@ unchanged", "|"),
             ),
             (
                 "default.forma",
-                r#"import codec from "std/codec";
-                   import json from "std/json";
+                r#"import "std/codec" as codec;
+                   import "std/json" as json;
                    @struct type T = {@json.default("wrong") value: Int};
                    codec.decode(T, {})"#,
                 "expected Int",
@@ -6104,11 +6096,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         let run_error = |name: &str, expression: &str| {
             let path = directory.join(name);
-            fs::write(
-                &path,
-                format!("import json from \"std/json\"; {expression}"),
-            )
-            .unwrap();
+            fs::write(&path, format!("import \"std/json\" as json; {expression}")).unwrap();
             load_module(path, BTreeMap::new(), 100_000)
                 .unwrap()
                 .execute(100_000)
@@ -6131,11 +6119,7 @@ unchanged", "|"),
         );
 
         let path = directory.join("quota.forma");
-        fs::write(
-            &path,
-            "import json from \"std/json\"; json.rename(\"name\")",
-        )
-        .unwrap();
+        fs::write(&path, "import \"std/json\" as json; json.rename(\"name\")").unwrap();
         let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
         let mut account = QuotaAccount::new(Quota::new(10, 1_000, 0));
         let error = Vm::new()
@@ -6157,11 +6141,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         let run_error = |name: &str, expression: &str| {
             let path = directory.join(name);
-            fs::write(
-                &path,
-                format!("import dicts from \"std/dict\"; {expression}"),
-            )
-            .unwrap();
+            fs::write(&path, format!("import \"std/dict\" as dicts; {expression}")).unwrap();
             let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
             module.execute(100_000).unwrap_err()
         };
@@ -6207,8 +6187,8 @@ unchanged", "|"),
         let a = directory.join("a.forma");
         let b = directory.join("b.forma");
         fs::write(&c, r#"{value: [1, 2, 3]}"#).unwrap();
-        fs::write(&a, r#"import c from "./c.forma"; c"#).unwrap();
-        fs::write(&b, r#"import c from "./c.forma"; c"#).unwrap();
+        fs::write(&a, r#"import "./c.forma" as c; c"#).unwrap();
+        fs::write(&b, r#"import "./c.forma" as c; c"#).unwrap();
         let mut loader = ModuleLoader {
             resolver: ModuleResolver::for_root(&a).unwrap(),
             cache: HashMap::new(),
@@ -6251,7 +6231,7 @@ unchanged", "|"),
         .unwrap();
         fs::write(
             &main,
-            "import model from \"./model.forma\";\
+            "import \"./model.forma\" as model;\
              type Local = String;\
              type Uses = model.Good;\
              type Down = Array(Uses);\
@@ -6331,8 +6311,8 @@ unchanged", "|"),
         fs::write(&data, r#"{"name":"Forma"}"#).unwrap();
         fs::write(
             &main,
-            r#"import result from "std/result";
-               import data from "./data.json";
+            r#"import "std/result" as result;
+               import "./data.json" as data;
                result.unwrap('Err(blame!(data.name, "invalid name")))"#,
         )
         .unwrap();
@@ -6431,9 +6411,9 @@ unchanged", "|"),
         fs::write(&model, "type Shared = String; {Shared: Shared}").unwrap();
         fs::write(
             &main,
-            "import data from \"./data.json\";\
-             import model from \"./model.forma\";\
-             import attributes from \"std/attributes\";\
+            "import \"./data.json\" as data;\
+             import \"./model.forma\" as model;\
+             import \"std/attributes\" as attributes;\
              type FromData = if data.kind == \"int\" { Int } else { String };\
              type FromForma = model.Shared;\
              type FromCore = attributes.strip(String);\
@@ -6486,9 +6466,9 @@ unchanged", "|"),
         let main = directory.join("main.forma");
         let a = directory.join("a.forma");
         let b = directory.join("b.forma");
-        fs::write(&main, "import a from \"./a.forma\"; a").unwrap();
-        fs::write(&a, "import b from \"./b.forma\"; type A = String; 0").unwrap();
-        fs::write(&b, "import a from \"./a.forma\"; type B = String; 0").unwrap();
+        fs::write(&main, "import \"./a.forma\" as a; a").unwrap();
+        fs::write(&a, "import \"./b.forma\" as b; type A = String; 0").unwrap();
+        fs::write(&b, "import \"./a.forma\" as a; type B = String; 0").unwrap();
         let snapshot = recovery_engine().recover_workspace(&main).unwrap();
         assert_eq!(
             snapshot
@@ -6516,8 +6496,8 @@ unchanged", "|"),
         let main = directory.join("main.forma");
         fs::write(
             &main,
-            r#"import json from "std/json";
-               import result from "std/result";
+            r#"import "std/json" as json;
+               import "std/result" as result;
                {
                    parsed: result.unwrap(json.parse("{\"answer\": 42}")),
                    decoded: result.unwrap(json.decode(Int, "42")),
@@ -6551,11 +6531,11 @@ unchanged", "|"),
         fs::write(models.join("base.forma"), "{answer: 42}").unwrap();
         fs::write(
             models.join("user.forma"),
-            "import base from \"./base.forma\"; base",
+            "import \"./base.forma\" as base; base",
         )
         .unwrap();
         let main = app.join("main.forma");
-        fs::write(&main, "import user from \"models/user.forma\"; user.answer").unwrap();
+        fs::write(&main, "import \"models/user.forma\" as user; user.answer").unwrap();
 
         let engine = recovery_engine();
         let loaded = engine.load_module(&main, BTreeMap::new()).unwrap();
@@ -6583,7 +6563,7 @@ unchanged", "|"),
         fs::write(
             &main,
             r#"@@manifest {name: "tool", dependencies: {dep: {path: "../dependency"}}};
-               import answer from "dep/answer.forma";
+               import "dep/answer.forma" as answer;
                answer"#,
         )
         .unwrap();
@@ -6598,7 +6578,7 @@ unchanged", "|"),
             "@@manifest {name: \"nested\", dependencies: {}}; 1",
         )
         .unwrap();
-        fs::write(&main, "import helper from \"@src/helper.forma\"; helper").unwrap();
+        fs::write(&main, "import \"@src/helper.forma\" as helper; helper").unwrap();
         let error = engine.load_module(&main, BTreeMap::new()).unwrap_err();
         assert!(error.message().contains("only allowed in @main"));
         fs::remove_dir_all(directory).unwrap();
@@ -6614,7 +6594,7 @@ unchanged", "|"),
         .unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import show from "./reference-show.forma";
+            r#"import "./reference-show.forma" as show;
                @struct type User = {name: String, scores: Array(Int)};
                @enum type Choice = {None: 'None, Some: String};
                type Pair = Tuple([Int, String]);
@@ -6672,8 +6652,8 @@ unchanged", "|"),
         .unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import reference from "./reference-hash.forma";
-               import hash from "std/hash";
+            r#"import "./reference-hash.forma" as reference;
+               import "std/hash" as hash;
                @struct type User = {name: String, scores: Array(Int)};
                @struct type Renamed = {label: String, scores: Array(Int)};
                @enum type Choice = {None: 'None, Some: String};
@@ -6741,9 +6721,9 @@ unchanged", "|"),
         .unwrap();
         fs::write(
             &main,
-            r#"import validation from "./explicit-diagnostics.forma";
-import arrays from "std/array";
-import project from "./project.json";
+            r#"import "./explicit-diagnostics.forma" as validation;
+import "std/array" as arrays;
+import "./project.json" as project;
 let initial: Array(BlameError) = [];
 match validation.validate_project(project, initial) {
     (checked, diagnostics) => {
@@ -6786,10 +6766,10 @@ match validation.validate_project(project, initial) {
             fs::write(
                 &main,
                 format!(
-                    r#"import validation from "./explicit-diagnostics.forma";
-import arrays from "std/array";
-import results from "std/result";
-import project from "./project.json";
+                    r#"import "./explicit-diagnostics.forma" as validation;
+import "std/array" as arrays;
+import "std/result" as results;
+import "./project.json" as project;
 let diagnostics = match validation.validate_project(project, []) {{
     (_, collected) => collected,
 }};
@@ -6824,9 +6804,9 @@ match arrays.find(diagnostics, fn(item) {{ item.message == "{message}" }}) {{
     fn blame_intrinsic_preserves_data_and_authored_rule_locations() {
         let directory = fixture_dir();
         fs::write(directory.join("user.json"), r#"{"age":42}"#).unwrap();
-        let source = r#"import user from "./user.json";
-import result from "std/result";
-import dyn from "std/dyn";
+        let source = r#"import "./user.json" as user;
+import "std/result" as result;
+import "std/dyn" as dyn;
 @struct type User = {age: Int};
 type ProbeResult = Result(Int, BlameError);
 def inspect_i: Fn(Dyn) -> ProbeResult = fn(value) {

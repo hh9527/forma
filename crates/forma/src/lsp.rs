@@ -1421,7 +1421,7 @@ mod tests {
         let model = root.join("model.forma");
         let main = root.join("main.forma");
         std::fs::write(&model, "{alpha: 1, beta: \"x\"}").expect("write model");
-        let source = "import model from \"./model.forma\"; model.alpha";
+        let source = "import \"./model.forma\" as model; model.alpha";
         std::fs::write(&main, source).expect("write main");
         initialize_state(&root, &state);
         let workspace = Rc::new(
@@ -1444,7 +1444,7 @@ mod tests {
         let model = root.join("model.forma");
         let main = root.join("main.forma");
         std::fs::write(&model, "{alpha: 1, beta: \"x\"}").expect("write model");
-        let source = "import model from \"./model.forma\"; model.";
+        let source = "import \"./model.forma\" as model; model.";
         std::fs::write(&main, source).expect("write main");
         initialize_state(&root, &state);
         let workspace = Rc::new(

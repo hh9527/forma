@@ -1,4 +1,4 @@
-import arrays from "std/array";
+import "std/array" as arrays;
 
 @struct type Package = {
     name: String,

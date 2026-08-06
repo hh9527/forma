@@ -1,6 +1,6 @@
-import arrays from "std/array";
-import desc from "std/type-desc";
-import dyn from "std/dyn";
+import "std/array" as arrays;
+import "std/type-desc" as desc;
+import "std/dyn" as dyn;
 
 @enum type TypeDescKind = {
     Any: 'None, Never: 'None, Type: 'None, TypeOf: 'None,

@@ -1,4 +1,4 @@
-import raw_user from "./user.json";
+import "./user.json" as raw_user;
 
 @struct
 type User = {
