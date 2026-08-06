@@ -7197,6 +7197,66 @@ unchanged", "|"),
     }
 
     #[test]
+    fn regex_native_values_validate_structs_and_drive_typed_decode() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        fs::write(
+            &main,
+            r#"import "std/regex" as re;
+               import "std/result" as result;
+               let pattern = re.compile(r"^(?P<name>\w+)=(?P<value>\d+)(?:;(?P<unit>\w+))?$");
+               @re.parse(pattern)
+               @struct type Rec = {
+                   name: String,
+                   value: Int,
+                   unit: Option(String),
+               };
+               {
+                   matched: re.is_match(pattern, "answer=42"),
+                   equal: pattern == re.compile(r"^(?P<name>\w+)=(?P<value>\d+)(?:;(?P<unit>\w+))?$"),
+                   first: result.unwrap(re.decode(Rec, "answer=42")),
+                   second: result.unwrap(re.decode(Rec, "size=7;px")),
+                   failed: re.decode(Rec, "not a record"),
+               }"#,
+        )
+        .unwrap();
+        let module = load_module(&main, BTreeMap::new(), 500_000).unwrap();
+        let output = module.execute(500_000).unwrap().to_string();
+        assert!(output.contains("matched: 'True"), "{output}");
+        assert!(output.contains("equal: 'True"), "{output}");
+        assert!(
+            output.contains("first: {name: \"answer\", unit: 'None, value: 42}"),
+            "{output}"
+        );
+        assert!(
+            output.contains("second: {name: \"size\", unit: 'Some(\"px\"), value: 7}"),
+            "{output}"
+        );
+        assert!(output.contains("failed: 'Err("), "{output}");
+
+        fs::write(
+            &main,
+            r#"import "std/regex" as re;
+               @re.parse(re.compile(r"(?P<name>\w+)"))
+               @struct type Bad = { value: Int };
+               { Bad }"#,
+        )
+        .unwrap();
+        let error = load_module(&main, BTreeMap::new(), 500_000).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("captures must match struct fields")
+        );
+
+        fs::write(&main, r#"import "std/regex" as re; re.compile(r"(")"#).unwrap();
+        let module = load_module(&main, BTreeMap::new(), 500_000).unwrap();
+        let error = module.execute(500_000).unwrap_err();
+        assert!(error.message.contains("invalid regular expression"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn dependency_imports_preserve_identity_across_relative_edges() {
         let directory = fixture_dir();
         let app = directory.join("app");

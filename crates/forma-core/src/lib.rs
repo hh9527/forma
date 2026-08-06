@@ -15,6 +15,7 @@ pub mod module_id;
 pub mod parser;
 mod pattern;
 pub mod query;
+mod regex;
 pub mod semantic;
 mod sha256;
 pub mod source;

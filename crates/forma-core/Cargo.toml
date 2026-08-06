@@ -10,6 +10,8 @@ path = "src/lib.rs"
 codespan-reporting = "0.13"
 crop = { version = "0.4.3", features = ["utf16-metric"] }
 logos = "0.16"
+regex = "1.12"
+regex-syntax = "0.8"
 
 [build-dependencies]
 lelwel = "0.10"

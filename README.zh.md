@@ -96,6 +96,18 @@ type User = {
 
 字段改名、默认值、扁平化和 skip policy 都是库定义的元数据。编码与解码共享一份计划，JSON Schema 也由同一份计划生成。
 
+类型也可以声明文本解析规则。`Regex` 是标准库公开的 native type；正则在类型构造阶段编译，并校验命名 capture 与字段的完整对应关系：
+
+```forma
+import "std/regex" as re;
+
+@re.parse(re.compile(r"(?P<name>\w+)=(?P<value>\d+)"))
+@struct
+type Rec = { name: String, value: Int };
+```
+
+`re.decode(Rec, "answer=42")` 的结果类型是 `Result(Rec, BlameError)`。类型是权威契约，正则只提供一种经过验证的文本表示。
+
 ### 确定的执行与输出计划
 
 模块没有默认返回值；它显式导出命名值，Host 再按运行模式选择入口。执行入口是一个普通函数：

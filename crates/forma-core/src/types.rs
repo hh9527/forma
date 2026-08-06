@@ -3539,7 +3539,7 @@ pub(crate) fn native_validate(context: &mut CallContext<'_, '_>) -> Result<(), N
     context.make_tagged(context.result(), tag, payload)
 }
 
-fn decode_native_type(value: ValueRef<'_>) -> Result<TypeDescriptor, NativeError> {
+pub(crate) fn decode_native_type(value: ValueRef<'_>) -> Result<TypeDescriptor, NativeError> {
     decode_type_ref(value, "Type").map_err(NativeError::new)
 }
 

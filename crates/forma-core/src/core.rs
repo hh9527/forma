@@ -23,6 +23,7 @@ pub(crate) const TOML_MODULE: &str = "std/toml";
 pub(crate) const TYPE_DESC_MODULE: &str = "std/type-desc";
 pub(crate) const DYN_MODULE: &str = "std/dyn";
 pub(crate) const EQ_MODULE: &str = "std/eq";
+pub(crate) const REGEX_MODULE: &str = "std/regex";
 
 pub(crate) struct CoreModuleSpec {
     pub(crate) native_id: u32,
@@ -451,6 +452,49 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
                 (
                     "validate",
                     NativeFunction::new("validate", 2, crate::types::native_validate),
+                ),
+            ],
+        },
+        CoreModuleSpec {
+            native_id: 19,
+            name: REGEX_MODULE,
+            source: include_str!("../modules/std/regex.forma-sys"),
+            functions: vec![
+                (
+                    "compile",
+                    NativeFunction::new_with_native_type(
+                        "std/regex.compile",
+                        1,
+                        0,
+                        crate::regex::native_compile,
+                    ),
+                ),
+                (
+                    "is_match",
+                    NativeFunction::new_with_native_type(
+                        "std/regex.is_match",
+                        2,
+                        0,
+                        crate::regex::native_is_match,
+                    ),
+                ),
+                (
+                    "prepare",
+                    NativeFunction::new_with_native_type(
+                        "std/regex.prepare",
+                        3,
+                        0,
+                        crate::regex::native_prepare,
+                    ),
+                ),
+                (
+                    "decode",
+                    NativeFunction::new_with_native_type(
+                        "std/regex.decode",
+                        2,
+                        0,
+                        crate::regex::native_decode,
+                    ),
                 ),
             ],
         },

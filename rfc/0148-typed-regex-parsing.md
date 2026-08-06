@@ -1,6 +1,6 @@
 # RFC 0148: Typed regular-expression parsing
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0056, RFC 0123, RFC 0134
 - Child RFCs: RFC 0149 through RFC 0150
 
@@ -72,3 +72,10 @@ typed decoding, diagnostics, and source attribution.
 5. Compiled regex values survive module publication and compare by logical
    pattern identity.
 6. No regex operation changes the module graph or static namespace.
+
+## Implementation result
+
+Implemented in August 2026 through RFCs 0149 and 0150. `std/regex` provides a
+public native `Regex` value, while type decorators validate and retain compiled
+patterns without changing the module graph. The initial scalar surface is
+`String`, `Int`, and their `Option` forms.

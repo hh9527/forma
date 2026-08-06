@@ -140,6 +140,22 @@ Field renaming, defaults, flattening, and skip policies are library-defined
 metadata. Encoding and decoding share one plan, and JSON Schema is generated
 from that same plan.
 
+Types can also declare textual parsing rules. `Regex` is a public standard
+library native type; its expression is compiled during type construction, when
+named captures are checked against the complete field set:
+
+```forma
+import "std/regex" as re;
+
+@re.parse(re.compile(r"(?P<name>\w+)=(?P<value>\d+)"))
+@struct
+type Rec = { name: String, value: Int };
+```
+
+`re.decode(Rec, "answer=42")` has type `Result(Rec, BlameError)`. The type is
+the authoritative contract; the regex supplies one validated textual
+representation.
+
 ### Deterministic executable and output plans
 
 A module has no default result. It explicitly exports named values, and the

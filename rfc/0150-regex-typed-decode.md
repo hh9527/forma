@@ -1,6 +1,6 @@
 # RFC 0150: Regex typed decode
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0148, RFC 0149
 
 ## Summary
@@ -52,3 +52,11 @@ metadata as the rule.
 4. Optional captures produce `Option` values and enforce optional fields.
 5. Decode failures use the standard `BlameError` representation.
 6. Type checking infers the concrete `Result(Rec, BlameError)` result.
+
+## Implementation result
+
+Implemented in August 2026. `re.parse` executes during decorated type metadata
+construction, validates regex HIR requiredness and the complete named capture
+set, and attaches the native `Regex` value under `std/regex.parse`.
+`re.decode` follows nested attribute wrappers, reconstructs the validated
+field plan, and returns the witnessed struct or a standard `BlameError`.
