@@ -160,7 +160,7 @@ fn run_writes_debug_events_only_to_stderr() {
     let directory = fixture_dir();
     fs::write(
         directory.join("debug.forma"),
-        r#"import debug from "@bim/std/debug";
+        r#"import debug from "std/debug";
            42 |> debug.dbg_with\("answer\nlabel", _)"#,
     )
     .unwrap();
@@ -187,9 +187,9 @@ fn exec_dry_run_invokes_explicit_pure_entry() {
     fs::write(
         &main,
         r#"#!/usr/bin/env -S forma exec --dry-run
-import arrays from "@bim/std/array";
-import exec from "@bim/std/exec";
-import hash from "@bim/std/hash";
+import arrays from "std/array";
+import exec from "std/exec";
+import hash from "std/hash";
 type ExecSettings = exec.ExecSettings;
 type ExecRequest = exec.ExecRequest;
 type ExecEnv = exec.ExecEnv;
@@ -370,8 +370,8 @@ fn build_dry_run_validates_and_prints_text_artifacts_without_writing() {
     let main = directory.join("build.forma");
     fs::write(
         &main,
-        r####"import build from "@bim/std/build";
-import strings from "@bim/std/string";
+        r####"import build from "std/build";
+import strings from "std/string";
 type OutputPlan = build.OutputPlan;
 let main: Fn() -> OutputPlan = fn() {
     {

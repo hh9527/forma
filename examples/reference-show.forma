@@ -1,7 +1,7 @@
-import arrays from "@bim/std/array";
-import desc from "@bim/std/type-desc";
-import dyn from "@bim/std/dyn";
-import strings from "@bim/std/string";
+import arrays from "std/array";
+import desc from "std/type-desc";
+import dyn from "std/dyn";
+import strings from "std/string";
 
 @enum type TypeDescKind = {
     Any: 'None, Never: 'None, Type: 'None, TypeOf: 'None,

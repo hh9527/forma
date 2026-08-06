@@ -98,7 +98,7 @@ fn argument_state(
         .value(register)?
         .as_opaque::<Context>(native_type)
         .cloned()
-        .ok_or_else(|| crate::NativeError::new("expected @bim/std/hash#HashState"))
+        .ok_or_else(|| crate::NativeError::new("expected std/hash#HashState"))
 }
 
 fn state_type(

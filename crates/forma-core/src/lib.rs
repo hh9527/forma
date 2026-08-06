@@ -48,7 +48,8 @@ pub use module::{
     load_module_with_quota, load_module_with_quota_and_debug_sink,
 };
 pub use module_id::{
-    ModuleFormat, ModuleId, ModuleResolver, ResolveModuleError, ResolvedModule, resolve_root_module,
+    ModuleAuthority, ModuleFormat, ModuleId, ModuleResolver, ResolveModuleError, ResolvedModule,
+    resolve_root_module,
 };
 pub use query::{CancellationToken, QueryContext, QueryError, Revision, RevisionClock};
 pub use semantic::{

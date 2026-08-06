@@ -7,7 +7,7 @@ use crate::compiler::{
 use crate::core::module_specs;
 use crate::heap::{Heap, PersistentValue, publish_root, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
-use crate::module_id::{ModuleFormat, ModuleId, ModuleResolver, ResolvedModule};
+use crate::module_id::{ModuleAuthority, ModuleFormat, ModuleId, ModuleResolver, ResolvedModule};
 use crate::parser::parse_registered;
 use crate::semantic::{
     SemanticImport, SemanticModuleInput, WorkspaceModuleKind, WorkspaceModuleState,
@@ -182,6 +182,14 @@ struct TrustedNativeModule {
     source: String,
     functions: Vec<(String, crate::NativeFunction)>,
     core: bool,
+}
+
+fn builtin_list(host_modules: &[RegisteredNativeModule]) -> Vec<(String, u32)> {
+    module_specs()
+        .into_iter()
+        .map(|spec| (spec.name.to_owned(), spec.native_id))
+        .chain(host_modules.iter().map(|spec| (spec.name.clone(), spec.id)))
+        .collect()
 }
 
 fn install_native_modules(
@@ -491,18 +499,20 @@ impl EngineBuilder {
         id: Option<u32>,
         spec: NativeModuleSpec,
     ) -> Result<u32, ModuleError> {
-        if !spec.name.starts_with("@bim/") || spec.name.len() == "@bim/".len() {
+        let valid_name = spec.name.split('/').count() >= 2
+            && spec
+                .name
+                .split('/')
+                .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+            && !spec.name.starts_with(['.', '@', '/']);
+        if !valid_name {
             return Err(ModuleError::new(
-                "Host native module name must start with @bim/ and include a name",
+                "Host native module name must be an absolute module path such as acme/runtime",
             ));
         }
-        if spec.name == "@bim/std"
-            || spec.name.starts_with("@bim/std/")
-            || spec.name == "@bim/core"
-            || spec.name.starts_with("@bim/core/")
-        {
+        if module_specs().iter().any(|core| core.name == spec.name) {
             return Err(ModuleError::new(format!(
-                "built-in module name {:?} is in Forma's reserved namespace",
+                "built-in module name {:?} is already registered by Forma",
                 spec.name
             )));
         }
@@ -615,7 +625,8 @@ impl Engine {
         path: impl AsRef<Path>,
     ) -> Result<WorkspaceSnapshot, ModuleError> {
         let resolver = ModuleResolver::for_root(path.as_ref())
-            .map_err(|error| ModuleError::new(error.to_string()))?;
+            .map_err(|error| ModuleError::new(error.to_string()))?
+            .with_builtins(builtin_list(&self.native_modules));
         let root_module = resolver
             .resolve_root(path.as_ref())
             .map_err(|error| ModuleError::new(error.to_string()))?;
@@ -681,7 +692,8 @@ impl Engine {
                 || ModuleResolver::for_root(root_path),
                 |source| ModuleResolver::for_root_with_source(root_path, source),
             )
-            .map_err(|error| ModuleError::new(error.to_string()))?;
+            .map_err(|error| ModuleError::new(error.to_string()))?
+            .with_builtins(builtin_list(&self.native_modules));
         let root_module = resolver
             .resolve_root(path.as_ref())
             .map_err(|error| ModuleError::new(error.to_string()))?;
@@ -751,6 +763,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                 return None;
             }
             let path = module.path()?.to_owned();
+            let authority = module.authority;
             let module_id = module.id;
             if let Some(value) = self.values.get(&module_id) {
                 return Some(value.clone());
@@ -817,12 +830,38 @@ impl RecoverableWorkspaceBuilder<'_> {
                     parsed.manifest.as_ref().expect("checked manifest").location,
                 ));
             }
+            if authority == ModuleAuthority::Ordinary
+                && let Some(binding) = program.as_ref().and_then(|program| {
+                    program.value.body.value.bindings.iter().find(|binding| {
+                        matches!(
+                            binding.value.kind,
+                            BindingKind::Native | BindingKind::NativeType
+                        )
+                    })
+                })
+            {
+                diagnostics.push(Diagnostic::error(
+                    format!(
+                        "native symbol {:?} is only allowed in built-in or .forma-sys modules",
+                        binding.value.name.value
+                    ),
+                    binding.location,
+                ));
+            }
             for (name, location, target) in imports {
-                if target.starts_with("@bim/") {
+                let target_module = match self.resolver.resolve_import(&module_id, &target) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        unavailable_imports.insert(name.clone());
+                        diagnostics.push(Diagnostic::error(error.to_string(), location));
+                        continue;
+                    }
+                };
+                if target_module.authority == ModuleAuthority::RuntimeSystem {
                     semantic_imports.push(SemanticImport {
                         name: name.clone(),
                         location,
-                        target: ModuleId::builtin(target.clone()),
+                        target: target_module.id,
                     });
                     if let Some((value, interface)) = self.core_modules.get(&target) {
                         external_values.insert(name.clone(), value.clone());
@@ -833,32 +872,9 @@ impl RecoverableWorkspaceBuilder<'_> {
                             format!("unknown built-in module {target:?}"),
                             location,
                         ));
-                        self.inputs
-                            .entry(target.clone())
-                            .or_insert_with(|| SemanticModuleInput {
-                                key: target.clone(),
-                                path: None,
-                                kind: WorkspaceModuleKind::Core,
-                                source: None,
-                                program: None,
-                                analysis: None,
-                                partial: None,
-                                state: WorkspaceModuleState::Unavailable,
-                                imports: Vec::new(),
-                                diagnostics: Vec::new(),
-                            });
                     }
                     continue;
                 }
-
-                let target_module = match self.resolver.resolve_import(&module_id, &target) {
-                    Ok(target) => target,
-                    Err(error) => {
-                        unavailable_imports.insert(name.clone());
-                        diagnostics.push(Diagnostic::error(error.to_string(), location));
-                        continue;
-                    }
-                };
                 let target_path = target_module
                     .path()
                     .expect("local import resolves to a local source")
@@ -1243,7 +1259,8 @@ fn load_module_with_native_modules(
     native_modules: &[RegisteredNativeModule],
 ) -> Result<LoadedModule, ModuleError> {
     let resolver = ModuleResolver::for_root(path.as_ref())
-        .map_err(|error| ModuleError::new(error.to_string()))?;
+        .map_err(|error| ModuleError::new(error.to_string()))?
+        .with_builtins(builtin_list(native_modules));
     let root_module = resolver
         .resolve_root(path.as_ref())
         .map_err(|error| ModuleError::new(error.to_string()))?;
@@ -1302,11 +1319,19 @@ impl ModuleLoader {
             .path()
             .expect("root module has a physical path")
             .to_owned();
+        let authority = module.authority;
         let module_id = module.id;
         self.dependencies.insert(path.clone());
         self.enter(&module_id)?;
         let mut account = QuotaAccount::new(self.module_quota);
-        let result = self.compile_xl(&module_id, &path, external_bindings, true, &mut account);
+        let result = self.compile_xl(
+            &module_id,
+            authority,
+            &path,
+            external_bindings,
+            true,
+            &mut account,
+        );
         self.leave(&module_id);
         let (analysis, function, externals) = result?;
         let workspace = WorkspaceSnapshot::build(
@@ -1336,6 +1361,7 @@ impl ModuleLoader {
 
     fn load_resolved_value(&mut self, module: ResolvedModule) -> Result<SourcedValue, ModuleError> {
         let format = module.format;
+        let authority = module.authority;
         let path = module
             .path()
             .expect("source module has a physical path")
@@ -1396,38 +1422,45 @@ impl ModuleLoader {
                 }
                 ModuleFormat::Forma => {
                     let mut account = QuotaAccount::new(self.module_quota);
-                    self.compile_xl(&module_id, &path, BTreeMap::new(), false, &mut account)
-                        .and_then(|(analysis, function, externals)| {
-                            let arena = Vm::new()
-                                .with_debug_sink(Arc::clone(&self.debug_sink))
-                                .execute_in_work(
-                                    &self.main.heap,
-                                    &externals,
-                                    &function,
-                                    &[],
-                                    &mut account,
-                                )
-                                .map_err(|error| {
-                                    ModuleError::new(error.with_sources(&self.sources).to_string())
-                                })?;
-                            let (value, opaque) = match arena.export(&self.main.heap) {
-                                Ok(value) => (value, false),
-                                Err(error) if error.is_legacy_cycle() => (Value::none(), true),
-                                Err(error) => return Err(ModuleError::new(error.to_string())),
-                            };
-                            let root = arena
-                                .publish(&mut self.main.heap)
-                                .map_err(|error| ModuleError::new(error.to_string()))?;
-                            Ok((
-                                SourcedValue {
-                                    value,
-                                    provenance: Provenance::default(),
-                                },
-                                root,
-                                opaque,
-                                analysis.module_interface,
-                            ))
-                        })
+                    self.compile_xl(
+                        &module_id,
+                        authority,
+                        &path,
+                        BTreeMap::new(),
+                        false,
+                        &mut account,
+                    )
+                    .and_then(|(analysis, function, externals)| {
+                        let arena = Vm::new()
+                            .with_debug_sink(Arc::clone(&self.debug_sink))
+                            .execute_in_work(
+                                &self.main.heap,
+                                &externals,
+                                &function,
+                                &[],
+                                &mut account,
+                            )
+                            .map_err(|error| {
+                                ModuleError::new(error.with_sources(&self.sources).to_string())
+                            })?;
+                        let (value, opaque) = match arena.export(&self.main.heap) {
+                            Ok(value) => (value, false),
+                            Err(error) if error.is_legacy_cycle() => (Value::none(), true),
+                            Err(error) => return Err(ModuleError::new(error.to_string())),
+                        };
+                        let root = arena
+                            .publish(&mut self.main.heap)
+                            .map_err(|error| ModuleError::new(error.to_string()))?;
+                        Ok((
+                            SourcedValue {
+                                value,
+                                provenance: Provenance::default(),
+                            },
+                            root,
+                            opaque,
+                            analysis.module_interface,
+                        ))
+                    })
                 }
             };
         self.leave(&module_id);
@@ -1447,6 +1480,7 @@ impl ModuleLoader {
     fn compile_xl(
         &mut self,
         module_id: &ModuleId,
+        authority: ModuleAuthority,
         path: &Path,
         mut external_bindings: BTreeMap<String, Value>,
         is_root: bool,
@@ -1491,7 +1525,16 @@ impl ModuleLoader {
             let ExprKind::String(relative) = &binding.value.value.value else {
                 return Err(ModuleError::new("import path must be a string"));
             };
-            if relative.starts_with("@bim/") {
+            let imported = self
+                .resolver
+                .resolve_import(module_id, relative)
+                .map_err(|error| {
+                    ModuleError::new(self.sources.render(&Diagnostic::error(
+                        error.to_string(),
+                        binding.value.value.location,
+                    )))
+                })?;
+            if imported.authority == ModuleAuthority::RuntimeSystem {
                 let (value, root, interface) =
                     self.load_native_module(relative).map_err(|error| {
                         ModuleError::new(self.sources.render(&Diagnostic::error(
@@ -1502,17 +1545,13 @@ impl ModuleLoader {
                 semantic_imports.push(SemanticImport {
                     name: binding.value.name.value.clone(),
                     location: binding.value.name.location,
-                    target: ModuleId::builtin(relative.clone()),
+                    target: imported.id,
                 });
                 external_roots.insert(binding.value.name.value.clone(), root);
                 external_interfaces.insert(binding.value.name.value.clone(), interface);
                 external_bindings.insert(binding.value.name.value.clone(), value);
                 continue;
             }
-            let imported = self
-                .resolver
-                .resolve_import(module_id, relative)
-                .map_err(|error| ModuleError::new(error.to_string()))?;
             let imported_id = imported.id.clone();
             let sourced = self.load_resolved_value(imported)?;
             semantic_imports.push(SemanticImport {
@@ -1545,14 +1584,19 @@ impl ModuleLoader {
                 BindingKind::Native | BindingKind::NativeType
             )
         }) {
+            let message = if authority == ModuleAuthority::Ordinary {
+                format!(
+                    "native symbol {:?} is only allowed in built-in or .forma-sys modules",
+                    binding.value.name.value
+                )
+            } else {
+                format!(
+                    "native symbol {:?} is not registered for this system module",
+                    binding.value.name.value
+                )
+            };
             return Err(ModuleError::new(self.sources.render(
-                &crate::source::Diagnostic::error(
-                    format!(
-                        "native symbol {:?} is not registered for this module",
-                        binding.value.name.value
-                    ),
-                    binding.location,
-                ),
+                &crate::source::Diagnostic::error(message, binding.location),
             )));
         }
 
@@ -1983,63 +2027,62 @@ mod tests {
         });
         assert_eq!(
             builder
-                .register_native_module(Some(2_000), spec("@bim/acme/stable"))
+                .register_native_module(Some(2_000), spec("acme/stable"))
                 .unwrap(),
             2_000
         );
         assert_eq!(
             builder
-                .register_native_module(None, spec("@bim/acme/automatic"))
+                .register_native_module(None, spec("acme/automatic"))
                 .unwrap(),
             1_024
         );
         assert!(
             builder
-                .register_native_module(Some(2_000), spec("@bim/acme/collision"))
+                .register_native_module(Some(2_000), spec("acme/collision"))
                 .unwrap_err()
                 .to_string()
                 .contains("already registered")
         );
         assert!(
             builder
-                .register_native_module(Some(2_001), spec("@bim/acme/stable"))
+                .register_native_module(Some(2_001), spec("acme/stable"))
                 .unwrap_err()
                 .to_string()
                 .contains("name")
         );
         assert!(
             builder
-                .register_native_module(Some(1_023), spec("@bim/acme/reserved"))
+                .register_native_module(Some(1_023), spec("acme/reserved"))
                 .unwrap_err()
                 .to_string()
                 .contains("reserved range")
         );
         assert!(
             builder
-                .register_native_module(None, spec("acme/invalid"))
+                .register_native_module(None, spec("invalid"))
                 .unwrap_err()
                 .to_string()
-                .contains("must start with @bim/")
+                .contains("absolute module path")
         );
         assert!(
             builder
-                .register_native_module(None, spec("@bim/std/hash"))
+                .register_native_module(None, spec("std/hash"))
                 .unwrap_err()
                 .to_string()
-                .contains("reserved namespace")
-        );
-        assert!(
-            builder
-                .register_native_module(None, spec("@bim/core/future"))
-                .unwrap_err()
-                .to_string()
-                .contains("reserved namespace")
+                .contains("already registered by Forma")
         );
         assert_eq!(
             builder
-                .register_native_module(None, spec("@bim/acme/after-errors"))
+                .register_native_module(None, spec("core/future"))
                 .unwrap(),
             1_025
+        );
+        assert_eq!(
+            builder
+                .register_native_module(None, spec("acme/after-errors"))
+                .unwrap(),
+            1_026
         );
 
         let engine = builder.build();
@@ -2049,7 +2092,7 @@ mod tests {
                 .iter()
                 .map(|module| module.id)
                 .collect::<Vec<_>>(),
-            [1_024, 1_025, 2_000]
+            [1_024, 1_025, 1_026, 2_000]
         );
         let directory = fixture_dir();
         fs::write(directory.join("main.forma"), "1").unwrap();
@@ -2071,12 +2114,12 @@ mod tests {
             .register_native_module(
                 Some(1_500),
                 NativeModuleSpec::new(
-                    "@bim/acme/runtime",
+                    "acme/runtime",
                     "native type Token = @9; native answer: Fn() -> Int; {Token: Token, answer: answer}",
                     vec![(
                         "answer",
                         crate::NativeFunction::new(
-                            "@bim/acme/runtime.answer",
+                            "acme/runtime.answer",
                             0,
                             fixture_answer_callback,
                         ),
@@ -2089,8 +2132,8 @@ mod tests {
         let main = directory.join("main.forma");
         fs::write(
             &main,
-            r#"import host from "@bim/acme/runtime";
-import desc from "@bim/std/type-desc";
+            r#"import host from "acme/runtime";
+import desc from "std/type-desc";
 {answer: host.answer(), name: desc.opaque_name(host.Token)}"#,
         )
         .unwrap();
@@ -2102,13 +2145,13 @@ import desc from "@bim/std/type-desc";
         assert_eq!(output.get("answer").unwrap().to_string(), "42");
         assert_eq!(
             output.get("name").unwrap().to_string(),
-            "'Some(\"@bim/acme/runtime#Token\")"
+            "'Some(\"acme/runtime#Token\")"
         );
         let host = module
             .workspace
             .modules()
             .iter()
-            .find(|module| module.name == "@bim/acme/runtime")
+            .find(|module| module.name == "acme/runtime")
             .unwrap();
         assert_eq!(host.kind, WorkspaceModuleKind::Core);
         assert_eq!(host.state, WorkspaceModuleState::Known);
@@ -2116,7 +2159,7 @@ import desc from "@bim/std/type-desc";
         let snapshot = engine.recover_workspace(&main).unwrap();
         assert!(snapshot.diagnostics().is_empty());
         assert!(snapshot.modules().iter().any(|module| {
-            module.name == "@bim/acme/runtime"
+            module.name == "acme/runtime"
                 && module.kind == WorkspaceModuleKind::Core
                 && module.state == WorkspaceModuleState::Known
         }));
@@ -2150,7 +2193,7 @@ import desc from "@bim/std/type-desc";
         let isolated = Engine::new(config)
             .load_module(&main, BTreeMap::new())
             .unwrap_err();
-        assert!(isolated.to_string().contains("unknown built-in module"));
+        assert!(isolated.to_string().contains("unknown dependency"));
         assert!(isolated.to_string().contains("main.forma:1:18"));
         fs::remove_dir_all(directory).unwrap();
     }
@@ -2161,21 +2204,14 @@ import desc from "@bim/std/type-desc";
         let main = directory.join("main.forma");
         fs::write(
             &main,
-            r#"import missing from "@bim/acme/missing";
+            r#"import missing from "acme/missing";
 type Independent = String;
 {Independent: Independent}"#,
         )
         .unwrap();
         let snapshot = recovery_engine().recover_workspace(&main).unwrap();
-        let missing = snapshot
-            .modules()
-            .iter()
-            .find(|module| module.name == "@bim/acme/missing")
-            .unwrap();
-        assert_eq!(missing.kind, WorkspaceModuleKind::Core);
-        assert_eq!(missing.state, WorkspaceModuleState::Unavailable);
         assert!(snapshot.diagnostics().iter().any(|diagnostic| {
-            diagnostic.message.contains("unknown built-in module")
+            diagnostic.message.contains("unknown dependency")
                 && diagnostic.labels[0].location.start == 20
         }));
         let root = snapshot
@@ -2195,7 +2231,7 @@ type Independent = String;
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import debug from "@bim/std/debug";
+            r#"import debug from "std/debug";
                let identity: Fn(Any) -> Any = fn(value) { value };
                let data = { text: "line\nnext", items: [1, 'Ok, (2,)] };
                let observed = debug.dbg_with("loaded\nvalue", data);
@@ -2232,7 +2268,7 @@ type Independent = String;
 
         fs::write(
             directory.join("bad-label.forma"),
-            r#"import debug from "@bim/std/debug"; debug.dbg_with(1, 42)"#,
+            r#"import debug from "std/debug"; debug.dbg_with(1, 42)"#,
         )
         .unwrap();
         let bad = engine
@@ -2248,12 +2284,12 @@ type Independent = String;
         fs::write(directory.join("data.json"), r#"{"value":42}"#).unwrap();
         fs::write(
             directory.join("dependency.forma"),
-            r#"import debug from "@bim/std/debug"; debug.dbg_with("tool", 41)"#,
+            r#"import debug from "std/debug"; debug.dbg_with("tool", 41)"#,
         )
         .unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import debug from "@bim/std/debug";
+            r#"import debug from "std/debug";
                import dependency from "./dependency.forma";
                import data from "./data.json";
                type Observed = debug.dbg(Int);
@@ -2335,7 +2371,7 @@ type Independent = String;
         let directory = fixture_dir();
         fs::write(
             directory.join("erased.forma"),
-            r#"import debug from "@bim/std/debug";
+            r#"import debug from "std/debug";
                def observe: Fn(Any) -> Any = fn(value) { debug.dbg_with("metadata", value) };
                type Observed = observe(Int);
                0"#,
@@ -2361,7 +2397,7 @@ type Independent = String;
 
         fs::write(
             directory.join("retained.forma"),
-            r#"import debug from "@bim/std/debug";
+            r#"import debug from "std/debug";
                def observe: Fn(Any) -> Any = fn(value) { debug.dbg_with("observed", value) };
                type Observed = observe(Int);
                observe(1)"#,
@@ -2387,7 +2423,7 @@ type Independent = String;
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import debug from "@bim/std/debug";
+            r#"import debug from "std/debug";
                type Observed = debug.dbg(Int);
                0"#,
         )
@@ -2413,8 +2449,8 @@ type Independent = String;
         let directory = fixture_dir();
         fs::write(
             directory.join("User.forma"),
-            r#"import codec from "@bim/std/codec";
-               import result from "@bim/std/result";
+            r#"import codec from "std/codec";
+               import result from "std/result";
                @struct type User = {v: Option(String)};
                let decode = fn(value) { codec.decode(User, value) };
                let encode = fn(value) {
@@ -2427,8 +2463,8 @@ type Independent = String;
             directory.join("main.forma"),
             r#"import data from "./abc.json";
                import User from "./User.forma";
-               import result from "@bim/std/result";
-               import json from "@bim/std/json";
+               import result from "std/result";
+               import json from "std/json";
                let user = data |> User.decode |> result.unwrap;
                user |> User.encode |> json.stringify_pretty(2)"#,
         )
@@ -2508,8 +2544,8 @@ type Independent = String;
         fs::write(
             directory.join("main.forma"),
             r#"import data from "./data.json";
-               import codec from "@bim/std/codec";
-               import result from "@bim/std/result";
+               import codec from "std/codec";
+               import result from "std/result";
                type StringRule = {kind: 'String};
                type UserRule = {kind: 'Struct, fields: {v: StringRule}};
                codec.decode(UserRule, data) |> result.unwrap"#,
@@ -2524,7 +2560,7 @@ type Independent = String;
 
         fs::write(
             directory.join("legacy.forma"),
-            r#"import result from "@bim/std/result"; result.unwrap('Err("legacy"))"#,
+            r#"import result from "std/result"; result.unwrap('Err("legacy"))"#,
         )
         .unwrap();
         let legacy = load_module(directory.join("legacy.forma"), BTreeMap::new(), 100_000)
@@ -2540,25 +2576,25 @@ type Independent = String;
         let directory = fixture_dir();
         let cases = [
             (
-                r#"import codec from "@bim/std/codec";
-                   import result from "@bim/std/result";
+                r#"import codec from "std/codec";
+                   import result from "std/result";
                    @struct type T = {name: String};
                    codec.decode(T, {}) |> result.unwrap"#,
                 "$.name: missing required field",
             ),
             (
-                r#"import codec from "@bim/std/codec";
-                   import result from "@bim/std/result";
+                r#"import codec from "std/codec";
+                   import result from "std/result";
                    @struct type T = {name: String};
                    codec.decode(T, {name: "Ada", extra: 1}) |> result.unwrap"#,
                 "$.extra: unknown field",
             ),
             (
-                r#"import json from "@bim/std/json"; json.stringify((1, 2))"#,
+                r#"import json from "std/json"; json.stringify((1, 2))"#,
                 "JSON cannot encode Tuple",
             ),
             (
-                r#"import json from "@bim/std/json"; json.stringify_pretty(17)"#,
+                r#"import json from "std/json"; json.stringify_pretty(17)"#,
                 "indent must be between 0 and 16",
             ),
         ];
@@ -2573,7 +2609,7 @@ type Independent = String;
         let path = directory.join("compact.forma");
         fs::write(
             &path,
-            r#"import json from "@bim/std/json";
+            r#"import json from "std/json";
                json.stringify({z: [1, 'True], a: "line\nnext"})"#,
         )
         .unwrap();
@@ -2636,7 +2672,7 @@ name = "rustc"
             directory.join("main.forma"),
             r#"import config from "./config.toml";
                import same from "./sub/../config.toml";
-               import toml from "@bim/std/toml";
+               import toml from "std/toml";
                type TomlDate = toml.DateTime;
                @struct type Tool = {name: String};
                @struct type Config = {
@@ -2695,8 +2731,8 @@ name = "rustc"
 
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "@bim/std/codec";
-               import result from "@bim/std/result";
+            r#"import codec from "std/codec";
+               import result from "std/result";
                import user from "./user.toml";
                @struct type User = {name: String, age: Int};
                codec.decode(User, user) |> result.unwrap"#,
@@ -2809,8 +2845,16 @@ name = "rustc"
             100_000,
         )
         .unwrap_err();
-        assert!(missing.message().contains("not registered"));
+        assert!(missing.message().contains("only allowed"));
         assert!(missing.to_string().contains("missing-native.forma:1:1"));
+        let recovered = recovery_engine()
+            .recover_workspace(directory.join("missing-native.forma"))
+            .unwrap();
+        assert!(recovered.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("only allowed in built-in or .forma-sys modules")
+        }));
 
         fs::write(
             directory.join("missing-native-type.forma"),
@@ -2823,12 +2867,35 @@ name = "rustc"
             100_000,
         )
         .unwrap_err();
-        assert!(missing_type.message().contains("not registered"));
+        assert!(missing_type.message().contains("only allowed"));
         assert!(
             missing_type
                 .to_string()
                 .contains("missing-native-type.forma:1:1")
         );
+
+        fs::write(
+            directory.join("system.forma-sys"),
+            "native missing: Fn(Int) -> Int; missing(1)",
+        )
+        .unwrap();
+        fs::write(
+            directory.join("system-user.forma"),
+            "import system from \"./system.forma-sys\"; system",
+        )
+        .unwrap();
+        let system = load_module(
+            directory.join("system-user.forma"),
+            BTreeMap::new(),
+            100_000,
+        )
+        .unwrap_err();
+        assert!(
+            system
+                .message()
+                .contains("not registered for this system module")
+        );
+        assert!(!system.message().contains("only allowed"));
 
         fs::write(
             directory.join("nested-native.forma"),
@@ -3012,7 +3079,7 @@ name = "rustc"
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import arrays from "@bim/std/array"; arrays.map([1, 2], fn(x) { x + 1 })"#,
+            r#"import arrays from "std/array"; arrays.map([1, 2], fn(x) { x + 1 })"#,
         )
         .unwrap();
         let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
@@ -3030,7 +3097,7 @@ name = "rustc"
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import arrays from "@bim/std/array";
+            r#"import arrays from "std/array";
                let values = [1, 2, 3];
                let empty: Array(Int) = [];
                let empty_strings: Array(String) = [];
@@ -3123,9 +3190,9 @@ name = "rustc"
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import arrays from "@bim/std/array";
-               import paths from "@bim/std/path";
-               import strings from "@bim/std/string";
+            r#"import arrays from "std/array";
+               import paths from "std/path";
+               import strings from "std/string";
                {
                    concat: arrays.concat([[1, 2], [], [3]]),
                    any: arrays.any([1, 0], fn(value) {
@@ -3225,11 +3292,11 @@ unchanged", "|"),
 
         for (source, expected) in [
             (
-                "import strings from \"@bim/std/string\"; strings.indent(\"x\", -1)",
+                "import strings from \"std/string\"; strings.indent(\"x\", -1)",
                 "indentation width must be non-negative",
             ),
             (
-                "import strings from \"@bim/std/string\"; strings.trim_margin(\"x\", \"\")",
+                "import strings from \"std/string\"; strings.trim_margin(\"x\", \"\")",
                 "margin marker must not be empty",
             ),
         ] {
@@ -3248,10 +3315,10 @@ unchanged", "|"),
         let main = directory.join("main.forma");
         fs::write(
             &main,
-            r#"import codec from "@bim/std/codec";
-               import dicts from "@bim/std/dict";
-               import json from "@bim/std/json";
-               import result from "@bim/std/result";
+            r#"import codec from "std/codec";
+               import dicts from "std/dict";
+               import json from "std/json";
+               import result from "std/result";
                type Env = Dict(String);
                let env: Env = {PATH: "/bin", HOME: "/tmp"};
                let decoded = codec.decode(Env, {SHELL: "/bin/sh"}) |> result.unwrap;
@@ -3341,7 +3408,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import json from "@bim/std/json";
+            r#"import json from "std/json";
                @struct type Node = {children: Dict(Node)};
                json.schema(Node)"#,
         )
@@ -3360,7 +3427,7 @@ unchanged", "|"),
         let main = directory.join("main.forma");
         fs::write(
             &main,
-            r#"import arrays from "@bim/std/array";
+            r#"import arrays from "std/array";
                {
                    ints: arrays.map([1, 2], fn(value) { value + 1 }),
                    strings: arrays.map(["a"], fn(value) { value }),
@@ -3375,7 +3442,7 @@ unchanged", "|"),
 
         fs::write(
             &main,
-            r#"import arrays from "@bim/std/array";
+            r#"import arrays from "std/array";
                let map = arrays.map;
                (map([1], fn(value) { value }), map(["a"], fn(value) { value }))"#,
         )
@@ -3498,7 +3565,7 @@ unchanged", "|"),
         fs::write(directory.join("values.json"), data).unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import arrays from "@bim/std/array";
+            r#"import arrays from "std/array";
                import values from "./values.json";
                arrays.map(values, fn(value) { value + 1 })"#,
         )
@@ -3559,7 +3626,7 @@ unchanged", "|"),
 
         fs::write(
             directory.join("types.forma"),
-            r#"import arrays from "@bim/std/array";
+            r#"import arrays from "std/array";
                type Pair = Tuple(arrays.map([Int, String], fn(item) { item }));
                let pair: Pair = (1, "one");
                pair"#,
@@ -3577,7 +3644,7 @@ unchanged", "|"),
             let path = directory.join(name);
             fs::write(
                 &path,
-                format!("import arrays from \"@bim/std/array\"; {expression}"),
+                format!("import arrays from \"std/array\"; {expression}"),
             )
             .unwrap();
             load_module(path, BTreeMap::new(), 100_000).unwrap_err()
@@ -3586,7 +3653,7 @@ unchanged", "|"),
             let path = directory.join(name);
             fs::write(
                 &path,
-                format!("import arrays from \"@bim/std/array\"; {expression}"),
+                format!("import arrays from \"std/array\"; {expression}"),
             )
             .unwrap();
             let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
@@ -3627,7 +3694,7 @@ unchanged", "|"),
             callback
                 .trace
                 .iter()
-                .any(|frame| frame.function == "@bim/std/array.map")
+                .any(|frame| frame.function == "std/array.map")
         );
 
         let nested_depth = run_error(
@@ -3648,14 +3715,14 @@ unchanged", "|"),
         let unknown_path = directory.join("unknown-core.forma");
         fs::write(
             &unknown_path,
-            "import unknown from \"@bim/std/unknown\"; unknown",
+            "import unknown from \"std/unknown\"; unknown",
         )
         .unwrap();
         assert!(
             load_module(unknown_path, BTreeMap::new(), 100_000)
                 .unwrap_err()
                 .to_string()
-                .contains("unknown built-in module")
+                .contains("unknown dependency")
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -3665,8 +3732,8 @@ unchanged", "|"),
         let directory = fixture_dir();
         let data = directory.join("data.json");
         let main = directory.join("main.forma");
-        let source = r#"import arrays from "@bim/std/array";
-                        import result from "@bim/std/result";
+        let source = r#"import arrays from "std/array";
+                        import result from "std/result";
                         import data from "./data.json";
                         let values = arrays.push(data, APPENDED);
                         arrays.map(values, fn(value) {
@@ -3710,7 +3777,7 @@ unchanged", "|"),
         fs::write(directory.join("values.json"), "[1, 2]").unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import arrays from "@bim/std/array";
+            r#"import arrays from "std/array";
                import values from "./values.json";
                arrays.push(values, 3)"#,
         )
@@ -3755,8 +3822,8 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import options from "@bim/std/option";
-               import results from "@bim/std/result";
+            r#"import options from "std/option";
+               import results from "std/result";
                let ok: Result(Int, String) = 'Ok(3);
                let err: Result(Int, String) = 'Err("bad");
                {
@@ -3812,8 +3879,8 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "@bim/std/codec";
-               import result from "@bim/std/result";
+            r#"import codec from "std/codec";
+               import result from "std/result";
                @struct type User = {name: String};
                let decoded = codec.decode(User, {name: "Ada"});
                let encoded = codec.encode(User, {name: "Lin"});
@@ -3924,7 +3991,7 @@ unchanged", "|"),
 
         fs::write(
             directory.join("wrong-encode.forma"),
-            r#"import codec from "@bim/std/codec";
+            r#"import codec from "std/codec";
                @struct type User = {name: String};
                codec.encode(User, {name: 1})"#,
         )
@@ -3953,7 +4020,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import dicts from "@bim/std/dict";
+            r#"import dicts from "std/dict";
                let source = { z: 3, a: 1, middle: 2 };
                {
                    keys: dicts.keys(source),
@@ -4003,9 +4070,9 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import desc from "@bim/std/type-desc";
-               import attributes from "@bim/std/attributes";
-               import arrays from "@bim/std/array";
+            r#"import desc from "std/type-desc";
+               import attributes from "std/attributes";
+               import arrays from "std/array";
                @struct type Node = {children: Array(Node)};
                let struct_nodes = desc.children(Node);
                let field_nodes = arrays.flat_map(struct_nodes, desc.children);
@@ -4060,8 +4127,8 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import desc from "@bim/std/type-desc";
-               import hash from "@bim/std/hash";
+            r#"import desc from "std/type-desc";
+               import hash from "std/hash";
                {
                    kind: desc.kind(hash.HashState),
                    children: desc.children(hash.HashState),
@@ -4077,12 +4144,12 @@ unchanged", "|"),
         assert_eq!(output.get("children").unwrap().to_string(), "[]");
         assert_eq!(
             output.get("name").unwrap().to_string(),
-            "'Some(\"@bim/std/hash#HashState\")"
+            "'Some(\"std/hash#HashState\")"
         );
         fs::write(
             directory.join("main.forma"),
-            r#"import json from "@bim/std/json";
-               import hash from "@bim/std/hash";
+            r#"import json from "std/json";
+               import hash from "std/hash";
                json.decode(hash.HashState, "1")"#,
         )
         .unwrap();
@@ -4100,8 +4167,8 @@ unchanged", "|"),
         );
         fs::write(
             directory.join("main.forma"),
-            r#"import json from "@bim/std/json";
-               import hash from "@bim/std/hash";
+            r#"import json from "std/json";
+               import hash from "std/hash";
                json.schema(hash.HashState)"#,
         )
         .unwrap();
@@ -4120,7 +4187,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import hash from "@bim/std/hash";
+            r#"import hash from "std/hash";
                let empty = hash.new();
                let string = hash.update_string(empty, "abc");
                let bytes = hash.update_bytes(empty, b"abc");
@@ -4176,7 +4243,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import dyn from "@bim/std/dyn";
+            r#"import dyn from "std/dyn";
                let int_value = dyn.pack(Int, 41);
                let string_value = dyn.pack(String, "text");
                let float_value = dyn.pack(Float, 1.5);
@@ -4228,7 +4295,7 @@ unchanged", "|"),
 
         fs::write(
             directory.join("invalid.forma"),
-            r#"import dyn from "@bim/std/dyn";
+            r#"import dyn from "std/dyn";
                dyn.pack[Int](Int, "wrong")"#,
         )
         .unwrap();
@@ -4243,9 +4310,9 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import dyn from "@bim/std/dyn";
-               import result from "@bim/std/result";
-               import arrays from "@bim/std/array";
+            r#"import dyn from "std/dyn";
+               import result from "std/result";
+               import arrays from "std/array";
                @struct type User = {name: String, pair: Tuple([Int, String])};
                @struct type Node = {value: Int, children: Array(Node)};
                @enum type Maybe = {None: 'None, Some: Int};
@@ -4338,7 +4405,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import dyn from "@bim/std/dyn";
+            r#"import dyn from "std/dyn";
                def int_eq_i: Fn(Dyn, Dyn) -> Bool = fn(left, right) {
                    match dyn.check_int(left) {
                        'Some(a) => match dyn.check_int(right) {
@@ -4447,7 +4514,7 @@ unchanged", "|"),
         fs::write(
             directory.join("main.forma"),
             r#"import equality from "./reference-equality.forma";
-               import eq from "@bim/std/eq";
+               import eq from "std/eq";
                @struct type Node = {value: Int, children: Array(Node)};
                @enum type Choice = {None: 'None, Some: String};
                type Pair = Tuple([Int, String]);
@@ -4515,8 +4582,8 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import arrays from "@bim/std/array";
-               import eq from "@bim/std/eq";
+            r#"import arrays from "std/array";
+               import eq from "std/eq";
                let function = fn(value) { value };
                let pairs = arrays.zip([1, 2, 3], [1, 2, 3]);
                def accepts_int_eq: Fn(Fn(Int, Int) -> Bool) -> Bool = fn(compare) {
@@ -4563,7 +4630,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import dicts from "@bim/std/dict";
+            r#"import dicts from "std/dict";
                let source: Dict(Int) = {z: 3, a: 1, middle: 2};
                let empty: Dict(Int) = {};
                {
@@ -4613,7 +4680,7 @@ unchanged", "|"),
         let main = directory.join("main.forma");
         fs::write(
             &main,
-            r#"import dicts from "@bim/std/dict";
+            r#"import dicts from "std/dict";
                dicts.filter({a: 1}, fn(value) { value })"#,
         )
         .unwrap();
@@ -4626,7 +4693,7 @@ unchanged", "|"),
 
         fs::write(
             &main,
-            r#"import dicts from "@bim/std/dict";
+            r#"import dicts from "std/dict";
                let mixed = {number: 1, text: "two"};
                dicts.map_values(mixed, fn(value) { value })"#,
         )
@@ -4636,7 +4703,7 @@ unchanged", "|"),
 
         fs::write(
             &main,
-            r#"import dicts from "@bim/std/dict";
+            r#"import dicts from "std/dict";
                let source: Dict(Int) = {a: 1};
                dicts.map_values(source, fn(value) { value / 0 })"#,
         )
@@ -4648,7 +4715,7 @@ unchanged", "|"),
             error
                 .trace
                 .iter()
-                .any(|frame| frame.function == "@bim/std/dict.map_values")
+                .any(|frame| frame.function == "std/dict.map_values")
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -4659,7 +4726,7 @@ unchanged", "|"),
         fs::write(directory.join("data.json"), r#"{"a":1,"long":2}"#).unwrap();
         fs::write(
             directory.join("main.forma"),
-            r#"import dicts from "@bim/std/dict";
+            r#"import dicts from "std/dict";
                import data from "./data.json";
                dicts.keys(data)"#,
         )
@@ -4700,7 +4767,7 @@ unchanged", "|"),
 
         fs::write(
             directory.join("types.forma"),
-            r#"import dicts from "@bim/std/dict";
+            r#"import dicts from "std/dict";
                type Pair = Tuple(dicts.values({ first: Int, second: String }));
                let pair: Pair = (1, "one");
                pair"#,
@@ -4716,7 +4783,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import attributes from "@bim/std/attributes";
+            r#"import attributes from "std/attributes";
                let nested = {
                    kind: 'WithAttributes,
                    inner: {
@@ -4781,11 +4848,11 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import attributes from "@bim/std/attributes";
-               import codec from "@bim/std/codec";
+            r#"import attributes from "std/attributes";
+               import codec from "std/codec";
                let rename = fn(name) {
                    let decorate: Fn(Any, Any) -> Any = fn(ctx, value) {
-                       attributes.add(value, { "@bim/std/json.rename": name })
+                       attributes.add(value, { "std/json.rename": name })
                    }; decorate
                };
                let model: Fn(Any, Any) -> Any = fn(ctx, value) {
@@ -4852,10 +4919,7 @@ unchanged", "|"),
             panic!("expected field attributes")
         };
         assert_eq!(
-            field_attributes
-                .get("@bim/std/json.rename")
-                .unwrap()
-                .to_string(),
+            field_attributes.get("std/json.rename").unwrap().to_string(),
             "\"type\""
         );
         fs::remove_dir_all(directory).unwrap();
@@ -4866,7 +4930,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import attributes from "@bim/std/attributes";
+            r#"import attributes from "std/attributes";
                let annotate = fn(key, payload) {
                    let decorate: Fn(Any, Any) -> Any = fn(ctx, value) { attributes.add(value, { marker: (key, payload) }) };
                    decorate
@@ -5014,7 +5078,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "@bim/std/codec";
+            r#"import codec from "std/codec";
                @enum
                type Choice = { None: 'None, Number: Int };
                {
@@ -5042,9 +5106,9 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "@bim/std/codec";
-               import json from "@bim/std/json";
-               import result from "@bim/std/result";
+            r#"import codec from "std/codec";
+               import json from "std/json";
+               import result from "std/result";
                @struct type User = {name: String};
                @json.rename_all('CamelCase)
                @enum type Event = {
@@ -5092,8 +5156,8 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "@bim/std/codec";
-               import json from "@bim/std/json";
+            r#"import codec from "std/codec";
+               import json from "std/json";
                @json.untagged @enum type Scalar = {Text: String, Count: Int};
                @json.untagged @enum type Ambiguous = {Anything: Any, Text: String};
                {
@@ -5134,9 +5198,9 @@ unchanged", "|"),
         fs::write(
             directory.join("main.forma"),
             r#"import data from "./data.json";
-               import codec from "@bim/std/codec";
-               import json from "@bim/std/json";
-               import result from "@bim/std/result";
+               import codec from "std/codec";
+               import json from "std/json";
+               import result from "std/result";
                @struct type User = {name: String};
                @struct type Details = {city_name: String};
                @json.rename_all('CamelCase)
@@ -5238,7 +5302,7 @@ unchanged", "|"),
         let path = directory.join("main.forma");
         fs::write(
             &path,
-            r#"import json from "@bim/std/json";
+            r#"import json from "std/json";
                json.schema(union('None, [Int, Array(String), {kind: 'Tuple, items: [Int, String]}]))"#,
         )
         .unwrap();
@@ -5268,9 +5332,9 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "@bim/std/codec";
-               import json from "@bim/std/json";
-               import result from "@bim/std/result";
+            r#"import codec from "std/codec";
+               import json from "std/json";
+               import result from "std/result";
                {
                    boolean: codec.decode(Bool, 'True) |> result.unwrap,
                    none: codec.decode(Option(Int), 'None) |> result.unwrap,
@@ -5297,7 +5361,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("Types.forma"),
-            r#"import json from "@bim/std/json";
+            r#"import json from "std/json";
                @struct type Node = {
                    value: Int,
                    children: Array(Node),
@@ -5330,9 +5394,9 @@ unchanged", "|"),
         fs::write(
             directory.join("main.forma"),
             r#"import Types from "./Types.forma";
-               import codec from "@bim/std/codec";
-               import json from "@bim/std/json";
-               import result from "@bim/std/result";
+               import codec from "std/codec";
+               import json from "std/json";
+               import result from "std/result";
                let node = codec.decode(Types.Node, {
                    value: 1,
                    children: [{value: 2, children: []}],
@@ -5372,8 +5436,8 @@ unchanged", "|"),
             directory.join("bad.forma"),
             r#"import data from "./bad.json";
                import Types from "./Types.forma";
-               import codec from "@bim/std/codec";
-               import result from "@bim/std/result";
+               import codec from "std/codec";
+               import result from "std/result";
                codec.decode(Types.Node, data) |> result.unwrap"#,
         )
         .unwrap();
@@ -5386,7 +5450,7 @@ unchanged", "|"),
         fs::write(
             directory.join("leak.forma"),
             r#"import Types from "./Types.forma";
-               import json from "@bim/std/json";
+               import json from "std/json";
                json.stringify(Types.Node)"#,
         )
         .unwrap();
@@ -5405,7 +5469,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "@bim/std/codec";
+            r#"import codec from "std/codec";
                @struct type Forward = {next: Later};
                let premature = codec.decode(Forward, {next: 1});
                type Later = Int;
@@ -5425,7 +5489,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import attributes from "@bim/std/attributes";
+            r#"import attributes from "std/attributes";
                type Maybe = Option(attributes.add(Int, { marker: "payload" }));
                type Outcome = Result(String, Int);
                let compared: Bool = 1 < 2;
@@ -5607,7 +5671,7 @@ unchanged", "|"),
         let path = directory.join("main.forma");
         fs::write(
             &path,
-            r#"import attributes from "@bim/std/attributes";
+            r#"import attributes from "std/attributes";
                attributes.normalize({kind: 'WithAttributes, inner: 1, attributes: []})"#,
         )
         .unwrap();
@@ -5617,7 +5681,7 @@ unchanged", "|"),
 
         fs::write(
             &path,
-            r#"import attributes from "@bim/std/attributes";
+            r#"import attributes from "std/attributes";
                attributes.normalize(1)"#,
         )
         .unwrap();
@@ -5642,7 +5706,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import json from "@bim/std/json";
+            r#"import json from "std/json";
                @json.rename_all('CamelCase)
                @struct
                type Model = {
@@ -5667,7 +5731,7 @@ unchanged", "|"),
         };
         assert_eq!(
             root_attributes
-                .get("@bim/std/json.rename_all")
+                .get("std/json.rename_all")
                 .unwrap()
                 .to_string(),
             "'CamelCase"
@@ -5688,16 +5752,13 @@ unchanged", "|"),
             panic!("expected field attributes")
         };
         assert_eq!(
-            attributes.get("@bim/std/json.rename").unwrap().to_string(),
+            attributes.get("std/json.rename").unwrap().to_string(),
             "\"outerName\""
         );
-        assert_eq!(
-            attributes.get("@bim/std/json.default").unwrap().to_string(),
-            "7"
-        );
+        assert_eq!(attributes.get("std/json.default").unwrap().to_string(), "7");
         assert_eq!(
             attributes
-                .get("@bim/std/json.skip_serializing_if")
+                .get("std/json.skip_serializing_if")
                 .unwrap()
                 .to_string(),
             "'None"
@@ -5710,7 +5771,7 @@ unchanged", "|"),
         };
         assert_eq!(
             nested_attributes
-                .get("@bim/std/json.flatten")
+                .get("std/json.flatten")
                 .unwrap()
                 .to_string(),
             "'True"
@@ -5723,9 +5784,9 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "@bim/std/codec";
-               import json from "@bim/std/json";
-               import result from "@bim/std/result";
+            r#"import codec from "std/codec";
+               import json from "std/json";
+               import result from "std/result";
 
                @struct type Coordinates = {
                    latitude: Int,
@@ -5780,9 +5841,9 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "@bim/std/codec";
-               import debug from "@bim/std/debug";
-               import json from "@bim/std/json";
+            r#"import codec from "std/codec";
+               import debug from "std/debug";
+               import json from "std/json";
                let zero = 0;
                def is_zero: Fn(Int) -> Bool = fn(value) { value == zero };
                @struct type Model = {
@@ -5823,7 +5884,7 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("arity.forma"),
-            r#"import json from "@bim/std/json";
+            r#"import json from "std/json";
                def wrong: Fn(Any, Any) -> Bool = fn(left, right) { 'False };
                @struct type Model = {
                    @json.skip_serializing_if(wrong) value: Int,
@@ -5837,8 +5898,8 @@ unchanged", "|"),
 
         fs::write(
             directory.join("result.forma"),
-            r#"import codec from "@bim/std/codec";
-               import json from "@bim/std/json";
+            r#"import codec from "std/codec";
+               import json from "std/json";
                def identity: Fn(Any) -> Any = fn(value) { value };
                @struct type Model = {
                    @json.skip_serializing_if(identity) value: Int,
@@ -5854,13 +5915,13 @@ unchanged", "|"),
             result
                 .trace
                 .iter()
-                .any(|frame| frame.function == "@bim/std/codec.encode")
+                .any(|frame| frame.function == "std/codec.encode")
         );
 
         fs::write(
             directory.join("callback.forma"),
-            r#"import codec from "@bim/std/codec";
-               import json from "@bim/std/json";
+            r#"import codec from "std/codec";
+               import json from "std/json";
                def fails: Fn(Any) -> Int = fn(value) { 1 / 0 };
                @struct type Model = {
                    @json.skip_serializing_if(fails) value: Int,
@@ -5882,7 +5943,7 @@ unchanged", "|"),
             failure
                 .trace
                 .iter()
-                .any(|frame| frame.function == "@bim/std/codec.encode")
+                .any(|frame| frame.function == "std/codec.encode")
         );
         fs::remove_dir_all(directory).unwrap();
     }
@@ -5892,8 +5953,8 @@ unchanged", "|"),
         let directory = fixture_dir();
         fs::write(
             directory.join("main.forma"),
-            r#"import codec from "@bim/std/codec";
-               import json from "@bim/std/json";
+            r#"import codec from "std/codec";
+               import json from "std/json";
                def is_zero: Fn(Int) -> Bool = fn(value) { value == 0 };
                def always: Fn(Any) -> Bool = fn(value) { 'True };
                @struct type Item = {
@@ -5925,8 +5986,8 @@ unchanged", "|"),
         let cases = [
             (
                 "collision.forma",
-                r#"import codec from "@bim/std/codec";
-                   import json from "@bim/std/json";
+                r#"import codec from "std/codec";
+                   import json from "std/json";
                    @struct type T = {
                        @json.rename("same") first: Int,
                        @json.rename("same") second: Int,
@@ -5936,16 +5997,16 @@ unchanged", "|"),
             ),
             (
                 "flatten-type.forma",
-                r#"import codec from "@bim/std/codec";
-                   import json from "@bim/std/json";
+                r#"import codec from "std/codec";
+                   import json from "std/json";
                    @struct type T = {@json.flatten value: Int};
                    codec.decode(T, {})"#,
                 "flatten requires Struct metadata",
             ),
             (
                 "flatten-rename.forma",
-                r#"import codec from "@bim/std/codec";
-                   import json from "@bim/std/json";
+                r#"import codec from "std/codec";
+                   import json from "std/json";
                    @struct type Inner = {value: Int};
                    @struct type T = {
                        @json.flatten @json.rename("x") inner: Inner,
@@ -5955,8 +6016,8 @@ unchanged", "|"),
             ),
             (
                 "default.forma",
-                r#"import codec from "@bim/std/codec";
-                   import json from "@bim/std/json";
+                r#"import codec from "std/codec";
+                   import json from "std/json";
                    @struct type T = {@json.default("wrong") value: Int};
                    codec.decode(T, {})"#,
                 "expected Int",
@@ -5980,7 +6041,7 @@ unchanged", "|"),
             let path = directory.join(name);
             fs::write(
                 &path,
-                format!("import json from \"@bim/std/json\"; {expression}"),
+                format!("import json from \"std/json\"; {expression}"),
             )
             .unwrap();
             load_module(path, BTreeMap::new(), 100_000)
@@ -6007,7 +6068,7 @@ unchanged", "|"),
         let path = directory.join("quota.forma");
         fs::write(
             &path,
-            "import json from \"@bim/std/json\"; json.rename(\"name\")",
+            "import json from \"std/json\"; json.rename(\"name\")",
         )
         .unwrap();
         let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
@@ -6033,7 +6094,7 @@ unchanged", "|"),
             let path = directory.join(name);
             fs::write(
                 &path,
-                format!("import dicts from \"@bim/std/dict\"; {expression}"),
+                format!("import dicts from \"std/dict\"; {expression}"),
             )
             .unwrap();
             let module = load_module(path, BTreeMap::new(), 100_000).unwrap();
@@ -6205,7 +6266,7 @@ unchanged", "|"),
         fs::write(&data, r#"{"name":"Forma"}"#).unwrap();
         fs::write(
             &main,
-            r#"import result from "@bim/std/result";
+            r#"import result from "std/result";
                import data from "./data.json";
                result.unwrap('Err(blame!(data.name, "invalid name")))"#,
         )
@@ -6307,7 +6368,7 @@ unchanged", "|"),
             &main,
             "import data from \"./data.json\";\
              import model from \"./model.forma\";\
-             import attributes from \"@bim/std/attributes\";\
+             import attributes from \"std/attributes\";\
              type FromData = if data.kind == \"int\" { Int } else { String };\
              type FromForma = model.Shared;\
              type FromCore = attributes.strip(String);\
@@ -6390,8 +6451,8 @@ unchanged", "|"),
         let main = directory.join("main.forma");
         fs::write(
             &main,
-            r#"import json from "@bim/std/json";
-               import result from "@bim/std/result";
+            r#"import json from "std/json";
+               import result from "std/result";
                {
                    parsed: result.unwrap(json.parse("{\"answer\": 42}")),
                    decoded: result.unwrap(json.decode(Int, "42")),
@@ -6547,7 +6608,7 @@ unchanged", "|"),
         fs::write(
             directory.join("main.forma"),
             r#"import reference from "./reference-hash.forma";
-               import hash from "@bim/std/hash";
+               import hash from "std/hash";
                @struct type User = {name: String, scores: Array(Int)};
                @struct type Renamed = {label: String, scores: Array(Int)};
                @enum type Choice = {None: 'None, Some: String};
@@ -6616,7 +6677,7 @@ unchanged", "|"),
         fs::write(
             &main,
             r#"import validation from "./explicit-diagnostics.forma";
-import arrays from "@bim/std/array";
+import arrays from "std/array";
 import project from "./project.json";
 let initial: Array(BlameError) = [];
 match validation.validate_project(project, initial) {
@@ -6661,8 +6722,8 @@ match validation.validate_project(project, initial) {
                 &main,
                 format!(
                     r#"import validation from "./explicit-diagnostics.forma";
-import arrays from "@bim/std/array";
-import results from "@bim/std/result";
+import arrays from "std/array";
+import results from "std/result";
 import project from "./project.json";
 let diagnostics = match validation.validate_project(project, []) {{
     (_, collected) => collected,
@@ -6699,8 +6760,8 @@ match arrays.find(diagnostics, fn(item) {{ item.message == "{message}" }}) {{
         let directory = fixture_dir();
         fs::write(directory.join("user.json"), r#"{"age":42}"#).unwrap();
         let source = r#"import user from "./user.json";
-import result from "@bim/std/result";
-import dyn from "@bim/std/dyn";
+import result from "std/result";
+import dyn from "std/dyn";
 @struct type User = {age: Int};
 type ProbeResult = Result(Int, BlameError);
 def inspect_i: Fn(Dyn) -> ProbeResult = fn(value) {

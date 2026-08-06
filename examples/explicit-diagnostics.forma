@@ -1,4 +1,4 @@
-import arrays from "@bim/std/array";
+import arrays from "std/array";
 
 @struct type Package = {
     name: String,

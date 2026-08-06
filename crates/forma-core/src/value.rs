@@ -284,12 +284,12 @@ pub(crate) enum CoreAttributesFunction {
 impl CoreAttributesFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Normalize => "@bim/std/attributes.normalize",
-            Self::Add => "@bim/std/attributes.add",
-            Self::Get => "@bim/std/attributes.get",
-            Self::Has => "@bim/std/attributes.has",
-            Self::All => "@bim/std/attributes.all",
-            Self::Strip => "@bim/std/attributes.strip",
+            Self::Normalize => "std/attributes.normalize",
+            Self::Add => "std/attributes.add",
+            Self::Get => "std/attributes.get",
+            Self::Has => "std/attributes.has",
+            Self::All => "std/attributes.all",
+            Self::Strip => "std/attributes.strip",
         }
     }
 
@@ -359,7 +359,7 @@ pub(crate) enum CoreEqFunction {
 
 impl CoreEqFunction {
     pub(crate) const fn name(self) -> &'static str {
-        "@bim/std/eq.equal"
+        "std/eq.equal"
     }
 
     pub(crate) const fn arity(self) -> usize {
@@ -374,7 +374,7 @@ pub(crate) enum CoreHashFunction {
 
 impl CoreHashFunction {
     pub(crate) const fn name(self) -> &'static str {
-        "@bim/std/hash.sha256"
+        "std/hash.sha256"
     }
 
     pub(crate) const fn arity(self) -> usize {
@@ -416,19 +416,19 @@ pub(crate) enum CoreDynFunction {
 impl CoreDynFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Pack => "@bim/std/dyn.pack",
-            Self::Desc => "@bim/std/dyn.desc",
-            Self::Kind => "@bim/std/dyn.kind",
-            Self::CheckInt => "@bim/std/dyn.check_int",
-            Self::CheckFloat => "@bim/std/dyn.check_float",
-            Self::CheckString => "@bim/std/dyn.check_string",
-            Self::CheckBytes => "@bim/std/dyn.check_bytes",
-            Self::Field => "@bim/std/dyn.field",
-            Self::Fields => "@bim/std/dyn.fields",
-            Self::ArrayItems => "@bim/std/dyn.array_items",
-            Self::TupleItems => "@bim/std/dyn.tuple_items",
-            Self::Tag => "@bim/std/dyn.tag",
-            Self::Payload => "@bim/std/dyn.payload",
+            Self::Pack => "std/dyn.pack",
+            Self::Desc => "std/dyn.desc",
+            Self::Kind => "std/dyn.kind",
+            Self::CheckInt => "std/dyn.check_int",
+            Self::CheckFloat => "std/dyn.check_float",
+            Self::CheckString => "std/dyn.check_string",
+            Self::CheckBytes => "std/dyn.check_bytes",
+            Self::Field => "std/dyn.field",
+            Self::Fields => "std/dyn.fields",
+            Self::ArrayItems => "std/dyn.array_items",
+            Self::TupleItems => "std/dyn.tuple_items",
+            Self::Tag => "std/dyn.tag",
+            Self::Payload => "std/dyn.payload",
         }
     }
 
@@ -443,10 +443,10 @@ impl CoreDynFunction {
 impl CoreTypeDescFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Kind => "@bim/std/type-desc.kind",
-            Self::Children => "@bim/std/type-desc.children",
-            Self::OpaqueName => "@bim/std/type-desc.opaque_name",
-            Self::Resolve => "@bim/std/type-desc.resolve",
+            Self::Kind => "std/type-desc.kind",
+            Self::Children => "std/type-desc.children",
+            Self::OpaqueName => "std/type-desc.opaque_name",
+            Self::Resolve => "std/type-desc.resolve",
         }
     }
 
@@ -458,8 +458,8 @@ impl CoreTypeDescFunction {
 impl CoreCodecFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Decode => "@bim/std/codec.decode",
-            Self::Encode => "@bim/std/codec.encode",
+            Self::Decode => "std/codec.decode",
+            Self::Encode => "std/codec.encode",
         }
     }
 
@@ -475,7 +475,7 @@ pub(crate) enum CoreResultFunction {
 
 impl CoreResultFunction {
     pub(crate) const fn name(self) -> &'static str {
-        "@bim/std/result.unwrap"
+        "std/result.unwrap"
     }
 
     pub(crate) const fn arity(self) -> usize {
@@ -506,22 +506,22 @@ pub(crate) enum CoreJsonFunction {
 impl CoreJsonFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Parse => "@bim/std/json.parse",
-            Self::Decode => "@bim/std/json.decode",
-            Self::Stringify => "@bim/std/json.stringify",
-            Self::StringifyPretty => "@bim/std/json.stringify_pretty",
-            Self::StringifyPrettyValue => "@bim/std/json.stringify_pretty.configured",
-            Self::Rename => "@bim/std/json.rename",
-            Self::RenameDecorator => "@bim/std/json.rename.configured",
-            Self::RenameAll => "@bim/std/json.rename_all",
-            Self::RenameAllDecorator => "@bim/std/json.rename_all.configured",
-            Self::Flatten => "@bim/std/json.flatten",
-            Self::Untagged => "@bim/std/json.untagged",
-            Self::Schema => "@bim/std/json.schema",
-            Self::Default => "@bim/std/json.default",
-            Self::DefaultDecorator => "@bim/std/json.default.configured",
-            Self::SkipSerializingIf => "@bim/std/json.skip_serializing_if",
-            Self::SkipSerializingIfDecorator => "@bim/std/json.skip_serializing_if.configured",
+            Self::Parse => "std/json.parse",
+            Self::Decode => "std/json.decode",
+            Self::Stringify => "std/json.stringify",
+            Self::StringifyPretty => "std/json.stringify_pretty",
+            Self::StringifyPrettyValue => "std/json.stringify_pretty.configured",
+            Self::Rename => "std/json.rename",
+            Self::RenameDecorator => "std/json.rename.configured",
+            Self::RenameAll => "std/json.rename_all",
+            Self::RenameAllDecorator => "std/json.rename_all.configured",
+            Self::Flatten => "std/json.flatten",
+            Self::Untagged => "std/json.untagged",
+            Self::Schema => "std/json.schema",
+            Self::Default => "std/json.default",
+            Self::DefaultDecorator => "std/json.default.configured",
+            Self::SkipSerializingIf => "std/json.skip_serializing_if",
+            Self::SkipSerializingIfDecorator => "std/json.skip_serializing_if.configured",
         }
     }
 
@@ -542,8 +542,8 @@ impl CoreJsonFunction {
 impl CoreDebugFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Dbg => "@bim/std/debug.dbg",
-            Self::DbgWith => "@bim/std/debug.dbg_with",
+            Self::Dbg => "std/debug.dbg",
+            Self::DbgWith => "std/debug.dbg_with",
         }
     }
 
@@ -558,14 +558,14 @@ impl CoreDebugFunction {
 impl CoreDictFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Keys => "@bim/std/dict.keys",
-            Self::Values => "@bim/std/dict.values",
-            Self::Pairs => "@bim/std/dict.pairs",
-            Self::FromPairs => "@bim/std/dict.from_pairs",
-            Self::Merge => "@bim/std/dict.merge",
-            Self::MapValues => "@bim/std/dict.map_values",
-            Self::Filter => "@bim/std/dict.filter",
-            Self::Fold => "@bim/std/dict.fold",
+            Self::Keys => "std/dict.keys",
+            Self::Values => "std/dict.values",
+            Self::Pairs => "std/dict.pairs",
+            Self::FromPairs => "std/dict.from_pairs",
+            Self::Merge => "std/dict.merge",
+            Self::MapValues => "std/dict.map_values",
+            Self::Filter => "std/dict.filter",
+            Self::Fold => "std/dict.fold",
         }
     }
 
@@ -581,18 +581,18 @@ impl CoreDictFunction {
 impl CoreStringFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Length => "@bim/std/string.length",
-            Self::Join => "@bim/std/string.join",
-            Self::JoinLines => "@bim/std/string.join_lines",
-            Self::Split => "@bim/std/string.split",
-            Self::Lines => "@bim/std/string.lines",
-            Self::StartsWith => "@bim/std/string.starts_with",
-            Self::EndsWith => "@bim/std/string.ends_with",
-            Self::Contains => "@bim/std/string.contains",
-            Self::Replace => "@bim/std/string.replace",
-            Self::Indent => "@bim/std/string.indent",
-            Self::EnsureTrailingNewline => "@bim/std/string.ensure_trailing_newline",
-            Self::TrimMargin => "@bim/std/string.trim_margin",
+            Self::Length => "std/string.length",
+            Self::Join => "std/string.join",
+            Self::JoinLines => "std/string.join_lines",
+            Self::Split => "std/string.split",
+            Self::Lines => "std/string.lines",
+            Self::StartsWith => "std/string.starts_with",
+            Self::EndsWith => "std/string.ends_with",
+            Self::Contains => "std/string.contains",
+            Self::Replace => "std/string.replace",
+            Self::Indent => "std/string.indent",
+            Self::EnsureTrailingNewline => "std/string.ensure_trailing_newline",
+            Self::TrimMargin => "std/string.trim_margin",
         }
     }
 
@@ -614,10 +614,10 @@ impl CoreStringFunction {
 impl CorePathFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Join => "@bim/std/path.join",
-            Self::Normalize => "@bim/std/path.normalize",
-            Self::Parent => "@bim/std/path.parent",
-            Self::FileName => "@bim/std/path.file_name",
+            Self::Join => "std/path.join",
+            Self::Normalize => "std/path.normalize",
+            Self::Parent => "std/path.parent",
+            Self::FileName => "std/path.file_name",
         }
     }
 
@@ -629,18 +629,18 @@ impl CorePathFunction {
 impl CoreArrayFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
-            Self::Length => "@bim/std/array.length",
-            Self::Push => "@bim/std/array.push",
-            Self::Concat => "@bim/std/array.concat",
-            Self::Zip => "@bim/std/array.zip",
-            Self::Map => "@bim/std/array.map",
-            Self::Filter => "@bim/std/array.filter",
-            Self::FlatMap => "@bim/std/array.flat_map",
-            Self::Fold => "@bim/std/array.fold",
-            Self::FoldControl => "@bim/std/array.fold_control",
-            Self::Any => "@bim/std/array.any",
-            Self::All => "@bim/std/array.all",
-            Self::Find => "@bim/std/array.find",
+            Self::Length => "std/array.length",
+            Self::Push => "std/array.push",
+            Self::Concat => "std/array.concat",
+            Self::Zip => "std/array.zip",
+            Self::Map => "std/array.map",
+            Self::Filter => "std/array.filter",
+            Self::FlatMap => "std/array.flat_map",
+            Self::Fold => "std/array.fold",
+            Self::FoldControl => "std/array.fold_control",
+            Self::Any => "std/array.any",
+            Self::All => "std/array.all",
+            Self::Find => "std/array.find",
         }
     }
 

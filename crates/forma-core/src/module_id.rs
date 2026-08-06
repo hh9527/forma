@@ -15,6 +15,13 @@ pub enum ModuleFormat {
 
 impl ModuleFormat {
     pub fn from_path(path: &Path) -> Result<Self, ResolveModuleError> {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".forma-sys"))
+        {
+            return Ok(Self::Forma);
+        }
         match path.extension().and_then(|extension| extension.to_str()) {
             Some("forma") => Ok(Self::Forma),
             Some("json") => Ok(Self::Json),
@@ -49,6 +56,13 @@ impl ModuleFormat {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum ModuleAuthority {
+    Ordinary,
+    PackageSystem,
+    RuntimeSystem,
+}
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ModuleId {
     Main,
@@ -78,6 +92,7 @@ impl fmt::Display for ModuleId {
 pub struct ResolvedModule {
     pub id: ModuleId,
     pub format: ModuleFormat,
+    pub authority: ModuleAuthority,
     physical_path: Option<PathBuf>,
 }
 
@@ -103,6 +118,8 @@ pub enum ResolveModuleError {
     UnknownDependency(String),
     InvalidImport(String),
     CrateEscape(String),
+    SystemModuleAccess(String),
+    SystemModuleRoot,
     Manifest(String),
     FormatConflict {
         configured: ModuleFormat,
@@ -126,6 +143,13 @@ impl fmt::Display for ResolveModuleError {
             Self::CrateEscape(request) => {
                 write!(formatter, "module import escapes its crate root: {request}")
             }
+            Self::SystemModuleAccess(request) => write!(
+                formatter,
+                "system module {request:?} can only be imported from the same crate"
+            ),
+            Self::SystemModuleRoot => {
+                formatter.write_str("a .forma-sys module cannot be used as the root module")
+            }
             Self::Manifest(message) | Self::Io(message) => formatter.write_str(message),
             Self::FormatConflict {
                 configured,
@@ -147,6 +171,7 @@ pub struct ModuleResolver {
     main_path: PathBuf,
     dependencies: BTreeMap<String, PathBuf>,
     formats: BTreeMap<String, ModuleFormat>,
+    builtins: BTreeMap<String, u32>,
 }
 
 impl ModuleResolver {
@@ -195,6 +220,7 @@ impl ModuleResolver {
             main_path: resolve_physical(&root)?,
             dependencies: BTreeMap::new(),
             formats: BTreeMap::new(),
+            builtins: BTreeMap::new(),
         };
         let has_external_manifest = manifest.is_some();
         if let Some(manifest) = manifest {
@@ -235,12 +261,21 @@ impl ModuleResolver {
         &self.workspace_root
     }
 
+    pub fn with_builtins(mut self, builtins: impl IntoIterator<Item = (String, u32)>) -> Self {
+        self.builtins = builtins.into_iter().collect();
+        self
+    }
+
     pub fn resolve_root(&self, path: &Path) -> Result<ResolvedModule, ResolveModuleError> {
         let path = resolve_physical(path)?;
+        if is_system_source(&path) {
+            return Err(ResolveModuleError::SystemModuleRoot);
+        }
         let format = self.format_for(&ModuleId::Main, &path)?;
         Ok(ResolvedModule {
             id: ModuleId::Main,
             format,
+            authority: ModuleAuthority::Ordinary,
             physical_path: Some(path),
         })
     }
@@ -250,18 +285,18 @@ impl ModuleResolver {
         importer: &ModuleId,
         target: &str,
     ) -> Result<ResolvedModule, ResolveModuleError> {
-        if target == "@bim/" {
-            return Err(ResolveModuleError::InvalidImport(target.into()));
+        if target.is_empty() {
+            return Err(ResolveModuleError::EmptyPath);
         }
-        if target.starts_with("@bim/") {
+        if !target.starts_with(['.', '@'])
+            && let Some(_registration_id) = self.builtins.get(target)
+        {
             return Ok(ResolvedModule {
                 id: ModuleId::builtin(target),
                 format: ModuleFormat::Forma,
+                authority: ModuleAuthority::RuntimeSystem,
                 physical_path: None,
             });
-        }
-        if target.is_empty() {
-            return Err(ResolveModuleError::EmptyPath);
         }
         if target == "@main" || target.starts_with("@main/") {
             return Err(ResolveModuleError::InvalidImport(target.into()));
@@ -288,7 +323,7 @@ impl ModuleResolver {
                         &path.parent().unwrap_or_else(|| Path::new("")).join(target),
                     )
                     .ok_or_else(|| ResolveModuleError::CrateEscape(target.into()))?;
-                    self.resolve_dependency_parts(name, logical, target)
+                    self.resolve_dependency_parts(name, logical, target, true)
                 }
                 ModuleId::Builtin(_) => Err(ResolveModuleError::InvalidImport(
                     "built-in modules cannot use relative imports".into(),
@@ -381,7 +416,7 @@ impl ModuleResolver {
         }
         let path = lexical_normalize_relative(Path::new(path))
             .ok_or_else(|| ResolveModuleError::CrateEscape(original.into()))?;
-        self.resolve_dependency_parts(name, path, original)
+        self.resolve_dependency_parts(name, path, original, false)
     }
 
     fn resolve_in_owner(
@@ -395,7 +430,7 @@ impl ModuleResolver {
         match importer {
             ModuleId::Main | ModuleId::Source(_) => self.resolve_source(path, original),
             ModuleId::Dependency { name, .. } => {
-                self.resolve_dependency_parts(name, path, original)
+                self.resolve_dependency_parts(name, path, original, true)
             }
             ModuleId::Builtin(_) => Err(ResolveModuleError::InvalidImport(
                 "@src is unavailable to built-in modules".into(),
@@ -417,6 +452,7 @@ impl ModuleResolver {
         Ok(ResolvedModule {
             id,
             format,
+            authority: authority_for_path(&physical),
             physical_path: Some(physical),
         })
     }
@@ -426,6 +462,7 @@ impl ModuleResolver {
         name: &str,
         path: PathBuf,
         original: &str,
+        allow_system: bool,
     ) -> Result<ResolvedModule, ResolveModuleError> {
         let root = self
             .dependencies
@@ -446,11 +483,16 @@ impl ModuleResolver {
             path,
         };
         let format = self.format_for(&id, &physical)?;
-        Ok(ResolvedModule {
+        let module = ResolvedModule {
             id,
             format,
+            authority: authority_for_path(&physical),
             physical_path: Some(physical),
-        })
+        };
+        if module.authority == ModuleAuthority::PackageSystem && !allow_system {
+            return Err(ResolveModuleError::SystemModuleAccess(original.into()));
+        }
+        Ok(module)
     }
 
     fn format_for(
@@ -543,6 +585,20 @@ fn resolve_physical(path: &Path) -> Result<PathBuf, ResolveModuleError> {
     Ok(resolved)
 }
 
+fn is_system_source(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".forma-sys"))
+}
+
+fn authority_for_path(path: &Path) -> ModuleAuthority {
+    if is_system_source(path) {
+        ModuleAuthority::PackageSystem
+    } else {
+        ModuleAuthority::Ordinary
+    }
+}
+
 fn lexical_normalize(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
     for component in path.components() {
@@ -625,8 +681,64 @@ mod tests {
         assert_eq!(dependency.id.to_string(), "models/user.forma");
         assert_eq!(dependency.format, ModuleFormat::Forma);
         assert!(matches!(
-            resolver.resolve_import(&root.id, "@bim/"),
-            Err(ResolveModuleError::InvalidImport(_))
+            resolver.resolve_import(&root.id, ""),
+            Err(ResolveModuleError::EmptyPath)
+        ));
+        std::fs::remove_dir_all(temporary).unwrap();
+    }
+
+    #[test]
+    fn builtins_precede_vtops_and_system_sources_stay_crate_local() {
+        let temporary = std::env::temp_dir().join(format!(
+            "forma-module-authority-test-{}",
+            std::process::id()
+        ));
+        let app = temporary.join("app");
+        let dependency = temporary.join("dependency");
+        let shadow = temporary.join("shadow");
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::create_dir_all(dependency.join("src")).unwrap();
+        std::fs::create_dir_all(shadow.join("src")).unwrap();
+        let main = app.join("main.forma");
+        std::fs::write(&main, "0").unwrap();
+        std::fs::write(app.join("src/local.forma-sys"), "0").unwrap();
+        std::fs::write(dependency.join("src/public.forma"), "0").unwrap();
+        std::fs::write(dependency.join("src/internal.forma-sys"), "0").unwrap();
+        std::fs::write(shadow.join("src/array"), "0").unwrap();
+        std::fs::write(
+            app.join("forma-deps.json"),
+            r#"{"dependencies":{"dep":{"path":"../dependency"},"std":{"path":"../shadow"}},"formats":{"std/array":"forma"}}"#,
+        )
+        .unwrap();
+
+        let resolver = ModuleResolver::for_root(&main)
+            .unwrap()
+            .with_builtins([("std/array".to_owned(), 5)]);
+        let root = resolver.resolve_root(&main).unwrap();
+        let builtin = resolver.resolve_import(&root.id, "std/array").unwrap();
+        assert_eq!(builtin.id, ModuleId::builtin("std/array"));
+        assert_eq!(builtin.authority, ModuleAuthority::RuntimeSystem);
+
+        let local = resolver
+            .resolve_import(&root.id, "@src/local.forma-sys")
+            .unwrap();
+        assert_eq!(local.authority, ModuleAuthority::PackageSystem);
+
+        assert!(matches!(
+            resolver.resolve_import(&root.id, "dep/internal.forma-sys"),
+            Err(ResolveModuleError::SystemModuleAccess(_))
+        ));
+        let dependency_module = resolver
+            .resolve_import(&root.id, "dep/public.forma")
+            .unwrap();
+        let internal = resolver
+            .resolve_import(&dependency_module.id, "./internal.forma-sys")
+            .unwrap();
+        assert_eq!(internal.authority, ModuleAuthority::PackageSystem);
+        assert!(matches!(
+            ModuleResolver::for_root(&app.join("src/local.forma-sys"))
+                .and_then(|resolver| resolver.resolve_root(&app.join("src/local.forma-sys"))),
+            Err(ResolveModuleError::SystemModuleRoot)
         ));
         std::fs::remove_dir_all(temporary).unwrap();
     }

@@ -4,23 +4,23 @@ use crate::value::{
     CorePathFunction, CoreResultFunction, CoreStringFunction, CoreTypeDescFunction, NativeFunction,
 };
 
-pub(crate) const ARRAY_MODULE: &str = "@bim/std/array";
-pub(crate) const ATTRIBUTES_MODULE: &str = "@bim/std/attributes";
-pub(crate) const DICT_MODULE: &str = "@bim/std/dict";
-pub(crate) const DEBUG_MODULE: &str = "@bim/std/debug";
-pub(crate) const BUILD_MODULE: &str = "@bim/std/build";
-pub(crate) const EXEC_MODULE: &str = "@bim/std/exec";
-pub(crate) const CODEC_MODULE: &str = "@bim/std/codec";
-pub(crate) const OPTION_MODULE: &str = "@bim/std/option";
-pub(crate) const RESULT_MODULE: &str = "@bim/std/result";
-pub(crate) const JSON_MODULE: &str = "@bim/std/json";
-pub(crate) const HASH_MODULE: &str = "@bim/std/hash";
-pub(crate) const STRING_MODULE: &str = "@bim/std/string";
-pub(crate) const PATH_MODULE: &str = "@bim/std/path";
-pub(crate) const TOML_MODULE: &str = "@bim/std/toml";
-pub(crate) const TYPE_DESC_MODULE: &str = "@bim/std/type-desc";
-pub(crate) const DYN_MODULE: &str = "@bim/std/dyn";
-pub(crate) const EQ_MODULE: &str = "@bim/std/eq";
+pub(crate) const ARRAY_MODULE: &str = "std/array";
+pub(crate) const ATTRIBUTES_MODULE: &str = "std/attributes";
+pub(crate) const DICT_MODULE: &str = "std/dict";
+pub(crate) const DEBUG_MODULE: &str = "std/debug";
+pub(crate) const BUILD_MODULE: &str = "std/build";
+pub(crate) const EXEC_MODULE: &str = "std/exec";
+pub(crate) const CODEC_MODULE: &str = "std/codec";
+pub(crate) const OPTION_MODULE: &str = "std/option";
+pub(crate) const RESULT_MODULE: &str = "std/result";
+pub(crate) const JSON_MODULE: &str = "std/json";
+pub(crate) const HASH_MODULE: &str = "std/hash";
+pub(crate) const STRING_MODULE: &str = "std/string";
+pub(crate) const PATH_MODULE: &str = "std/path";
+pub(crate) const TOML_MODULE: &str = "std/toml";
+pub(crate) const TYPE_DESC_MODULE: &str = "std/type-desc";
+pub(crate) const DYN_MODULE: &str = "std/dyn";
+pub(crate) const EQ_MODULE: &str = "std/eq";
 
 pub(crate) struct CoreModuleSpec {
     pub(crate) native_id: u32,
@@ -588,7 +588,7 @@ native finish: Fn(HashState) -> Bytes;
                 (
                     "new",
                     NativeFunction::new_with_native_type(
-                        "@bim/std/hash.new",
+                        "std/hash.new",
                         0,
                         3,
                         crate::sha256::native_new,
@@ -597,7 +597,7 @@ native finish: Fn(HashState) -> Bytes;
                 (
                     "update_bytes",
                     NativeFunction::new_with_native_type(
-                        "@bim/std/hash.update_bytes",
+                        "std/hash.update_bytes",
                         2,
                         3,
                         crate::sha256::native_update_bytes,
@@ -606,7 +606,7 @@ native finish: Fn(HashState) -> Bytes;
                 (
                     "update_string",
                     NativeFunction::new_with_native_type(
-                        "@bim/std/hash.update_string",
+                        "std/hash.update_string",
                         2,
                         3,
                         crate::sha256::native_update_string,
@@ -615,7 +615,7 @@ native finish: Fn(HashState) -> Bytes;
                 (
                     "update_int",
                     NativeFunction::new_with_native_type(
-                        "@bim/std/hash.update_int",
+                        "std/hash.update_int",
                         2,
                         3,
                         crate::sha256::native_update_int,
@@ -624,7 +624,7 @@ native finish: Fn(HashState) -> Bytes;
                 (
                     "finish",
                     NativeFunction::new_with_native_type(
-                        "@bim/std/hash.finish",
+                        "std/hash.finish",
                         1,
                         3,
                         crate::sha256::native_finish,

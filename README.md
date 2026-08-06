@@ -125,7 +125,7 @@ Decorators are functions, attributes are data, and codecs are metadata
 interpreters:
 
 ```forma
-import json from "@bim/std/json";
+import json from "std/json";
 
 @json.rename_all('CamelCase)
 @struct
