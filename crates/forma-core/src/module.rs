@@ -1824,9 +1824,10 @@ fn expression_has_import(expression: &Expr) -> bool {
         }
         ExprKind::Match { value, arms } => {
             expression_has_import(value)
-                || arms
-                    .iter()
-                    .any(|arm| expression_has_import(&arm.value.value))
+                || arms.iter().any(|arm| {
+                    arm.value.guard.as_ref().is_some_and(expression_has_import)
+                        || expression_has_import(&arm.value.value)
+                })
         }
         ExprKind::Int(_)
         | ExprKind::Float(_)

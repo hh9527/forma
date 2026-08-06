@@ -152,6 +152,7 @@ impl Elaborator<'_> {
                         located(
                             MatchArmKind {
                                 pattern: pattern.clone(),
+                                guard: None,
                                 value: located(
                                     ExprKind::Block(then_branch.clone()),
                                     then_branch.location,
@@ -163,6 +164,7 @@ impl Elaborator<'_> {
                         located(
                             MatchArmKind {
                                 pattern: located(PatternKind::Wildcard, expression.location),
+                                guard: None,
                                 value: located(
                                     ExprKind::Block(else_branch.clone()),
                                     else_branch.location,
@@ -189,6 +191,7 @@ impl Elaborator<'_> {
                         located(
                             MatchArmKind {
                                 pattern: pattern.clone(),
+                                guard: None,
                                 value: located(ExprKind::Block(body.clone()), body.location),
                                 irrefutable_required: false,
                             },
@@ -197,6 +200,7 @@ impl Elaborator<'_> {
                         located(
                             MatchArmKind {
                                 pattern: located(PatternKind::Wildcard, expression.location),
+                                guard: None,
                                 value: located(
                                     ExprKind::Block(else_branch.clone()),
                                     else_branch.location,
@@ -211,6 +215,9 @@ impl Elaborator<'_> {
             ExprKind::Match { value, arms } => {
                 self.expression(value);
                 for arm in arms {
+                    if let Some(guard) = &mut arm.value.guard {
+                        self.expression(guard);
+                    }
                     self.expression(&mut arm.value.value);
                 }
             }
@@ -267,6 +274,7 @@ impl Elaborator<'_> {
             located(
                 MatchArmKind {
                     pattern: success_pattern,
+                    guard: None,
                     value: variable(&payload),
                     irrefutable_required: false,
                 },
@@ -275,6 +283,7 @@ impl Elaborator<'_> {
             located(
                 MatchArmKind {
                     pattern: failure_pattern,
+                    guard: None,
                     value: located(
                         ExprKind::Return {
                             value: Box::new(variable(&subject)),

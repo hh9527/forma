@@ -1173,6 +1173,18 @@ impl<'a> Compiler<'a> {
                 &mut failures,
                 &mut pattern_bindings,
             )?;
+            if let Some(guard) = &arm.value.guard {
+                let condition = self.compile_expr(guard)?;
+                let failure = self.new_label();
+                self.emit(
+                    Operation::JumpIfFalse {
+                        condition,
+                        target: failure,
+                    },
+                    guard.location,
+                );
+                failures.push(failure);
+            }
             let arm_value = self.compile_expr(&arm.value.value)?;
             self.emit_synthetic(
                 Operation::Move {
@@ -1220,6 +1232,18 @@ impl<'a> Compiler<'a> {
                 &mut failures,
                 &mut pattern_bindings,
             )?;
+            if let Some(guard) = &arm.value.guard {
+                let condition = self.compile_expr(guard)?;
+                let failure = self.new_label();
+                self.emit(
+                    Operation::JumpIfFalse {
+                        condition,
+                        target: failure,
+                    },
+                    guard.location,
+                );
+                failures.push(failure);
+            }
             self.compile_tail_expr(&arm.value.value)?;
             for failure in failures {
                 self.mark_label(failure);
@@ -1634,6 +1658,9 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
             for arm in arms {
                 let mut arm_bound = bound.clone();
                 bind_pattern(&arm.value.pattern, &mut arm_bound);
+                if let Some(guard) = &arm.value.guard {
+                    free_expr(guard, &arm_bound, free);
+                }
                 free_expr(&arm.value.value, &arm_bound, free);
             }
         }
@@ -1754,6 +1781,9 @@ pub(crate) fn collect_runtime_names(expression: &Expr, names: &mut HashSet<Strin
         ExprKind::Match { value, arms } => {
             collect_runtime_names(value, names);
             for arm in arms {
+                if let Some(guard) = &arm.value.guard {
+                    collect_runtime_names(guard, names);
+                }
                 collect_runtime_names(&arm.value.value, names);
             }
         }
@@ -2386,6 +2416,82 @@ let decorators = {
 
         let error = compile_source("test", "'True && 1").unwrap_err();
         assert!(error.message.contains("Int"), "{}", error.message);
+    }
+
+    #[test]
+    fn match_guards_use_pattern_bindings_and_continue_after_false() {
+        let value = run("let value: Option(Int) = 'Some(3); match value {\
+                'Some(item) if 4 < item => 40,\
+                'Some(item) if 2 < item && item < 4 => item,\
+                'Some(_) => 0,\
+                'None => -1,\
+            }")
+        .unwrap();
+        assert_eq!(value.to_string(), "3");
+    }
+
+    #[test]
+    fn match_guards_require_bool() {
+        let error = compile_source(
+            "test",
+            "let value: Option(Int) = 'Some(1); match value {\
+                'Some(item) if item => item,\
+                _ => 0,\
+            }",
+        )
+        .unwrap_err();
+        assert!(
+            error.message.contains("Int")
+                && error.message.contains("False")
+                && error.message.contains("True"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn guarded_match_arms_do_not_establish_exhaustiveness() {
+        let error = compile_source(
+            "test",
+            "let value: Option(Int) = 'Some(1); match value {\
+                'Some(item) if 'True => item,\
+                'None if 'True => 0,\
+            }",
+        )
+        .unwrap_err();
+        assert!(
+            error.message.contains("non-exhaustive match"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn match_guard_redundancy_depends_only_on_unguarded_coverage() {
+        compile_source(
+            "test",
+            "let value: Option(Int) = 'Some(1); match value {\
+                'Some(item) if 0 < item => item,\
+                'Some(item) => item,\
+                'None => 0,\
+            }",
+        )
+        .unwrap();
+
+        let error = compile_source(
+            "test",
+            "let value: Option(Int) = 'Some(1); match value {\
+                'Some(item) => item,\
+                'Some(item) if 0 < item => item,\
+                'None => 0,\
+            }",
+        )
+        .unwrap_err();
+        assert!(
+            error.message.contains("unreachable match arm"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]

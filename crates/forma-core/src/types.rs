@@ -2874,6 +2874,17 @@ fn collect_nested_annotation_types(
                 annotations,
             )?;
             for arm in arms {
+                if let Some(guard) = &arm.value.guard {
+                    collect_nested_annotation_types(
+                        source_name,
+                        guard,
+                        bindings,
+                        account,
+                        sources,
+                        debug_sink,
+                        annotations,
+                    )?;
+                }
                 collect_nested_annotation_types(
                     source_name,
                     &arm.value.value,
@@ -5715,12 +5726,14 @@ impl<'a> GenericInference<'a> {
                             .entry(arm.value.pattern.location)
                             .or_insert(message);
                     }
-                    covered_variants.extend(analysis.covered_variants.iter().cloned());
-                    all_values_covered |= analysis.irrefutable;
-                    if let TypeDescriptor::Enum(variants) = &resolved_value_type {
-                        all_values_covered |= variants
-                            .keys()
-                            .all(|variant| covered_variants.contains(variant));
+                    if arm.value.guard.is_none() {
+                        covered_variants.extend(analysis.covered_variants.iter().cloned());
+                        all_values_covered |= analysis.irrefutable;
+                        if let TypeDescriptor::Enum(variants) = &resolved_value_type {
+                            all_values_covered |= variants
+                                .keys()
+                                .all(|variant| covered_variants.contains(variant));
+                        }
                     }
                     for problem in analysis.problems {
                         self.pattern_diagnostics
@@ -5740,6 +5753,9 @@ impl<'a> GenericInference<'a> {
                             .insert(binding.location, binding.ty.clone());
                         self.set_local_scheme(binding.name.clone(), None);
                         arm_environment.insert(binding.name, binding.ty);
+                    }
+                    if let Some(guard) = &arm.value.guard {
+                        self.infer(guard, &arm_environment, Some(&normalized_bool_descriptor()))?;
                     }
                     let arm_type = self.infer(&arm.value.value, &arm_environment, expected);
                     self.scheme_scopes.pop();
@@ -6379,9 +6395,13 @@ fn expression_references_names(
         }
         ExprKind::Match { value, arms } => {
             expression_references_names(value, names, bound)
-                || arms
-                    .iter()
-                    .any(|arm| expression_references_names(&arm.value.value, names, bound))
+                || arms.iter().any(|arm| {
+                    arm.value
+                        .guard
+                        .as_ref()
+                        .is_some_and(|guard| expression_references_names(guard, names, bound))
+                        || expression_references_names(&arm.value.value, names, bound)
+                })
         }
         ExprKind::Int(_)
         | ExprKind::Float(_)
@@ -6665,6 +6685,9 @@ fn infer_expr_with(
                     .map(|arm| {
                         let mut arm_environment = environment.clone();
                         bind_pattern_types(&arm.value.pattern, &mut arm_environment);
+                        if let Some(guard) = &arm.value.guard {
+                            infer_expr_with(guard, &arm_environment, record);
+                        }
                         infer_expr_with(&arm.value.value, &arm_environment, record)
                     })
                     .collect(),
@@ -6791,6 +6814,9 @@ fn check_interpolations(
             for arm in arms {
                 let mut arm_environment = environment.clone();
                 bind_pattern_types(&arm.value.pattern, &mut arm_environment);
+                if let Some(guard) = &arm.value.guard {
+                    check_interpolations(guard, &arm_environment, sources)?;
+                }
                 check_interpolations(&arm.value.value, &arm_environment, sources)?;
             }
         }

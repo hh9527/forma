@@ -369,6 +369,7 @@ impl<'a> Lowerer<'a> {
                     let arm = located(
                         MatchArmKind {
                             pattern,
+                            guard: None,
                             value: body,
                             irrefutable_required: true,
                         },
@@ -1220,9 +1221,22 @@ impl<'a> Lowerer<'a> {
             .children(node)
             .find(|child| self.is_expression(*child) && self.cst.span(*child).start > arrow_start)
             .ok_or_else(|| self.error(node, "match arm has no value"))?;
+        let guard = self
+            .token_children(node, Token::If)
+            .next()
+            .and_then(|if_token| {
+                self.children(node).find(|child| {
+                    self.is_expression(*child)
+                        && self.cst.span(*child).start > self.cst.span(if_token).end
+                        && self.cst.span(*child).end <= arrow_start
+                })
+            })
+            .map(|guard| self.expression(guard))
+            .transpose()?;
         Ok(located(
             MatchArmKind {
                 pattern: self.pattern(pattern)?,
+                guard,
                 value: self.expression(value)?,
                 irrefutable_required: false,
             },

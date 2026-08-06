@@ -95,7 +95,7 @@ if_expr: 'if' expression block 'else' block;
 if_let_expr: 'if' 'let' pattern '=' expression block 'else' block;
 match_expr: 'match' expression '{' match_arm (?1 ',' match_arm)* [','] '}';
 return_expr: 'return' expression Semicolon @return_expr;
-match_arm: pattern '=>' expression;
+match_arm: pattern ['if' expression] '=>' expression;
 pattern:
   (Identifier | Placeholder) @identifier_pattern
 | Int @int_pattern

@@ -589,6 +589,9 @@ impl Resolver {
             &arm.value.pattern,
             scopes.last_mut().expect("arm has a scope"),
         );
+        if let Some(guard) = &arm.value.guard {
+            self.index_expr(guard, scopes);
+        }
         self.index_expr(&arm.value.value, scopes);
         scopes.pop();
     }
