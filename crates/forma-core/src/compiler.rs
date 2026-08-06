@@ -576,6 +576,12 @@ impl<'a> Compiler<'a> {
             }
         }
         for binding in &block.value.bindings {
+            if matches!(
+                binding.value.kind,
+                BindingKind::OpenImport | BindingKind::Export
+            ) {
+                continue;
+            }
             let name = &binding.value.name.value;
             if native_declarations.contains_key(name) && binding.value.kind != BindingKind::Native {
                 return Err(self.error_at(
@@ -655,6 +661,12 @@ impl<'a> Compiler<'a> {
             }
         }
         for binding in &block.value.bindings {
+            if matches!(
+                binding.value.kind,
+                BindingKind::OpenImport | BindingKind::Export
+            ) {
+                continue;
+            }
             let name = &binding.value.name.value;
             if declared.contains_key(name)
                 && !matches!(binding.value.kind, BindingKind::Decl | BindingKind::Def)

@@ -187,7 +187,7 @@ impl<'a> Lowerer<'a> {
         let authored_result = self
             .children(body_node)
             .any(|child| self.is_expression(child));
-        let body = self.block_body_with_destructuring(body_node, false)?;
+        let mut body = self.block_body_with_destructuring(body_node, false)?;
         let exports = body
             .value
             .bindings
@@ -211,6 +211,12 @@ impl<'a> Lowerer<'a> {
                 )
                 .with_secondary("first exported here", first));
             }
+        }
+        if !authored_result {
+            body.value.result = Box::new(synthesize_export_record(
+                &body.value.bindings,
+                self.location(body_node),
+            ));
         }
         Ok(located(
             ProgramKind {
@@ -277,6 +283,16 @@ impl<'a> Lowerer<'a> {
                 .first()
                 .map_or(0, |label| label.location.start)
         });
+        if result.is_none()
+            && bindings
+                .iter()
+                .any(|binding| binding.value.kind == BindingKind::Export)
+        {
+            result = Some(synthesize_export_record(
+                &bindings,
+                self.location(NodeRef::ROOT),
+            ));
+        }
         RecoveredProgram {
             location: self.location(NodeRef::ROOT),
             bindings,
@@ -2157,6 +2173,30 @@ impl<'a> Lowerer<'a> {
         }
         Ok(output)
     }
+}
+
+fn synthesize_export_record(bindings: &[Binding], location: Location) -> Expr {
+    let fields = bindings
+        .iter()
+        .filter(|binding| binding.value.kind == BindingKind::Export)
+        .map(|binding| {
+            let local = binding
+                .value
+                .imported_name
+                .as_deref()
+                .expect("export markers retain their local name")
+                .clone();
+            located(
+                DictFieldKind {
+                    decorators: Vec::new(),
+                    name: Some(binding.value.name.clone()),
+                    value: located(ExprKind::Variable(local), binding.location),
+                },
+                binding.location,
+            )
+        })
+        .collect();
+    located(ExprKind::Dict(fields), location)
 }
 
 fn push_unique_diagnostic(diagnostics: &mut Vec<Diagnostic>, diagnostic: Diagnostic) {

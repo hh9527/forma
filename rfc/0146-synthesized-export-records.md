@@ -1,6 +1,6 @@
 # RFC 0146: Synthesized export records
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0144, RFC 0145
 
 ## Summary
@@ -98,3 +98,23 @@ Legacy modules retain their current final-value host behavior only until RFC
 8. Missing and invalid host entries have mode-specific diagnostics.
 9. Legacy final-value modules continue to operate during this RFC only.
 
+## Implementation result
+
+Strict and recovered parsing synthesize an internal `Dict` expression from
+export markers. The existing inference, compiler, persistent publication, and
+module-loading paths therefore produce one canonical export record without a
+second runtime representation. Public aliases read the same local register and
+field root, preserving function and metadata identity.
+
+Interface publication retains existing generic schemes and now supplies a
+resolved zero-parameter scheme for explicitly exported monomorphic bindings.
+This fallback is deliberately limited to explicit exports so legacy module
+inference remains unchanged during migration. Workspace export projection and
+module completion consume the synthesized result shape.
+
+`LoadedModule` records whether its source used explicit exports. The CLI selects
+`output`, `exec`, or `build` only for that mode and preserves legacy final-value
+behavior until RFC 0147. Tests cover private omission, aliases, generic and
+monomorphic selective/open imports, recovery export projection, forward-export
+failure, mode-specific missing entries, and explicit run, exec, and build
+entry points.

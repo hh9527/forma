@@ -1,6 +1,6 @@
 use forma_core::{
-    DebugEvent, DebugSink, DefinitionKind, Engine, EngineConfig, Location, Quota, TextRange, Value,
-    Vm, WorkspaceSnapshot, WorkspaceTypeId, parse_json,
+    DebugEvent, DebugSink, DefinitionKind, Engine, EngineConfig, LoadedModule, Location, Quota,
+    TextRange, Value, Vm, WorkspaceSnapshot, WorkspaceTypeId, parse_json,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -94,7 +94,29 @@ fn evaluate_module(module_path: &str, bindings: BTreeMap<String, Value>) -> Resu
     let module = engine
         .load_module(module_path, bindings)
         .map_err(|error| error.to_string())?;
-    engine.execute(&module).map_err(|error| error.to_string())
+    let exports = engine.execute(&module).map_err(|error| error.to_string())?;
+    select_host_entry(&module, exports, "run", "output")
+}
+
+fn select_host_entry(
+    module: &LoadedModule,
+    module_value: Value,
+    mode: &str,
+    name: &str,
+) -> Result<Value, String> {
+    if !module.uses_explicit_exports() {
+        return Ok(module_value);
+    }
+    let Value::Dict(exports) = module_value else {
+        return Err(format!(
+            "forma {mode} expected an explicit export record, found {}",
+            module_value.type_name()
+        ));
+    };
+    exports
+        .get(name)
+        .cloned()
+        .ok_or_else(|| format!("forma {mode} requires the explicit export {name:?} in @main"))
 }
 
 fn exec_command(arguments: &[String]) -> Result<(), String> {
@@ -113,7 +135,8 @@ fn exec_command(arguments: &[String]) -> Result<(), String> {
     let module = engine
         .load_module(module_path, BTreeMap::new())
         .map_err(|error| error.to_string())?;
-    let entry = engine.execute(&module).map_err(|error| error.to_string())?;
+    let exports = engine.execute(&module).map_err(|error| error.to_string())?;
+    let entry = select_host_entry(&module, exports, "exec", "exec")?;
     let mut values = Vm::new();
     let settings = exec_settings(&mut values)?;
     let request = exec_request(&mut values, request_args)?;
@@ -135,7 +158,8 @@ fn build_command(arguments: &[String]) -> Result<(), String> {
     let module = engine
         .load_module(module_path, BTreeMap::new())
         .map_err(|error| error.to_string())?;
-    let entry = engine.execute(&module).map_err(|error| error.to_string())?;
+    let exports = engine.execute(&module).map_err(|error| error.to_string())?;
+    let entry = select_host_entry(&module, exports, "build", "build")?;
     let plan = engine
         .invoke(&module, &entry, &[])
         .map_err(|error| error.to_string())?;

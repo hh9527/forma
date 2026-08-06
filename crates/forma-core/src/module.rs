@@ -543,6 +543,10 @@ impl fmt::Debug for ModuleRuntime {
 }
 
 impl LoadedModule {
+    pub const fn uses_explicit_exports(&self) -> bool {
+        self.analysis.explicit_exports
+    }
+
     pub fn execute(&self, evaluation_fuel: usize) -> Result<Value, crate::RuntimeError> {
         self.execute_with_quota(Quota::with_fuel(evaluation_fuel))
     }
@@ -2538,6 +2542,69 @@ let user = {name: unwrap('Ok("forma"))};
                 .message
                 .contains("open import name \"shared\" is ambiguous")
         }));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn explicit_exports_synthesize_typed_identity_preserving_module_records() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("library.forma"),
+            r#"let private = "hidden";
+export def identity: for(A) Fn(A) -> A = fn(value) { value };
+export let answer = 42;
+export { identity as map };"#,
+        )
+        .unwrap();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import "./library.forma" as library, { identity as id, answer };
+import "./library.forma" *;
+(id(1), id("forma"), answer, map == library.map, library.identity == library.map)"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            module.execute(100_000).unwrap().to_string(),
+            "(1, \"forma\", 42, 'True, 'True)"
+        );
+        let snapshot = recovery_engine()
+            .recover_workspace(directory.join("main.forma"))
+            .unwrap();
+        let library = snapshot
+            .module_by_path(&canonicalize(&directory.join("library.forma")).unwrap())
+            .unwrap();
+        let exports = snapshot
+            .exports_of(library.id)
+            .into_iter()
+            .map(|export| export.name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            exports,
+            BTreeSet::from(["answer".into(), "identity".into(), "map".into()])
+        );
+
+        fs::write(
+            directory.join("private.forma"),
+            "import \"./library.forma\" { private }; private",
+        )
+        .unwrap();
+        let private =
+            load_module(directory.join("private.forma"), BTreeMap::new(), 100_000).unwrap_err();
+        assert!(private.to_string().contains("has no export \"private\""));
+
+        fs::write(
+            directory.join("forward.forma"),
+            "export { later }; let later = 1;",
+        )
+        .unwrap();
+        let forward =
+            load_module(directory.join("forward.forma"), BTreeMap::new(), 100_000).unwrap_err();
+        assert!(
+            forward
+                .to_string()
+                .contains("cannot export unknown or forward binding \"later\"")
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

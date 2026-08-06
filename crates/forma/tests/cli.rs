@@ -99,6 +99,39 @@ fn run_accepts_external_json_and_failures_are_nonzero() {
 }
 
 #[test]
+fn run_selects_output_from_explicit_main_exports() {
+    let directory = fixture_dir();
+    let main = directory.join("explicit.forma");
+    fs::write(
+        &main,
+        "let private = 1; let result = private + 41; export { result as output };",
+    )
+    .unwrap();
+    let run = forma()
+        .args(["run", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "42");
+
+    fs::write(&main, "export let other = 1;").unwrap();
+    let missing = forma()
+        .args(["run", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!missing.status.success());
+    assert!(
+        String::from_utf8_lossy(&missing.stderr)
+            .contains("forma run requires the explicit export \"output\"")
+    );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn show_reports_ordered_independent_runtime_failures_while_run_stays_strict() {
     let directory = fixture_dir();
     let main = directory.join("main.forma");
@@ -188,12 +221,12 @@ fn exec_dry_run_invokes_explicit_pure_entry() {
         &main,
         r#"#!/usr/bin/env -S forma exec --dry-run
 import "std/array" as arrays;
-import "std/exec" as exec;
+import "std/exec" as exec_types;
 import "std/hash" as hash;
-type ExecSettings = exec.ExecSettings;
-type ExecRequest = exec.ExecRequest;
-type ExecEnv = exec.ExecEnv;
-let main: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
+type ExecSettings = exec_types.ExecSettings;
+type ExecRequest = exec_types.ExecRequest;
+type ExecEnv = exec_types.ExecEnv;
+export let exec: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
     let platform = `\{settings.platform.os}-\{settings.platform.arch}`;
     let compiler_url = `https://example.invalid/gcc-\{platform}.tar.gz`;
     let sysroot_url = `https://example.invalid/sysroot-\{platform}.tar.gz`;
@@ -209,8 +242,7 @@ let main: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
         args: arrays.flat_map([[`--sysroot=\{sysroot}`], request.args], fn(part) { part }),
         env: {VISIBLE: request.env.FORMA_EXEC_TEST},
     }
-};
-main"#,
+};"#,
     )
     .unwrap();
 
@@ -370,10 +402,10 @@ fn build_dry_run_validates_and_prints_text_artifacts_without_writing() {
     let main = directory.join("build.forma");
     fs::write(
         &main,
-        r####"import "std/build" as build;
+        r####"import "std/build" as build_types;
 import "std/string" as strings;
-type OutputPlan = build.OutputPlan;
-let main: Fn() -> OutputPlan = fn() {
+type OutputPlan = build_types.OutputPlan;
+export def build: Fn() -> OutputPlan = fn() {
     {
         files: [
             'TextFile({
@@ -385,8 +417,7 @@ let main: Fn() -> OutputPlan = fn() {
             'TextFile({path: "generated/name.txt", content: `Forma\n`}),
         ],
     }
-};
-main"####,
+};"####,
     )
     .unwrap();
 

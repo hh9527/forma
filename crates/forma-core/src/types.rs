@@ -929,6 +929,7 @@ pub struct Analysis {
     pub definition_schemes: BTreeMap<HirDefinitionId, TypeScheme>,
     pub expression_types: BTreeMap<HirExpressionId, TypeId>,
     pub module_interface: ModuleInterface,
+    pub explicit_exports: bool,
     pub(crate) propagation_families: HashMap<crate::Location, PropagationFamily>,
     pub(crate) prelude: BTreeMap<String, Value>,
     pub(crate) external_values: BTreeMap<String, Value>,
@@ -2313,6 +2314,26 @@ pub(crate) fn analyze_program_with_bindings_observed(
         })
         .collect();
     binding_schemes.extend(inference.top_level_inferred_schemes.clone());
+    let explicitly_exported_locals = program
+        .value
+        .body
+        .value
+        .bindings
+        .iter()
+        .filter(|binding| binding.value.kind == BindingKind::Export)
+        .filter_map(|binding| binding.value.imported_name.as_deref())
+        .map(|name| name.value.as_str())
+        .collect::<HashSet<_>>();
+    for (name, descriptor) in &binding_types {
+        if explicitly_exported_locals.contains(name.as_str()) {
+            binding_schemes
+                .entry(name.clone())
+                .or_insert_with(|| TypeScheme {
+                    parameters: Vec::new(),
+                    body: inference.resolve(descriptor),
+                });
+        }
+    }
     let resolved_result = inference.resolve(&result_type);
     for (name, descriptor) in &binding_types {
         let resolved = inference.resolve(descriptor);
@@ -2459,6 +2480,13 @@ pub(crate) fn analyze_program_with_bindings_observed(
         definition_schemes,
         expression_types,
         module_interface,
+        explicit_exports: program
+            .value
+            .body
+            .value
+            .bindings
+            .iter()
+            .any(|binding| binding.value.kind == BindingKind::Export),
         propagation_families,
         prelude: prelude_values,
         external_values: external_values.clone(),
