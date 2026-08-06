@@ -109,6 +109,20 @@ type Rec = { name: String, value: Int };
 
 `string.parse(Rec, "answer=42")` 的结果类型是 `Result(Rec, BlameError)`。类型是权威契约；正则只负责匹配并拆分经过验证的文本表示。捕获字段会递归使用同一个 `std/string.parse` 能力，因此嵌套的修饰 struct 类型可以自然组合，正则不需要拥有它们的转换逻辑。
 
+反向转换使用独立的 `Display` capability，生成稳定、面向用户的文本：
+
+```forma
+import "std/fmt" as fmt;
+
+@fmt.display_by("{host}:{port}")
+@struct
+type Endpoint = { host: String, port: Int };
+
+fmt.display(Endpoint, { host: "localhost", port: 8080 })
+```
+
+模板在类型构造阶段完成校验和编译。字段替换会递归使用字段类型的 Display capability，因此嵌套的修饰 struct 可以自然组合，运行时不需要重新解析模板。面向诊断的 `Debug` 输出仍是另一项后续能力。
+
 ### 确定的执行与输出计划
 
 模块没有默认返回值；它显式导出命名值，Host 再按运行模式选择入口。执行入口是一个普通函数：

@@ -5,6 +5,7 @@ mod core;
 pub mod document;
 mod elaboration;
 mod evaluation;
+mod fmt;
 mod heap;
 pub mod hir;
 pub mod json;

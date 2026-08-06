@@ -24,6 +24,7 @@ pub(crate) const TYPE_DESC_MODULE: &str = "std/type-desc";
 pub(crate) const DYN_MODULE: &str = "std/dyn";
 pub(crate) const EQ_MODULE: &str = "std/eq";
 pub(crate) const REGEX_MODULE: &str = "std/regex";
+pub(crate) const FMT_MODULE: &str = "std/fmt";
 
 pub(crate) struct CoreModuleSpec {
     pub(crate) native_id: u32,
@@ -489,6 +490,31 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
                         3,
                         0,
                         crate::regex::native_prepare,
+                    ),
+                ),
+            ],
+        },
+        CoreModuleSpec {
+            native_id: 20,
+            name: FMT_MODULE,
+            source: include_str!("../modules/std/fmt.forma-sys"),
+            functions: vec![
+                (
+                    "prepare",
+                    NativeFunction::new_with_native_type(
+                        "std/fmt.prepare",
+                        3,
+                        0,
+                        crate::fmt::native_prepare,
+                    ),
+                ),
+                (
+                    "display",
+                    NativeFunction::new_with_native_type(
+                        "std/fmt.display",
+                        2,
+                        0,
+                        crate::fmt::native_display,
                     ),
                 ),
             ],

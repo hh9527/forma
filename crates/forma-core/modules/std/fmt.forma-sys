@@ -1,0 +1,10 @@
+native type DisplayTemplate = @0;
+
+native prepare: Fn(String, Any, Any) -> Any;
+native display: for(A) Fn(TypeOf(A), A) -> String;
+
+def display_by = fn(template) {
+    fn(ctx, value) { prepare(template, ctx, value) }
+};
+
+export { display, display_by };

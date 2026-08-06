@@ -159,6 +159,24 @@ textual representation. Captured fields are parsed recursively through the
 same `std/string.parse` capability, so nested decorated struct types compose
 without regex owning their conversions.
 
+The reverse direction uses a separate `Display` capability for stable,
+user-facing text:
+
+```forma
+import "std/fmt" as fmt;
+
+@fmt.display_by("{host}:{port}")
+@struct
+type Endpoint = { host: String, port: Int };
+
+fmt.display(Endpoint, { host: "localhost", port: 8080 })
+```
+
+The template is checked and compiled during type construction. Field
+substitutions recursively use their types' Display capabilities, so nested
+decorated structs compose without reparsing templates at runtime. Diagnostic
+`Debug` output remains a separate future capability.
+
 ### Deterministic executable and output plans
 
 A module has no default result. It explicitly exports named values, and the

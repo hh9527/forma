@@ -7285,6 +7285,58 @@ unchanged", "|"),
     }
 
     #[test]
+    fn display_templates_validate_once_and_compose_nested_types() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        fs::write(
+            &main,
+            r#"import "std/fmt" as fmt;
+               @fmt.display_by("{host}:{port}")
+               @struct type Endpoint = { host: String, port: Int };
+               @fmt.display_by("{name}@{endpoint} {{ready}} {name}")
+               @struct type Service = { name: String, endpoint: Endpoint };
+               export let output = fmt.display(Service, {
+                   name: "api",
+                   endpoint: { host: "localhost", port: 8080 },
+               });"#,
+        )
+        .unwrap();
+        let engine = recovery_engine();
+        let module = engine.load_module(&main, BTreeMap::new()).unwrap();
+        assert_eq!(
+            named_output(engine.execute(&module).unwrap()).to_string(),
+            "\"api@localhost:8080 {ready} api\""
+        );
+
+        fs::write(
+            &main,
+            r#"import "std/fmt" as fmt;
+               @fmt.display_by("{missing}")
+               @struct type Bad = { value: Int };
+               export { Bad };"#,
+        )
+        .unwrap();
+        let error = recovery_engine()
+            .load_module(&main, BTreeMap::new())
+            .unwrap_err();
+        assert!(error.message().contains("unknown field \"missing\""));
+
+        fs::write(
+            &main,
+            r#"import "std/fmt" as fmt;
+               @fmt.display_by("{value")
+               @struct type Bad = { value: Int };
+               export { Bad };"#,
+        )
+        .unwrap();
+        let error = recovery_engine()
+            .load_module(&main, BTreeMap::new())
+            .unwrap_err();
+        assert!(error.message().contains("unclosed Display template field"));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn dependency_imports_preserve_identity_across_relative_edges() {
         let directory = fixture_dir();
         let app = directory.join("app");
