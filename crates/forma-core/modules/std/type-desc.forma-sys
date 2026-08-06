@@ -11,9 +11,9 @@ native opaque_name: Fn(Type) -> Option(String);
 native resolve: Fn(Type) -> Result(Type, BlameError);
 {
     TypeDesc: Type,
-    TypeDescKind: TypeDescKind,
-    kind: kind,
-    children: children,
-    opaque_name: opaque_name,
-    resolve: resolve,
+    TypeDescKind,
+    kind,
+    children,
+    opaque_name,
+    resolve,
 }

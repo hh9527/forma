@@ -10,4 +10,4 @@ native replace: Fn(String, String, String) -> String;
 native indent: Fn(String, Int) -> String;
 native ensure_trailing_newline: Fn(String) -> String;
 native trim_margin: Fn(String, String) -> String;
-{ length: length, join: join, join_lines: join_lines, split: split, lines: lines, starts_with: starts_with, ends_with: ends_with, contains: contains, replace: replace, indent: indent, ensure_trailing_newline: ensure_trailing_newline, trim_margin: trim_margin }
+{ length, join, join_lines, split, lines, starts_with, ends_with, contains, replace, indent, ensure_trailing_newline, trim_margin }

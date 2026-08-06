@@ -820,16 +820,23 @@ impl<'a> Lowerer<'a> {
                     } else {
                         self.identifier(key)
                     };
-                    let colon = self.first_token(field, Token::Colon)?;
-                    let value = self
-                        .children(field)
-                        .find(|child| {
-                            self.is_expression(*child)
-                                && self.cst.span(*child).start > self.cst.span(colon).start
-                        })
-                        .ok_or_else(|| self.error(field, "Dict field has no value"))?;
                     let decorators = self.decorators(field)?;
-                    let value = self.expression(value)?;
+                    let value = if let Ok(colon) = self.first_token(field, Token::Colon) {
+                        let value = self
+                            .children(field)
+                            .find(|child| {
+                                self.is_expression(*child)
+                                    && self.cst.span(*child).start > self.cst.span(colon).start
+                            })
+                            .ok_or_else(|| self.error(field, "Dict field has no value"))?;
+                        self.expression(value)?
+                    } else {
+                        if !decorators.is_empty() {
+                            return Err(self
+                                .error(field, "decorated Dict fields require an explicit value"));
+                        }
+                        located(ExprKind::Variable(name.clone()), name.location)
+                    };
                     let value = self.apply_decorators(
                         &decorators,
                         "Field",

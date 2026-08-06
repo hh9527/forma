@@ -6,11 +6,11 @@ native update_string: Fn(HashState, String) -> HashState;
 native update_int: Fn(HashState, Int) -> HashState;
 native finish: Fn(HashState) -> Bytes;
 {
-    HashState: HashState,
-    sha256: sha256,
-    new: new,
-    update_bytes: update_bytes,
-    update_string: update_string,
-    update_int: update_int,
-    finish: finish,
+    HashState,
+    sha256,
+    new,
+    update_bytes,
+    update_string,
+    update_int,
+    finish,
 }

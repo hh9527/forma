@@ -33,11 +33,11 @@
     env: Dict(String),
 };
 {
-    Platform: Platform,
-    ExecSettings: ExecSettings,
-    ExecRequest: ExecRequest,
-    UnpackType: UnpackType,
-    UnpackOpt: UnpackOpt,
-    Install: Install,
-    ExecEnv: ExecEnv,
+    Platform,
+    ExecSettings,
+    ExecRequest,
+    UnpackType,
+    UnpackOpt,
+    Install,
+    ExecEnv,
 }

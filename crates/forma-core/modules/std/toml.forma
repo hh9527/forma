@@ -4,4 +4,4 @@
     LocalDate: String,
     LocalTime: String,
 };
-{DateTime: DateTime}
+{DateTime}

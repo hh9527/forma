@@ -10,15 +10,15 @@ native schema: Fn(Any) -> Any;
 native default: Fn(Any) -> Fn(Any, Any) -> Any;
 native skip_serializing_if: Fn(Any) -> Fn(Any, Any) -> Any;
 {
-    parse: parse,
-    decode: decode,
-    stringify: stringify,
-    stringify_pretty: stringify_pretty,
-    rename: rename,
-    rename_all: rename_all,
-    flatten: flatten,
-    untagged: untagged,
-    schema: schema,
-    default: default,
-    skip_serializing_if: skip_serializing_if,
+    parse,
+    decode,
+    stringify,
+    stringify_pretty,
+    rename,
+    rename_all,
+    flatten,
+    untagged,
+    schema,
+    default,
+    skip_serializing_if,
 }

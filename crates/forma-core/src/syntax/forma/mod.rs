@@ -114,6 +114,26 @@ fn(settings, request) { {args: request.args} }"#;
     }
 
     #[test]
+    fn cst_preserves_dict_field_shorthand_losslessly() {
+        let source = "let name = \"forma\"; { name, explicit: 1, ...extra }";
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("shorthand.forma", source);
+        let parsed = parse(id, source);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+
+        for invalid in [
+            "let other = 1; { other, @tag name }",
+            "let other = 1; { other, name.value }",
+        ] {
+            let id = sources.add("invalid-shorthand.forma", invalid);
+            assert!(parse(id, invalid).has_errors(), "accepted {invalid:?}");
+        }
+    }
+
+    #[test]
     fn cst_preserves_generic_definition_declarations_losslessly() {
         let source =
             "decl identity: for(A) Fn(A) -> A; def identity = fn(value) { value }; identity";

@@ -74,7 +74,7 @@ braced:
   ?1 '{' [dict_item (?2 ',' dict_item)* [',']] '}' @dict_expr
 | ?t block
 ;
-dict_field: decorator* (Identifier | string_literal) ':' expression;
+dict_field: ?1 Identifier | decorator* (Identifier | string_literal) ':' expression;
 dict_item^: spread_item | dict_field;
 decorator: '@' decorator_path [arguments];
 decorator_path: Identifier ('.' Identifier)*;

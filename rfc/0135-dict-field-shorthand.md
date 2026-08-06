@@ -1,6 +1,6 @@
 # RFC 0135: Dict field shorthand
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0002, RFC 0133
 
 ## Summary
@@ -50,6 +50,14 @@ provenance, and diagnostics then follow the ordinary explicit-field path.
 
 No runtime representation or bytecode change is required.
 
+## Braced-expression disambiguation
+
+`{ name }` is parsed as a Dict literal. Blocks in syntax-directed positions,
+including function, `if`, `match`, and `let else` bodies, remain blocks. This
+resolves the otherwise unavoidable ambiguity in favor of the new data form;
+an unconstrained braced expression containing only an identifier no longer
+acts as a redundant standalone block.
+
 ## Acceptance criteria
 
 - `{ name }` produces the same value and inferred type as `{ name: name }`.
@@ -61,3 +69,16 @@ No runtime representation or bytecode change is required.
   diagnostic at the authored identifier.
 - Decorated shorthand and non-identifier bare entries remain syntax errors.
 - Built-in Forma modules use shorthand for their export records.
+
+## Implementation result
+
+Implemented in the lossless grammar and AST lowering. A one-token lookahead
+distinguishes shorthand from explicit fields, while braced-expression
+selection recognizes identifier-only Dicts. The synthesized variable retains
+the authored identifier location and all later stages reuse the existing named
+field path.
+
+The embedded standard modules now use shorthand for value and Type metadata
+exports. Tests cover lossless CST reconstruction, inferred and evaluated
+values, mixtures with explicit fields and spread, duplicate and unresolved
+names, and rejection of decorated or non-identifier shorthand entries.

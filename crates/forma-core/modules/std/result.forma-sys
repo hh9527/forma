@@ -15,10 +15,10 @@ def is_ok: for(A, E) Fn(Result(A, E)) -> Bool = fn(result) {
     match result { 'Ok(_) => 'True, 'Err(_) => 'False }
 };
 {
-    unwrap: unwrap,
-    map: map,
-    flat_map: flat_map,
-    map_err: map_err,
-    unwrap_or: unwrap_or,
-    is_ok: is_ok,
+    unwrap,
+    map,
+    flat_map,
+    map_err,
+    unwrap_or,
+    is_ok,
 }

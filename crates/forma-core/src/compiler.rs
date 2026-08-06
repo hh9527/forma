@@ -2611,6 +2611,27 @@ let decorators = {
     }
 
     #[test]
+    fn dict_field_shorthand_lowers_to_an_ordinary_named_field() {
+        let value = run("let name = \"forma\"; let version = 1; { name, version }").unwrap();
+        assert_eq!(value.to_string(), "{name: \"forma\", version: 1}");
+
+        let mixed = run("let name = 1; let extra: Dict(Int) = {version: 2};\
+             {name, explicit: 3, ...extra}")
+        .unwrap();
+        assert_eq!(mixed.to_string(), "{explicit: 3, name: 1, version: 2}");
+
+        let duplicate = compile_source("test", "let name = 1; {name, name: 2}").unwrap_err();
+        assert!(duplicate.message.contains("duplicate Dict field"));
+
+        let unknown = compile_source("test", "{missing}").unwrap_err();
+        assert!(
+            unknown.message.contains("unknown binding") && unknown.message.contains("missing"),
+            "{}",
+            unknown.message
+        );
+    }
+
+    #[test]
     fn dict_spread_requires_dict_without_adding_struct_update() {
         let error = compile_source("test", "let base = {a: 1}; {...base, b: 2}").unwrap_err();
         assert!(

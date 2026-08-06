@@ -3,13 +3,13 @@
     content: String,
 };
 @enum type Artifact = {
-    TextFile: TextFile,
+    TextFile,
 };
 @struct type OutputPlan = {
     files: Array(Artifact),
 };
 {
-    TextFile: TextFile,
-    Artifact: Artifact,
-    OutputPlan: OutputPlan,
+    TextFile,
+    Artifact,
+    OutputPlan,
 }

@@ -10,4 +10,4 @@ def unwrap_or: for(A) Fn(Option(A), A) -> A = fn(option, fallback) {
 def is_some: for(A) Fn(Option(A)) -> Bool = fn(option) {
     match option { 'None => 'False, 'Some(_) => 'True }
 };
-{ map: map, flat_map: flat_map, unwrap_or: unwrap_or, is_some: is_some }
+{ map, flat_map, unwrap_or, is_some }

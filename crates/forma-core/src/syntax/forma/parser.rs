@@ -127,7 +127,8 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
         if self.peek(1) == Token::RBrace
             || self.peek(1) == Token::At
             || self.peek(1) == Token::Ellipsis
-            || self.peek(1) == Token::Identifier && self.peek(2) == Token::Colon
+            || self.peek(1) == Token::Identifier
+                && matches!(self.peek(2), Token::Colon | Token::Comma | Token::RBrace)
         {
             return true;
         }
@@ -154,6 +155,9 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
             }
             lookahead += 1;
         }
+    }
+    fn predicate_dict_field_1(&self) -> bool {
+        self.current == Token::Identifier && self.peek(1) != Token::Colon
     }
     fn predicate_braced_2(&self) -> bool {
         self.peek(1) != Token::RBrace
