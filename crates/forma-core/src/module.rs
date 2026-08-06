@@ -7293,11 +7293,12 @@ unchanged", "|"),
             r#"import "std/fmt" as fmt;
                @fmt.display_by("{host}:{port}")
                @struct type Endpoint = { host: String, port: Int };
-               @fmt.display_by("{name}@{endpoint} {{ready}} {name}")
-               @struct type Service = { name: String, endpoint: Endpoint };
+               @fmt.display_by("{name}@{endpoint} {{ready}} {ratio} {name}")
+               @struct type Service = { name: String, endpoint: Endpoint, ratio: Float };
                export let output = fmt.display(Service, {
                    name: "api",
                    endpoint: { host: "localhost", port: 8080 },
+                   ratio: 1.5,
                });"#,
         )
         .unwrap();
@@ -7305,7 +7306,7 @@ unchanged", "|"),
         let module = engine.load_module(&main, BTreeMap::new()).unwrap();
         assert_eq!(
             named_output(engine.execute(&module).unwrap()).to_string(),
-            "\"api@localhost:8080 {ready} api\""
+            "\"api@localhost:8080 {ready} 1.5 api\""
         );
 
         fs::write(

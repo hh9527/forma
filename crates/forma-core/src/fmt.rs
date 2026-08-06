@@ -14,6 +14,7 @@ struct DisplayTemplate(Vec<TemplatePart>);
 enum DisplayPlan {
     String,
     Int,
+    Float,
     Template {
         template: DisplayTemplate,
         fields: BTreeMap<String, DisplayPlan>,
@@ -184,6 +185,7 @@ fn display_plan_at(
     {
         Some("String") => Ok(DisplayPlan::String),
         Some("Int") => Ok(DisplayPlan::Int),
+        Some("Float") => Ok(DisplayPlan::Float),
         _ => Err(NativeError::new("type has no std/fmt.display capability")),
     }
 }
@@ -199,6 +201,12 @@ fn render(plan: &DisplayPlan, value: ValueRef<'_>, output: &mut String) -> Resul
             &value
                 .as_int()
                 .ok_or_else(|| NativeError::new("Display expected Int"))?
+                .to_string(),
+        ),
+        DisplayPlan::Float => output.push_str(
+            &value
+                .as_float()
+                .ok_or_else(|| NativeError::new("Display expected Float"))?
                 .to_string(),
         ),
         DisplayPlan::Template { template, fields } => {

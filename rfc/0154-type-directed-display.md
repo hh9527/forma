@@ -40,7 +40,7 @@ typed value and a valid capability have been supplied.
 
 ## Acceptance criteria
 
-1. `String` and `Int` have built-in Display implementations.
+1. `String`, `Int`, and `Float` have built-in Display implementations.
 2. A struct can install a validated template with `fmt.display_by`.
 3. Unknown fields and malformed templates fail during type construction.
 4. Nested decorated struct fields compose recursively.

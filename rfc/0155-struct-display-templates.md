@@ -20,12 +20,13 @@ public language value.
 
 ## Deferred work
 
-- `Float`, `Bytes`, collections, enums, and optional values;
+- `Bytes`, collections, enums, and optional values;
 - width, alignment, fill, and numeric formatting;
 - custom function providers;
 - `Debug` and diagnostic structural rendering.
 
 ## Implementation result
 
-Implemented in August 2026 with built-in `String` and `Int` rendering, checked
-struct templates, escaped braces, and nested named struct composition.
+Implemented in August 2026 with built-in `String`, `Int`, and `Float`
+rendering, checked struct templates, escaped braces, and nested named struct
+composition.

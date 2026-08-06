@@ -225,6 +225,13 @@ impl<'a> ValueRef<'a> {
         }
     }
 
+    pub fn as_float(self) -> Option<f64> {
+        match self.value.value {
+            RuntimeValue::Float(value) => Some(value),
+            _ => None,
+        }
+    }
+
     pub fn as_str(self) -> Option<&'a str> {
         match self.value.value {
             RuntimeValue::ShortString(id) => self.view.text(id).ok(),
