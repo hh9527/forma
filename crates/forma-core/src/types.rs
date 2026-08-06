@@ -2609,6 +2609,15 @@ fn collect_nested_annotation_types(
                 )?;
             }
         }
+        ExprKind::Spread(operand) => collect_nested_annotation_types(
+            source_name,
+            operand,
+            bindings,
+            account,
+            sources,
+            debug_sink,
+            annotations,
+        )?,
         ExprKind::Dict(fields) => {
             for field in fields {
                 collect_nested_annotation_types(
@@ -5118,7 +5127,22 @@ impl<'a> GenericInference<'a> {
                 };
                 let mut item_types = Vec::new();
                 for item in items {
-                    item_types.push(self.infer(item, environment, item_expected.as_ref())?);
+                    if let ExprKind::Spread(operand) = &item.value {
+                        let spread_expected = item_expected
+                            .as_ref()
+                            .map(|item| TypeDescriptor::Array(Box::new(item.clone())));
+                        let spread = self.infer(operand, environment, spread_expected.as_ref())?;
+                        let resolved = self.resolve(&spread);
+                        let TypeDescriptor::Array(spread_item) = resolved else {
+                            return Err(format!(
+                                "array spread requires Array, found {}",
+                                resolved.display_name()
+                            ));
+                        };
+                        item_types.push(*spread_item);
+                    } else {
+                        item_types.push(self.infer(item, environment, item_expected.as_ref())?);
+                    }
                 }
                 let item = if let Some(expected) = item_expected {
                     expected
@@ -5129,6 +5153,7 @@ impl<'a> GenericInference<'a> {
                 };
                 TypeDescriptor::Array(Box::new(item))
             }
+            ExprKind::Spread(operand) => self.infer(operand, environment, expected)?,
             ExprKind::Tuple(items) => {
                 let item_expected = match expected.map(|ty| self.resolve(ty)) {
                     Some(TypeDescriptor::Tuple(expected_items))
@@ -6288,6 +6313,7 @@ fn expression_references_names(
         ExprKind::Array(items) | ExprKind::Tuple(items) => items
             .iter()
             .any(|item| expression_references_names(item, names, bound)),
+        ExprKind::Spread(operand) => expression_references_names(operand, names, bound),
         ExprKind::Dict(fields) => fields
             .iter()
             .any(|field| expression_references_names(&field.value.value, names, bound)),
@@ -6530,11 +6556,21 @@ fn infer_expr_with(
         ExprKind::Array(items) => {
             let item_types = items
                 .iter()
-                .map(|item| infer_expr_with(item, environment, record))
+                .map(|item| {
+                    if let ExprKind::Spread(operand) = &item.value {
+                        match infer_expr_with(operand, environment, record) {
+                            TypeDescriptor::Array(item) => *item,
+                            _ => TypeDescriptor::Any,
+                        }
+                    } else {
+                        infer_expr_with(item, environment, record)
+                    }
+                })
                 .collect::<Vec<_>>();
             let item = common_type(item_types).unwrap_or(TypeDescriptor::Any);
             TypeDescriptor::Array(Box::new(item))
         }
+        ExprKind::Spread(operand) => infer_expr_with(operand, environment, record),
         ExprKind::Tuple(items) => TypeDescriptor::Tuple(
             items
                 .iter()
@@ -6727,6 +6763,7 @@ fn check_interpolations(
                 check_interpolations(item, environment, sources)?;
             }
         }
+        ExprKind::Spread(operand) => check_interpolations(operand, environment, sources)?,
         ExprKind::Dict(fields) => {
             for field in fields {
                 check_interpolations(&field.value.value, environment, sources)?;

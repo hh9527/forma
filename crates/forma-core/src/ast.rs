@@ -67,6 +67,7 @@ pub enum ExprKind {
     Atom(String),
     Variable(Identifier),
     Array(Vec<Expr>),
+    Spread(Box<Expr>),
     Tuple(Vec<Expr>),
     Dict(Vec<DictField>),
     Block(Block),

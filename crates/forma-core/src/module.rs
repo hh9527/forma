@@ -1733,6 +1733,7 @@ fn expression_has_import(expression: &Expr) -> bool {
                 || expression_has_import(&block.value.result)
         }
         ExprKind::Array(items) | ExprKind::Tuple(items) => items.iter().any(expression_has_import),
+        ExprKind::Spread(operand) => expression_has_import(operand),
         ExprKind::InterpolatedString(parts) => parts.iter().any(|part| match &part.value {
             StringPartKind::Text(_) => false,
             StringPartKind::Expression(expression) => expression_has_import(expression),

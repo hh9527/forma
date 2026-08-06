@@ -438,6 +438,10 @@ impl Resolver {
                 }
                 None
             }
+            ExprKind::Spread(operand) => {
+                self.index_expr(operand, scopes);
+                None
+            }
             ExprKind::Dict(fields) => {
                 for field in fields {
                     self.index_expr(&field.value.value, scopes);

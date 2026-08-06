@@ -1485,6 +1485,46 @@ impl Vm {
                             pc,
                         )?;
                     }
+                    Opcode::ConcatArrays { dst, arrays } => {
+                        let arrays = read_many(&registers, arrays, function, pc)?;
+                        let mut values = Vec::new();
+                        for array in arrays {
+                            let RuntimeValue::Array(handle) = array.value else {
+                                return Err(error(
+                                    RuntimeErrorKind::TypeMismatch,
+                                    "array spread operand must be an Array",
+                                    function,
+                                    pc,
+                                ));
+                            };
+                            values.extend_from_slice(view.sequence(handle, false).map_err(
+                                |heap_error| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        heap_error.to_string(),
+                                        function,
+                                        pc,
+                                    )
+                                },
+                            )?);
+                        }
+                        let bytes = logical_value_bytes(values.len()).map_err(|native_error| {
+                            allocation_error(native_error.message, function, pc)
+                        })?;
+                        charge_allocation(account, bytes, function, pc)?;
+                        write_register(
+                            &mut registers,
+                            *dst,
+                            RichValue::new(
+                                RuntimeValue::Array(
+                                    current.allocate(crate::heap::Object::Array(values.into())),
+                                ),
+                                instruction_location(function, pc),
+                            ),
+                            function,
+                            pc,
+                        )?;
+                    }
                     Opcode::MakeTuple { dst, items } => {
                         let values = read_many(&registers, items, function, pc)?;
                         let bytes = logical_value_bytes(values.len()).map_err(|native_error| {

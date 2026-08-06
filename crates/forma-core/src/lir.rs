@@ -79,6 +79,10 @@ pub enum Operation {
         dst: RegisterId,
         items: Vec<RegisterId>,
     },
+    ConcatArrays {
+        dst: RegisterId,
+        arrays: Vec<RegisterId>,
+    },
     MakeTuple {
         dst: RegisterId,
         items: Vec<RegisterId>,
@@ -340,6 +344,10 @@ fn lower_operation(
         Operation::MakeArray { dst, items } => Instruction::MakeArray {
             dst: register(dst)?,
             items: registers(items)?,
+        },
+        Operation::ConcatArrays { dst, arrays } => Instruction::ConcatArrays {
+            dst: register(dst)?,
+            arrays: registers(arrays)?,
         },
         Operation::MakeTuple { dst, items } => Instruction::MakeTuple {
             dst: register(dst)?,

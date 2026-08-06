@@ -1,7 +1,7 @@
 token Let='let' Decl='decl' Def='def' Native='native' For='for' Type='type' Fn='fn' FunctionType='Fn' Interpreter='interpreter' If='if' Else='else' Match='match' Return='return';
 token Import='import' From='from';
 token SectionLParen='\\(' LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
-token Comma=',' Colon=':' Semicolon=';' Dot='.' At='@' Bang='!' Question='?';
+token Comma=',' Colon=':' Semicolon=';' Ellipsis='...' Dot='.' At='@' Bang='!' Question='?';
 token Plus='+' Minus='-' Star='*' Slash='/' Less='<' EqualEqual='==' Equal='=';
 token AndAnd='&&' OrOr='||';
 token Arrow='->' FatArrow='=>' Pipe='|>';
@@ -61,7 +61,7 @@ primary:
 | ?6 if_let_expr
 | legacy_interpreter_expr
 | '(' [expression (?1 ',' expression)* [',']] ')' @paren_expr
-| '[' [expression (?2 ',' expression)* [',']] ']' @array_expr
+| '[' [array_item (?2 ',' array_item)* [',']] ']' @array_expr
 | braced
 | ?3 function_contract
 | ?t closure
@@ -91,6 +91,8 @@ type_arguments: '[' type_argument (?1 ',' type_argument)* [','] ']';
 type_argument: expression | Placeholder;
 section_arguments: '\\(' [argument (?1 ',' argument)* [',']] ')';
 argument: expression | Placeholder | IndexedPlaceholder;
+array_item^: spread_item | expression;
+spread_item: '...' expression @spread_expr;
 if_expr: 'if' expression block 'else' block;
 if_let_expr: 'if' 'let' pattern '=' expression block 'else' block;
 match_expr: 'match' expression '{' match_arm (?1 ',' match_arm)* [','] '}';

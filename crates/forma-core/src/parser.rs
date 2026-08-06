@@ -775,6 +775,13 @@ impl<'a> Lowerer<'a> {
                 ExprKind::Variable(self.identifier(self.first_token(node, Token::Identifier)?))
             }
             Rule::ArrayExpr => ExprKind::Array(self.expression_children(node)?),
+            Rule::SpreadExpr => {
+                let operand = self
+                    .children(node)
+                    .find(|child| self.is_expression(*child))
+                    .ok_or_else(|| self.error(node, "spread has no operand"))?;
+                ExprKind::Spread(Box::new(self.expression(operand)?))
+            }
             Rule::ParenExpr => {
                 let items = self.expression_children(node)?;
                 if items.len() == 1 && self.token_children(node, Token::Comma).next().is_none() {
@@ -1669,6 +1676,7 @@ impl<'a> Lowerer<'a> {
                     | Rule::PropagateExpr
                     | Rule::ReturnExpr
                     | Rule::SectionExpr
+                    | Rule::SpreadExpr
                     | Rule::StringExpr
                     | Rule::TypeApplyExpr
                     | Rule::UnaryExpr

@@ -47,6 +47,7 @@ pub enum Token {
     Comma,
     Colon,
     Semicolon,
+    Ellipsis,
     Dot,
     At,
     Bang,
@@ -136,6 +137,8 @@ enum NormalToken {
     Colon,
     #[token(";")]
     Semicolon,
+    #[token("...")]
+    Ellipsis,
     #[token(".")]
     Dot,
     #[token("@")]
@@ -558,6 +561,7 @@ impl From<NormalToken> for Token {
             NormalToken::Comma => Self::Comma,
             NormalToken::Colon => Self::Colon,
             NormalToken::Semicolon => Self::Semicolon,
+            NormalToken::Ellipsis => Self::Ellipsis,
             NormalToken::Dot => Self::Dot,
             NormalToken::At => Self::At,
             NormalToken::Bang => Self::Bang,

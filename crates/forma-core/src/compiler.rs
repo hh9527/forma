@@ -816,10 +816,19 @@ impl<'a> Compiler<'a> {
                 }
             }
             ExprKind::Array(items) => {
+                if items
+                    .iter()
+                    .any(|item| matches!(item.value, ExprKind::Spread(_)))
+                {
+                    return self.compile_spread_array(items, expression.location);
+                }
                 let items = self.compile_many(items)?;
                 let dst = self.allocate();
                 self.emit(Operation::MakeArray { dst, items }, expression.location);
                 Ok(dst)
+            }
+            ExprKind::Spread(_) => {
+                Err(self.error_at(expression.location, "spread is only valid in a collection"))
             }
             ExprKind::Tuple(items) => {
                 let items = self.compile_many(items)?;
@@ -997,6 +1006,33 @@ impl<'a> Compiler<'a> {
             .iter()
             .map(|expression| self.compile_expr(expression))
             .collect()
+    }
+
+    fn compile_spread_array(
+        &mut self,
+        items: &[Expr],
+        location: Location,
+    ) -> Result<RegisterId, FrontendError> {
+        let mut arrays = Vec::with_capacity(items.len());
+        for item in items {
+            if let ExprKind::Spread(operand) = &item.value {
+                arrays.push(self.compile_expr(operand)?);
+            } else {
+                let value = self.compile_expr(item)?;
+                let array = self.allocate();
+                self.emit(
+                    Operation::MakeArray {
+                        dst: array,
+                        items: vec![value],
+                    },
+                    item.location,
+                );
+                arrays.push(array);
+            }
+        }
+        let dst = self.allocate();
+        self.emit(Operation::ConcatArrays { dst, arrays }, location);
+        Ok(dst)
     }
 
     fn compile_dict(
@@ -1567,6 +1603,7 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
                 free_expr(item, bound, free);
             }
         }
+        ExprKind::Spread(operand) => free_expr(operand, bound, free),
         ExprKind::InterpolatedString(parts) => {
             for part in parts {
                 if let StringPartKind::Expression(expression) = &part.value {
@@ -1715,6 +1752,7 @@ pub(crate) fn collect_runtime_names(expression: &Expr, names: &mut HashSet<Strin
                 collect_runtime_names(item, names);
             }
         }
+        ExprKind::Spread(operand) => collect_runtime_names(operand, names),
         ExprKind::InterpolatedString(parts) => {
             for part in parts {
                 if let StringPartKind::Expression(expression) = &part.value {
@@ -2489,6 +2527,27 @@ let decorators = {
         .unwrap_err();
         assert!(
             error.message.contains("unreachable match arm"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn array_spread_flattens_fragments_in_source_order() {
+        let value =
+            run("let middle = [1, 2]; let empty: Array(Int) = []; [0, ...middle, 3, ...empty, 4]")
+                .unwrap();
+        assert_eq!(value.to_string(), "[0, 1, 2, 3, 4]");
+
+        let nested = run("let values = [[1], [2, 3]]; [...values]").unwrap();
+        assert_eq!(nested.to_string(), "[[1], [2, 3]]");
+    }
+
+    #[test]
+    fn array_spread_requires_an_array_operand() {
+        let error = compile_source("test", "[0, ...1]").unwrap_err();
+        assert!(
+            error.message.contains("array spread requires Array") && error.message.contains("Int"),
             "{}",
             error.message
         );
