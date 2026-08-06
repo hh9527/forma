@@ -402,6 +402,43 @@ fn project_default_prelude(analysis: &mut Analysis, exports: &BTreeMap<String, V
     }
 }
 
+fn select_import_value(
+    value: Value,
+    interface: ModuleInterface,
+    exported: Option<&crate::ast::Identifier>,
+    local: &str,
+) -> Result<(Value, ModuleInterface), ModuleError> {
+    let Some(exported) = exported else {
+        return Ok((value, interface));
+    };
+    let Value::Dict(module) = value else {
+        return Err(ModuleError::new(format!(
+            "cannot selectively import {:?} from a non-module value",
+            exported.value
+        )));
+    };
+    let selected = module
+        .get(&exported.value)
+        .cloned()
+        .ok_or_else(|| ModuleError::new(format!("module has no export {:?}", exported.value)))?;
+    let scheme = interface
+        .exports
+        .get(&exported.value)
+        .cloned()
+        .ok_or_else(|| {
+            ModuleError::new(format!(
+                "module interface has no export {:?}",
+                exported.value
+            ))
+        })?;
+    Ok((
+        selected,
+        ModuleInterface {
+            exports: BTreeMap::from([(local.to_owned(), scheme)]),
+        },
+    ))
+}
+
 impl fmt::Debug for ModuleRuntime {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -850,6 +887,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                 .filter_map(|binding| match &binding.value.value.value {
                     ExprKind::String(target) => Some((
                         binding.value.name.value.clone(),
+                        binding.value.imported_name.clone(),
                         binding.value.value.location,
                         target.clone(),
                     )),
@@ -888,7 +926,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                     binding.location,
                 ));
             }
-            for (name, location, target) in imports {
+            for (name, imported_name, location, target) in imports {
                 let target_module = match self.resolver.resolve_import(&module_id, &target) {
                     Ok(target) => target,
                     Err(error) => {
@@ -904,8 +942,21 @@ impl RecoverableWorkspaceBuilder<'_> {
                         target: target_module.id,
                     });
                     if let Some((value, interface)) = self.core_modules.get(&target) {
-                        external_values.insert(name.clone(), value.clone());
-                        external_interfaces.insert(name, interface.clone());
+                        match select_import_value(
+                            value.clone(),
+                            interface.clone(),
+                            imported_name.as_deref(),
+                            &name,
+                        ) {
+                            Ok((value, interface)) => {
+                                external_values.insert(name.clone(), value);
+                                external_interfaces.insert(name, interface);
+                            }
+                            Err(error) => {
+                                unavailable_imports.insert(name);
+                                diagnostics.push(Diagnostic::error(error.to_string(), location));
+                            }
+                        }
                     } else {
                         unavailable_imports.insert(name);
                         diagnostics.push(Diagnostic::error(
@@ -934,10 +985,21 @@ impl RecoverableWorkspaceBuilder<'_> {
                     if let Some(sourced) = self.sourced_values.get(&target_module.id) {
                         external_sourced_values.insert(name.clone(), sourced.clone());
                     }
-                    if let Some(interface) = self.interfaces.get(&target_module.id) {
-                        external_interfaces.insert(name.clone(), interface.clone());
+                    let interface = self
+                        .interfaces
+                        .get(&target_module.id)
+                        .cloned()
+                        .unwrap_or_default();
+                    match select_import_value(value, interface, imported_name.as_deref(), &name) {
+                        Ok((value, interface)) => {
+                            external_interfaces.insert(name.clone(), interface);
+                            external_values.insert(name, value);
+                        }
+                        Err(error) => {
+                            unavailable_imports.insert(name);
+                            diagnostics.push(Diagnostic::error(error.to_string(), location));
+                        }
                     }
-                    external_values.insert(name, value);
                 } else {
                     unavailable_imports.insert(name);
                     if self.cycle_members.contains(&target_module.id) {
@@ -1587,7 +1649,28 @@ impl ModuleLoader {
                     location: binding.value.name.location,
                     target: imported.id,
                 });
-                external_roots.insert(binding.value.name.value.clone(), root);
+                let selected_root =
+                    binding
+                        .value
+                        .imported_name
+                        .as_ref()
+                        .map_or(Ok(root), |name| {
+                            root.dict_get(&self.main.heap, &name.value)
+                                .map_err(|error| ModuleError::new(error.to_string()))?
+                                .ok_or_else(|| {
+                                    ModuleError::new(format!(
+                                        "module has no export {:?}",
+                                        name.value
+                                    ))
+                                })
+                        })?;
+                let (value, interface) = select_import_value(
+                    value,
+                    interface,
+                    binding.value.imported_name.as_deref(),
+                    &binding.value.name.value,
+                )?;
+                external_roots.insert(binding.value.name.value.clone(), selected_root);
                 external_interfaces.insert(binding.value.name.value.clone(), interface);
                 external_bindings.insert(binding.value.name.value.clone(), value);
                 continue;
@@ -1608,15 +1691,32 @@ impl ModuleLoader {
                 .cache
                 .get(&imported_id)
                 .expect("loaded module has a ready cache entry");
-            external_roots.insert(binding.value.name.value.clone(), *root);
-            external_interfaces.insert(binding.value.name.value.clone(), interface.clone());
+            let selected_root = binding
+                .value
+                .imported_name
+                .as_ref()
+                .map_or(Ok(*root), |name| {
+                    root.dict_get(&self.main.heap, &name.value)
+                        .map_err(|error| ModuleError::new(error.to_string()))?
+                        .ok_or_else(|| {
+                            ModuleError::new(format!("module has no export {:?}", name.value))
+                        })
+                })?;
+            let (selected_value, selected_interface) = select_import_value(
+                sourced.value.clone(),
+                interface.clone(),
+                binding.value.imported_name.as_deref(),
+                &binding.value.name.value,
+            )?;
+            external_roots.insert(binding.value.name.value.clone(), selected_root);
+            external_interfaces.insert(binding.value.name.value.clone(), selected_interface);
             if *opaque {
                 opaque_bindings.insert(binding.value.name.value.clone());
             }
             if !sourced.provenance.values.is_empty() {
                 external_provenance.insert(binding.value.name.value.clone(), sourced.provenance);
             }
-            external_bindings.insert(binding.value.name.value.clone(), sourced.value);
+            external_bindings.insert(binding.value.name.value.clone(), selected_value);
         }
         if let Some(binding) = program.value.body.value.bindings.iter().find(|binding| {
             matches!(
@@ -2018,17 +2118,39 @@ mod tests {
         fs::write(
             directory.join("main.forma"),
             r#"import "core/prelude" as prelude;
+import "core/prelude" { struct as make_struct, validate as check };
 import "std/result" as result;
-type User = prelude.struct('None, {name: String});
-let user: User = {name: result.unwrap(prelude.validate(String, "forma"))};
-(user, struct == prelude.struct, enum == prelude.enum, union == prelude.union, validate == prelude.validate)"#,
+type User = make_struct('None, {name: String});
+let user: User = {name: result.unwrap(check(String, "forma"))};
+(user, struct == prelude.struct, enum == prelude.enum, union == prelude.union, validate == prelude.validate, make_struct == prelude.struct, check == prelude.validate)"#,
         )
         .unwrap();
 
         let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
         assert_eq!(
             module.execute(100_000).unwrap().to_string(),
-            "({name: \"forma\"}, 'True, 'True, 'True, 'True)"
+            "({name: \"forma\"}, 'True, 'True, 'True, 'True, 'True, 'True)"
+        );
+        fs::write(
+            directory.join("missing.forma"),
+            "import \"core/prelude\" { missing }; missing",
+        )
+        .unwrap();
+        let missing =
+            load_module(directory.join("missing.forma"), BTreeMap::new(), 100_000).unwrap_err();
+        assert!(missing.to_string().contains("has no export \"missing\""));
+
+        fs::write(
+            directory.join("duplicate.forma"),
+            "import \"core/prelude\" { struct as item, enum as item }; item",
+        )
+        .unwrap();
+        let duplicate =
+            load_module(directory.join("duplicate.forma"), BTreeMap::new(), 100_000).unwrap_err();
+        assert!(
+            duplicate
+                .to_string()
+                .contains("duplicate module binding \"item\"")
         );
         fs::remove_dir_all(directory).unwrap();
     }

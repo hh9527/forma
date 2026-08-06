@@ -115,7 +115,7 @@ fn(settings, request) { {args: request.args} }"#;
 
     #[test]
     fn cst_preserves_path_first_module_bindings() {
-        let source = "import \"std/array\" as arrays; let from = 1; (arrays, from)";
+        let source = "import \"std/array\" as arrays; import \"std/array\" { map, filter as select }; let from = 1; (arrays, map, select, from)";
         let mut sources = crate::source::SourceDatabase::default();
         let id = sources.add("imports.forma", source);
         let parsed = parse(id, source);

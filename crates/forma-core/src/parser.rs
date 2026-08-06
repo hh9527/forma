@@ -224,8 +224,14 @@ impl<'a> Lowerer<'a> {
         let mut result = None;
         if let Some(body) = root.body() {
             for binding in body.bindings() {
-                match self.binding(binding.syntax().node_ref()) {
-                    Ok(binding) => bindings.push(binding),
+                let node = binding.syntax().node_ref();
+                let lowered = if self.rule(node) == Some(Rule::ImportBinding) {
+                    self.import_bindings(node)
+                } else {
+                    self.binding(node).map(|binding| vec![binding])
+                };
+                match lowered {
+                    Ok(lowered) => bindings.extend(lowered),
                     Err(diagnostic) => push_unique_diagnostic(diagnostics, diagnostic),
                 }
             }
@@ -276,9 +282,13 @@ impl<'a> Lowerer<'a> {
                     | Rule::DefBinding
                     | Rule::NativeBinding
                     | Rule::NativeTypeBinding
-                    | Rule::TypeBinding
-                    | Rule::ImportBinding,
+                    | Rule::TypeBinding,
                 ) => entries.push(BlockEntry::Binding(self.binding(child)?)),
+                Some(Rule::ImportBinding) => entries.extend(
+                    self.import_bindings(child)?
+                        .into_iter()
+                        .map(BlockEntry::Binding),
+                ),
                 Some(Rule::LetPatternBinding) => {
                     if !allow_destructuring {
                         return Err(self.error(
@@ -337,6 +347,12 @@ impl<'a> Lowerer<'a> {
                             value,
                             location: self.location(inner),
                         });
+                    } else if self.rule(inner) == Some(Rule::ImportBinding) {
+                        entries.extend(
+                            self.import_bindings(inner)?
+                                .into_iter()
+                                .map(BlockEntry::Binding),
+                        );
                     } else {
                         entries.push(BlockEntry::Binding(self.binding(inner)?));
                     }
@@ -499,6 +515,7 @@ impl<'a> Lowerer<'a> {
                     BindingData {
                         decorators: Vec::new(),
                         kind: BindingKind::Let,
+                        imported_name: None,
                         name,
                         type_parameters: Vec::new(),
                         annotation,
@@ -537,6 +554,7 @@ impl<'a> Lowerer<'a> {
                     BindingData {
                         decorators: Vec::new(),
                         kind: BindingKind::Decl,
+                        imported_name: None,
                         name,
                         type_parameters,
                         annotation: Some(contract.clone()),
@@ -575,6 +593,7 @@ impl<'a> Lowerer<'a> {
                     BindingData {
                         decorators: Vec::new(),
                         kind: BindingKind::Native,
+                        imported_name: None,
                         name,
                         type_parameters,
                         annotation: Some(contract.clone()),
@@ -589,6 +608,7 @@ impl<'a> Lowerer<'a> {
                     BindingData {
                         decorators: Vec::new(),
                         kind: BindingKind::NativeType,
+                        imported_name: None,
                         name,
                         type_parameters: Vec::new(),
                         annotation: None,
@@ -661,6 +681,7 @@ impl<'a> Lowerer<'a> {
                     BindingData {
                         decorators: Vec::new(),
                         kind: BindingKind::Def,
+                        imported_name: None,
                         name,
                         type_parameters,
                         annotation,
@@ -686,6 +707,7 @@ impl<'a> Lowerer<'a> {
                     BindingData {
                         decorators,
                         kind: BindingKind::Type,
+                        imported_name: None,
                         name,
                         type_parameters: Vec::new(),
                         annotation: None,
@@ -703,6 +725,7 @@ impl<'a> Lowerer<'a> {
                     BindingData {
                         decorators: Vec::new(),
                         kind: BindingKind::Import,
+                        imported_name: None,
                         name,
                         type_parameters: Vec::new(),
                         annotation: None,
@@ -716,6 +739,52 @@ impl<'a> Lowerer<'a> {
             }
             _ => Err(self.error(node, "unexpected binding rule")),
         }
+    }
+
+    fn import_bindings(&self, node: NodeRef) -> Result<Vec<Binding>, Diagnostic> {
+        let path = self
+            .rule_children(node)
+            .find(|child| self.rule(*child) == Some(Rule::StringLiteral))
+            .ok_or_else(|| self.error(node, "import has no path"))?;
+        let value = located(
+            ExprKind::String(self.plain_string(path, "import path")?),
+            self.location(path),
+        );
+        let Some(items) = self
+            .rule_children(node)
+            .find(|child| self.rule(*child) == Some(Rule::ImportItems))
+        else {
+            return Ok(vec![self.binding(node)?]);
+        };
+        self.rule_children(items)
+            .filter(|child| self.rule(*child) == Some(Rule::ImportItem))
+            .map(|item| {
+                let names = self
+                    .token_children(item, Token::Identifier)
+                    .map(|name| self.identifier(name))
+                    .collect::<Vec<_>>();
+                let imported_name = names
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| self.error(item, "import item has no exported name"))?;
+                let name = names
+                    .get(1)
+                    .cloned()
+                    .unwrap_or_else(|| imported_name.clone());
+                Ok(located(
+                    BindingData {
+                        decorators: Vec::new(),
+                        kind: BindingKind::Import,
+                        imported_name: Some(Box::new(imported_name)),
+                        name,
+                        type_parameters: Vec::new(),
+                        annotation: None,
+                        value: value.clone(),
+                    },
+                    self.location(item),
+                ))
+            })
+            .collect()
     }
 
     fn expression(&self, node: NodeRef) -> Result<Expr, Diagnostic> {

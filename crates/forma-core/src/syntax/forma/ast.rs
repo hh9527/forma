@@ -312,6 +312,10 @@ impl<'tree> ImportBinding<'tree> {
     pub fn path(self) -> Option<StringLiteral<'tree>> {
         child_node(self.syntax, Rule::StringLiteral).map(|syntax| StringLiteral { syntax })
     }
+
+    pub fn has_items(self) -> bool {
+        child_node(self.syntax, Rule::ImportItems).is_some()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -404,7 +408,9 @@ pub fn validate(source: SourceId, tree: &CstData) -> Vec<SyntaxIssue> {
     };
     let mut issues = Vec::new();
     for binding in body.bindings() {
-        if binding.name().is_none() {
+        if binding.name().is_none()
+            && !matches!(binding, Binding::Import(import) if import.has_items())
+        {
             issues.push(missing_after_keyword(source, binding));
         }
         match binding {

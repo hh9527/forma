@@ -1,6 +1,6 @@
 # RFC 0142: Selective module imports
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0141
 
 ## Summary
@@ -56,3 +56,16 @@ Selective imports do not re-export their members.
 6. Resolver caching loads a target only once for multiple selected items.
 7. Strict and recoverable analysis publish the selected schemes and semantic
    import targets.
+
+## Implementation result
+
+Selective syntax lowers each authored item to an import binding that retains
+its exported and local identifiers. Strict loading projects the legacy value,
+persistent root, and one-entry module interface directly from the cached
+target. Recoverable loading performs the same value/interface projection and
+keeps the target module identity in semantic import records.
+
+Type analysis installs the projected export scheme as the local import scheme,
+preserving generic instantiation. Tests cover aliases, generic validation,
+model construction, identity equality with qualified access, lossless CST,
+missing exports, duplicate local aliases, and shared target caching.

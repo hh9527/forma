@@ -1856,9 +1856,18 @@ pub(crate) fn analyze_program_with_bindings_observed(
                             format!("import {} has not been resolved", binding.value.name.value),
                         )
                     })?;
-                let inferred = infer_value(&value);
+                let scheme = external_interfaces
+                    .get(&binding.value.name.value)
+                    .and_then(|interface| interface.exports.get(&binding.value.name.value))
+                    .cloned();
+                let inferred = scheme
+                    .as_ref()
+                    .map_or_else(|| infer_value(&value), |scheme| scheme.body.clone());
                 static_environment.insert(binding.value.name.value.clone(), inferred.clone());
                 binding_types.insert(binding.value.name.value.clone(), inferred);
+                if let Some(scheme) = scheme {
+                    binding_schemes.insert(binding.value.name.value.clone(), scheme);
+                }
                 tool_values.insert(binding.value.name.value.clone(), value);
             }
         }
@@ -2056,7 +2065,11 @@ pub(crate) fn analyze_program_with_bindings_observed(
             BindingKind::Decl | BindingKind::Native | BindingKind::Import
         ) {
             if binding.value.kind == BindingKind::Import {
-                inference.set_local_scheme(binding.value.name.value.clone(), None);
+                let scheme = external_interfaces
+                    .get(&binding.value.name.value)
+                    .and_then(|interface| interface.exports.get(&binding.value.name.value))
+                    .cloned();
+                inference.set_local_scheme(binding.value.name.value.clone(), scheme);
             }
             continue;
         }

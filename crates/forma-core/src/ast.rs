@@ -33,6 +33,7 @@ pub struct BlockKind {
 pub struct BindingData {
     pub decorators: Vec<Decorator>,
     pub kind: BindingKind,
+    pub imported_name: Option<Box<Identifier>>,
     pub name: Identifier,
     pub type_parameters: Vec<Identifier>,
     pub annotation: Option<Expr>,
