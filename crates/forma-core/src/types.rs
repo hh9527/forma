@@ -1110,11 +1110,11 @@ pub(crate) fn analyze_partial_types_recovered_with_query(
 ) -> PartialAnalysis {
     let source_name = sources.get(source_id).name.to_string();
     let mut vm = Vm::new();
-    let prelude = core_prelude(&mut vm);
+    let prelude = BootstrapPrelude::new(&mut vm);
     let hir = HirProgram::resolve_recovered(
         recovered,
         prelude
-            .keys()
+            .visible_names()
             .chain(external_values.keys())
             .cloned()
             .collect::<Vec<_>>(),
@@ -1203,7 +1203,7 @@ pub(crate) fn analyze_partial_types_recovered_with_query(
         facts.insert(definition, fact);
     }
     let mut types = TypeGraph::default();
-    let mut tool_values = prelude;
+    let mut tool_values = prelude.values;
     tool_values.extend(external_values.clone());
     let any_metadata = tool_values
         .get("Any")
@@ -1466,17 +1466,21 @@ pub(crate) fn analyze_program_with_bindings_observed(
     debug_sink: &Arc<dyn DebugSink>,
 ) -> Result<Analysis, FrontendError> {
     let mut tool_vm = Vm::new();
-    let prelude = core_prelude(&mut tool_vm);
+    let prelude = BootstrapPrelude::new(&mut tool_vm);
     let hir = HirProgram::resolve(
         program,
         prelude
-            .keys()
+            .visible_names()
             .chain(external_values.keys())
             .cloned()
             .collect::<Vec<_>>(),
     );
-    let mut tool_values = prelude.clone();
-    let mut static_environment = core_static_prelude();
+    let prelude_values = prelude.values.clone();
+    let BootstrapPrelude {
+        values: mut tool_values,
+        types: mut static_environment,
+        schemes: mut binding_schemes,
+    } = prelude;
     let mut declared_types = BTreeMap::new();
     let mut binding_types = BTreeMap::new();
     let mut declared_type_spans = HashMap::new();
@@ -1485,7 +1489,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
     // Tool-stage descriptors are currently trees. Predeclare type names with
     // conservative metadata so self and forward references can be evaluated;
     // the runtime retains the authoritative recursive metadata graph.
-    let any_metadata = prelude
+    let any_metadata = tool_values
         .get("Any")
         .expect("core prelude defines Any")
         .clone();
@@ -1512,7 +1516,6 @@ pub(crate) fn analyze_program_with_bindings_observed(
     }
 
     let mut definition_contracts = HashMap::new();
-    let mut binding_schemes = core_static_schemes();
     let mut declaration_locations = HashMap::new();
     let mut definition_counts = HashMap::<String, usize>::new();
     for binding in &program.value.body.value.bindings {
@@ -2397,7 +2400,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
         expression_types,
         module_interface,
         propagation_families,
-        prelude,
+        prelude: prelude_values,
         external_values: external_values.clone(),
         dynamic_bindings: dynamic_bindings.clone(),
     })
@@ -2976,7 +2979,31 @@ fn collect_block_annotation_types(
     )
 }
 
-fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
+struct BootstrapPrelude {
+    values: BTreeMap<String, Value>,
+    types: HashMap<String, TypeDescriptor>,
+    schemes: HashMap<String, TypeScheme>,
+}
+
+impl BootstrapPrelude {
+    fn new(vm: &mut Vm) -> Self {
+        let artifact = Self {
+            values: core_prelude_values(vm),
+            types: core_prelude_types(),
+            schemes: core_prelude_schemes(),
+        };
+        debug_assert!(artifact.schemes.keys().all(|name| {
+            artifact.values.contains_key(name) && artifact.types.contains_key(name)
+        }));
+        artifact
+    }
+
+    fn visible_names(&self) -> impl Iterator<Item = &String> {
+        self.values.keys().filter(|name| !name.starts_with('\0'))
+    }
+}
+
+fn core_prelude_values(vm: &mut Vm) -> BTreeMap<String, Value> {
     let mut prelude = BTreeMap::new();
     for (name, descriptor) in [
         ("Type", TypeDescriptor::Type),
@@ -3022,7 +3049,7 @@ fn core_prelude(vm: &mut Vm) -> BTreeMap<String, Value> {
     prelude
 }
 
-fn core_static_prelude() -> HashMap<String, TypeDescriptor> {
+fn core_prelude_types() -> HashMap<String, TypeDescriptor> {
     let metadata = TypeDescriptor::Type;
     let function =
         |parameters: Vec<TypeDescriptor>, result: TypeDescriptor| TypeDescriptor::Function {
@@ -3116,7 +3143,7 @@ fn core_static_prelude() -> HashMap<String, TypeDescriptor> {
     prelude
 }
 
-fn core_static_schemes() -> HashMap<String, TypeScheme> {
+fn core_prelude_schemes() -> HashMap<String, TypeScheme> {
     let bound = |index| TypeDescriptor::Bound(TypeParameterId(index));
     let witness = |instance| TypeDescriptor::TypeOf(Box::new(instance));
     let function = |parameters, result| TypeDescriptor::Function {
@@ -7512,6 +7539,21 @@ fn frontend_error(source_name: &str, message: impl Into<String>) -> FrontendErro
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_prelude_keeps_public_projections_consistent() {
+        let mut vm = Vm::new();
+        let prelude = BootstrapPrelude::new(&mut vm);
+        assert!(prelude.visible_names().all(|name| !name.starts_with('\0')));
+        assert!(prelude.values.contains_key("\0forma_pack_dyn"));
+        for name in prelude.schemes.keys() {
+            assert!(
+                prelude.values.contains_key(name),
+                "missing value for {name}"
+            );
+            assert!(prelude.types.contains_key(name), "missing type for {name}");
+        }
+    }
 
     fn analyze_with_natives(
         source: &str,

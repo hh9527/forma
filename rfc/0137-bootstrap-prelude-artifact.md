@@ -1,6 +1,6 @@
 # RFC 0137: Bootstrap prelude artifact
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0136
 
 ## Summary
@@ -50,3 +50,15 @@ exempt and remain inaccessible to HIR name resolution.
 3. Public scheme names have corresponding runtime and static entries.
 4. Hidden implementation bindings are not HIR-visible.
 5. Existing inference, module, LSP, and runtime behavior remains unchanged.
+
+## Implementation result
+
+Strict and recoverable analysis now construct `BootstrapPrelude` and project
+HIR-visible names, tool values, static types, and generic schemes from that
+owned artifact. Its constructor checks scheme projection consistency in debug
+builds. Hidden `\0forma_pack_dyn` remains available to internal lowering but is
+no longer offered as an HIR-visible prelude name.
+
+The old independent entry points have become private artifact builders. This
+keeps behavior stable while giving RFC 0138 one owned boundary from which to
+remove the ordinary callable capabilities.
