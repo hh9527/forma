@@ -791,11 +791,20 @@ impl<'a> Lowerer<'a> {
             }
             Rule::DictExpr => {
                 let mut fields = Vec::new();
-                for field in rules
-                    .iter()
-                    .copied()
-                    .filter(|child| self.rule(*child) == Some(Rule::DictField))
-                {
+                for field in rules.iter().copied().filter(|child| {
+                    matches!(self.rule(*child), Some(Rule::DictField | Rule::SpreadExpr))
+                }) {
+                    if self.rule(field) == Some(Rule::SpreadExpr) {
+                        fields.push(located(
+                            DictFieldKind {
+                                decorators: Vec::new(),
+                                name: None,
+                                value: self.expression(field)?,
+                            },
+                            self.location(field),
+                        ));
+                        continue;
+                    }
                     let key = self
                         .children(field)
                         .find(|child| {
@@ -831,7 +840,7 @@ impl<'a> Lowerer<'a> {
                     fields.push(located(
                         DictFieldKind {
                             decorators,
-                            name,
+                            name: Some(name),
                             value,
                         },
                         self.location(field),
@@ -1169,7 +1178,7 @@ impl<'a> Lowerer<'a> {
                 located(
                     DictFieldKind {
                         decorators: Vec::new(),
-                        name: located(name.into(), location),
+                        name: Some(located(name.into(), location)),
                         value,
                     },
                     location,
@@ -1532,7 +1541,7 @@ impl<'a> Lowerer<'a> {
                 located(
                     DictFieldKind {
                         decorators: Vec::new(),
-                        name: located("kind".to_owned(), target_location),
+                        name: Some(located("kind".to_owned(), target_location)),
                         value: located(ExprKind::Atom(kind.to_owned()), target_location),
                     },
                     target_location,
@@ -1540,7 +1549,7 @@ impl<'a> Lowerer<'a> {
                 located(
                     DictFieldKind {
                         decorators: Vec::new(),
-                        name: located("name".to_owned(), name.location),
+                        name: Some(located("name".to_owned(), name.location)),
                         value: located(ExprKind::String(name.value.clone()), name.location),
                     },
                     name.location,
@@ -2711,7 +2720,15 @@ mod tests {
         assert_eq!(
             fields
                 .iter()
-                .map(|field| field.value.name.value.as_str())
+                .map(|field| {
+                    field
+                        .value
+                        .name
+                        .as_ref()
+                        .expect("blame fields have names")
+                        .value
+                        .as_str()
+                })
                 .collect::<Vec<_>>(),
             ["data", "message", "rule"]
         );

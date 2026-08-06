@@ -1696,6 +1696,66 @@ impl Vm {
                         );
                         write_register(&mut registers, *dst, dict, function, pc)?;
                     }
+                    Opcode::MergeDicts { dst, dicts } => {
+                        let dicts = read_many(&registers, dicts, function, pc)?;
+                        let mut merged = BTreeMap::new();
+                        for dict in dicts {
+                            let RuntimeValue::Dict(handle) = dict.value else {
+                                return Err(error(
+                                    RuntimeErrorKind::TypeMismatch,
+                                    "Dict spread operand must be a Dict",
+                                    function,
+                                    pc,
+                                ));
+                            };
+                            let (fields, values) =
+                                view.dict_parts(handle).map_err(|heap_error| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        heap_error.to_string(),
+                                        function,
+                                        pc,
+                                    )
+                                })?;
+                            for (field, value) in fields.iter().zip(values) {
+                                let field = view.text(*field).map_err(|heap_error| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        heap_error.to_string(),
+                                        function,
+                                        pc,
+                                    )
+                                })?;
+                                merged.insert(field.to_owned(), *value);
+                            }
+                        }
+                        let field_bytes = merged.keys().try_fold(0u64, |total, field| {
+                            total.checked_add(field.len() as u64).ok_or_else(|| {
+                                allocation_error("Dict allocation size overflowed", function, pc)
+                            })
+                        })?;
+                        let value_bytes =
+                            logical_value_bytes(merged.len()).map_err(|native_error| {
+                                allocation_error(native_error.message, function, pc)
+                            })?;
+                        let bytes = field_bytes.checked_add(value_bytes).ok_or_else(|| {
+                            allocation_error("Dict allocation size overflowed", function, pc)
+                        })?;
+                        charge_allocation(account, bytes, function, pc)?;
+                        let (fields, values): (Vec<_>, Vec<_>) = merged
+                            .into_iter()
+                            .map(|(field, value)| (current.intern(&field), value))
+                            .unzip();
+                        let shape = current.intern_shape(fields);
+                        let dict = RichValue::new(
+                            RuntimeValue::Dict(current.allocate(crate::heap::Object::Dict {
+                                shape,
+                                values: values.into(),
+                            })),
+                            instruction_location(function, pc),
+                        );
+                        write_register(&mut registers, *dst, dict, function, pc)?;
+                    }
                     Opcode::GetField { dst, dict, field } => {
                         let (_, _, text_links, _) =
                             view.bytecode(frame.prototype).map_err(|heap_error| {

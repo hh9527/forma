@@ -95,6 +95,10 @@ pub enum Operation {
         dst: RegisterId,
         fields: Vec<(String, RegisterId)>,
     },
+    MergeDicts {
+        dst: RegisterId,
+        dicts: Vec<RegisterId>,
+    },
     GetField {
         dst: RegisterId,
         dict: RegisterId,
@@ -363,6 +367,10 @@ fn lower_operation(
                 .into_iter()
                 .map(|(name, value)| Ok((name, register(value)?)))
                 .collect::<Result<_, AssembleError>>()?,
+        },
+        Operation::MergeDicts { dst, dicts } => Instruction::MergeDicts {
+            dst: register(dst)?,
+            dicts: registers(dicts)?,
         },
         Operation::GetField { dst, dict, field } => Instruction::GetField {
             dst: register(dst)?,

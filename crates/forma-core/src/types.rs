@@ -2369,7 +2369,13 @@ pub(crate) fn analyze_program_with_bindings_observed(
                     binding_schemes
                         .get(&binding.value)
                         .cloned()
-                        .map(|scheme| (field.value.name.value.clone(), scheme))
+                        .and_then(|scheme| {
+                            field
+                                .value
+                                .name
+                                .as_ref()
+                                .map(|name| (name.value.clone(), scheme))
+                        })
                 })
                 .collect(),
             _ => BTreeMap::new(),
@@ -5174,20 +5180,69 @@ impl<'a> GenericInference<'a> {
                 )
             }
             ExprKind::Dict(fields) => {
+                let has_spread = fields.iter().any(|field| field.value.name.is_none());
                 let metadata_expected = expected
                     .map(|ty| self.resolve(ty))
                     .filter(|ty| matches!(ty, TypeDescriptor::Type | TypeDescriptor::TypeOf(_)));
                 if let Some(metadata_expected) = metadata_expected {
+                    if has_spread {
+                        return Err("Dict spread is not valid in type metadata".into());
+                    }
                     for field in fields {
                         self.infer(&field.value.value, environment, None)?;
                     }
                     metadata_expected
+                } else if has_spread {
+                    let item_expected = match expected.map(|ty| self.resolve(ty)) {
+                        Some(TypeDescriptor::Dict(item)) => Some(*item),
+                        _ => None,
+                    };
+                    let mut item_types = Vec::new();
+                    for field in fields {
+                        if field.value.name.is_none() {
+                            let ExprKind::Spread(operand) = &field.value.value.value else {
+                                return Err("invalid Dict spread entry".into());
+                            };
+                            let spread_expected = item_expected
+                                .as_ref()
+                                .map(|item| TypeDescriptor::Dict(Box::new(item.clone())));
+                            let spread =
+                                self.infer(operand, environment, spread_expected.as_ref())?;
+                            let resolved = self.resolve(&spread);
+                            let TypeDescriptor::Dict(spread_item) = resolved else {
+                                return Err(format!(
+                                    "Dict spread requires Dict, found {}",
+                                    resolved.display_name()
+                                ));
+                            };
+                            item_types.push(*spread_item);
+                        } else {
+                            item_types.push(self.infer(
+                                &field.value.value,
+                                environment,
+                                item_expected.as_ref(),
+                            )?);
+                        }
+                    }
+                    TypeDescriptor::Dict(Box::new(
+                        item_expected.unwrap_or_else(|| {
+                            common_type(item_types).unwrap_or(TypeDescriptor::Any)
+                        }),
+                    ))
                 } else {
                     if let Some(TypeDescriptor::Dict(item)) = expected.map(|ty| self.resolve(ty)) {
                         for field in fields {
                             self.infer(&field.value.value, environment, Some(&item))
                                 .map_err(|message| {
-                                    format!("field {}: {message}", field.value.name.value)
+                                    format!(
+                                        "field {}: {message}",
+                                        field
+                                            .value
+                                            .name
+                                            .as_ref()
+                                            .expect("ordinary Dict field has a name")
+                                            .value
+                                    )
                                 })?;
                         }
                         TypeDescriptor::Dict(item)
@@ -5200,7 +5255,13 @@ impl<'a> GenericInference<'a> {
                             fields
                                 .iter()
                                 .map(|field| {
-                                    let name = field.value.name.value.clone();
+                                    let name = field
+                                        .value
+                                        .name
+                                        .as_ref()
+                                        .expect("ordinary Dict field has a name")
+                                        .value
+                                        .clone();
                                     Ok((
                                         name.clone(),
                                         self.infer(
@@ -6577,12 +6638,37 @@ fn infer_expr_with(
                 .map(|item| infer_expr_with(item, environment, record))
                 .collect(),
         ),
+        ExprKind::Dict(fields) if fields.iter().any(|field| field.value.name.is_none()) => {
+            let items = fields
+                .iter()
+                .map(|field| {
+                    if field.value.name.is_none() {
+                        let ExprKind::Spread(operand) = &field.value.value.value else {
+                            return TypeDescriptor::Any;
+                        };
+                        match infer_expr_with(operand, environment, record) {
+                            TypeDescriptor::Dict(item) => *item,
+                            _ => TypeDescriptor::Any,
+                        }
+                    } else {
+                        infer_expr_with(&field.value.value, environment, record)
+                    }
+                })
+                .collect();
+            TypeDescriptor::Dict(Box::new(common_type(items).unwrap_or(TypeDescriptor::Any)))
+        }
         ExprKind::Dict(fields) => TypeDescriptor::Struct(
             fields
                 .iter()
                 .map(|field| {
                     (
-                        field.value.name.value.clone(),
+                        field
+                            .value
+                            .name
+                            .as_ref()
+                            .expect("ordinary Dict field has a name")
+                            .value
+                            .clone(),
                         infer_expr_with(&field.value.value, environment, record),
                     )
                 })
@@ -7383,7 +7469,13 @@ fn expression_location_at_path(
         expression = match (segment, &expression.value) {
             (ValuePathSegment::Key(name), ExprKind::Dict(fields)) => fields
                 .iter()
-                .find(|field| field.value.name.value == *name)
+                .find(|field| {
+                    field
+                        .value
+                        .name
+                        .as_ref()
+                        .is_some_and(|field_name| field_name.value == *name)
+                })
                 .map(|field| &field.value.value)?,
             (ValuePathSegment::Index(index), ExprKind::Array(items))
             | (ValuePathSegment::Index(index), ExprKind::Tuple(items)) => items.get(*index)?,

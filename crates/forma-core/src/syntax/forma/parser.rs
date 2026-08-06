@@ -126,6 +126,7 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
     fn predicate_braced_1(&self) -> bool {
         if self.peek(1) == Token::RBrace
             || self.peek(1) == Token::At
+            || self.peek(1) == Token::Ellipsis
             || self.peek(1) == Token::Identifier && self.peek(2) == Token::Colon
         {
             return true;

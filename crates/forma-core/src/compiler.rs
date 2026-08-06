@@ -189,7 +189,7 @@ pub(crate) fn compile_metadata_initializer(
                     located(
                         DictFieldKind {
                             decorators: Vec::new(),
-                            name: located(name.clone(), program.location),
+                            name: Some(located(name.clone(), program.location)),
                             value: located(
                                 ExprKind::Variable(located(name.clone(), program.location)),
                                 program.location,
@@ -1040,10 +1040,18 @@ impl<'a> Compiler<'a> {
         fields: &[DictField],
         location: Location,
     ) -> Result<RegisterId, FrontendError> {
+        if fields.iter().any(|field| field.value.name.is_none()) {
+            return self.compile_spread_dict(fields, location);
+        }
         let mut seen = HashSet::new();
         let mut compiled = Vec::with_capacity(fields.len());
         for field in fields {
-            let name = &field.value.name.value;
+            let name = &field
+                .value
+                .name
+                .as_ref()
+                .expect("ordinary Dict field has a name")
+                .value;
             if !seen.insert(name) {
                 return Err(frontend_error(
                     self.source_name,
@@ -1060,6 +1068,43 @@ impl<'a> Compiler<'a> {
             },
             location,
         );
+        Ok(dst)
+    }
+
+    fn compile_spread_dict(
+        &mut self,
+        fields: &[DictField],
+        location: Location,
+    ) -> Result<RegisterId, FrontendError> {
+        let mut seen = HashSet::new();
+        let mut dicts = Vec::with_capacity(fields.len());
+        for field in fields {
+            if let Some(name) = &field.value.name {
+                if !seen.insert(&name.value) {
+                    return Err(frontend_error(
+                        self.source_name,
+                        format!("duplicate Dict field {:?}", name.value),
+                    ));
+                }
+                let value = self.compile_expr(&field.value.value)?;
+                let dict = self.allocate();
+                self.emit(
+                    Operation::MakeDict {
+                        dst: dict,
+                        fields: vec![(name.value.clone(), value)],
+                    },
+                    field.location,
+                );
+                dicts.push(dict);
+            } else {
+                let ExprKind::Spread(operand) = &field.value.value.value else {
+                    return Err(self.error_at(field.location, "invalid Dict spread entry"));
+                };
+                dicts.push(self.compile_expr(operand)?);
+            }
+        }
+        let dst = self.allocate();
+        self.emit(Operation::MergeDicts { dst, dicts }, location);
         Ok(dst)
     }
 
@@ -2551,6 +2596,33 @@ let decorators = {
             "{}",
             error.message
         );
+    }
+
+    #[test]
+    fn dict_spread_merges_in_source_order_with_later_values_winning() {
+        let value = run("let base: Dict(Int) = {a: 1, b: 2};\
+             let extra: Dict(Int) = {b: 3, c: 4};\
+             {...base, x: 0, ...extra, c: 5}")
+        .unwrap();
+        assert_eq!(value.to_string(), "{a: 1, b: 3, c: 5, x: 0}");
+
+        let contextual = run("let value: Dict(Int) = {...{a: 1}, b: 2}; value").unwrap();
+        assert_eq!(contextual.to_string(), "{a: 1, b: 2}");
+    }
+
+    #[test]
+    fn dict_spread_requires_dict_without_adding_struct_update() {
+        let error = compile_source("test", "let base = {a: 1}; {...base, b: 2}").unwrap_err();
+        assert!(
+            error.message.contains("Dict spread requires Dict")
+                && error.message.contains("{a: Int}"),
+            "{}",
+            error.message
+        );
+
+        let duplicate =
+            compile_source("test", "let base: Dict(Int) = {}; {...base, a: 1, a: 2}").unwrap_err();
+        assert!(duplicate.message.contains("duplicate Dict field"));
     }
 
     #[test]

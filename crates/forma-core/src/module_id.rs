@@ -494,8 +494,18 @@ fn immediate_value(expression: &Expr, vm: &mut Vm) -> Result<Value, ResolveModul
             let entries = fields
                 .iter()
                 .map(|field| {
-                    immediate_value(&field.value.value, vm)
-                        .map(|value| (field.value.name.value.clone(), value))
+                    immediate_value(&field.value.value, vm).map(|value| {
+                        (
+                            field
+                                .value
+                                .name
+                                .as_ref()
+                                .expect("manifest fields have names")
+                                .value
+                                .clone(),
+                            value,
+                        )
+                    })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             vm.make_dict(entries).map_err(ResolveModuleError::Manifest)

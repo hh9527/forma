@@ -167,7 +167,7 @@ pub enum BinaryOperator {
 #[derive(Clone, Debug)]
 pub struct DictFieldKind {
     pub decorators: Vec<Decorator>,
-    pub name: Identifier,
+    pub name: Option<Identifier>,
     pub value: Expr,
 }
 

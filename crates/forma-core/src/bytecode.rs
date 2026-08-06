@@ -95,6 +95,10 @@ pub enum Instruction {
         dst: Register,
         fields: Vec<(String, Register)>,
     },
+    MergeDicts {
+        dst: Register,
+        dicts: Vec<Register>,
+    },
     GetField {
         dst: Register,
         dict: Register,
@@ -240,6 +244,10 @@ pub enum Opcode {
     MakeDict {
         dst: Register,
         fields: Vec<(TextLinkId, Register)>,
+    },
+    MergeDicts {
+        dst: Register,
+        dicts: Vec<Register>,
     },
     GetField {
         dst: Register,
@@ -577,6 +585,7 @@ fn link_instruction(instruction: Instruction, links: &mut LinkingTable) -> Opcod
                 .map(|(field, register)| (text(field, links), register))
                 .collect(),
         },
+        Instruction::MergeDicts { dst, dicts } => Opcode::MergeDicts { dst, dicts },
         Instruction::GetField { dst, dict, field } => Opcode::GetField {
             dst,
             dict,
