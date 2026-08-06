@@ -24,9 +24,16 @@ pub(crate) struct DuplicatePatternBinding {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PatternProblem {
+    pub(crate) location: Location,
+    pub(crate) message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PatternAnalysis {
     pub(crate) bindings: Vec<PatternBinding>,
     pub(crate) duplicates: Vec<DuplicatePatternBinding>,
+    pub(crate) problems: Vec<PatternProblem>,
     pub(crate) compatibility: PatternCompatibility,
     pub(crate) irrefutable: bool,
     pub(crate) covered_variants: BTreeSet<String>,
@@ -38,6 +45,7 @@ pub(crate) fn analyze_pattern(pattern: &Pattern, matched: &TypeDescriptor) -> Pa
     PatternAnalysis {
         bindings: context.bindings,
         duplicates: context.duplicates,
+        problems: context.problems,
         compatibility: shape.compatibility,
         irrefutable: shape.irrefutable,
         covered_variants: shape.covered_variants,
@@ -49,6 +57,7 @@ struct AnalysisContext {
     names: HashSet<String>,
     bindings: Vec<PatternBinding>,
     duplicates: Vec<DuplicatePatternBinding>,
+    problems: Vec<PatternProblem>,
 }
 
 struct PatternShape {
@@ -169,6 +178,52 @@ impl AnalysisContext {
                     let item = self.analyze(item, item_type);
                     compatibility = combine(compatibility, item.compatibility);
                     irrefutable &= item.irrefutable;
+                }
+                PatternShape::new(compatibility, irrefutable)
+            }
+            PatternKind::Struct(fields) => {
+                let matched_fields = match matched {
+                    TypeDescriptor::Struct(fields) => Some(fields),
+                    _ => None,
+                };
+                let outer = match matched {
+                    TypeDescriptor::Struct(_) => PatternCompatibility::Compatible,
+                    matched if is_unknown(matched) => PatternCompatibility::Unknown,
+                    _ => PatternCompatibility::Incompatible,
+                };
+                if outer == PatternCompatibility::Incompatible {
+                    self.problems.push(PatternProblem {
+                        location: pattern.location,
+                        message: format!("Struct pattern cannot match {}", matched.display_name()),
+                    });
+                }
+                let mut names = HashSet::new();
+                let mut compatibility = outer;
+                let mut irrefutable = outer == PatternCompatibility::Compatible;
+                for field in fields {
+                    if !names.insert(field.name.value.clone()) {
+                        self.problems.push(PatternProblem {
+                            location: field.name.location,
+                            message: format!(
+                                "duplicate Struct pattern field {:?}",
+                                field.name.value
+                            ),
+                        });
+                    }
+                    let field_type =
+                        matched_fields.and_then(|matched| matched.get(&field.name.value));
+                    if matched_fields.is_some() && field_type.is_none() {
+                        self.problems.push(PatternProblem {
+                            location: field.name.location,
+                            message: format!("Struct has no field {:?}", field.name.value),
+                        });
+                        compatibility = PatternCompatibility::Incompatible;
+                        irrefutable = false;
+                    }
+                    let field =
+                        self.analyze(&field.pattern, field_type.unwrap_or(&TypeDescriptor::Any));
+                    compatibility = combine(compatibility, field.compatibility);
+                    irrefutable &= field.irrefutable && field_type.is_some();
                 }
                 PatternShape::new(compatibility, irrefutable)
             }

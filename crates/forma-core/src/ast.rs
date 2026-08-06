@@ -154,6 +154,12 @@ pub struct MatchArmKind {
 }
 
 #[derive(Clone, Debug)]
+pub struct StructPatternField {
+    pub name: Identifier,
+    pub pattern: Pattern,
+}
+
+#[derive(Clone, Debug)]
 pub enum PatternKind {
     Wildcard,
     Binding(Identifier),
@@ -163,6 +169,7 @@ pub enum PatternKind {
     Atom(String),
     Tagged { tag: String, payload: Box<Pattern> },
     Tuple(Vec<Pattern>),
+    Struct(Vec<StructPatternField>),
 }
 
 pub fn located<T>(value: T, location: Location) -> Located<T> {

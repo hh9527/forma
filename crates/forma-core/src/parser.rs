@@ -1,8 +1,8 @@
 use crate::ast::{
     BinaryOperator, Binding, BindingData, BindingKind, Block, BlockKind, ClosureParameter,
     Decorator, DecoratorKind, DictFieldKind, Expr, ExprKind, Identifier, MatchArm, MatchArmKind,
-    Pattern, PatternKind, Program, ProgramKind, StringPartKind, TypeArgument, TypeArgumentKind,
-    UnaryOperator, located,
+    Pattern, PatternKind, Program, ProgramKind, StringPartKind, StructPatternField, TypeArgument,
+    TypeArgumentKind, UnaryOperator, located,
 };
 use crate::lexer::{FrontendError, SourceLocation};
 use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
@@ -1076,9 +1076,27 @@ impl<'a> Lowerer<'a> {
                     .map(|child| self.pattern(child))
                     .collect::<Result<Vec<_>, _>>()?,
             ),
+            Rule::StructPattern => PatternKind::Struct(
+                self.rule_children(node)
+                    .filter(|child| self.rule(*child) == Some(Rule::StructPatternField))
+                    .map(|field| self.struct_pattern_field(field))
+                    .collect::<Result<Vec<_>, _>>()?,
+            ),
             _ => return Err(self.error(node, "unexpected pattern rule")),
         };
         Ok(located(inner, self.location(node)))
+    }
+
+    fn struct_pattern_field(&self, node: NodeRef) -> Result<StructPatternField, Diagnostic> {
+        let name_node = self.first_token(node, Token::Identifier)?;
+        let name = self.identifier(name_node);
+        let pattern = self
+            .children(node)
+            .find(|child| *child != name_node && self.is_pattern(*child))
+            .map(|pattern| self.pattern(pattern))
+            .transpose()?
+            .unwrap_or_else(|| located(PatternKind::Binding(name.clone()), name.location));
+        Ok(StructPatternField { name, pattern })
     }
 
     fn parameters(&self, node: NodeRef) -> Result<Vec<ClosureParameter>, Diagnostic> {
@@ -1410,6 +1428,7 @@ impl<'a> Lowerer<'a> {
                     | Rule::StringPattern
                     | Rule::TaggedPattern
                     | Rule::TuplePattern
+                    | Rule::StructPattern
             )
         )
     }
@@ -1980,6 +1999,25 @@ mod tests {
             "{:?}",
             arms[0].value.pattern.value
         );
+    }
+
+    #[test]
+    fn lowers_shorthand_and_nested_struct_patterns() {
+        let program = parse(
+            "test.forma",
+            "match user { { name, address: { city }, } => (name, city) }",
+        )
+        .unwrap();
+        let ExprKind::Match { arms, .. } = &program.value.body.value.result.value else {
+            panic!("expected match");
+        };
+        let PatternKind::Struct(fields) = &arms[0].value.pattern.value else {
+            panic!("expected Struct pattern");
+        };
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name.value, "name");
+        assert!(matches!(fields[0].pattern.value, PatternKind::Binding(_)));
+        assert!(matches!(fields[1].pattern.value, PatternKind::Struct(_)));
     }
 
     #[test]

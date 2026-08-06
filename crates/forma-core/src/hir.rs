@@ -574,6 +574,11 @@ impl Resolver {
                 }
             }
             PatternKind::Tagged { payload, .. } => self.index_pattern(payload, scope),
+            PatternKind::Struct(fields) => {
+                for field in fields {
+                    self.index_pattern(&field.pattern, scope);
+                }
+            }
             _ => {}
         }
     }

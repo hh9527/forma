@@ -96,6 +96,15 @@ pub enum Operation {
         dict: RegisterId,
         field: String,
     },
+    FieldExists {
+        dst: RegisterId,
+        value: RegisterId,
+        field: String,
+    },
+    IsDict {
+        dst: RegisterId,
+        value: RegisterId,
+    },
     TupleLengthEquals {
         dst: RegisterId,
         value: RegisterId,
@@ -348,6 +357,15 @@ fn lower_operation(
             dst: register(dst)?,
             dict: register(dict)?,
             field,
+        },
+        Operation::FieldExists { dst, value, field } => Instruction::FieldExists {
+            dst: register(dst)?,
+            value: register(value)?,
+            field,
+        },
+        Operation::IsDict { dst, value } => Instruction::IsDict {
+            dst: register(dst)?,
+            value: register(value)?,
         },
         Operation::TupleLengthEquals { dst, value, length } => Instruction::TupleLengthEquals {
             dst: register(dst)?,

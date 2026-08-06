@@ -1,6 +1,6 @@
 # RFC 0120: Struct patterns
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0119
 
 ## Summary
@@ -82,4 +82,20 @@ have not demonstrated a need in typed Struct declarations.
 
 ## Implementation result
 
-Pending.
+Added Struct pattern AST/CST forms with empty, shorthand, nested, renamed, and
+trailing-comma syntax. A dedicated Struct-list predicate preserves the
+surrounding match-arm grammar. Shared typed pattern analysis now selects known
+field types, classifies irrefutability, and records precise unknown-shape,
+missing-field, duplicate-field, and duplicate-binding diagnostics.
+
+Lowering emits a non-throwing runtime Dict-kind test, field-presence tests, and
+the existing provenance-preserving field read before recursively matching each
+child. Missing fields and non-Dict dynamic inputs therefore fall through rather
+than raising ordinary field-access errors; the empty Struct pattern still
+checks runtime kind. HIR indexes nested bindings, and inferred pattern binding
+types now populate semantic definition facts for hover and lookup consumers.
+
+Focused parser, inference, runtime, dynamic-fallback, empty-pattern, and
+semantic-fact tests pass together with the complete core suite. Struct/Dict
+representation, ordinary field access, open-record typing, and `let` syntax
+remain unchanged.

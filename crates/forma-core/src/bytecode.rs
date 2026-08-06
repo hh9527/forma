@@ -96,6 +96,15 @@ pub enum Instruction {
         dict: Register,
         field: String,
     },
+    FieldExists {
+        dst: Register,
+        value: Register,
+        field: String,
+    },
+    IsDict {
+        dst: Register,
+        value: Register,
+    },
     TupleLengthEquals {
         dst: Register,
         value: Register,
@@ -225,6 +234,15 @@ pub enum Opcode {
         dst: Register,
         dict: Register,
         field: TextLinkId,
+    },
+    FieldExists {
+        dst: Register,
+        value: Register,
+        field: TextLinkId,
+    },
+    IsDict {
+        dst: Register,
+        value: Register,
     },
     TupleLengthEquals {
         dst: Register,
@@ -549,6 +567,12 @@ fn link_instruction(instruction: Instruction, links: &mut LinkingTable) -> Opcod
             dict,
             field: text(field, links),
         },
+        Instruction::FieldExists { dst, value, field } => Opcode::FieldExists {
+            dst,
+            value,
+            field: text(field, links),
+        },
+        Instruction::IsDict { dst, value } => Opcode::IsDict { dst, value },
         Instruction::TupleLengthEquals { dst, value, length } => {
             Opcode::TupleLengthEquals { dst, value, length }
         }

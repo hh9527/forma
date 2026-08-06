@@ -94,7 +94,9 @@ pattern:
 | ?2 Atom '(' pattern ')' @tagged_pattern
 | ?t Atom @atom_pattern
 | '(' [pattern (?1 ',' pattern)* [',']] ')' @tuple_pattern
+| '{' [struct_pattern_field (?3 ',' struct_pattern_field)* [',']] '}' @struct_pattern
 ;
+struct_pattern_field: Identifier [':' pattern];
 string_literal: DoubleQuote string_text_part* DoubleQuote | RawString;
 concat_expression: Backtick string_part* Backtick;
 string_text_part^:

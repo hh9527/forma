@@ -2171,6 +2171,12 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 Diagnostic::error(message, program.value.body.value.result.location),
             )
         })?;
+    if let Some((location, message)) = inference.pattern_diagnostics.first_key_value() {
+        return Err(FrontendError::from_diagnostic(
+            sources,
+            Diagnostic::error(message.clone(), *location),
+        ));
+    }
     if let Some((location, message)) = inference.unresolved_placeholder_since(0) {
         return Err(FrontendError::from_diagnostic(
             sources,
@@ -2273,6 +2279,22 @@ pub(crate) fn analyze_program_with_bindings_observed(
         })
         .collect();
     let any_type = types.intern_descriptor(&TypeDescriptor::Any);
+    let pattern_definition_types = hir
+        .definitions()
+        .iter()
+        .filter(|definition| definition.kind == HirDefinitionKind::Pattern)
+        .filter_map(|definition| {
+            inference
+                .pattern_binding_types
+                .get(&definition.location)
+                .map(|descriptor| {
+                    (
+                        definition.id,
+                        types.intern_erased_descriptor(&inference.resolve(descriptor)),
+                    )
+                })
+        })
+        .collect::<HashMap<_, _>>();
     let definition_types = hir
         .definitions()
         .iter()
@@ -2284,6 +2306,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
                     .value
                     .and_then(|value| expression_types.get(&value).copied())
             }
+            .or_else(|| pattern_definition_types.get(&definition.id).copied())
             .unwrap_or(any_type);
             (definition.id, ty)
         })
@@ -3911,6 +3934,8 @@ struct GenericInference<'a> {
     recursive_equations: HashMap<InferenceVariableId, TypeDescriptor>,
     substitutions: HashMap<InferenceVariableId, TypeDescriptor>,
     records: HashMap<crate::Location, TypeDescriptor>,
+    pattern_diagnostics: BTreeMap<crate::Location, String>,
+    pattern_binding_types: HashMap<crate::Location, TypeDescriptor>,
 }
 
 #[derive(Default)]
@@ -4092,6 +4117,8 @@ impl<'a> GenericInference<'a> {
             recursive_equations: HashMap::new(),
             substitutions: HashMap::new(),
             records: HashMap::new(),
+            pattern_diagnostics: BTreeMap::new(),
+            pattern_binding_types: HashMap::new(),
         }
     }
 
@@ -5228,11 +5255,27 @@ impl<'a> GenericInference<'a> {
                         query.check().map_err(|error| error.to_string())?;
                     }
                     let mut arm_environment = environment.clone();
-                    bind_pattern_types_from(
+                    let analysis = crate::pattern::analyze_pattern(
                         &arm.value.pattern,
                         &self.resolve(&value_type),
-                        &mut arm_environment,
                     );
+                    for problem in analysis.problems {
+                        self.pattern_diagnostics
+                            .entry(problem.location)
+                            .or_insert(problem.message);
+                    }
+                    for duplicate in analysis.duplicates {
+                        self.pattern_diagnostics
+                            .entry(duplicate.location)
+                            .or_insert_with(|| {
+                                format!("duplicate pattern binding {:?}", duplicate.name)
+                            });
+                    }
+                    for binding in analysis.bindings {
+                        self.pattern_binding_types
+                            .insert(binding.location, binding.ty.clone());
+                        arm_environment.insert(binding.name, binding.ty);
+                    }
                     arm_types.push(self.infer(&arm.value.value, &arm_environment, expected)?);
                 }
                 if let Some(first) = arm_types.first().cloned() {
@@ -8389,6 +8432,56 @@ mod tests {
                 .expression_types
                 .values()
                 .any(|ty| matches!(analysis.types.node(*ty), TypeNode::Function { .. }))
+        );
+    }
+
+    #[test]
+    fn struct_patterns_bind_field_types_and_reject_unknown_fields() {
+        let analysis = analyze_source(
+            "pattern.forma",
+            "@struct type User = {name: String, age: Int};\
+             let user: User = {name: \"Ada\", age: 36};\
+             match user { {age} => age + 1 }",
+        )
+        .unwrap();
+        assert_eq!(analysis.display(analysis.result_type), "Int");
+        let age = analysis
+            .hir
+            .definitions()
+            .iter()
+            .find(|definition| {
+                definition.kind == HirDefinitionKind::Pattern && definition.name == "age"
+            })
+            .unwrap();
+        assert_eq!(analysis.display(analysis.definition_types[&age.id]), "Int");
+
+        let error = analyze_source(
+            "pattern.forma",
+            "@struct type User = {name: String};\
+             let user: User = {name: \"Ada\"};\
+             match user { {age} => age }",
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Struct has no field \"age\""));
+
+        let wrong_shape =
+            analyze_source("pattern.forma", "match 1 { {} => 0, _ => 1 }").unwrap_err();
+        assert!(
+            wrong_shape
+                .to_string()
+                .contains("Struct pattern cannot match Int")
+        );
+
+        let duplicate = analyze_source(
+            "pattern.forma",
+            "let user = {name: \"Ada\"}; match user { {name, name} => name }",
+        )
+        .unwrap_err();
+        assert!(
+            duplicate
+                .to_string()
+                .contains("duplicate Struct pattern field \"name\""),
+            "{duplicate}"
         );
     }
 

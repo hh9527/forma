@@ -1699,6 +1699,48 @@ impl Vm {
                             })?;
                         write_register(&mut registers, *dst, value, function, pc)?;
                     }
+                    Opcode::FieldExists { dst, value, field } => {
+                        let (_, _, text_links, _) =
+                            view.bytecode(frame.prototype).map_err(|heap_error| {
+                                error(
+                                    RuntimeErrorKind::InvalidBytecode,
+                                    heap_error.to_string(),
+                                    function,
+                                    pc,
+                                )
+                            })?;
+                        let field = text_links.get(field.0).copied().ok_or_else(|| {
+                            error(
+                                RuntimeErrorKind::InvalidBytecode,
+                                format!("text link {} is out of bounds", field.0),
+                                function,
+                                pc,
+                            )
+                        })?;
+                        let value = read_register(&registers, *value, function, pc)?;
+                        let exists = match value.value {
+                            RuntimeValue::Dict(handle) => view
+                                .dict_get(handle, field)
+                                .map_err(|heap_error| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        heap_error.to_string(),
+                                        function,
+                                        pc,
+                                    )
+                                })?
+                                .is_some(),
+                            _ => false,
+                        };
+                        write_register(&mut registers, *dst, runtime_bool(exists), function, pc)?;
+                    }
+                    Opcode::IsDict { dst, value } => {
+                        let matches = matches!(
+                            read_register(&registers, *value, function, pc)?.value,
+                            RuntimeValue::Dict(_)
+                        );
+                        write_register(&mut registers, *dst, runtime_bool(matches), function, pc)?;
+                    }
                     Opcode::TupleLengthEquals { dst, value, length } => {
                         let matches = matches!(
                             read_register(&registers, *value, function, pc)?.value,

@@ -172,4 +172,7 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
     fn predicate_pattern_1(&self) -> bool {
         self.peek(1) != Token::RParen
     }
+    fn predicate_pattern_3(&self) -> bool {
+        self.peek(1) != Token::RBrace
+    }
 }

@@ -1303,6 +1303,62 @@ impl<'a> Compiler<'a> {
                     self.compile_pattern(pattern, element, failures, bindings)?;
                 }
             }
+            PatternKind::Struct(fields) => {
+                let condition = self.allocate();
+                self.emit(
+                    Operation::IsDict {
+                        dst: condition,
+                        value,
+                    },
+                    pattern.location,
+                );
+                let failure = self.new_label();
+                self.emit(
+                    Operation::JumpIfFalse {
+                        condition,
+                        target: failure,
+                    },
+                    pattern.location,
+                );
+                failures.push(failure);
+                let mut field_names = HashSet::new();
+                for field in fields {
+                    if !field_names.insert(field.name.value.clone()) {
+                        return Err(frontend_error(
+                            self.source_name,
+                            format!("duplicate Struct pattern field {:?}", field.name.value),
+                        ));
+                    }
+                    let condition = self.allocate();
+                    self.emit(
+                        Operation::FieldExists {
+                            dst: condition,
+                            value,
+                            field: field.name.value.clone(),
+                        },
+                        field.name.location,
+                    );
+                    let failure = self.new_label();
+                    self.emit(
+                        Operation::JumpIfFalse {
+                            condition,
+                            target: failure,
+                        },
+                        field.name.location,
+                    );
+                    failures.push(failure);
+                    let selected = self.allocate();
+                    self.emit(
+                        Operation::GetField {
+                            dst: selected,
+                            dict: value,
+                            field: field.name.value.clone(),
+                        },
+                        field.name.location,
+                    );
+                    self.compile_pattern(&field.pattern, selected, failures, bindings)?;
+                }
+            }
         }
         Ok(())
     }
@@ -1541,6 +1597,11 @@ fn bind_pattern(pattern: &Pattern, bound: &mut HashSet<String>) {
             }
         }
         PatternKind::Tagged { payload, .. } => bind_pattern(payload, bound),
+        PatternKind::Struct(fields) => {
+            for field in fields {
+                bind_pattern(&field.pattern, bound);
+            }
+        }
         PatternKind::Wildcard
         | PatternKind::Int(_)
         | PatternKind::Float(_)
@@ -2068,6 +2129,26 @@ let decorators = {
         let value =
             run("let Some = 'Some; match Some(42) { 'None => 0, 'Some(value) => value }").unwrap();
         assert!(matches!(value, Value::Int(42)));
+    }
+
+    #[test]
+    fn struct_patterns_select_nested_fields_and_fall_through_dynamically() {
+        let selected = run("let user = {name: \"Ada\", address: {city: \"London\"}};\
+             match user { {name, address: {city}} => (name, city) }")
+        .unwrap();
+        assert_eq!(selected.to_string(), "(\"Ada\", \"London\")");
+
+        let fallback = run("let select: Fn(Any) -> String = fn(value) {\
+                match value { {name} => name, _ => \"fallback\" }\
+             }; select(1)")
+        .unwrap();
+        assert_eq!(fallback.to_string(), "\"fallback\"");
+
+        let empty = run("let is_struct: Fn(Any) -> Bool = fn(value) {\
+                match value { {} => 'True, _ => 'False }\
+             }; (is_struct({}), is_struct(1))")
+        .unwrap();
+        assert_eq!(empty.to_string(), "('True, 'False)");
     }
 
     #[test]
