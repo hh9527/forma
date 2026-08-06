@@ -844,6 +844,11 @@ impl<'a> Compiler<'a> {
                 self.emit(Operation::Return { src: value }, expression.location);
                 Ok(value)
             }
+            ExprKind::Panic { message } => {
+                let message = self.compile_expr(message)?;
+                self.emit(Operation::Panic { message }, expression.location);
+                Ok(message)
+            }
             ExprKind::Binary {
                 operator,
                 left,
@@ -1603,6 +1608,7 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
             free_expr(operand, bound, free)
         }
         ExprKind::Return { value } => free_expr(value, bound, free),
+        ExprKind::Panic { message } => free_expr(message, bound, free),
         ExprKind::Binary { left, right, .. } => {
             free_expr(left, bound, free);
             free_expr(right, bound, free);
@@ -1718,6 +1724,7 @@ pub(crate) fn collect_runtime_names(expression: &Expr, names: &mut HashSet<Strin
             collect_runtime_names(operand, names)
         }
         ExprKind::Return { value } => collect_runtime_names(value, names),
+        ExprKind::Panic { message } => collect_runtime_names(message, names),
         ExprKind::Binary { left, right, .. } => {
             collect_runtime_names(left, names);
             collect_runtime_names(right, names);
@@ -2302,6 +2309,29 @@ let decorators = {
 
         let wrong = compile_source("test", "let f: Fn(Bool) -> Int = fn(condition) { if condition { return \"wrong\"; } else { 1 } }; f").unwrap_err();
         assert!(wrong.message.contains("String") && wrong.message.contains("Int"));
+    }
+
+    #[test]
+    fn panic_is_a_sourced_never_expression() {
+        let value = run("if 'False { panic!(\"unused\") } else { 3 }").unwrap();
+        assert_eq!(value.to_string(), "3");
+
+        let error = run("let fail = fn() {\n  panic!(\"broken\")\n};\nfail()").unwrap_err();
+        let ExecutionError::Runtime(error) = error else {
+            panic!("expected runtime panic")
+        };
+        assert_eq!(error.kind, RuntimeErrorKind::Panic);
+        assert_eq!(error.message, "broken");
+        assert!(error.to_string().contains("test:2:3"));
+    }
+
+    #[test]
+    fn panic_requires_one_string_message() {
+        let wrong_type = compile_source("test", "panic!(1)").unwrap_err();
+        assert!(wrong_type.message.contains("Int") && wrong_type.message.contains("String"));
+
+        let wrong_arity = compile_source("test", "panic!()").unwrap_err();
+        assert!(wrong_arity.message.contains("exactly one argument"));
     }
 
     #[test]

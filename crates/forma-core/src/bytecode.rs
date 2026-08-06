@@ -150,6 +150,9 @@ pub enum Instruction {
     Fail {
         message: String,
     },
+    Panic {
+        message: Register,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -288,6 +291,9 @@ pub enum Opcode {
     },
     Fail {
         message: String,
+    },
+    Panic {
+        message: Register,
     },
 }
 
@@ -612,6 +618,7 @@ fn link_instruction(instruction: Instruction, links: &mut LinkingTable) -> Opcod
         Instruction::JumpIfFalse { condition, target } => Opcode::JumpIfFalse { condition, target },
         Instruction::Return { src } => Opcode::Return { src },
         Instruction::Fail { message } => Opcode::Fail { message },
+        Instruction::Panic { message } => Opcode::Panic { message },
     }
 }
 

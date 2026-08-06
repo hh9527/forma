@@ -986,7 +986,7 @@ impl<'a> Lowerer<'a> {
                     .next()
                     .ok_or_else(|| self.error(node, "contextual intrinsic has no name"))?;
                 let name_text = self.text(name);
-                if name_text == "blame" {
+                if name_text == "blame" || name_text == "panic" {
                     let bang = self.first_token(node, Token::Bang)?;
                     let arguments = self
                         .children(node)
@@ -996,7 +996,25 @@ impl<'a> Lowerer<'a> {
                         })
                         .map(|argument| self.expression(argument))
                         .collect::<Result<Vec<_>, _>>()?;
-                    self.lower_blame(arguments, node)
+                    if name_text == "blame" {
+                        self.lower_blame(arguments, node)
+                    } else {
+                        if arguments.len() != 1 {
+                            return Err(self.error(
+                                node,
+                                format!(
+                                    "panic! expects exactly one argument, found {}",
+                                    arguments.len()
+                                ),
+                            ));
+                        }
+                        Ok(located(
+                            ExprKind::Panic {
+                                message: Box::new(arguments.into_iter().next().unwrap()),
+                            },
+                            self.location(node),
+                        ))
+                    }
                 } else if matches!(name_text.as_ref(), "file" | "line") {
                     Err(self.error(
                         name,

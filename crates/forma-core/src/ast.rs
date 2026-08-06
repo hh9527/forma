@@ -80,6 +80,9 @@ pub enum ExprKind {
     Return {
         value: Box<Expr>,
     },
+    Panic {
+        message: Box<Expr>,
+    },
     Binary {
         operator: Located<BinaryOperator>,
         left: Box<Expr>,

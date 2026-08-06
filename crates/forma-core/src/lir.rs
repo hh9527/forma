@@ -150,6 +150,9 @@ pub enum Operation {
     Fail {
         message: String,
     },
+    Panic {
+        message: RegisterId,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -444,6 +447,9 @@ fn lower_operation(
             src: register(src)?,
         },
         Operation::Fail { message } => Instruction::Fail { message },
+        Operation::Panic { message } => Instruction::Panic {
+            message: register(message)?,
+        },
     })
 }
 

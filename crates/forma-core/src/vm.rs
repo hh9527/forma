@@ -670,6 +670,7 @@ pub enum RuntimeErrorKind {
     InvalidBytecode,
     MissingField,
     NoPatternMatched,
+    Panic,
     StackLimitExceeded,
     TypeMismatch,
     UninitializedDefinition,
@@ -710,6 +711,7 @@ impl RuntimeError {
             | RuntimeErrorKind::IntegerOverflow
             | RuntimeErrorKind::MissingField
             | RuntimeErrorKind::NoPatternMatched
+            | RuntimeErrorKind::Panic
             | RuntimeErrorKind::TypeMismatch
             | RuntimeErrorKind::UninitializedDefinition
             | RuntimeErrorKind::DuplicateDefinition => FailureClass::Recoverable,
@@ -1983,6 +1985,45 @@ impl Vm {
                             function,
                             pc,
                         ));
+                    }
+                    Opcode::Panic { message } => {
+                        let message = *read_register(&registers, *message, function, pc)?;
+                        let text = match message.value {
+                            RuntimeValue::ShortString(id) => view
+                                .text(id)
+                                .map_err(|heap_error| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        heap_error.to_string(),
+                                        function,
+                                        pc,
+                                    )
+                                })?
+                                .to_owned(),
+                            RuntimeValue::String(handle) => {
+                                match view.object(handle).map_err(|heap_error| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        heap_error.to_string(),
+                                        function,
+                                        pc,
+                                    )
+                                })? {
+                                    Object::String(value) => value.to_string(),
+                                    _ => {
+                                        return Err(runtime_type_error(
+                                            "String", &message, &view, function, pc,
+                                        ));
+                                    }
+                                }
+                            }
+                            _ => {
+                                return Err(runtime_type_error(
+                                    "String", &message, &view, function, pc,
+                                ));
+                            }
+                        };
+                        return Err(error(RuntimeErrorKind::Panic, text, function, pc));
                     }
                 }
                 frames.last_mut().expect("execution frame").pc += 1;

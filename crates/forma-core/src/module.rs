@@ -1744,6 +1744,7 @@ fn expression_has_import(expression: &Expr) -> bool {
             expression_has_import(operand)
         }
         ExprKind::Return { value } => expression_has_import(value),
+        ExprKind::Panic { message } => expression_has_import(message),
         ExprKind::Binary { left, right, .. } => {
             expression_has_import(left) || expression_has_import(right)
         }
@@ -6226,6 +6227,36 @@ unchanged", "|"),
         assert!(
             division_errors[0].labels[0].location.start
                 < division_errors[1].labels[0].location.start
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recoverable_workspace_records_panic_and_continues_independent_bindings() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        fs::write(
+            &main,
+            "let failed = panic!(\"broken\");\nlet independent = 2 + 3;\n{failed: failed, independent: independent}",
+        )
+        .unwrap();
+
+        let snapshot = recovery_engine().recover_workspace(&main).unwrap();
+        let root = snapshot
+            .module_by_path(&canonicalize(&main).unwrap())
+            .unwrap();
+        assert_eq!(root.state, WorkspaceModuleState::Partial);
+        assert!(snapshot.diagnostics().iter().any(|diagnostic| {
+            diagnostic.message == "broken"
+                && diagnostic.labels[0].location.source == root.source.unwrap()
+        }));
+        assert_eq!(
+            snapshot
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.message == "broken")
+                .count(),
+            1
         );
         fs::remove_dir_all(directory).unwrap();
     }
