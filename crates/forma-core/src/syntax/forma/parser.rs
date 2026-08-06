@@ -73,6 +73,21 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
     fn predicate_binding_3(&self) -> bool {
         self.current == Token::Let && matches!(self.peek(1), Token::LParen | Token::LBrace)
     }
+    fn predicate_binding_4(&self) -> bool {
+        if self.current != Token::Let
+            || !matches!(self.peek(1), Token::Atom | Token::LParen | Token::LBrace)
+        {
+            return false;
+        }
+        let mut lookahead = 2usize;
+        loop {
+            match self.peek(lookahead) {
+                Token::Else => return true,
+                Token::Semicolon | Token::EOF => return false,
+                _ => lookahead += 1,
+            }
+        }
+    }
     fn predicate_manifest_dict_1(&self) -> bool {
         self.peek(1) != Token::RBrace
     }

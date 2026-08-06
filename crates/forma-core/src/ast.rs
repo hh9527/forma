@@ -120,6 +120,12 @@ pub enum ExprKind {
         then_branch: Block,
         else_branch: Block,
     },
+    LetElse {
+        pattern: Pattern,
+        value: Box<Expr>,
+        else_branch: Block,
+        body: Block,
+    },
     Match {
         value: Box<Expr>,
         arms: Vec<MatchArm>,

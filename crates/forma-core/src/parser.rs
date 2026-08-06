@@ -108,6 +108,12 @@ enum BlockEntry {
         value: Expr,
         location: Location,
     },
+    LetElse {
+        pattern: Pattern,
+        value: Expr,
+        else_branch: Block,
+        location: Location,
+    },
 }
 
 enum CallArgument {
@@ -287,11 +293,38 @@ impl<'a> Lowerer<'a> {
                         location: self.location(child),
                     });
                 }
+                Some(Rule::LetElseBinding) => {
+                    if !allow_destructuring {
+                        return Err(
+                            self.error(child, "let else is allowed only inside a local block")
+                        );
+                    }
+                    let (pattern, value, else_branch) = self.let_else_binding(child)?;
+                    entries.push(BlockEntry::LetElse {
+                        pattern,
+                        value,
+                        else_branch,
+                        location: self.location(child),
+                    });
+                }
                 Some(Rule::Binding) => {
                     let inner = self
                         .first_rule(child)
                         .ok_or_else(|| self.error(child, "empty binding"))?;
-                    if self.rule(inner) == Some(Rule::LetPatternBinding) {
+                    if self.rule(inner) == Some(Rule::LetElseBinding) {
+                        if !allow_destructuring {
+                            return Err(
+                                self.error(inner, "let else is allowed only inside a local block")
+                            );
+                        }
+                        let (pattern, value, else_branch) = self.let_else_binding(inner)?;
+                        entries.push(BlockEntry::LetElse {
+                            pattern,
+                            value,
+                            else_branch,
+                            location: self.location(inner),
+                        });
+                    } else if self.rule(inner) == Some(Rule::LetPatternBinding) {
                         if !allow_destructuring {
                             return Err(self.error(
                                 inner,
@@ -355,6 +388,28 @@ impl<'a> Lowerer<'a> {
                         block_location,
                     );
                 }
+                BlockEntry::LetElse {
+                    pattern,
+                    value,
+                    else_branch,
+                    location,
+                } => {
+                    block = located(
+                        BlockKind {
+                            bindings: Vec::new(),
+                            result: Box::new(located(
+                                ExprKind::LetElse {
+                                    pattern,
+                                    value: Box::new(value),
+                                    else_branch,
+                                    body: block,
+                                },
+                                location,
+                            )),
+                        },
+                        block_location,
+                    );
+                }
             }
         }
         Ok(block)
@@ -372,6 +427,34 @@ impl<'a> Lowerer<'a> {
             .find(|child| self.is_expression(*child) && self.cst.span(*child).start > equal_start)
             .ok_or_else(|| self.error(node, "destructuring let has no value"))?;
         Ok((self.pattern(pattern)?, self.expression(value)?))
+    }
+
+    fn let_else_binding(&self, node: NodeRef) -> Result<(Pattern, Expr, Block), Diagnostic> {
+        let equal = self.first_token(node, Token::Equal)?;
+        let else_token = self.first_token(node, Token::Else)?;
+        let pattern = self
+            .children(node)
+            .find(|child| {
+                self.is_pattern(*child) && self.cst.span(*child).end <= self.cst.span(equal).start
+            })
+            .ok_or_else(|| self.error(node, "let else has no pattern"))?;
+        let value = self
+            .children(node)
+            .find(|child| {
+                self.is_expression(*child)
+                    && self.cst.span(*child).start > self.cst.span(equal).end
+                    && self.cst.span(*child).end <= self.cst.span(else_token).start
+            })
+            .ok_or_else(|| self.error(node, "let else has no value"))?;
+        let else_branch = self
+            .rule_children(node)
+            .find(|child| self.rule(*child) == Some(Rule::Block))
+            .ok_or_else(|| self.error(node, "let else has no else block"))?;
+        Ok((
+            self.pattern(pattern)?,
+            self.expression(value)?,
+            self.block_body(else_branch)?,
+        ))
     }
 
     fn binding(&self, node: NodeRef) -> Result<Binding, Diagnostic> {

@@ -915,6 +915,9 @@ impl<'a> Compiler<'a> {
             ExprKind::IfLet { .. } => {
                 Err(self.error_at(expression.location, "unelaborated if let expression"))
             }
+            ExprKind::LetElse { .. } => {
+                Err(self.error_at(expression.location, "unelaborated let else expression"))
+            }
             ExprKind::Match { value, arms } => self.compile_match(value, arms, expression.location),
         }
     }
@@ -1607,6 +1610,19 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
             let mut else_bound = bound.clone();
             free_block(else_branch, &mut else_bound, free);
         }
+        ExprKind::LetElse {
+            pattern,
+            value,
+            else_branch,
+            body,
+        } => {
+            free_expr(value, bound, free);
+            let mut else_bound = bound.clone();
+            free_block(else_branch, &mut else_bound, free);
+            let mut body_bound = bound.clone();
+            bind_pattern(pattern, &mut body_bound);
+            free_block(body, &mut body_bound, free);
+        }
         ExprKind::Match { value, arms } => {
             free_expr(value, bound, free);
             for arm in arms {
@@ -1718,6 +1734,16 @@ pub(crate) fn collect_runtime_names(expression: &Expr, names: &mut HashSet<Strin
             collect_runtime_names(value, names);
             collect_runtime_names_block(then_branch, names);
             collect_runtime_names_block(else_branch, names);
+        }
+        ExprKind::LetElse {
+            value,
+            else_branch,
+            body,
+            ..
+        } => {
+            collect_runtime_names(value, names);
+            collect_runtime_names_block(else_branch, names);
+            collect_runtime_names_block(body, names);
         }
         ExprKind::Match { value, arms } => {
             collect_runtime_names(value, names);
@@ -2320,6 +2346,29 @@ let decorators = {
         let error =
             compile_source("test", "if let 'Some(item) = 1 { item } else { 0 }").unwrap_err();
         assert!(error.message.contains("pattern cannot match Int"));
+    }
+
+    #[test]
+    fn let_else_binds_the_remaining_block_and_requires_divergence() {
+        let value = run("let step: Fn(Option(Int)) -> Option(Int) = fn(option) { let 'Some(item) = option else { return 'None; }; 'Some(item + 1) }; (step('Some(2)), step('None))").unwrap();
+        assert_eq!(value.to_string(), "('Some(3), 'None)");
+
+        let panic = run("let require = fn(option: Option(Int)) { let 'Some(item) = option else { panic!(\"none\") }; item }; require('Some(4))").unwrap();
+        assert_eq!(panic.to_string(), "4");
+
+        let non_never = compile_source(
+            "test",
+            "let f = fn(option: Option(Int)) { let 'Some(item) = option else { 0 }; item }; f",
+        )
+        .unwrap_err();
+        assert!(non_never.message.contains("must have type Never"));
+
+        let irrefutable = compile_source("test", "@struct type Pair = {a: Int, b: Int}; let f = fn(pair: Pair) { let {a, b} = pair else { panic!(\"never\") }; a + b }; f").unwrap_err();
+        assert!(
+            irrefutable.message.contains("irrefutable"),
+            "{}",
+            irrefutable.message
+        );
     }
 
     #[test]

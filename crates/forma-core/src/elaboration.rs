@@ -145,6 +145,40 @@ impl Elaborator<'_> {
                     ],
                 };
             }
+            ExprKind::LetElse {
+                pattern,
+                value,
+                else_branch,
+                body,
+            } => {
+                self.expression(value);
+                self.block(else_branch);
+                self.block(body);
+                expression.value = ExprKind::Match {
+                    value: value.clone(),
+                    arms: vec![
+                        located(
+                            MatchArmKind {
+                                pattern: pattern.clone(),
+                                value: located(ExprKind::Block(body.clone()), body.location),
+                                irrefutable_required: false,
+                            },
+                            expression.location,
+                        ),
+                        located(
+                            MatchArmKind {
+                                pattern: located(PatternKind::Wildcard, expression.location),
+                                value: located(
+                                    ExprKind::Block(else_branch.clone()),
+                                    else_branch.location,
+                                ),
+                                irrefutable_required: false,
+                            },
+                            expression.location,
+                        ),
+                    ],
+                };
+            }
             ExprKind::Match { value, arms } => {
                 self.expression(value);
                 for arm in arms {

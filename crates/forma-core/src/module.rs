@@ -1806,6 +1806,22 @@ fn expression_has_import(expression: &Expr) -> bool {
                     .chain(&else_branch.value.bindings)
                     .any(|binding| expression_has_import(&binding.value.value))
         }
+        ExprKind::LetElse {
+            value,
+            else_branch,
+            body,
+            ..
+        } => {
+            expression_has_import(value)
+                || expression_has_import(&else_branch.value.result)
+                || expression_has_import(&body.value.result)
+                || else_branch
+                    .value
+                    .bindings
+                    .iter()
+                    .chain(&body.value.bindings)
+                    .any(|binding| expression_has_import(&binding.value.value))
+        }
         ExprKind::Match { value, arms } => {
             expression_has_import(value)
                 || arms
