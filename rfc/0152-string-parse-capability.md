@@ -12,9 +12,9 @@
 native parse: for(A) Fn(TypeOf(A), String) -> Result(A, BlameError);
 ```
 
-The initial built-in cases are identity for `String` and decimal conversion
-for `Int`. A parse failure has `rule` set to the supplied type metadata and
-`data` set to the source string.
+The initial built-in cases are identity for `String`, decimal conversion for
+`Int`, and floating-point conversion for `Float`. A parse failure has `rule`
+set to the supplied type metadata and `data` set to the source string.
 
 ## Provider protocol
 

@@ -34,7 +34,7 @@ stable typed entry point while allowing the set of providers to grow.
 
 The initial providers are deliberately narrow:
 
-1. built-in parsing for `String` and `Int`;
+1. built-in parsing for `String`, `Int`, and `Float`;
 2. regex-backed struct parsing installed by `std/regex.parse_by`.
 
 A later RFC may allow a type to install an ordinary Forma parser function.
@@ -79,7 +79,7 @@ RFC 0153 migrates regex parsing from `re.parse` plus `re.decode` to
 ## Acceptance criteria
 
 1. `string.parse` returns `Result(A, BlameError)` for a supplied `TypeOf(A)`.
-2. `String` and `Int` parse without attached metadata.
+2. `String`, `Int`, and `Float` parse without attached metadata.
 3. Provider metadata remains attached to the type object and is preserved
    through nested attributed wrappers.
 4. Regex-backed fields use the same parsing protocol recursively.

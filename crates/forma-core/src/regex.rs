@@ -22,6 +22,7 @@ impl Eq for CompiledRegex {}
 enum ParsePlan {
     String,
     Int,
+    Float,
     Regex {
         compiled: CompiledRegex,
         fields: BTreeMap<String, FieldPlan>,
@@ -224,6 +225,7 @@ fn parse_plan(metadata: crate::ValueRef<'_>) -> Result<ParsePlan, NativeError> {
     match metadata.dict_get("kind").and_then(|kind| kind.as_atom()) {
         Some("String") => Ok(ParsePlan::String),
         Some("Int") => Ok(ParsePlan::Int),
+        Some("Float") => Ok(ParsePlan::Float),
         _ => Err(NativeError::new("type has no std/string.parse capability")),
     }
 }
@@ -352,6 +354,14 @@ fn execute_plan(
             .and_then(|value| {
                 context
                     .set_int(output, value)
+                    .map_err(|error| error.message)
+            }),
+        ParsePlan::Float => input
+            .parse::<f64>()
+            .map_err(|_| "input is not a valid Float".to_owned())
+            .and_then(|value| {
+                context
+                    .set_float(output, value)
                     .map_err(|error| error.message)
             }),
         ParsePlan::Regex { compiled, fields } => {

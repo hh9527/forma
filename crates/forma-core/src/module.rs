@@ -7217,10 +7217,12 @@ unchanged", "|"),
                    equal: pattern == re.compile(r"^(?P<name>\w+)=(?P<value>\d+)(?:;(?P<unit>\w+))?$"),
                    text: result.unwrap(string.parse(String, "plain")),
                    number: result.unwrap(string.parse(Int, "42")),
+                   float: result.unwrap(string.parse(Float, "1.5")),
                    first: result.unwrap(string.parse(Rec, "answer=42")),
                    second: result.unwrap(string.parse(Rec, "size=7;px")),
                    failed: string.parse(Rec, "not a record"),
                    bad_int: string.parse(Int, "4x"),
+                   bad_float: string.parse(Float, "1.5x"),
                }"#,
         )
         .unwrap();
@@ -7230,6 +7232,7 @@ unchanged", "|"),
         assert!(output.contains("equal: 'True"), "{output}");
         assert!(output.contains("text: \"plain\""), "{output}");
         assert!(output.contains("number: 42"), "{output}");
+        assert!(output.contains("float: 1.5"), "{output}");
         assert!(
             output.contains("first: {name: \"answer\", unit: 'None, value: 42}"),
             "{output}"
@@ -7240,6 +7243,7 @@ unchanged", "|"),
         );
         assert!(output.contains("failed: 'Err("), "{output}");
         assert!(output.contains("bad_int: 'Err("), "{output}");
+        assert!(output.contains("bad_float: 'Err("), "{output}");
 
         fs::write(
             &main,
