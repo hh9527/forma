@@ -54,6 +54,7 @@ primary:
 | ?4 named_intrinsic
 | Identifier @variable_expr
 | ?5 interpreter_intrinsic
+| ?6 if_let_expr
 | legacy_interpreter_expr
 | '(' [expression (?1 ',' expression)* [',']] ')' @paren_expr
 | '[' [expression (?2 ',' expression)* [',']] ']' @array_expr
@@ -87,6 +88,7 @@ type_argument: expression | Placeholder;
 section_arguments: '\\(' [argument (?1 ',' argument)* [',']] ')';
 argument: expression | Placeholder | IndexedPlaceholder;
 if_expr: 'if' expression block 'else' block;
+if_let_expr: 'if' 'let' pattern '=' expression block 'else' block;
 match_expr: 'match' expression '{' match_arm (?1 ',' match_arm)* [','] '}';
 return_expr: 'return' expression Semicolon @return_expr;
 match_arm: pattern '=>' expression;

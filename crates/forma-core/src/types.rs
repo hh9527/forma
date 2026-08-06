@@ -2809,6 +2809,33 @@ fn collect_nested_annotation_types(
                 )?;
             }
         }
+        ExprKind::IfLet {
+            value,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_nested_annotation_types(
+                source_name,
+                value,
+                bindings,
+                account,
+                sources,
+                debug_sink,
+                annotations,
+            )?;
+            for block in [then_branch, else_branch] {
+                collect_block_annotation_types(
+                    source_name,
+                    block,
+                    bindings,
+                    account,
+                    sources,
+                    debug_sink,
+                    annotations,
+                )?;
+            }
+        }
         ExprKind::Match { value, arms } => {
             collect_nested_annotation_types(
                 source_name,
@@ -5496,6 +5523,47 @@ impl<'a> GenericInference<'a> {
                 let else_type = self.infer_block(else_branch, environment, expected)?;
                 join_types(self.resolve(&then_type), self.resolve(&else_type))
             }
+            ExprKind::IfLet {
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+            } => {
+                let value_type = self.infer(value, environment, None)?;
+                let resolved_value_type = self.resolve(&value_type);
+                let analysis = crate::pattern::analyze_pattern(pattern, &resolved_value_type);
+                if analysis.compatibility == crate::pattern::PatternCompatibility::Incompatible
+                    && analysis.problems.is_empty()
+                {
+                    let location =
+                        crate::pattern::first_incompatible_location(pattern, &resolved_value_type)
+                            .unwrap_or(pattern.location);
+                    self.pattern_diagnostics.entry(location).or_insert_with(|| {
+                        format!(
+                            "pattern cannot match {}",
+                            resolved_value_type.display_name()
+                        )
+                    });
+                }
+                for problem in analysis.problems {
+                    self.pattern_diagnostics
+                        .entry(problem.location)
+                        .or_insert(problem.message);
+                }
+                let mut then_environment = environment.clone();
+                self.scheme_scopes.push(HashMap::new());
+                for binding in analysis.bindings {
+                    self.pattern_binding_types
+                        .insert(binding.location, binding.ty.clone());
+                    self.set_local_scheme(binding.name.clone(), None);
+                    then_environment.insert(binding.name, binding.ty);
+                }
+                let then_type = self.infer_block(then_branch, &then_environment, expected);
+                self.scheme_scopes.pop();
+                let then_type = then_type?;
+                let else_type = self.infer_block(else_branch, environment, expected)?;
+                join_types(self.resolve(&then_type), self.resolve(&else_type))
+            }
             ExprKind::Match { value, arms } => {
                 let value_type = self.infer(value, environment, None)?;
                 let resolved_value_type = self.resolve(&value_type);
@@ -6206,6 +6274,16 @@ fn expression_references_names(
                     bound,
                 )
         }
+        ExprKind::IfLet {
+            value,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expression_references_names(value, names, bound)
+                || expression_references_names(&then_branch.value.result, names, bound)
+                || expression_references_names(&else_branch.value.result, names, bound)
+        }
         ExprKind::Match { value, arms } => {
             expression_references_names(value, names, bound)
                 || arms
@@ -6465,6 +6543,18 @@ fn infer_expr_with(
                 infer_block_with(else_branch, environment, record),
             ])
         }
+        ExprKind::IfLet {
+            value,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            infer_expr_with(value, environment, record);
+            join_types(
+                infer_block_with(then_branch, environment, record),
+                infer_block_with(else_branch, environment, record),
+            )
+        }
         ExprKind::Match { value, arms } => {
             infer_expr_with(value, environment, record);
             canonical_union(
@@ -6570,6 +6660,16 @@ fn check_interpolations(
             else_branch,
         } => {
             check_interpolations(condition, environment, sources)?;
+            check_block_interpolations(then_branch, environment, sources)?;
+            check_block_interpolations(else_branch, environment, sources)?;
+        }
+        ExprKind::IfLet {
+            value,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            check_interpolations(value, environment, sources)?;
             check_block_interpolations(then_branch, environment, sources)?;
             check_block_interpolations(else_branch, environment, sources)?;
         }

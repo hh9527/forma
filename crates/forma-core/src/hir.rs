@@ -537,6 +537,20 @@ impl Resolver {
                 self.index_block(else_branch, scopes, false);
                 None
             }
+            ExprKind::IfLet {
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+            } => {
+                self.index_expr(value, scopes);
+                scopes.push(Scope::new());
+                self.index_pattern(pattern, scopes.last_mut().expect("if let has a scope"));
+                self.index_block(then_branch, scopes, false);
+                scopes.pop();
+                self.index_block(else_branch, scopes, false);
+                None
+            }
             ExprKind::Match { value, arms } => {
                 self.index_expr(value, scopes);
                 for arm in arms {

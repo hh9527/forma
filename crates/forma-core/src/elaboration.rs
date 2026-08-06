@@ -108,6 +108,43 @@ impl Elaborator<'_> {
                 self.block(then_branch);
                 self.block(else_branch);
             }
+            ExprKind::IfLet {
+                pattern,
+                value,
+                then_branch,
+                else_branch,
+            } => {
+                self.expression(value);
+                self.block(then_branch);
+                self.block(else_branch);
+                expression.value = ExprKind::Match {
+                    value: value.clone(),
+                    arms: vec![
+                        located(
+                            MatchArmKind {
+                                pattern: pattern.clone(),
+                                value: located(
+                                    ExprKind::Block(then_branch.clone()),
+                                    then_branch.location,
+                                ),
+                                irrefutable_required: false,
+                            },
+                            expression.location,
+                        ),
+                        located(
+                            MatchArmKind {
+                                pattern: located(PatternKind::Wildcard, expression.location),
+                                value: located(
+                                    ExprKind::Block(else_branch.clone()),
+                                    else_branch.location,
+                                ),
+                                irrefutable_required: false,
+                            },
+                            expression.location,
+                        ),
+                    ],
+                };
+            }
             ExprKind::Match { value, arms } => {
                 self.expression(value);
                 for arm in arms {

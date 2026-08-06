@@ -1790,6 +1790,22 @@ fn expression_has_import(expression: &Expr) -> bool {
                 || expression_has_import(&then_branch.value.result)
                 || expression_has_import(&else_branch.value.result)
         }
+        ExprKind::IfLet {
+            value,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            expression_has_import(value)
+                || expression_has_import(&then_branch.value.result)
+                || expression_has_import(&else_branch.value.result)
+                || then_branch
+                    .value
+                    .bindings
+                    .iter()
+                    .chain(&else_branch.value.bindings)
+                    .any(|binding| expression_has_import(&binding.value.value))
+        }
         ExprKind::Match { value, arms } => {
             expression_has_import(value)
                 || arms

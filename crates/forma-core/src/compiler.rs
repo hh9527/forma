@@ -912,6 +912,9 @@ impl<'a> Compiler<'a> {
                 then_branch,
                 else_branch,
             } => self.compile_if(condition, then_branch, else_branch, expression.location),
+            ExprKind::IfLet { .. } => {
+                Err(self.error_at(expression.location, "unelaborated if let expression"))
+            }
             ExprKind::Match { value, arms } => self.compile_match(value, arms, expression.location),
         }
     }
@@ -1591,6 +1594,19 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
             let mut else_bound = bound.clone();
             free_block(else_branch, &mut else_bound, free);
         }
+        ExprKind::IfLet {
+            pattern,
+            value,
+            then_branch,
+            else_branch,
+        } => {
+            free_expr(value, bound, free);
+            let mut then_bound = bound.clone();
+            bind_pattern(pattern, &mut then_bound);
+            free_block(then_branch, &mut then_bound, free);
+            let mut else_bound = bound.clone();
+            free_block(else_branch, &mut else_bound, free);
+        }
         ExprKind::Match { value, arms } => {
             free_expr(value, bound, free);
             for arm in arms {
@@ -1690,6 +1706,16 @@ pub(crate) fn collect_runtime_names(expression: &Expr, names: &mut HashSet<Strin
             else_branch,
         } => {
             collect_runtime_names(condition, names);
+            collect_runtime_names_block(then_branch, names);
+            collect_runtime_names_block(else_branch, names);
+        }
+        ExprKind::IfLet {
+            value,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_runtime_names(value, names);
             collect_runtime_names_block(then_branch, names);
             collect_runtime_names_block(else_branch, names);
         }
@@ -2275,6 +2301,25 @@ let decorators = {
 
         let wrong_arity = compile_source("test", "panic!()").unwrap_err();
         assert!(wrong_arity.message.contains("exactly one argument"));
+    }
+
+    #[test]
+    fn if_let_selects_and_scopes_structural_patterns() {
+        let some = run(
+            "let value: Option(Int) = 'Some(3); if let 'Some(item) = value { item + 1 } else { 0 }",
+        )
+        .unwrap();
+        assert_eq!(some.to_string(), "4");
+
+        let none = run(
+            "let value: Option(Int) = 'None; if let 'Some(item) = value { item + 1 } else { 0 }",
+        )
+        .unwrap();
+        assert_eq!(none.to_string(), "0");
+
+        let error =
+            compile_source("test", "if let 'Some(item) = 1 { item } else { 0 }").unwrap_err();
+        assert!(error.message.contains("pattern cannot match Int"));
     }
 
     #[test]

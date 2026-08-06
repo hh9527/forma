@@ -948,6 +948,31 @@ impl<'a> Lowerer<'a> {
                     else_branch: self.block_body(blocks[1])?,
                 }
             }
+            Rule::IfLetExpr => {
+                let pattern = rules
+                    .iter()
+                    .copied()
+                    .find(|child| self.is_pattern(*child))
+                    .ok_or_else(|| self.error(node, "if let has no pattern"))?;
+                let value = rules
+                    .iter()
+                    .copied()
+                    .find(|child| {
+                        self.is_expression(*child) && self.rule(*child) != Some(Rule::Block)
+                    })
+                    .ok_or_else(|| self.error(node, "if let has no value"))?;
+                let blocks = rules
+                    .iter()
+                    .copied()
+                    .filter(|child| self.rule(*child) == Some(Rule::Block))
+                    .collect::<Vec<_>>();
+                ExprKind::IfLet {
+                    pattern: self.pattern(pattern)?,
+                    value: Box::new(self.expression(value)?),
+                    then_branch: self.block_body(blocks[0])?,
+                    else_branch: self.block_body(blocks[1])?,
+                }
+            }
             Rule::MatchExpr => {
                 let value_node = self
                     .children(node)
@@ -1532,6 +1557,7 @@ impl<'a> Lowerer<'a> {
                     | Rule::FloatExpr
                     | Rule::FunctionContract
                     | Rule::IfExpr
+                    | Rule::IfLetExpr
                     | Rule::InterpreterIntrinsic
                     | Rule::NamedIntrinsic
                     | Rule::LegacyInterpreterExpr

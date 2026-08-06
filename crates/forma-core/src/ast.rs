@@ -114,6 +114,12 @@ pub enum ExprKind {
         then_branch: Block,
         else_branch: Block,
     },
+    IfLet {
+        pattern: Pattern,
+        value: Box<Expr>,
+        then_branch: Block,
+        else_branch: Block,
+    },
     Match {
         value: Box<Expr>,
         arms: Vec<MatchArm>,

@@ -496,6 +496,7 @@ fn is_expression_slot(syntax: SyntaxNode<'_>) -> bool {
                 | Rule::FieldExpr
                 | Rule::FloatExpr
                 | Rule::IfExpr
+                | Rule::IfLetExpr
                 | Rule::InterpreterIntrinsic
                 | Rule::NamedIntrinsic
                 | Rule::LegacyInterpreterExpr
