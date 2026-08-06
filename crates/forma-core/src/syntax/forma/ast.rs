@@ -314,7 +314,13 @@ impl<'tree> ImportBinding<'tree> {
     }
 
     pub fn has_items(self) -> bool {
-        child_node(self.syntax, Rule::ImportItems).is_some()
+        child_node(self.syntax, Rule::ImportSelector)
+            .and_then(|selector| child_node(selector, Rule::ImportItems))
+            .is_some()
+    }
+
+    pub fn has_selector(self) -> bool {
+        child_node(self.syntax, Rule::ImportSelector).is_some()
     }
 }
 
@@ -409,7 +415,7 @@ pub fn validate(source: SourceId, tree: &CstData) -> Vec<SyntaxIssue> {
     let mut issues = Vec::new();
     for binding in body.bindings() {
         if binding.name().is_none()
-            && !matches!(binding, Binding::Import(import) if import.has_items())
+            && !matches!(binding, Binding::Import(import) if import.has_selector())
         {
             issues.push(missing_after_keyword(source, binding));
         }

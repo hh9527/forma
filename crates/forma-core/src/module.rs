@@ -17,7 +17,7 @@ use crate::source::{Diagnostic, SourceDatabase};
 use crate::toml::parse_toml_registered;
 use crate::types::{
     Analysis, ModuleInterface, PartialAnalysisControl, analyze_partial_types_recovered_with_query,
-    analyze_program_with_bindings_observed,
+    analyze_program_with_bindings_observed, program_references_name, recovered_reference_locations,
 };
 use crate::yaml::parse_yaml_registered;
 use crate::{
@@ -34,6 +34,101 @@ struct StaticDataParse {
     value: Option<SourcedValue>,
     diagnostics: Vec<Diagnostic>,
     kind: WorkspaceModuleKind,
+}
+
+#[derive(Clone)]
+struct OpenImportCandidate {
+    provider: ModuleId,
+    value: Value,
+    root: PersistentValue,
+    scheme: crate::types::TypeScheme,
+    provenance: Option<Provenance>,
+    opaque: bool,
+}
+
+#[derive(Clone)]
+struct RecoveryOpenImportCandidate {
+    provider: ModuleId,
+    value: Value,
+    scheme: crate::types::TypeScheme,
+    sourced: Option<SourcedValue>,
+}
+
+fn recovery_open_import_exports(
+    provider: &ModuleId,
+    value: &Value,
+    interface: &ModuleInterface,
+    sourced: Option<&SourcedValue>,
+) -> Result<Vec<(String, RecoveryOpenImportCandidate)>, ModuleError> {
+    let Value::Dict(exports) = value else {
+        return Err(ModuleError::new(format!(
+            "cannot open non-module value {provider}"
+        )));
+    };
+    interface
+        .exports
+        .iter()
+        .map(|(name, scheme)| {
+            let value = exports.get(name).cloned().ok_or_else(|| {
+                ModuleError::new(format!(
+                    "module {provider} has no value for export {name:?}"
+                ))
+            })?;
+            Ok((
+                name.clone(),
+                RecoveryOpenImportCandidate {
+                    provider: provider.clone(),
+                    value,
+                    scheme: scheme.clone(),
+                    sourced: sourced.cloned(),
+                },
+            ))
+        })
+        .collect()
+}
+
+fn open_import_exports(
+    provider: &ModuleId,
+    value: &Value,
+    root: PersistentValue,
+    interface: &ModuleInterface,
+    heap: &Heap,
+    provenance: Option<&Provenance>,
+    opaque: bool,
+) -> Result<Vec<(String, OpenImportCandidate)>, ModuleError> {
+    let Value::Dict(exports) = value else {
+        return Err(ModuleError::new(format!(
+            "cannot open non-module value {provider}"
+        )));
+    };
+    interface
+        .exports
+        .iter()
+        .map(|(name, scheme)| {
+            let value = exports.get(name).cloned().ok_or_else(|| {
+                ModuleError::new(format!(
+                    "module {provider} has no value for export {name:?}"
+                ))
+            })?;
+            let root = root
+                .dict_get(heap, name)
+                .map_err(|error| ModuleError::new(error.to_string()))?
+                .ok_or_else(|| {
+                    ModuleError::new(format!("module {provider} has no root for export {name:?}"))
+                })?;
+            Ok((
+                name.clone(),
+                OpenImportCandidate {
+                    provider: provider.clone(),
+                    value,
+                    root,
+                    scheme: scheme.clone(),
+                    provenance: provenance.cloned(),
+                    opaque,
+                },
+            ))
+        })
+        .collect()
 }
 
 fn static_data_kind(format: ModuleFormat) -> Option<WorkspaceModuleKind> {
@@ -883,11 +978,17 @@ impl RecoverableWorkspaceBuilder<'_> {
                 .recovered
                 .bindings
                 .iter()
-                .filter(|binding| binding.value.kind == BindingKind::Import)
+                .filter(|binding| {
+                    matches!(
+                        binding.value.kind,
+                        BindingKind::Import | BindingKind::OpenImport
+                    )
+                })
                 .filter_map(|binding| match &binding.value.value.value {
                     ExprKind::String(target) => Some((
                         binding.value.name.value.clone(),
                         binding.value.imported_name.clone(),
+                        binding.value.kind == BindingKind::OpenImport,
                         binding.value.value.location,
                         target.clone(),
                     )),
@@ -901,6 +1002,8 @@ impl RecoverableWorkspaceBuilder<'_> {
             let mut external_sourced_values = BTreeMap::new();
             let mut external_interfaces = BTreeMap::new();
             let mut unavailable_imports = HashSet::new();
+            let mut open_candidates: BTreeMap<String, Vec<RecoveryOpenImportCandidate>> =
+                BTreeMap::new();
             let mut diagnostics = Vec::new();
             if has_manifest && module_id != ModuleId::Main {
                 diagnostics.push(Diagnostic::error(
@@ -926,7 +1029,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                     binding.location,
                 ));
             }
-            for (name, imported_name, location, target) in imports {
+            for (name, imported_name, open, location, target) in imports {
                 let target_module = match self.resolver.resolve_import(&module_id, &target) {
                     Ok(target) => target,
                     Err(error) => {
@@ -937,11 +1040,29 @@ impl RecoverableWorkspaceBuilder<'_> {
                 };
                 if target_module.authority == ModuleAuthority::RuntimeSystem {
                     semantic_imports.push(SemanticImport {
-                        name: name.clone(),
+                        name: if open { "*".into() } else { name.clone() },
                         location,
-                        target: target_module.id,
+                        target: target_module.id.clone(),
                     });
                     if let Some((value, interface)) = self.core_modules.get(&target) {
+                        if open {
+                            match recovery_open_import_exports(
+                                &target_module.id,
+                                value,
+                                interface,
+                                None,
+                            ) {
+                                Ok(exports) => {
+                                    for (name, candidate) in exports {
+                                        open_candidates.entry(name).or_default().push(candidate);
+                                    }
+                                }
+                                Err(error) => {
+                                    diagnostics.push(Diagnostic::error(error.to_string(), location))
+                                }
+                            }
+                            continue;
+                        }
                         match select_import_value(
                             value.clone(),
                             interface.clone(),
@@ -971,7 +1092,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                     .expect("local import resolves to a local source")
                     .to_owned();
                 semantic_imports.push(SemanticImport {
-                    name: name.clone(),
+                    name: if open { "*".into() } else { name.clone() },
                     location,
                     target: target_module.id.clone(),
                 });
@@ -982,6 +1103,30 @@ impl RecoverableWorkspaceBuilder<'_> {
                     }
                 };
                 if let Some(value) = value {
+                    if open {
+                        let sourced = self.sourced_values.get(&target_module.id);
+                        let interface = self
+                            .interfaces
+                            .get(&target_module.id)
+                            .cloned()
+                            .unwrap_or_default();
+                        match recovery_open_import_exports(
+                            &target_module.id,
+                            &value,
+                            &interface,
+                            sourced,
+                        ) {
+                            Ok(exports) => {
+                                for (name, candidate) in exports {
+                                    open_candidates.entry(name).or_default().push(candidate);
+                                }
+                            }
+                            Err(error) => {
+                                diagnostics.push(Diagnostic::error(error.to_string(), location));
+                            }
+                        }
+                        continue;
+                    }
                     if let Some(sourced) = self.sourced_values.get(&target_module.id) {
                         external_sourced_values.insert(name.clone(), sourced.clone());
                     }
@@ -1017,6 +1162,56 @@ impl RecoverableWorkspaceBuilder<'_> {
                         ));
                     }
                 }
+            }
+            if module_id.to_string() != PRELUDE_MODULE
+                && let Some((value, interface)) = self.core_modules.get(PRELUDE_MODULE)
+            {
+                let provider = ModuleId::Builtin(PRELUDE_MODULE.into());
+                if let Ok(exports) = recovery_open_import_exports(&provider, value, interface, None)
+                {
+                    for (name, candidate) in exports {
+                        open_candidates.entry(name).or_default().push(candidate);
+                    }
+                }
+            }
+            let explicit_names = parsed
+                .recovered
+                .bindings
+                .iter()
+                .filter(|binding| binding.value.kind != BindingKind::OpenImport)
+                .map(|binding| binding.value.name.value.as_str())
+                .collect::<HashSet<_>>();
+            for (name, mut candidates) in open_candidates {
+                if explicit_names.contains(name.as_str()) || external_values.contains_key(&name) {
+                    continue;
+                }
+                candidates.sort_by(|left, right| left.provider.cmp(&right.provider));
+                candidates.dedup_by(|left, right| left.provider == right.provider);
+                if candidates.len() > 1 {
+                    let providers = candidates
+                        .iter()
+                        .map(|candidate| candidate.provider.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    for location in recovered_reference_locations(&parsed.recovered, &name) {
+                        diagnostics.push(Diagnostic::error(
+                            format!("open import name {name:?} is ambiguous between {providers}"),
+                            location,
+                        ));
+                    }
+                    continue;
+                }
+                let candidate = candidates.into_iter().next().expect("one candidate");
+                if let Some(sourced) = candidate.sourced {
+                    external_sourced_values.insert(name.clone(), sourced);
+                }
+                external_interfaces.insert(
+                    name.clone(),
+                    ModuleInterface {
+                        exports: BTreeMap::from([(name.clone(), candidate.scheme)]),
+                    },
+                );
+                external_values.insert(name, candidate.value);
             }
             self.visiting.pop();
 
@@ -1613,12 +1808,18 @@ impl ModuleLoader {
         let mut opaque_bindings = HashSet::new();
         let mut semantic_imports = Vec::new();
         let mut external_interfaces = BTreeMap::new();
+        let mut open_candidates: BTreeMap<String, Vec<OpenImportCandidate>> = BTreeMap::new();
 
         for binding in &program.value.body.value.bindings {
-            if binding.value.kind != BindingKind::Import {
+            if !matches!(
+                binding.value.kind,
+                BindingKind::Import | BindingKind::OpenImport
+            ) {
                 continue;
             }
-            if external_bindings.contains_key(&binding.value.name.value) {
+            if binding.value.kind == BindingKind::Import
+                && external_bindings.contains_key(&binding.value.name.value)
+            {
                 return Err(ModuleError::new(format!(
                     "duplicate module binding {:?} in {source_name}",
                     binding.value.name.value
@@ -1645,10 +1846,28 @@ impl ModuleLoader {
                         )))
                     })?;
                 semantic_imports.push(SemanticImport {
-                    name: binding.value.name.value.clone(),
+                    name: if binding.value.kind == BindingKind::OpenImport {
+                        "*".into()
+                    } else {
+                        binding.value.name.value.clone()
+                    },
                     location: binding.value.name.location,
-                    target: imported.id,
+                    target: imported.id.clone(),
                 });
+                if binding.value.kind == BindingKind::OpenImport {
+                    for (name, candidate) in open_import_exports(
+                        &imported.id,
+                        &value,
+                        root,
+                        &interface,
+                        &self.main.heap,
+                        None,
+                        false,
+                    )? {
+                        open_candidates.entry(name).or_default().push(candidate);
+                    }
+                    continue;
+                }
                 let selected_root =
                     binding
                         .value
@@ -1678,7 +1897,11 @@ impl ModuleLoader {
             let imported_id = imported.id.clone();
             let sourced = self.load_resolved_value(imported)?;
             semantic_imports.push(SemanticImport {
-                name: binding.value.name.value.clone(),
+                name: if binding.value.kind == BindingKind::OpenImport {
+                    "*".into()
+                } else {
+                    binding.value.name.value.clone()
+                },
                 location: binding.value.name.location,
                 target: imported_id.clone(),
             });
@@ -1691,6 +1914,22 @@ impl ModuleLoader {
                 .cache
                 .get(&imported_id)
                 .expect("loaded module has a ready cache entry");
+            if binding.value.kind == BindingKind::OpenImport {
+                let provenance =
+                    (!sourced.provenance.values.is_empty()).then_some(&sourced.provenance);
+                for (name, candidate) in open_import_exports(
+                    &imported_id,
+                    &sourced.value,
+                    *root,
+                    interface,
+                    &self.main.heap,
+                    provenance,
+                    *opaque,
+                )? {
+                    open_candidates.entry(name).or_default().push(candidate);
+                }
+                continue;
+            }
             let selected_root = binding
                 .value
                 .imported_name
@@ -1717,6 +1956,70 @@ impl ModuleLoader {
                 external_provenance.insert(binding.value.name.value.clone(), sourced.provenance);
             }
             external_bindings.insert(binding.value.name.value.clone(), selected_value);
+        }
+        if module_id.to_string() != PRELUDE_MODULE
+            && let Some((value, root, interface)) = self.core_modules.get(PRELUDE_MODULE)
+        {
+            let provider = ModuleId::Builtin(PRELUDE_MODULE.into());
+            for (name, candidate) in open_import_exports(
+                &provider,
+                value,
+                *root,
+                interface,
+                &self.main.heap,
+                None,
+                false,
+            )? {
+                open_candidates.entry(name).or_default().push(candidate);
+            }
+        }
+        let explicit_names = program
+            .value
+            .body
+            .value
+            .bindings
+            .iter()
+            .filter(|binding| binding.value.kind != BindingKind::OpenImport)
+            .map(|binding| binding.value.name.value.as_str())
+            .collect::<HashSet<_>>();
+        for (name, mut candidates) in open_candidates {
+            if explicit_names.contains(name.as_str()) || external_bindings.contains_key(&name) {
+                continue;
+            }
+            candidates.sort_by(|left, right| left.provider.cmp(&right.provider));
+            candidates.dedup_by(|left, right| left.provider == right.provider);
+            if candidates.len() > 1 {
+                if program_references_name(&program, &name) {
+                    let providers = candidates
+                        .iter()
+                        .map(|candidate| candidate.provider.to_string())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    return Err(ModuleError::new(format!(
+                        "open import name {name:?} is ambiguous between {providers}"
+                    )));
+                }
+                continue;
+            }
+            let candidate = candidates.into_iter().next().expect("one candidate");
+            external_roots.insert(name.clone(), candidate.root);
+            external_interfaces.insert(
+                name.clone(),
+                ModuleInterface {
+                    exports: BTreeMap::from([(name.clone(), candidate.scheme)]),
+                },
+            );
+            if candidate.opaque {
+                opaque_bindings.insert(name.clone());
+            }
+            if let Some(provenance) = candidate.provenance
+                && !provenance.values.is_empty()
+            {
+                external_provenance.insert(name.clone(), provenance);
+            }
+            external_bindings.insert(name, candidate.value);
         }
         if let Some(binding) = program.value.body.value.bindings.iter().find(|binding| {
             matches!(
@@ -1911,7 +2214,7 @@ fn expression_has_import(expression: &Expr) -> bool {
             block.value.bindings.iter().any(|binding| {
                 matches!(
                     binding.value.kind,
-                    BindingKind::Import | BindingKind::Native
+                    BindingKind::Import | BindingKind::OpenImport | BindingKind::Native
                 )
             }) || block
                 .value
@@ -1950,15 +2253,16 @@ fn expression_has_import(expression: &Expr) -> bool {
         }
         ExprKind::Interpreter { operand, .. } => expression_has_import(operand),
         ExprKind::Closure { body, .. } => {
-            body.value
+            body.value.bindings.iter().any(|binding| {
+                matches!(
+                    binding.value.kind,
+                    BindingKind::Import | BindingKind::OpenImport
+                )
+            }) || body
+                .value
                 .bindings
                 .iter()
-                .any(|binding| binding.value.kind == BindingKind::Import)
-                || body
-                    .value
-                    .bindings
-                    .iter()
-                    .any(|binding| expression_has_import(&binding.value.value))
+                .any(|binding| expression_has_import(&binding.value.value))
                 || expression_has_import(&body.value.result)
         }
         ExprKind::If {
@@ -1973,8 +2277,10 @@ fn expression_has_import(expression: &Expr) -> bool {
                     .iter()
                     .chain(&else_branch.value.bindings)
                     .any(|binding| {
-                        binding.value.kind == BindingKind::Import
-                            || expression_has_import(&binding.value.value)
+                        matches!(
+                            binding.value.kind,
+                            BindingKind::Import | BindingKind::OpenImport
+                        ) || expression_has_import(&binding.value.value)
                     })
                 || expression_has_import(&then_branch.value.result)
                 || expression_has_import(&else_branch.value.result)
@@ -2152,6 +2458,76 @@ let user: User = {name: result.unwrap(check(String, "forma"))};
                 .to_string()
                 .contains("duplicate module binding \"item\"")
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn open_imports_resolve_lazily_and_combine_with_module_bindings() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import "std/result" as result, *;
+import "core/prelude" as prelude, { struct as make_struct };
+type User = make_struct('None, {name: String});
+let user = {name: unwrap('Ok("forma"))};
+(user, result.unwrap == unwrap, prelude.struct == make_struct)"#,
+        )
+        .unwrap();
+        let module = load_module(directory.join("main.forma"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            module.execute(100_000).unwrap().to_string(),
+            "({name: \"forma\"}, 'True, 'True)"
+        );
+
+        fs::write(
+            directory.join("left.forma"),
+            "def shared: Int = 1; {shared}",
+        )
+        .unwrap();
+        fs::write(
+            directory.join("right.forma"),
+            "def shared: Int = 2; {shared}",
+        )
+        .unwrap();
+        fs::write(
+            directory.join("unused.forma"),
+            "import \"./left.forma\" *; import \"./right.forma\" *; 0",
+        )
+        .unwrap();
+        let unused = load_module(directory.join("unused.forma"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(unused.execute(100_000).unwrap().to_string(), "0");
+
+        fs::write(
+            directory.join("shadowed.forma"),
+            "import \"./left.forma\" *; import \"./right.forma\" *; let shared = 3; shared",
+        )
+        .unwrap();
+        let shadowed =
+            load_module(directory.join("shadowed.forma"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(shadowed.execute(100_000).unwrap().to_string(), "3");
+
+        fs::write(
+            directory.join("ambiguous.forma"),
+            "import \"./left.forma\" *; import \"./right.forma\" *; shared",
+        )
+        .unwrap();
+        let ambiguous =
+            load_module(directory.join("ambiguous.forma"), BTreeMap::new(), 100_000).unwrap_err();
+        let message = ambiguous.to_string();
+        assert!(
+            message.contains("open import name \"shared\" is ambiguous"),
+            "{message}"
+        );
+        assert!(message.contains("left.forma"));
+        assert!(message.contains("right.forma"));
+        let recovered = recovery_engine()
+            .recover_workspace(directory.join("ambiguous.forma"))
+            .unwrap();
+        assert!(recovered.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("open import name \"shared\" is ambiguous")
+        }));
         fs::remove_dir_all(directory).unwrap();
     }
 

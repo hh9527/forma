@@ -30,7 +30,8 @@ native_type_binding: 'native' 'type' Identifier '=' '@' Int ';';
 type_scheme: ['for' type_parameters] contract;
 type_parameters: '(' Identifier (?1 ',' Identifier)* [','] ')';
 type_binding: decorator* 'type' Identifier '=' expression ';';
-import_binding: 'import' string_literal ('as' Identifier | import_items) ';';
+import_binding: 'import' string_literal import_selector ';';
+import_selector: 'as' Identifier [',' ('*' | import_items)] | '*' | import_items;
 import_items: '{' import_item (?1 ',' import_item)* [','] '}';
 import_item: Identifier ['as' Identifier];
 

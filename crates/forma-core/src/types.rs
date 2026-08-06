@@ -1493,6 +1493,34 @@ pub(crate) fn analyze_program_with_bindings_observed(
     let mut declared_type_spans = HashMap::new();
     let mut expression_descriptors = HashMap::new();
 
+    let authored_names = program
+        .value
+        .body
+        .value
+        .bindings
+        .iter()
+        .filter(|binding| binding.value.kind != BindingKind::OpenImport)
+        .map(|binding| binding.value.name.value.as_str())
+        .collect::<HashSet<_>>();
+    for (name, value) in external_values {
+        if authored_names.contains(name.as_str()) {
+            continue;
+        }
+        tool_values.insert(name.clone(), value.clone());
+        let scheme = external_interfaces
+            .get(name)
+            .and_then(|interface| interface.exports.get(name))
+            .cloned();
+        let inferred = scheme
+            .as_ref()
+            .map_or_else(|| infer_value(value), |scheme| scheme.body.clone());
+        static_environment.insert(name.clone(), inferred.clone());
+        binding_types.insert(name.clone(), inferred);
+        if let Some(scheme) = scheme {
+            binding_schemes.insert(name.clone(), scheme);
+        }
+    }
+
     // Tool-stage descriptors are currently trees. Predeclare type names with
     // conservative metadata so self and forward references can be evaluated;
     // the runtime retains the authoritative recursive metadata graph.
@@ -1648,6 +1676,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
             infer_expr_recorded(annotation, &static_environment, &mut expression_descriptors);
         }
         match binding.value.kind {
+            BindingKind::OpenImport => continue,
             BindingKind::Decl => continue,
             BindingKind::Native | BindingKind::NativeType => {
                 let value = external_values
@@ -2062,7 +2091,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
     for binding in &program.value.body.value.bindings {
         if matches!(
             binding.value.kind,
-            BindingKind::Decl | BindingKind::Native | BindingKind::Import
+            BindingKind::Decl | BindingKind::Native | BindingKind::Import | BindingKind::OpenImport
         ) {
             if binding.value.kind == BindingKind::Import {
                 let scheme = external_interfaces
@@ -6568,6 +6597,29 @@ fn expression_references_names(
         | ExprKind::Bytes(_)
         | ExprKind::Atom(_) => false,
     }
+}
+
+pub(crate) fn program_references_name(program: &Program, name: &str) -> bool {
+    HirProgram::resolve(program, Vec::<String>::new())
+        .references()
+        .iter()
+        .any(|reference| {
+            reference.name == name && reference.resolution == HirResolution::Unresolved
+        })
+}
+
+pub(crate) fn recovered_reference_locations(
+    program: &crate::parser::RecoveredProgram,
+    name: &str,
+) -> Vec<crate::source::Location> {
+    HirProgram::resolve_recovered(program, Vec::<String>::new())
+        .references()
+        .iter()
+        .filter(|reference| {
+            reference.name == name && reference.resolution == HirResolution::Unresolved
+        })
+        .map(|reference| reference.location)
+        .collect()
 }
 
 fn contains_inference_variable_at_or_after(ty: &TypeDescriptor, first: u32) -> bool {

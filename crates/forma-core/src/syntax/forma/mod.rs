@@ -115,7 +115,7 @@ fn(settings, request) { {args: request.args} }"#;
 
     #[test]
     fn cst_preserves_path_first_module_bindings() {
-        let source = "import \"std/array\" as arrays; import \"std/array\" { map, filter as select }; let from = 1; (arrays, map, select, from)";
+        let source = "import \"std/array\" as arrays, *; import \"std/array\" as qualified, { map, filter as select }; let from = 1; (arrays, qualified, map, select, from)";
         let mut sources = crate::source::SourceDatabase::default();
         let id = sources.add("imports.forma", source);
         let parsed = parse(id, source);
@@ -127,6 +127,14 @@ fn(settings, request) { {args: request.args} }"#;
         let removed = "import arrays from \"std/array\"; arrays";
         let id = sources.add("removed-import.forma", removed);
         assert!(parse(id, removed).has_errors());
+
+        for rejected in [
+            "import \"std/array\"; 0",
+            "import \"std/array\" * as arrays; arrays",
+        ] {
+            let id = sources.add("rejected-import.forma", rejected);
+            assert!(parse(id, rejected).has_errors(), "{rejected}");
+        }
     }
 
     #[test]

@@ -411,6 +411,25 @@ impl<'a> Compiler<'a> {
                 compiler.environment.insert(name.clone(), register);
             }
         }
+        let authored_names = program
+            .value
+            .body
+            .value
+            .bindings
+            .iter()
+            .filter(|binding| binding.value.kind != BindingKind::OpenImport)
+            .map(|binding| binding.value.name.value.as_str())
+            .collect::<HashSet<_>>();
+        for (name, value) in &analysis.external_values {
+            if !authored_names.contains(name.as_str())
+                && compiler.retained_names.contains(name)
+                && !compiler.environment.contains_key(name)
+            {
+                let register =
+                    compiler.load_external_constant(value.clone(), name.clone(), program.location);
+                compiler.environment.insert(name.clone(), register);
+            }
+        }
         compiler.compile_tail_block(&program.value.body)?;
         compiler.finish()
     }
@@ -643,6 +662,7 @@ impl<'a> Compiler<'a> {
 
         for binding in &block.value.bindings {
             match binding.value.kind {
+                BindingKind::OpenImport => continue,
                 BindingKind::Decl => continue,
                 BindingKind::Type => {
                     if self.retained_names.contains(&binding.value.name.value) {

@@ -56,6 +56,7 @@ pub enum BindingKind {
     NativeType,
     Type,
     Import,
+    OpenImport,
 }
 
 #[derive(Clone, Debug)]

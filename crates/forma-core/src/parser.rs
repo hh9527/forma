@@ -750,41 +750,84 @@ impl<'a> Lowerer<'a> {
             ExprKind::String(self.plain_string(path, "import path")?),
             self.location(path),
         );
-        let Some(items) = self
+        let selector = self
             .rule_children(node)
+            .find(|child| self.rule(*child) == Some(Rule::ImportSelector))
+            .ok_or_else(|| self.error(node, "import has no selector"))?;
+        let mut bindings = Vec::new();
+        if self.token_children(selector, Token::As).next().is_some() {
+            let name_node = self
+                .token_children(selector, Token::Identifier)
+                .next()
+                .ok_or_else(|| self.error(selector, "module import has no alias"))?;
+            bindings.push(located(
+                BindingData {
+                    decorators: Vec::new(),
+                    kind: BindingKind::Import,
+                    imported_name: None,
+                    name: self.identifier(name_node),
+                    type_parameters: Vec::new(),
+                    annotation: None,
+                    value: value.clone(),
+                },
+                self.location(node),
+            ));
+        }
+        if self.token_children(selector, Token::Star).next().is_some() {
+            bindings.push(located(
+                BindingData {
+                    decorators: Vec::new(),
+                    kind: BindingKind::OpenImport,
+                    imported_name: None,
+                    name: located(
+                        format!("\0open:{}", self.cst.span(node).start),
+                        self.location(node),
+                    ),
+                    type_parameters: Vec::new(),
+                    annotation: None,
+                    value: value.clone(),
+                },
+                self.location(node),
+            ));
+        }
+        let Some(items) = self
+            .rule_children(selector)
             .find(|child| self.rule(*child) == Some(Rule::ImportItems))
         else {
-            return Ok(vec![self.binding(node)?]);
+            return Ok(bindings);
         };
-        self.rule_children(items)
-            .filter(|child| self.rule(*child) == Some(Rule::ImportItem))
-            .map(|item| {
-                let names = self
-                    .token_children(item, Token::Identifier)
-                    .map(|name| self.identifier(name))
-                    .collect::<Vec<_>>();
-                let imported_name = names
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| self.error(item, "import item has no exported name"))?;
-                let name = names
-                    .get(1)
-                    .cloned()
-                    .unwrap_or_else(|| imported_name.clone());
-                Ok(located(
-                    BindingData {
-                        decorators: Vec::new(),
-                        kind: BindingKind::Import,
-                        imported_name: Some(Box::new(imported_name)),
-                        name,
-                        type_parameters: Vec::new(),
-                        annotation: None,
-                        value: value.clone(),
-                    },
-                    self.location(item),
-                ))
-            })
-            .collect()
+        bindings.extend(
+            self.rule_children(items)
+                .filter(|child| self.rule(*child) == Some(Rule::ImportItem))
+                .map(|item| {
+                    let names = self
+                        .token_children(item, Token::Identifier)
+                        .map(|name| self.identifier(name))
+                        .collect::<Vec<_>>();
+                    let imported_name = names
+                        .first()
+                        .cloned()
+                        .ok_or_else(|| self.error(item, "import item has no exported name"))?;
+                    let name = names
+                        .get(1)
+                        .cloned()
+                        .unwrap_or_else(|| imported_name.clone());
+                    Ok(located(
+                        BindingData {
+                            decorators: Vec::new(),
+                            kind: BindingKind::Import,
+                            imported_name: Some(Box::new(imported_name)),
+                            name,
+                            type_parameters: Vec::new(),
+                            annotation: None,
+                            value: value.clone(),
+                        },
+                        self.location(item),
+                    ))
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        Ok(bindings)
     }
 
     fn expression(&self, node: NodeRef) -> Result<Expr, Diagnostic> {

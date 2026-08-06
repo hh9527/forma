@@ -1,6 +1,6 @@
 # RFC 0140: Path-first module imports
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0057, RFC 0139
 - Child RFCs: RFC 0141 through RFC 0143
 
@@ -110,3 +110,12 @@ the synthetic default-prelude edge.
 6. Explicit local bindings take precedence over open providers.
 7. Strict execution, recovery, semantic queries, and LSP agree on resolution.
 8. `core/prelude` uses the same open-provider model as authored imports.
+
+## Implementation result
+
+RFCs 0141 through 0143 implement the full path-first family. Module bindings,
+selective projections, open providers, and combined selectors share resolved
+module loading and preserve value identity and interface schemes. Open lookup
+retains provider identity until explicit shadowing, unique resolution, or a
+used-name ambiguity is known. The default prelude now enters module analysis
+through that provider path after its bootstrap module is available.

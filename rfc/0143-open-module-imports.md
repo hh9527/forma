@@ -1,6 +1,6 @@
 # RFC 0143: Open module imports
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0140, RFC 0141, RFC 0142
 
 ## Summary
@@ -107,3 +107,20 @@ providers, qualified by provider module id.
    self-reference.
 9. Strict, recoverable, semantic, and LSP behavior is covered by tests.
 
+## Implementation result
+
+The parser lowers open selectors to dependency-only `OpenImport` AST edges;
+combined forms additionally lower their explicit module or item bindings.
+Strict and recoverable loaders retain candidates by export name and provider
+module id, deduplicate repeated access to one provider, apply explicit-binding
+precedence, and diagnose only referenced collisions.
+
+Unique candidates enter the existing external-value and interface pipeline,
+so runtime identity and exported generic schemes are preserved without adding
+authored bindings or exports. `core/prelude` is seeded through the same
+candidate path after bootstrap and is omitted while that module initializes.
+
+The semantic workspace records open dependency edges and resolves their unique
+names as external references. Tests cover combined selectors, runtime identity,
+explicit shadowing, unused and used collisions, recovery diagnostics, and the
+rejected bare and `* as name` forms.
