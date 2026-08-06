@@ -89,6 +89,7 @@ pub(crate) fn compile_program_with_promoted_types(
         binding.value.kind == BindingKind::Type
             || !erased_bindings.contains(&binding.value.name.value)
     });
+    crate::elaboration::elaborate_program(&mut program, &analysis.propagation_families);
     Compiler::program_in(
         source_file.name.as_ref(),
         Some(source_file),
@@ -838,7 +839,9 @@ impl<'a> Compiler<'a> {
                 }
                 Ok(dst)
             }
-            ExprKind::Propagate { operand } => self.compile_propagate(operand, expression.location),
+            ExprKind::Propagate { .. } => {
+                Err(self.error_at(expression.location, "unelaborated propagation expression"))
+            }
             ExprKind::Return { value } => {
                 let value = self.compile_expr(value)?;
                 self.emit(Operation::Return { src: value }, expression.location);
@@ -944,66 +947,6 @@ impl<'a> Compiler<'a> {
             }
         }
         Ok(())
-    }
-
-    fn compile_propagate(
-        &mut self,
-        operand: &Expr,
-        location: Location,
-    ) -> Result<RegisterId, FrontendError> {
-        let value = self.compile_expr(operand)?;
-        let success = self.new_label();
-        let check_ok = self.new_label();
-        let some = self.load_constant(atom_value("Some"), location);
-        let condition = self.allocate();
-        self.emit(
-            Operation::TaggedTagEquals {
-                dst: condition,
-                value,
-                tag: some,
-            },
-            location,
-        );
-        self.emit(
-            Operation::JumpIfFalse {
-                condition,
-                target: check_ok,
-            },
-            location,
-        );
-        self.emit_synthetic(Operation::Jump { target: success }, location);
-        self.mark_label(check_ok);
-        let ok = self.load_constant(atom_value("Ok"), location);
-        let condition = self.allocate();
-        self.emit(
-            Operation::TaggedTagEquals {
-                dst: condition,
-                value,
-                tag: ok,
-            },
-            location,
-        );
-        let failure = self.new_label();
-        self.emit(
-            Operation::JumpIfFalse {
-                condition,
-                target: failure,
-            },
-            location,
-        );
-        self.emit_synthetic(Operation::Jump { target: success }, location);
-        self.mark_label(failure);
-        self.emit_synthetic(Operation::Return { src: value }, location);
-        self.mark_label(success);
-        let payload = self.allocate();
-        self.emit(
-            Operation::GetTaggedPayload {
-                dst: payload,
-                value,
-            },
-            location,
-        );
-        Ok(payload)
     }
 
     fn compile_call_window(

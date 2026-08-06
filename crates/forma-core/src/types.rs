@@ -929,9 +929,16 @@ pub struct Analysis {
     pub definition_schemes: BTreeMap<HirDefinitionId, TypeScheme>,
     pub expression_types: BTreeMap<HirExpressionId, TypeId>,
     pub module_interface: ModuleInterface,
+    pub(crate) propagation_families: HashMap<crate::Location, PropagationFamily>,
     pub(crate) prelude: BTreeMap<String, Value>,
     pub(crate) external_values: BTreeMap<String, Value>,
     pub(crate) dynamic_bindings: HashSet<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PropagationFamily {
+    Option,
+    Result,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2372,6 +2379,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
         validate_publishable_scheme(scheme)
             .map_err(|message| frontend_error(source_name, message))?;
     }
+    let propagation_families = std::mem::take(&mut inference.propagation_families);
     Ok(Analysis {
         types,
         declared_types,
@@ -2382,6 +2390,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
         definition_schemes,
         expression_types,
         module_interface,
+        propagation_families,
         prelude,
         external_values: external_values.clone(),
         dynamic_bindings: dynamic_bindings.clone(),
@@ -3990,6 +3999,7 @@ struct GenericInference<'a> {
     pattern_binding_types: HashMap<crate::Location, TypeDescriptor>,
     propagation_boundaries: Vec<Option<PropagationRequirement>>,
     return_boundaries: Vec<Option<ReturnBoundary>>,
+    propagation_families: HashMap<crate::Location, PropagationFamily>,
 }
 
 #[derive(Clone)]
@@ -4186,6 +4196,7 @@ impl<'a> GenericInference<'a> {
             pattern_binding_types: HashMap::new(),
             propagation_boundaries: vec![None],
             return_boundaries: vec![None],
+            propagation_families: HashMap::new(),
         }
     }
 
@@ -5130,11 +5141,15 @@ impl<'a> GenericInference<'a> {
                 match self.resolve(&operand) {
                     TypeDescriptor::Enum(variants) => {
                         if let Some(payload) = option_parts(&variants) {
+                            self.propagation_families
+                                .insert(expression.location, PropagationFamily::Option);
                             self.record_propagation(PropagationRequirement::Option)?;
                             payload.clone()
                         } else if let Some((ok, err)) =
                             result_parts(&TypeDescriptor::Enum(variants))
                         {
+                            self.propagation_families
+                                .insert(expression.location, PropagationFamily::Result);
                             let ok = ok.clone();
                             let err = err.clone();
                             self.record_propagation(PropagationRequirement::Result(vec![err]))?;
