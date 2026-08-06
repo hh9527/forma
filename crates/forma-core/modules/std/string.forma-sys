@@ -10,4 +10,5 @@ native replace: Fn(String, String, String) -> String;
 native indent: Fn(String, Int) -> String;
 native ensure_trailing_newline: Fn(String) -> String;
 native trim_margin: Fn(String, String) -> String;
-export { length, join, join_lines, split, lines, starts_with, ends_with, contains, replace, indent, ensure_trailing_newline, trim_margin };
+native parse: for(A) Fn(TypeOf(A), String) -> Result(A, BlameError);
+export { length, join, join_lines, split, lines, starts_with, ends_with, contains, replace, indent, ensure_trailing_newline, trim_margin, parse };

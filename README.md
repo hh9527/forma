@@ -146,15 +146,17 @@ named captures are checked against the complete field set:
 
 ```forma
 import "std/regex" as re;
+import "std/string" as string;
 
-@re.parse(re.compile(r"(?P<name>\w+)=(?P<value>\d+)"))
+@re.parse_by(re.compile(r"(?P<name>\w+)=(?P<value>\d+)"))
 @struct
 type Rec = { name: String, value: Int };
 ```
 
-`re.decode(Rec, "answer=42")` has type `Result(Rec, BlameError)`. The type is
-the authoritative contract; the regex supplies one validated textual
-representation.
+`string.parse(Rec, "answer=42")` has type `Result(Rec, BlameError)`. The type
+is the authoritative contract; the regex only matches and splits a validated
+textual representation. Captured fields are parsed recursively through the
+same `std/string.parse` capability, so regex does not own their conversions.
 
 ### Deterministic executable and output plans
 

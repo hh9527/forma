@@ -3,10 +3,9 @@ native type Regex = @0;
 native compile: Fn(String) -> Regex;
 native is_match: Fn(Regex, String) -> Bool;
 native prepare: Fn(Regex, Any, Any) -> Any;
-native decode: for(A) Fn(TypeOf(A), String) -> Result(A, BlameError);
 
-def parse = fn(regex) {
+def parse_by = fn(regex) {
     fn(ctx, value) { prepare(regex, ctx, value) }
 };
 
-export { Regex, compile, is_match, parse, decode };
+export { Regex, compile, is_match, parse_by };

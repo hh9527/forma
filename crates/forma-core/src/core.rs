@@ -249,6 +249,10 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
                     "starts_with",
                     NativeFunction::core_string(CoreStringFunction::StartsWith),
                 ),
+                (
+                    "parse",
+                    NativeFunction::new("std/string.parse", 2, crate::regex::native_parse),
+                ),
             ],
         },
         CoreModuleSpec {
@@ -485,15 +489,6 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
                         3,
                         0,
                         crate::regex::native_prepare,
-                    ),
-                ),
-                (
-                    "decode",
-                    NativeFunction::new_with_native_type(
-                        "std/regex.decode",
-                        2,
-                        0,
-                        crate::regex::native_decode,
                     ),
                 ),
             ],

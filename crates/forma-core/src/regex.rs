@@ -1,4 +1,3 @@
-use crate::types::TypeDescriptor;
 use crate::{CallContext, NativeError, NativeType};
 use regex_syntax::hir::{Hir, HirKind};
 use std::collections::{BTreeMap, BTreeSet};
@@ -19,14 +18,19 @@ impl PartialEq for CompiledRegex {
 
 impl Eq for CompiledRegex {}
 
-#[derive(Clone, Copy)]
-enum ScalarKind {
+#[derive(Clone)]
+enum ParsePlan {
     String,
     Int,
+    Regex {
+        compiled: CompiledRegex,
+        fields: BTreeMap<String, FieldPlan>,
+    },
 }
 
+#[derive(Clone)]
 struct FieldPlan {
-    kind: ScalarKind,
+    plan: ParsePlan,
     optional: bool,
 }
 
@@ -132,45 +136,102 @@ pub(crate) fn native_is_match(context: &mut CallContext<'_, '_>) -> Result<(), N
     )
 }
 
-fn option_scalar(descriptor: &TypeDescriptor) -> Option<ScalarKind> {
-    let TypeDescriptor::Enum(variants) = descriptor else {
-        return None;
-    };
-    if variants.len() != 2 || variants.get("None")?.is_some() {
+fn stripped_metadata(
+    mut metadata: crate::ValueRef<'_>,
+) -> Result<crate::ValueRef<'_>, NativeError> {
+    while metadata.dict_get("kind").and_then(|kind| kind.as_atom()) == Some("WithAttributes") {
+        metadata = metadata
+            .dict_get("inner")
+            .ok_or_else(|| NativeError::new("attributed type has no inner metadata"))?;
+    }
+    Ok(metadata)
+}
+
+fn option_payload(metadata: crate::ValueRef<'_>) -> Option<crate::ValueRef<'_>> {
+    let metadata = stripped_metadata(metadata).ok()?;
+    if metadata.dict_get("kind")?.as_atom()? != "Enum" {
         return None;
     }
-    match variants.get("Some")?.as_deref()? {
-        TypeDescriptor::String => Some(ScalarKind::String),
-        TypeDescriptor::Int => Some(ScalarKind::Int),
-        _ => None,
+    let variants = metadata.dict_get("variants")?;
+    if variants.dict_fields()?.as_slice() != ["None", "Some"] {
+        return None;
+    }
+    let none = stripped_metadata(variants.dict_get("None")?).ok()?;
+    if none.as_atom()? != "None" {
+        return None;
+    }
+    let payload = stripped_metadata(variants.dict_get("Some")?).ok()?;
+    (payload.as_atom() != Some("None")).then_some(payload)
+}
+
+fn attached_regex(metadata: crate::ValueRef<'_>) -> Result<Option<CompiledRegex>, NativeError> {
+    let mut metadata = metadata;
+    loop {
+        if let Some(provider) = metadata
+            .dict_get("attributes")
+            .and_then(|attributes| attributes.dict_get("std/string.parse"))
+        {
+            let (tag, payload) = provider
+                .tagged_parts()
+                .ok_or_else(|| NativeError::new("std/string.parse provider must be Tagged"))?;
+            if tag.as_atom() != Some("Regex") {
+                return Err(NativeError::new("unknown std/string.parse provider"));
+            }
+            let native_type = payload
+                .opaque_native_type()
+                .ok_or_else(|| NativeError::new("regex parse provider has an invalid payload"))?;
+            if native_type.qualified_name() != "std/regex#Regex" {
+                return Err(NativeError::new(
+                    "regex parse provider has an invalid payload",
+                ));
+            }
+            return payload
+                .as_opaque::<CompiledRegex>(native_type)
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| NativeError::new("regex parse provider has an invalid payload"));
+        }
+        if metadata.dict_get("kind").and_then(|kind| kind.as_atom()) != Some("WithAttributes") {
+            return Ok(None);
+        }
+        metadata = metadata
+            .dict_get("inner")
+            .ok_or_else(|| NativeError::new("attributed type has no inner metadata"))?;
     }
 }
 
-fn field_plan(descriptor: &TypeDescriptor) -> Option<FieldPlan> {
-    match descriptor {
-        TypeDescriptor::String => Some(FieldPlan {
-            kind: ScalarKind::String,
-            optional: false,
-        }),
-        TypeDescriptor::Int => Some(FieldPlan {
-            kind: ScalarKind::Int,
-            optional: false,
-        }),
-        descriptor => option_scalar(descriptor).map(|kind| FieldPlan {
-            kind,
-            optional: true,
-        }),
+fn parse_plan(metadata: crate::ValueRef<'_>) -> Result<ParsePlan, NativeError> {
+    if let Some(compiled) = attached_regex(metadata)? {
+        let fields = validate_relation(&compiled, metadata)?;
+        return Ok(ParsePlan::Regex { compiled, fields });
+    }
+    let metadata = stripped_metadata(metadata)?;
+    match metadata.dict_get("kind").and_then(|kind| kind.as_atom()) {
+        Some("String") => Ok(ParsePlan::String),
+        Some("Int") => Ok(ParsePlan::Int),
+        _ => Err(NativeError::new("type has no std/string.parse capability")),
     }
 }
 
 fn validate_relation(
     compiled: &CompiledRegex,
-    descriptor: &TypeDescriptor,
+    metadata: crate::ValueRef<'_>,
 ) -> Result<BTreeMap<String, FieldPlan>, NativeError> {
-    let TypeDescriptor::Struct(fields) = descriptor else {
-        return Err(NativeError::new("std/regex.parse requires a struct type"));
-    };
-    let names = fields.keys().cloned().collect::<BTreeSet<_>>();
+    let metadata = stripped_metadata(metadata)?;
+    if metadata.dict_get("kind").and_then(|kind| kind.as_atom()) != Some("Struct") {
+        return Err(NativeError::new(
+            "std/regex.parse_by requires a struct type",
+        ));
+    }
+    let fields = metadata
+        .dict_get("fields")
+        .ok_or_else(|| NativeError::new("struct type metadata has no fields"))?;
+    let names = fields
+        .dict_fields()
+        .ok_or_else(|| NativeError::new("struct fields metadata must be a Dict"))?
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
     if names != compiled.captures {
         let missing = names
             .difference(&compiled.captures)
@@ -185,16 +246,22 @@ fn validate_relation(
             "regex captures must match struct fields; missing captures {missing:?}, extra captures {extra:?}"
         )));
     }
-    fields
-        .iter()
-        .map(|(name, descriptor)| {
-            let plan = field_plan(descriptor).ok_or_else(|| {
+    names
+        .into_iter()
+        .map(|name| {
+            let metadata = fields
+                .dict_get(&name)
+                .expect("field name came from metadata");
+            let (optional, metadata) =
+                option_payload(metadata).map_or((false, metadata), |payload| (true, payload));
+            let plan = parse_plan(metadata).map_err(|error| {
                 NativeError::new(format!(
-                    "regex field {name:?} must be String, Int, Option(String), or Option(Int)"
+                    "regex field {name:?} is not string-parsable: {}",
+                    error.message
                 ))
             })?;
-            let capture_optional = !compiled.required.contains(name);
-            if capture_optional != plan.optional {
+            let capture_optional = !compiled.required.contains(&name);
+            if capture_optional != optional {
                 return Err(NativeError::new(format!(
                     "regex capture {name:?} is {}, but its field is {}",
                     if capture_optional {
@@ -202,14 +269,10 @@ fn validate_relation(
                     } else {
                         "required"
                     },
-                    if plan.optional {
-                        "optional"
-                    } else {
-                        "required"
-                    }
+                    if optional { "optional" } else { "required" }
                 )));
             }
-            Ok((name.clone(), plan))
+            Ok((name, FieldPlan { plan, optional }))
         })
         .collect()
 }
@@ -217,13 +280,16 @@ fn validate_relation(
 pub(crate) fn native_prepare(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
     let native_type = regex_type(context)?;
     let compiled = compiled_argument(context, 0, &native_type)?;
-    let descriptor = crate::types::decode_native_type(context.value(context.argument(2)?)?)?;
-    validate_relation(&compiled, &descriptor)?;
+    validate_relation(&compiled, context.value(context.argument(2)?)?)?;
 
     let regex = context.scratch()?;
     context.copy(regex, context.argument(0)?)?;
     let attributes = context.scratch()?;
-    context.make_dict(attributes, &[("std/regex.parse".into(), regex)])?;
+    let provider_tag = context.scratch()?;
+    context.set_atom(provider_tag, "Regex")?;
+    let provider = context.scratch()?;
+    context.make_tagged(provider, provider_tag, regex)?;
+    context.make_dict(attributes, &[("std/string.parse".into(), provider)])?;
     let kind = context.scratch()?;
     context.set_atom(kind, "WithAttributes")?;
     let inner = context.scratch()?;
@@ -236,30 +302,6 @@ pub(crate) fn native_prepare(context: &mut CallContext<'_, '_>) -> Result<(), Na
             ("attributes".into(), attributes),
         ],
     )
-}
-
-fn attached_regex(
-    context: &CallContext<'_, '_>,
-    native_type: &NativeType,
-) -> Result<CompiledRegex, NativeError> {
-    let mut metadata = context.value(context.argument(0)?)?;
-    loop {
-        if let Some(compiled) = metadata
-            .dict_get("attributes")
-            .and_then(|attributes| attributes.dict_get("std/regex.parse"))
-            .and_then(|value| value.as_opaque::<CompiledRegex>(native_type))
-        {
-            return Ok(compiled.clone());
-        }
-        if metadata.dict_get("kind").and_then(|kind| kind.as_atom()) != Some("WithAttributes") {
-            return Err(NativeError::new(
-                "type has no valid std/regex.parse metadata",
-            ));
-        }
-        metadata = metadata
-            .dict_get("inner")
-            .ok_or_else(|| NativeError::new("attributed type has no inner metadata"))?;
-    }
 }
 
 fn set_error(context: &mut CallContext<'_, '_>, message: String) -> Result<(), NativeError> {
@@ -279,53 +321,79 @@ fn set_error(context: &mut CallContext<'_, '_>, message: String) -> Result<(), N
     context.make_tagged(context.result(), tag, error)
 }
 
-pub(crate) fn native_decode(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
-    let native_type = regex_type(context)?;
-    let compiled = attached_regex(context, &native_type)?;
-    let descriptor = crate::types::decode_native_type(context.value(context.argument(0)?)?)?;
-    let plans = validate_relation(&compiled, &descriptor)?;
+fn execute_plan(
+    context: &mut CallContext<'_, '_>,
+    plan: &ParsePlan,
+    input: &str,
+    output: crate::lir::RegisterId,
+) -> Result<(), String> {
+    match plan {
+        ParsePlan::String => context
+            .set_string(output, input)
+            .map_err(|error| error.message),
+        ParsePlan::Int => input
+            .parse::<i64>()
+            .map_err(|_| "input is not a valid Int".to_owned())
+            .and_then(|value| {
+                context
+                    .set_int(output, value)
+                    .map_err(|error| error.message)
+            }),
+        ParsePlan::Regex { compiled, fields } => {
+            let captures = compiled
+                .regex
+                .captures(input)
+                .ok_or_else(|| "input does not match regular expression".to_owned())?;
+            let mut values = Vec::with_capacity(fields.len());
+            for (name, field) in fields {
+                let register = context.scratch().map_err(|error| error.message)?;
+                match captures.name(name).map(|capture| capture.as_str()) {
+                    Some(text) => {
+                        let value = context.scratch().map_err(|error| error.message)?;
+                        execute_plan(context, &field.plan, text, value)
+                            .map_err(|message| format!("capture {name:?}: {message}"))?;
+                        if field.optional {
+                            let tag = context.scratch().map_err(|error| error.message)?;
+                            context
+                                .set_atom(tag, "Some")
+                                .map_err(|error| error.message)?;
+                            context
+                                .make_tagged(register, tag, value)
+                                .map_err(|error| error.message)?;
+                        } else {
+                            context
+                                .copy(register, value)
+                                .map_err(|error| error.message)?;
+                        }
+                    }
+                    None if field.optional => {
+                        context.set_none(register).map_err(|error| error.message)?
+                    }
+                    None => return Err(format!("required capture {name:?} is absent")),
+                }
+                values.push((name.clone(), register));
+            }
+            context
+                .make_dict(output, &values)
+                .map_err(|error| error.message)
+        }
+    }
+}
+
+pub(crate) fn native_parse(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+    let plan = match parse_plan(context.value(context.argument(0)?)?) {
+        Ok(plan) => plan,
+        Err(error) => return set_error(context, error.message),
+    };
     let input = context
         .value(context.argument(1)?)?
         .as_str()
-        .ok_or_else(|| NativeError::new("std/regex.decode expects String"))?
+        .ok_or_else(|| NativeError::new("std/string.parse expects String"))?
         .to_owned();
-    let Some(captures) = compiled.regex.captures(&input) else {
-        return set_error(context, "input does not match regular expression".into());
-    };
-
-    let mut fields = Vec::with_capacity(plans.len());
-    for (name, plan) in plans {
-        let register = context.scratch()?;
-        match captures.name(&name).map(|capture| capture.as_str()) {
-            Some(text) => {
-                let value = context.scratch()?;
-                match plan.kind {
-                    ScalarKind::String => context.set_string(value, text)?,
-                    ScalarKind::Int => match text.parse::<i64>() {
-                        Ok(number) => context.set_int(value, number)?,
-                        Err(_) => {
-                            return set_error(
-                                context,
-                                format!("capture {name:?} is not a valid Int"),
-                            );
-                        }
-                    },
-                }
-                if plan.optional {
-                    let tag = context.scratch()?;
-                    context.set_atom(tag, "Some")?;
-                    context.make_tagged(register, tag, value)?;
-                } else {
-                    context.copy(register, value)?;
-                }
-            }
-            None if plan.optional => context.set_none(register)?,
-            None => return set_error(context, format!("required capture {name:?} is absent")),
-        }
-        fields.push((name, register));
-    }
     let value = context.scratch()?;
-    context.make_dict(value, &fields)?;
+    if let Err(message) = execute_plan(context, &plan, &input, value) {
+        return set_error(context, message);
+    }
     let tag = context.scratch()?;
     context.set_atom(tag, "Ok")?;
     context.make_tagged(context.result(), tag, value)

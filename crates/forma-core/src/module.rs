@@ -7204,8 +7204,9 @@ unchanged", "|"),
             &main,
             r#"import "std/regex" as re;
                import "std/result" as result;
+               import "std/string" as string;
                let pattern = re.compile(r"^(?P<name>\w+)=(?P<value>\d+)(?:;(?P<unit>\w+))?$");
-               @re.parse(pattern)
+               @re.parse_by(pattern)
                @struct type Rec = {
                    name: String,
                    value: Int,
@@ -7214,9 +7215,12 @@ unchanged", "|"),
                {
                    matched: re.is_match(pattern, "answer=42"),
                    equal: pattern == re.compile(r"^(?P<name>\w+)=(?P<value>\d+)(?:;(?P<unit>\w+))?$"),
-                   first: result.unwrap(re.decode(Rec, "answer=42")),
-                   second: result.unwrap(re.decode(Rec, "size=7;px")),
-                   failed: re.decode(Rec, "not a record"),
+                   text: result.unwrap(string.parse(String, "plain")),
+                   number: result.unwrap(string.parse(Int, "42")),
+                   first: result.unwrap(string.parse(Rec, "answer=42")),
+                   second: result.unwrap(string.parse(Rec, "size=7;px")),
+                   failed: string.parse(Rec, "not a record"),
+                   bad_int: string.parse(Int, "4x"),
                }"#,
         )
         .unwrap();
@@ -7224,6 +7228,8 @@ unchanged", "|"),
         let output = module.execute(500_000).unwrap().to_string();
         assert!(output.contains("matched: 'True"), "{output}");
         assert!(output.contains("equal: 'True"), "{output}");
+        assert!(output.contains("text: \"plain\""), "{output}");
+        assert!(output.contains("number: 42"), "{output}");
         assert!(
             output.contains("first: {name: \"answer\", unit: 'None, value: 42}"),
             "{output}"
@@ -7233,11 +7239,12 @@ unchanged", "|"),
             "{output}"
         );
         assert!(output.contains("failed: 'Err("), "{output}");
+        assert!(output.contains("bad_int: 'Err("), "{output}");
 
         fs::write(
             &main,
             r#"import "std/regex" as re;
-               @re.parse(re.compile(r"(?P<name>\w+)"))
+               @re.parse_by(re.compile(r"(?P<name>\w+)"))
                @struct type Bad = { value: Int };
                { Bad }"#,
         )
@@ -7253,6 +7260,7 @@ unchanged", "|"),
         let module = load_module(&main, BTreeMap::new(), 500_000).unwrap();
         let error = module.execute(500_000).unwrap_err();
         assert!(error.message.contains("invalid regular expression"));
+
         fs::remove_dir_all(directory).unwrap();
     }
 

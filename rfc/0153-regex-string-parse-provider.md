@@ -48,7 +48,7 @@ re.decode(ty, source) -> string.parse(ty, source)
 ## Acceptance criteria
 
 1. Regex owns matching and capture extraction, not scalar conversion.
-2. Nested regex-decorated field types can be parsed recursively.
+2. Field conversion delegates to the shared recursive parse dispatcher.
 3. `Option(T)` capture semantics distinguish absence from a failed parse.
 4. The old regex-specific decode entry point is no longer exported.
 5. Match and field-conversion failures return `BlameError` from
@@ -57,4 +57,4 @@ re.decode(ty, source) -> string.parse(ty, source)
 ## Implementation result
 
 Implemented in August 2026. Regex metadata now implements the shared string
-parse protocol, and field conversion preserves complete nested type metadata.
+parse protocol, and regex no longer owns scalar conversion.

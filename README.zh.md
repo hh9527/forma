@@ -100,13 +100,14 @@ type User = {
 
 ```forma
 import "std/regex" as re;
+import "std/string" as string;
 
-@re.parse(re.compile(r"(?P<name>\w+)=(?P<value>\d+)"))
+@re.parse_by(re.compile(r"(?P<name>\w+)=(?P<value>\d+)"))
 @struct
 type Rec = { name: String, value: Int };
 ```
 
-`re.decode(Rec, "answer=42")` 的结果类型是 `Result(Rec, BlameError)`。类型是权威契约，正则只提供一种经过验证的文本表示。
+`string.parse(Rec, "answer=42")` 的结果类型是 `Result(Rec, BlameError)`。类型是权威契约；正则只负责匹配并拆分经过验证的文本表示。捕获字段会递归使用同一个 `std/string.parse` 能力，因此正则不需要拥有它们的转换逻辑。
 
 ### 确定的执行与输出计划
 
