@@ -1,6 +1,6 @@
 # RFC 0121: Closed-Enum exhaustiveness
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0119, RFC 0120
 
 ## Summary
@@ -76,4 +76,16 @@ ordinary language values.
 
 ## Implementation result
 
-Pending.
+Generic inference now unions the shared whole-variant facts for every match arm
+after resolving the scrutinee type. A known Enum with uncovered variants emits
+one diagnostic at the match, listing canonical source-like witnesses such as
+`'None` and `'Some(_)` in stable map order. Catch-alls and irrefutable Tagged
+payload patterns complete coverage; dynamic and non-Enum scrutinees remain
+unchanged.
+
+Tests cover complete matches, omitted unit variants, omitted payload variants,
+refutable payload literals, catch-alls, and Any input. The reference equality
+interpreter was made explicit at the conservative boundary: it first matches
+`'Ok(value)` and then matches the closed Bool payload, rather than asking the
+checker to combine two refutable nested payload arms. The full core suite and
+strict Clippy pass without parser, bytecode, VM, or value-model changes.

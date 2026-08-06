@@ -49,11 +49,13 @@ def equal_items: Fn(Array(Dyn), Array(Dyn)) -> Result(Bool, BlameError) =
             'Some(pairs) => match arrays.fold_control[DynPair, EqualityResult, EqualityResult](pairs, 'Ok('True), fn(state, pair) {
                 match state {
                     'Err(error) => 'Break('Err(error)),
-                    'Ok('False) => 'Break('Ok('False)),
-                    'Ok('True) => match pair {
-                        (left_value, right_value) => match equal_dyn(left_value, right_value) {
-                            'Ok('True) => 'Continue('Ok('True)),
-                            result => 'Break(result),
+                    'Ok(equal) => match equal {
+                        'False => 'Break('Ok('False)),
+                        'True => match pair {
+                            (left_value, right_value) => match equal_dyn(left_value, right_value) {
+                                'Ok('True) => 'Continue('Ok('True)),
+                                result => 'Break(result),
+                            },
                         },
                     },
                 }
@@ -72,17 +74,19 @@ def equal_fields:
             'Some(pairs) => match arrays.fold_control[FieldPair, EqualityResult, EqualityResult](pairs, 'Ok('True), fn(state, pair) {
                 match state {
                     'Err(error) => 'Break('Err(error)),
-                    'Ok('False) => 'Break('Ok('False)),
-                    'Ok('True) => match pair {
-                        ((left_name, left_value), (right_name, right_value)) => {
-                            if left_name == right_name {
-                                match equal_dyn(left_value, right_value) {
-                                    'Ok('True) => 'Continue('Ok('True)),
-                                    result => 'Break(result),
+                    'Ok(equal) => match equal {
+                        'False => 'Break('Ok('False)),
+                        'True => match pair {
+                            ((left_name, left_value), (right_name, right_value)) => {
+                                if left_name == right_name {
+                                    match equal_dyn(left_value, right_value) {
+                                        'Ok('True) => 'Continue('Ok('True)),
+                                        result => 'Break(result),
+                                    }
+                                } else {
+                                    'Break('Ok('False))
                                 }
-                            } else {
-                                'Break('Ok('False))
-                            }
+                            },
                         },
                     },
                 }

@@ -22,7 +22,7 @@ use crate::{
     BuiltinAtom, CallContext, DebugSink, DiscardDebugSink, Quota, QuotaAccount, ValueKind,
     ValueRef, Vm,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 const DEFAULT_TOOL_FUEL: usize = 100_000;
@@ -5249,16 +5249,17 @@ impl<'a> GenericInference<'a> {
             }
             ExprKind::Match { value, arms } => {
                 let value_type = self.infer(value, environment, None)?;
+                let resolved_value_type = self.resolve(&value_type);
                 let mut arm_types = Vec::with_capacity(arms.len());
+                let mut covered_variants = BTreeSet::new();
                 for arm in arms {
                     if let Some(query) = &self.query {
                         query.check().map_err(|error| error.to_string())?;
                     }
                     let mut arm_environment = environment.clone();
-                    let analysis = crate::pattern::analyze_pattern(
-                        &arm.value.pattern,
-                        &self.resolve(&value_type),
-                    );
+                    let analysis =
+                        crate::pattern::analyze_pattern(&arm.value.pattern, &resolved_value_type);
+                    covered_variants.extend(analysis.covered_variants.iter().cloned());
                     for problem in analysis.problems {
                         self.pattern_diagnostics
                             .entry(problem.location)
@@ -5277,6 +5278,26 @@ impl<'a> GenericInference<'a> {
                         arm_environment.insert(binding.name, binding.ty);
                     }
                     arm_types.push(self.infer(&arm.value.value, &arm_environment, expected)?);
+                }
+                if let TypeDescriptor::Enum(variants) = &resolved_value_type {
+                    let missing = variants
+                        .iter()
+                        .filter(|(name, _)| !covered_variants.contains(*name))
+                        .map(|(name, payload)| {
+                            if payload.is_some() {
+                                format!("'{name}(_)")
+                            } else {
+                                format!("'{name}")
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    if !missing.is_empty() {
+                        self.pattern_diagnostics
+                            .entry(expression.location)
+                            .or_insert_with(|| {
+                                format!("non-exhaustive match; missing {}", missing.join(", "))
+                            });
+                    }
                 }
                 if let Some(first) = arm_types.first().cloned() {
                     arm_types
@@ -8483,6 +8504,47 @@ mod tests {
                 .contains("duplicate Struct pattern field \"name\""),
             "{duplicate}"
         );
+    }
+
+    #[test]
+    fn closed_enum_matches_require_conservative_whole_variant_coverage() {
+        let complete = analyze_source(
+            "match.forma",
+            "let option: Option(Int) = 'Some(1);\
+             match option { 'None => 0, 'Some(value) => value }",
+        )
+        .unwrap();
+        assert_eq!(complete.display(complete.result_type), "Int");
+
+        let missing = analyze_source(
+            "match.forma",
+            "let option: Option(Int) = 'Some(1); match option { 'Some(value) => value }",
+        )
+        .unwrap_err();
+        assert!(missing.to_string().contains("missing 'None"), "{missing}");
+
+        let refutable = analyze_source(
+            "match.forma",
+            "let option: Option(Int) = 'Some(1);\
+             match option { 'None => 0, 'Some(1) => 1 }",
+        )
+        .unwrap_err();
+        assert!(
+            refutable.to_string().contains("missing 'Some(_)"),
+            "{refutable}"
+        );
+
+        let catch_all = analyze_source(
+            "match.forma",
+            "let option: Option(Int) = 'Some(1); match option { _ => 0 }",
+        );
+        assert!(catch_all.is_ok());
+
+        let dynamic = analyze_source(
+            "match.forma",
+            "let inspect: Fn(Any) -> Int = fn(value) { match value { 'None => 0 } }; inspect",
+        );
+        assert!(dynamic.is_ok());
     }
 
     #[test]
