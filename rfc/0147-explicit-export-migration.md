@@ -1,6 +1,6 @@
 # RFC 0147: Explicit export migration
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0144, RFC 0145, RFC 0146
 
 ## Summary
@@ -100,3 +100,16 @@ module satisfies the explicit-export rule.
 8. RFC 0144 records the completed child sequence and final implementation
    result.
 
+## Implementation result
+
+Implemented in August 2026. All embedded `core/` and `std/` sources, current
+examples, CLI fixtures, and semantic/LSP module fixtures now use explicit
+exports. `Engine`, imports, and workspace recovery reject Forma modules without
+an export declaration; recovery retains their facts but marks the module
+unavailable.
+
+The former free module-loading helpers were replaced by the explicitly named
+`evaluate_expression_module*` test harness API. It accepts final expressions
+for compiler and VM tests, uses an isolated resolver graph, and is not used by
+the CLI, LSP, workspace, or production `Engine` path. Host modes consume only
+the named `output`, `exec`, and `build` entries.

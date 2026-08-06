@@ -86,6 +86,7 @@ def hash_tagged: Fn(Dyn, HashState, String) -> HashResult = fn(value, state, kin
                     let state = hash.update_int(state, 1);
                     hash_dyn(payload, state)
                 },
+                _ => panic!("invalid tagged payload result"),
             }
         },
     }
@@ -132,4 +133,4 @@ def my_hash:
     for(A) Fn(TypeOf(A)) -> Fn(A, HashState) -> HashResult =
     interpreter!(hash_dyn);
 
-{my_hash: my_hash, hash_dyn: hash_dyn}
+export { my_hash, hash_dyn };

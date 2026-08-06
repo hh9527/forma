@@ -32,7 +32,7 @@
     args: Array(String),
     env: Dict(String),
 };
-{
+export {
     Platform,
     ExecSettings,
     ExecRequest,
@@ -40,4 +40,4 @@
     UnpackOpt,
     Install,
     ExecEnv,
-}
+};

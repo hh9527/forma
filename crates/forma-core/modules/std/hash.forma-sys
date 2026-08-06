@@ -5,7 +5,7 @@ native update_bytes: Fn(HashState, Bytes) -> HashState;
 native update_string: Fn(HashState, String) -> HashState;
 native update_int: Fn(HashState, Int) -> HashState;
 native finish: Fn(HashState) -> Bytes;
-{
+export {
     HashState,
     sha256,
     new,
@@ -13,4 +13,4 @@ native finish: Fn(HashState) -> Bytes;
     update_string,
     update_int,
     finish,
-}
+};

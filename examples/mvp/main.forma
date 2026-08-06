@@ -8,4 +8,5 @@ type User = {
 };
 
 let user: User = raw_user;
-validate(User, user)
+let result = validate(User, user);
+export { result as output };

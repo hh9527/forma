@@ -44,8 +44,9 @@ pub use json::{
 };
 pub use lexer::{FrontendError, SourceLocation};
 pub use module::{
-    Engine, EngineBuilder, EngineConfig, LoadedModule, ModuleError, NativeModuleSpec, load_module,
-    load_module_with_quota, load_module_with_quota_and_debug_sink,
+    Engine, EngineBuilder, EngineConfig, LoadedModule, ModuleError, NativeModuleSpec,
+    evaluate_expression_module, evaluate_expression_module_with_quota,
+    evaluate_expression_module_with_quota_and_debug_sink,
 };
 pub use module_id::{
     ModuleAuthority, ModuleFormat, ModuleId, ModuleResolver, ResolveModuleError, ResolvedModule,

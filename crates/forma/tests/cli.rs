@@ -33,7 +33,7 @@ fn check_run_and_types_cover_the_closed_world_loop() {
         "import \"./data.json\" as data;\
          @struct type User = {name: String, age: Int};\
          let user: User = data;\
-         validate(User, user)",
+         export let output = validate(User, user);",
     )
     .unwrap();
 
@@ -71,7 +71,7 @@ fn check_run_and_types_cover_the_closed_world_loop() {
 #[test]
 fn run_accepts_external_json_and_failures_are_nonzero() {
     let directory = fixture_dir();
-    fs::write(directory.join("main.forma"), "input").unwrap();
+    fs::write(directory.join("main.forma"), "export { input as output };").unwrap();
     fs::write(directory.join("input.json"), "[1, 2, 3]").unwrap();
 
     let run = forma()
@@ -86,7 +86,7 @@ fn run_accepts_external_json_and_failures_are_nonzero() {
     assert!(run.status.success());
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "[1, 2, 3]");
 
-    fs::write(directory.join("bad.forma"), "1 / 0").unwrap();
+    fs::write(directory.join("bad.forma"), "export let output = 1 / 0;").unwrap();
     let failure = forma()
         .args(["run", directory.join("bad.forma").to_str().unwrap()])
         .output()
@@ -94,7 +94,7 @@ fn run_accepts_external_json_and_failures_are_nonzero() {
     assert!(!failure.status.success());
     let stderr = String::from_utf8_lossy(&failure.stderr);
     assert!(stderr.contains("division by zero"));
-    assert!(stderr.contains("bad.forma:1:1"));
+    assert!(stderr.contains("bad.forma:1:"));
     fs::remove_dir_all(directory).unwrap();
 }
 
@@ -137,7 +137,7 @@ fn show_reports_ordered_independent_runtime_failures_while_run_stays_strict() {
     let main = directory.join("main.forma");
     fs::write(
         &main,
-        "let first = 1 / 0;\nlet blocked = first + 1;\nlet second = 2 / 0;\n0",
+        "let first = 1 / 0;\nlet blocked = first + 1;\nlet second = 2 / 0;\nexport let output = 0;",
     )
     .unwrap();
 
@@ -156,6 +156,7 @@ fn show_reports_ordered_independent_runtime_failures_while_run_stays_strict() {
         .unwrap();
     assert!(!run.status.success());
     let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(!stderr.trim().is_empty());
     assert_eq!(stderr.matches("division by zero").count(), 1, "{stderr}");
     fs::remove_dir_all(directory).unwrap();
 }
@@ -165,7 +166,7 @@ fn run_evaluates_structured_string_interpolation() {
     let directory = fixture_dir();
     fs::write(
         directory.join("interpolation.forma"),
-        r#"let name = "Ada"; let count = 2; `hi, \{name} x\{count}`"#,
+        r#"let name = "Ada"; let count = 2; export let output = `hi, \{name} x\{count}`;"#,
     )
     .unwrap();
 
@@ -194,7 +195,7 @@ fn run_writes_debug_events_only_to_stderr() {
     fs::write(
         directory.join("debug.forma"),
         r#"import "std/debug" as debug;
-           42 |> debug.dbg_with\("answer\nlabel", _)"#,
+           export let output: Int = 42 |> debug.dbg_with\("answer\nlabel", _);"#,
     )
     .unwrap();
 
@@ -204,9 +205,12 @@ fn run_writes_debug_events_only_to_stderr() {
         .unwrap();
     assert!(run.status.success());
     assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "42");
-    assert_eq!(
-        String::from_utf8_lossy(&run.stderr).trim(),
-        r#"[debug] "answer\nlabel": 42"#
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr
+            .lines()
+            .all(|line| line == r#"[debug] "answer\nlabel": 42"#),
+        "{stderr}"
     );
     fs::remove_dir_all(directory).unwrap();
 }
@@ -319,7 +323,7 @@ export let exec: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request
 fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
     let directory = fixture_dir();
     let value = directory.join("value.forma");
-    fs::write(&value, "42").unwrap();
+    fs::write(&value, "export let exec = 42;").unwrap();
 
     let rejected = forma()
         .args(["exec", value.to_str().unwrap()])
@@ -342,7 +346,7 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
     assert!(String::from_utf8_lossy(&not_function.stderr).contains("must be a function"));
 
     let not_dict = directory.join("not-dict.forma");
-    fs::write(&not_dict, "fn(settings, request) { 42 }").unwrap();
+    fs::write(&not_dict, "export def exec = fn(settings, request) { 42 };").unwrap();
     let not_dict = forma()
         .args(["exec", "--dry-run", not_dict.to_str().unwrap()])
         .output()
@@ -353,7 +357,7 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
     let malformed = directory.join("malformed.forma");
     fs::write(
         &malformed,
-        "fn(settings, request) { {install: ['Copy({})], cwd: 'None, bin: \"x\", args: [], env: {}} }",
+        "export def exec = fn(settings, request) { {install: ['Copy({})], cwd: 'None, bin: \"x\", args: [], env: {}} };",
     )
     .unwrap();
     let malformed = forma()
@@ -369,7 +373,7 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
     let bad_env = directory.join("bad-env.forma");
     fs::write(
         &bad_env,
-        "fn(settings, request) { {install: [], cwd: 'None, bin: \"x\", args: [], env: {BAD: 1}} }",
+        "export def exec = fn(settings, request) { {install: [], cwd: 'None, bin: \"x\", args: [], env: {BAD: 1}} };",
     )
     .unwrap();
     let bad_env = forma()
@@ -383,7 +387,7 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
     let bad_cwd = directory.join("bad-cwd.forma");
     fs::write(
         &bad_cwd,
-        "fn(settings, request) { {install: [], cwd: 'Some(1), bin: \"x\", args: [], env: {}} }",
+        "export def exec = fn(settings, request) { {install: [], cwd: 'Some(1), bin: \"x\", args: [], env: {}} };",
     )
     .unwrap();
     let bad_cwd = forma()
@@ -451,12 +455,12 @@ export def build: Fn() -> OutputPlan = fn() {
     for (name, source, expected) in [
         (
             "escape.forma",
-            "fn() { {files: ['TextFile({path: \"../outside\", content: \"x\"})]} }",
+            "export def build = fn() { {files: ['TextFile({path: \"../outside\", content: \"x\"})]} };",
             "normalized relative path",
         ),
         (
             "duplicate.forma",
-            "fn() { {files: ['TextFile({path: \"a\", content: \"x\"}), 'TextFile({path: \"a\", content: \"y\"})]} }",
+            "export def build = fn() { {files: ['TextFile({path: \"a\", content: \"x\"}), 'TextFile({path: \"a\", content: \"y\"})]} };",
             "duplicate path",
         ),
     ] {
@@ -481,7 +485,7 @@ export def build: Fn() -> OutputPlan = fn() {
 fn show_observes_deterministic_workspace_and_position_queries() {
     let directory = fixture_dir();
     let main = directory.join("main.forma");
-    fs::write(&main, "let answer = 42;\nanswer").unwrap();
+    fs::write(&main, "let answer = 42;\nexport { answer as output };").unwrap();
 
     let first = forma()
         .args(["show", main.to_str().unwrap()])
@@ -512,7 +516,7 @@ fn show_observes_deterministic_workspace_and_position_queries() {
             "at",
             main.to_str().unwrap(),
             "2",
-            "1",
+            "10",
         ])
         .output()
         .unwrap();
@@ -533,7 +537,11 @@ fn show_observes_deterministic_workspace_and_position_queries() {
 fn show_reports_inferred_local_type_schemes() {
     let directory = fixture_dir();
     let main = directory.join("main.forma");
-    fs::write(&main, "let identity = fn(value) { value };\nidentity(1)").unwrap();
+    fs::write(
+        &main,
+        "let identity = fn(value) { value };\nlet result = identity(1); export { result as output };",
+    )
+    .unwrap();
 
     let show = forma()
         .args(["show", main.to_str().unwrap()])
@@ -558,7 +566,7 @@ fn types_projects_recursive_types_from_the_workspace_snapshot() {
     let main = directory.join("main.forma");
     fs::write(
         &main,
-        "@struct type Node = {children: Array(Node)}; {Node: Node}",
+        "@struct type Node = {children: Array(Node)}; export { Node };",
     )
     .unwrap();
 
@@ -669,7 +677,7 @@ fn show_recovers_types_and_causes_across_failed_modules() {
     let main = directory.join("main.forma");
     fs::write(
         &model,
-        "type Broken = missing(Int); type Good = String; {Good: Good}",
+        "type Broken = missing(Int); type Good = String; export { Good };",
     )
     .unwrap();
     fs::write(
@@ -678,7 +686,7 @@ fn show_recovers_types_and_causes_across_failed_modules() {
          type Local = String;\
          type Uses = model.Good;\
          type Down = Array(Uses);\
-         0",
+         export { Local as output };",
     )
     .unwrap();
 

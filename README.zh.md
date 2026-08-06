@@ -98,15 +98,18 @@ type User = {
 
 ### 确定的执行与输出计划
 
-执行入口是一个普通函数：
+模块没有默认返回值；它显式导出命名值，Host 再按运行模式选择入口。执行入口是一个普通函数：
 
-```text
-Fn(ExecSettings, ExecRequest) -> ExecEnv
+```forma
+export def exec: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
+    # 纯粹地计算完整执行计划
+    make_exec(settings, request)
+};
 ```
 
 Host 提供平台、安装前缀、环境、参数和工作目录。Forma 返回包含工件、路径、二进制、参数与环境的完整具体值。Host 不展开模板，也不重新解释政策。
 
-构建入口同样返回 `Fn() -> build.OutputPlan`。adapter 校验规范化相对路径、拒绝重复目标并输出 canonical JSON。文本生成使用普通 String 与函数，而不是第二门模板语言。
+`forma run` 读取命名导出 `output`；`forma exec` 调用 `exec`；`forma build` 调用 `build`。构建入口可写为 `export def build: Fn() -> build.OutputPlan = ...;`。adapter 校验规范化相对路径、拒绝重复目标并输出 canonical JSON。文本生成使用普通 String 与函数，而不是第二门模板语言。
 
 ### 静态数据也是源码
 

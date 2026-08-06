@@ -4,4 +4,4 @@ native get: Fn(Any, String) -> Any;
 native has: Fn(Any, String) -> Any;
 native all: Fn(Any) -> Any;
 native strip: Fn(Any) -> Any;
-{ normalize, add, get, has, all, strip }
+export { normalize, add, get, has, all, strip };

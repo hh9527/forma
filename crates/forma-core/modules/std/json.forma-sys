@@ -9,7 +9,7 @@ native untagged: Fn(Any, Any) -> Any;
 native schema: Fn(Any) -> Any;
 native default: Fn(Any) -> Fn(Any, Any) -> Any;
 native skip_serializing_if: Fn(Any) -> Fn(Any, Any) -> Any;
-{
+export {
     parse,
     decode,
     stringify,
@@ -21,4 +21,4 @@ native skip_serializing_if: Fn(Any) -> Fn(Any, Any) -> Any;
     schema,
     default,
     skip_serializing_if,
-}
+};

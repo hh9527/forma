@@ -142,10 +142,15 @@ from that same plan.
 
 ### Deterministic executable and output plans
 
-An executable entry is an ordinary function:
+A module has no default result. It explicitly exports named values, and the
+host selects an entry for its mode. An executable entry is an ordinary
+function:
 
-```text
-Fn(ExecSettings, ExecRequest) -> ExecEnv
+```forma
+export def exec: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
+    # Purely compute the complete execution plan.
+    make_exec(settings, request)
+};
 ```
 
 The host supplies the platform, install prefix, environment, arguments, and
@@ -153,7 +158,9 @@ working directory. Forma returns a fully concrete value containing artifacts,
 paths, binary, arguments, and environment. The host expands no templates and
 reinterprets no policy.
 
-A build entry similarly returns `Fn() -> build.OutputPlan`. The adapter
+`forma run` reads the named export `output`; `forma exec` invokes `exec`; and
+`forma build` invokes `build`. A build entry can be written as
+`export def build: Fn() -> build.OutputPlan = ...;`. The adapter
 validates normalized relative paths, rejects duplicate targets, and emits
 canonical JSON. Text generation uses ordinary strings and functions rather
 than a second template language.

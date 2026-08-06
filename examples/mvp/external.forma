@@ -4,4 +4,5 @@ type Request = {
     count: Int,
 };
 
-validate(Request, input)
+let result = validate(Request, input);
+export { result as output };

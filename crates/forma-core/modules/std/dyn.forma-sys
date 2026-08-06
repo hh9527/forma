@@ -16,7 +16,7 @@ native array_items: Fn(Dyn) -> Result(Array(Dyn), BlameError);
 native tuple_items: Fn(Dyn) -> Result(Array(Dyn), BlameError);
 native tag: Fn(Dyn) -> Result(String, BlameError);
 native payload: Fn(Dyn) -> Result(Option(Dyn), BlameError);
-{
+export {
     Dyn,
     ValueKind,
     pack,
@@ -32,4 +32,4 @@ native payload: Fn(Dyn) -> Result(Option(Dyn), BlameError);
     tuple_items,
     tag,
     payload,
-}
+};

@@ -3,4 +3,4 @@ native enum: Fn(Any, Any) -> Type;
 native union: Fn(Any, Any) -> Type;
 native validate: for(A) Fn(TypeOf(A), Any) -> Result(A, BlameError);
 
-{ struct, enum, union, validate }
+export { struct, enum, union, validate };

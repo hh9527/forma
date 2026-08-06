@@ -192,4 +192,4 @@ def equal:
     for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Result(Bool, BlameError) =
     interpreter!(equal_dyn);
 
-{ equal: equal, equal_dyn: equal_dyn }
+export { equal, equal_dyn };

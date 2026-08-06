@@ -1,2 +1,2 @@
 native equal: for(A, B) Fn(A, B) -> Bool;
-{ equal }
+export { equal };

@@ -59,10 +59,10 @@ def validate_project:
         (project, diagnostics)
     };
 
-{
-    DiagnosticRecord: DiagnosticRecord,
-    Diagnostics: Diagnostics,
-    Package: Package,
-    Project: Project,
-    validate_project: validate_project,
-}
+export {
+    DiagnosticRecord,
+    Diagnostics,
+    Package,
+    Project,
+    validate_project,
+};

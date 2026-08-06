@@ -1274,7 +1274,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn hover_reports_an_ordinary_expression_type() {
-        let (_, state, uri) = semantic_fixture("let count = 1 + 2;\ncount").await;
+        let (_, state, uri) =
+            semantic_fixture("let count = 1 + 2;\nexport { count as output };").await;
         let hover: Option<lsp::Hover> = serde_json::from_value(
             dispatch_request(
                 state,
@@ -1300,7 +1301,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn hover_reports_inferred_local_type_schemes() {
         let (_, state, uri) =
-            semantic_fixture("let identity = fn(value) { value };\nidentity(1)").await;
+            semantic_fixture(
+                "let identity = fn(value) { value };\nlet result = identity(1); export { result as output };",
+            )
+            .await;
         let hover: Option<lsp::Hover> = serde_json::from_value(
             dispatch_request(
                 state,
@@ -1309,7 +1313,7 @@ mod tests {
                     lsp::request::HoverRequest::METHOD,
                     serde_json::json!({
                         "textDocument": { "uri": uri },
-                        "position": { "line": 1, "character": 2 }
+                        "position": { "line": 1, "character": 15 }
                     }),
                 ),
             )
@@ -1373,8 +1377,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn lsp_completion_maps_struct_fields_and_utf16_text_edits() {
-        let source = "let face = \"😀\"; let value = {alpha: 1, beta: \"x\"}; value.alpha";
-        let (_, state, uri) = disk_semantic_fixture(source).await;
+        let source =
+            "let face = \"😀\"; let value = {alpha: 1, beta: \"x\"}; let selected = value.alpha";
+        let module_source = format!("{source}; export {{ selected as output }};");
+        let (_, state, uri) = disk_semantic_fixture(&module_source).await;
         let document = state
             .borrow()
             .workspace
@@ -1420,9 +1426,11 @@ mod tests {
         let (root, state) = fixture();
         let model = root.join("model.forma");
         let main = root.join("main.forma");
-        std::fs::write(&model, "{alpha: 1, beta: \"x\"}").expect("write model");
+        std::fs::write(&model, "export let alpha = 1; export let beta = \"x\";")
+            .expect("write model");
         let source = "import \"./model.forma\" as model; model.alpha";
-        std::fs::write(&main, source).expect("write main");
+        std::fs::write(&main, format!("{source}; export {{ model as output }};"))
+            .expect("write main");
         initialize_state(&root, &state);
         let workspace = Rc::new(
             Workspace::new(&main, Engine::new(config())).expect("create document workspace"),
@@ -1443,9 +1451,11 @@ mod tests {
         let (root, state) = fixture();
         let model = root.join("model.forma");
         let main = root.join("main.forma");
-        std::fs::write(&model, "{alpha: 1, beta: \"x\"}").expect("write model");
+        std::fs::write(&model, "export let alpha = 1; export let beta = \"x\";")
+            .expect("write model");
         let source = "import \"./model.forma\" as model; model.";
-        std::fs::write(&main, source).expect("write main");
+        std::fs::write(&main, format!("{source}\nexport {{ model as output }};"))
+            .expect("write main");
         initialize_state(&root, &state);
         let workspace = Rc::new(
             Workspace::new(&main, Engine::new(config())).expect("create document workspace"),
@@ -1568,7 +1578,7 @@ mod tests {
             .open(
                 &path,
                 DocumentVersion(1),
-                "let first = 1 / 0; let second = 2 / 0; 0",
+                "let first = 1 / 0; let second = 2 / 0; export let output = 0;",
             )
             .expect("open invalid source");
         {
@@ -1593,7 +1603,7 @@ mod tests {
                 &path,
                 DocumentVersion(1),
                 DocumentVersion(2),
-                &[TextEdit::Full("1".to_owned())],
+                &[TextEdit::Full("export let output = 1;".to_owned())],
             )
             .expect("fix source");
         state.borrow_mut().documents.insert(path, 2);

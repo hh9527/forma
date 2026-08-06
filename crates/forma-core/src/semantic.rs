@@ -1447,7 +1447,11 @@ mod tests {
     fn completion_returns_struct_fields_and_filters_prefixes() {
         let directory = fixture_dir();
         let main = directory.join("main.forma");
-        fs::write(&main, "let value = {alpha: 1, beta: \"x\"}; value.alpha").unwrap();
+        fs::write(
+            &main,
+            "let value = {alpha: 1, beta: \"x\"}; let selected = value.alpha; export { selected as output };",
+        )
+        .unwrap();
         let snapshot = engine().recover_workspace(&main).unwrap();
         let completion = completion_at(&snapshot, "value.alpha").expect("member context");
         assert_eq!(completion.replacement.end - completion.replacement.start, 5);
@@ -1467,8 +1471,12 @@ mod tests {
         let directory = fixture_dir();
         let model = directory.join("model.forma");
         let main = directory.join("main.forma");
-        fs::write(&model, "{alpha: 1, beta: \"x\"}").unwrap();
-        fs::write(&main, "import \"./model.forma\" as model; model.alpha").unwrap();
+        fs::write(&model, "export let alpha = 1; export let beta = \"x\";").unwrap();
+        fs::write(
+            &main,
+            "import \"./model.forma\" as model; let selected = model.alpha; export { selected as output };",
+        )
+        .unwrap();
         let snapshot = engine().recover_workspace(&main).unwrap();
         let completion = completion_at(&snapshot, "model.alpha").expect("module context");
         assert_eq!(completion.candidates.len(), 1);
@@ -1501,7 +1509,7 @@ mod tests {
         let main = directory.join("main.forma");
         fs::write(
             &model,
-            "@struct type Node = {children: Array(Node)}; {Node: Node}",
+            "@struct type Node = {children: Array(Node)}; export { Node };",
         )
         .unwrap();
         fs::write(&data, "{\"value\":1}").unwrap();
@@ -1511,7 +1519,7 @@ mod tests {
              import \"./data.json\" as data;\n\
              let f = fn(x) { let y = x; y };\n\
              let count = 1 + 2;\n\
-             {model: model, data: data, f: f, count: count}",
+             export { model, data, f, count };",
         )
         .unwrap();
 

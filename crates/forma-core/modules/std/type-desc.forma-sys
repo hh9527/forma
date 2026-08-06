@@ -9,11 +9,11 @@ native kind: Fn(Type) -> TypeDescKind;
 native children: Fn(Type) -> Array(Type);
 native opaque_name: Fn(Type) -> Option(String);
 native resolve: Fn(Type) -> Result(Type, BlameError);
-{
-    TypeDesc: Type,
+export {
+    Type as TypeDesc,
     TypeDescKind,
     kind,
     children,
     opaque_name,
     resolve,
-}
+};

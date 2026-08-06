@@ -5,4 +5,4 @@ import "core:json" as json;
 
 let user = data |> User.decode |> result.unwrap;
 let text = user |> User.encode |> json.stringify_pretty(2);
-text
+export { text as output };

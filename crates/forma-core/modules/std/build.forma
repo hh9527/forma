@@ -8,8 +8,8 @@
 @struct type OutputPlan = {
     files: Array(Artifact),
 };
-{
+export {
     TextFile,
     Artifact,
     OutputPlan,
-}
+};

@@ -12,8 +12,4 @@ let encode = fn(value) {
     codec.encode(Type, value) |> result.unwrap
 };
 
-{
-    Type: Type,
-    decode: decode,
-    encode: encode,
-}
+export { Type, decode, encode };

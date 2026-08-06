@@ -203,14 +203,15 @@ metadata and ordinary libraries provide richer interpretations.
 
 Forma has no authority over the external world. It does not need a general
 effect system or a universal action ABI. A host opens a small, explicit window
-by supplying ordinary input values and deciding whether an ordinary output
-value has external meaning:
+by supplying ordinary input values and selecting a named export whose value
+has external meaning:
 
 ```text
 external world
     -> host freezes explicit input
     -> closed Forma computation
-    -> ordinary output value
+    -> explicit named module exports
+    -> host selects a protocol entry
     -> host validates, authorizes, and interprets it
     -> external world
 ```
@@ -219,6 +220,10 @@ The VM does not know that a value describes a process, file, deployment, or
 approval. Different hosts define different input and output protocols using
 ordinary Forma types. Possessing a value of a plan type does not itself grant
 the capability to perform that plan.
+
+Modules have no default result. This includes `@main`: its only special status
+is that it is selected by the host and cannot be imported. Host modes choose
+their own named protocol entry, such as `output`, `exec`, or `build`.
 
 The standard `forma run`, `forma exec`, and `forma build` commands are concrete
 host adapters, not the beginning of a language-level effect system. Domain

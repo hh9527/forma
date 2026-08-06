@@ -1,6 +1,6 @@
 # RFC 0144: Explicit module exports
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0057, RFC 0140
 - Child RFCs: RFC 0145 through RFC 0147
 
@@ -204,3 +204,16 @@ and records the final implementation result here.
 9. Modules no longer require an authored final export `Dict` after migration.
 10. Strict loading, recoverable analysis, semantic navigation, completion, and
    hover agree on each exported symbol.
+
+## Implementation result
+
+Implemented through RFCs 0145-0147 in August 2026. Forma modules now publish a
+synthesized immutable record containing only their explicit named exports.
+Selective and open imports consume that interface, and `@main` follows the same
+model while remaining non-importable.
+
+The transition is complete: production module loading and recovery no longer
+accept an authored final result. `forma run`, `forma exec`, and `forma build`
+select `output`, `exec`, and `build` respectively. Arbitrary final-expression
+evaluation survives only in the separately named low-level expression harness
+used by compiler, VM, and type-system tests.

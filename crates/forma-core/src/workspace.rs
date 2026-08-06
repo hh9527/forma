@@ -314,8 +314,9 @@ mod tests {
 
     #[test]
     fn valid_overlay_dependencies_supply_real_import_capabilities() {
-        let (directory, root) =
-            fixture("import \"./model.forma\" as model; type FromOverlay = model.Shared; 0");
+        let (directory, root) = fixture(
+            "import \"./model.forma\" as model; type FromOverlay = model.Shared; export { FromOverlay as output };",
+        );
         let model = directory.join("model.forma");
         std::fs::write(&model, "type Shared = missing; 0").unwrap();
         let workspace = Workspace::new(&root, engine()).unwrap();
@@ -323,7 +324,7 @@ mod tests {
             .open(
                 &model,
                 DocumentVersion(1),
-                "type Shared = String; {Shared: Shared}",
+                "type Shared = String; export { Shared };",
             )
             .unwrap();
         let context = workspace.context();
