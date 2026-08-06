@@ -801,6 +801,17 @@ impl<'a> Lowerer<'a> {
                     )?,
                 ),
             },
+            Rule::PropagateExpr => ExprKind::Propagate {
+                operand: Box::new(
+                    self.expression(
+                        rules
+                            .iter()
+                            .copied()
+                            .find(|child| self.is_expression(*child))
+                            .ok_or_else(|| self.error(node, "propagation has no operand"))?,
+                    )?,
+                ),
+            },
             Rule::BinaryExpr => {
                 let comparison = self.token_children(node, Token::Less).next().is_some()
                     || self
@@ -1499,6 +1510,7 @@ impl<'a> Lowerer<'a> {
                     | Rule::MatchExpr
                     | Rule::ParenExpr
                     | Rule::PipelineExpr
+                    | Rule::PropagateExpr
                     | Rule::SectionExpr
                     | Rule::StringExpr
                     | Rule::TypeApplyExpr
@@ -2479,6 +2491,21 @@ mod tests {
             &operand.value,
             ExprKind::Variable(name) if name.value == "eq_i"
         ));
+    }
+
+    #[test]
+    fn parses_propagation_as_a_postfix_expression() {
+        let program = parse("propagate.forma", "value?").unwrap();
+        assert!(matches!(
+            program.value.body.value.result.value,
+            ExprKind::Propagate { .. }
+        ));
+
+        let program = parse("propagate.forma", "left + right?").unwrap();
+        let ExprKind::Binary { right, .. } = &program.value.body.value.result.value else {
+            panic!("expected binary expression")
+        };
+        assert!(matches!(right.value, ExprKind::Propagate { .. }));
     }
 
     #[test]

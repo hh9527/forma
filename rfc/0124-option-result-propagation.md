@@ -1,6 +1,6 @@
 # RFC 0124: Option and Result propagation
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0054, RFC 0067 through RFC 0088, RFC 0118 through RFC 0123
 
 ## Summary
@@ -185,4 +185,23 @@ the surrounding authored result makes that type valid.
 
 ## Implementation result
 
-Pending.
+Implemented in the Forma lexer, CST/AST lowering, HIR traversal, generic type
+inference, compiler, and existing VM control flow.
+
+The implementation recognizes only the two exact structural Enum shapes from
+this RFC. Inference maintains one private propagation requirement per module or
+Function boundary, leaves ordinary blocks transparent, rejects mixed families,
+checks Result error compatibility, and widens successful singleton
+constructors at boundary exit. The postfix expression's recorded type is its
+success payload.
+
+Compilation evaluates the operand once and lowers success-tag tests, payload
+selection, and failure propagation to existing LIR operations. No opcode,
+runtime value, exception path, trait, effect, or public bottom type was added.
+Tests cover postfix precedence, Option and Result success/failure behavior,
+ordinary-block transparency, nested-Function isolation, module propagation,
+inferred success widening, unsupported shapes, and mixed-family diagnostics.
+
+Verification completed with the full workspace test suite (20 LSP tests, 15
+CLI tests, and 348 core tests passed with one ignored), strict workspace
+Clippy, formatting checks, diff checks, and workspace metadata validation.

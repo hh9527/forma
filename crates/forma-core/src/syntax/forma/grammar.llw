@@ -1,7 +1,7 @@
 token Let='let' Decl='decl' Def='def' Native='native' For='for' Type='type' Fn='fn' FunctionType='Fn' Interpreter='interpreter' If='if' Else='else' Match='match';
 token Import='import' From='from';
 token SectionLParen='\\(' LParen='(' RParen=')' LBrace='{' RBrace='}' LBracket='[' RBracket=']';
-token Comma=',' Colon=':' Semicolon=';' Dot='.' At='@' Bang='!';
+token Comma=',' Colon=':' Semicolon=';' Dot='.' At='@' Bang='!' Question='?';
 token Plus='+' Minus='-' Star='*' Slash='/' Less='<' EqualEqual='==' Equal='=';
 token Arrow='->' FatArrow='=>' Pipe='|>';
 token Int='<integer>' Float='<float>' Bytes='<bytes>';
@@ -31,7 +31,8 @@ type_binding: decorator* 'type' Identifier '=' expression ';';
 import_binding: 'import' Identifier 'from' string_literal ';';
 
 expression:
-  expression arguments @call_expr
+  expression Question @propagate_expr
+| expression arguments @call_expr
 | expression type_arguments @type_apply_expr
 | expression section_arguments @section_expr
 | expression '.' Identifier @field_expr

@@ -1740,7 +1740,9 @@ fn expression_has_import(expression: &Expr) -> bool {
         ExprKind::Dict(fields) => fields
             .iter()
             .any(|field| expression_has_import(&field.value.value)),
-        ExprKind::Unary { operand, .. } => expression_has_import(operand),
+        ExprKind::Unary { operand, .. } | ExprKind::Propagate { operand } => {
+            expression_has_import(operand)
+        }
         ExprKind::Binary { left, right, .. } => {
             expression_has_import(left) || expression_has_import(right)
         }

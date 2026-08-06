@@ -2171,6 +2171,18 @@ pub(crate) fn analyze_program_with_bindings_observed(
                 Diagnostic::error(message, program.value.body.value.result.location),
             )
         })?;
+    let module_requirement = inference
+        .propagation_boundaries
+        .pop()
+        .expect("module propagation boundary exists");
+    let result_type = inference
+        .finish_propagation_boundary(result_type, None, module_requirement)
+        .map_err(|message| {
+            FrontendError::from_diagnostic(
+                sources,
+                Diagnostic::error(message, program.value.body.value.result.location),
+            )
+        })?;
     if let Some((location, message)) = inference.pattern_diagnostics.first_key_value() {
         return Err(FrontendError::from_diagnostic(
             sources,
@@ -2652,6 +2664,7 @@ fn collect_nested_annotation_types(
             )?;
         }
         ExprKind::Unary { operand, .. }
+        | ExprKind::Propagate { operand }
         | ExprKind::Field {
             receiver: operand, ..
         } => {
@@ -3067,6 +3080,14 @@ fn option_descriptor(item: TypeDescriptor) -> TypeDescriptor {
     ]))
 }
 
+fn option_parts(
+    variants: &BTreeMap<String, Option<Box<TypeDescriptor>>>,
+) -> Option<&TypeDescriptor> {
+    (variants.len() == 2 && variants.get("None").is_some_and(Option::is_none))
+        .then(|| variants.get("Some").and_then(Option::as_deref))
+        .flatten()
+}
+
 fn blame_error_descriptor() -> TypeDescriptor {
     TypeDescriptor::Struct(BTreeMap::from([
         ("data".into(), TypeDescriptor::Any),
@@ -3080,6 +3101,19 @@ fn result_descriptor(ok: TypeDescriptor, err: TypeDescriptor) -> TypeDescriptor 
         ("Err".into(), Some(Box::new(err))),
         ("Ok".into(), Some(Box::new(ok))),
     ]))
+}
+
+fn result_parts(descriptor: &TypeDescriptor) -> Option<(&TypeDescriptor, &TypeDescriptor)> {
+    let TypeDescriptor::Enum(variants) = descriptor else {
+        return None;
+    };
+    if variants.len() != 2 {
+        return None;
+    }
+    Some((
+        variants.get("Ok")?.as_deref()?,
+        variants.get("Err")?.as_deref()?,
+    ))
 }
 
 fn fold_control_descriptor(state: TypeDescriptor, result: TypeDescriptor) -> TypeDescriptor {
@@ -3936,6 +3970,13 @@ struct GenericInference<'a> {
     records: HashMap<crate::Location, TypeDescriptor>,
     pattern_diagnostics: BTreeMap<crate::Location, String>,
     pattern_binding_types: HashMap<crate::Location, TypeDescriptor>,
+    propagation_boundaries: Vec<Option<PropagationRequirement>>,
+}
+
+#[derive(Clone)]
+enum PropagationRequirement {
+    Option,
+    Result(Vec<TypeDescriptor>),
 }
 
 #[derive(Default)]
@@ -4119,6 +4160,90 @@ impl<'a> GenericInference<'a> {
             records: HashMap::new(),
             pattern_diagnostics: BTreeMap::new(),
             pattern_binding_types: HashMap::new(),
+            propagation_boundaries: vec![None],
+        }
+    }
+
+    fn record_propagation(&mut self, requirement: PropagationRequirement) -> Result<(), String> {
+        let boundary = self
+            .propagation_boundaries
+            .last_mut()
+            .expect("module propagation boundary exists");
+        match (boundary.as_mut(), requirement) {
+            (None, requirement) => *boundary = Some(requirement),
+            (Some(PropagationRequirement::Option), PropagationRequirement::Option) => {}
+            (
+                Some(PropagationRequirement::Result(errors)),
+                PropagationRequirement::Result(mut more),
+            ) => {
+                errors.append(&mut more);
+            }
+            _ => return Err("cannot mix Option and Result propagation in one boundary".into()),
+        }
+        Ok(())
+    }
+
+    fn finish_propagation_boundary(
+        &mut self,
+        result: TypeDescriptor,
+        expected: Option<&TypeDescriptor>,
+        requirement: Option<PropagationRequirement>,
+    ) -> Result<TypeDescriptor, String> {
+        let Some(requirement) = requirement else {
+            return Ok(result);
+        };
+        let resolved = self.resolve(&result);
+        match requirement {
+            PropagationRequirement::Option => match resolved {
+                TypeDescriptor::Enum(ref variants) if option_parts(variants).is_some() => {
+                    Ok(resolved)
+                }
+                TypeDescriptor::Tagged { tag, payload } if tag.name() == "Some" => {
+                    Ok(option_descriptor(*payload))
+                }
+                TypeDescriptor::Atom(tag) if tag.name() == "None" => {
+                    match expected.map(|ty| self.resolve(ty)) {
+                        Some(ref expected @ TypeDescriptor::Enum(ref variants)) if option_parts(variants).is_some() => Ok(expected.clone()),
+                        _ => Err("Option propagation boundary ending in 'None needs an expected Option success type".into()),
+                    }
+                }
+                _ => Err(format!(
+                    "Option propagation requires an Option-shaped boundary result, found {}",
+                    resolved.display_name()
+                )),
+            },
+            PropagationRequirement::Result(errors) => {
+                let expected = expected.map(|ty| self.resolve(ty));
+                let boundary_error = expected
+                    .as_ref()
+                    .and_then(result_parts)
+                    .map(|(_, err)| err.clone())
+                    .or_else(|| common_type(errors.clone()))
+                    .ok_or_else(|| "cannot infer Result propagation error type".to_owned())?;
+                for error in &errors {
+                    self.check(error, &boundary_error)?;
+                }
+                match resolved {
+                    TypeDescriptor::Enum(ref variants) if result_parts(&TypeDescriptor::Enum(variants.clone())).is_some() => {
+                        let (_, result_error) = result_parts(&resolved).expect("checked Result shape");
+                        for error in &errors { self.check(error, result_error)?; }
+                        Ok(resolved)
+                    }
+                    TypeDescriptor::Tagged { tag, payload } if tag.name() == "Ok" => {
+                        Ok(result_descriptor(*payload, boundary_error))
+                    }
+                    TypeDescriptor::Tagged { tag, payload } if tag.name() == "Err" => {
+                        match expected {
+                            Some(ref expected @ TypeDescriptor::Enum(ref variants)) if result_parts(&TypeDescriptor::Enum(variants.clone())).is_some() => {
+                                self.check(&payload, &boundary_error)?;
+                                Ok(expected.clone())
+                            }
+                            _ => Err("Result propagation boundary ending in 'Err(_) needs an expected Result success type".into()),
+                        }
+                    }
+                    _ => Err(format!("Result propagation requires a Result-shaped boundary result, found {}", resolved.display_name())),
+                }
+            }
         }
     }
 
@@ -4958,6 +5083,35 @@ impl<'a> GenericInference<'a> {
                 self.require_numeric(&operand)?;
                 self.resolve(&numeric)
             }
+            ExprKind::Propagate { operand } => {
+                let operand = self.infer(operand, environment, None)?;
+                match self.resolve(&operand) {
+                    TypeDescriptor::Enum(variants) => {
+                        if let Some(payload) = option_parts(&variants) {
+                            self.record_propagation(PropagationRequirement::Option)?;
+                            payload.clone()
+                        } else if let Some((ok, err)) =
+                            result_parts(&TypeDescriptor::Enum(variants))
+                        {
+                            let ok = ok.clone();
+                            let err = err.clone();
+                            self.record_propagation(PropagationRequirement::Result(vec![err]))?;
+                            ok
+                        } else {
+                            return Err(
+                                "? operand must be an exact Option-shaped or Result-shaped Enum"
+                                    .into(),
+                            );
+                        }
+                    }
+                    descriptor => {
+                        return Err(format!(
+                            "? operand must resolve to an Option-shaped or Result-shaped Enum, found {}",
+                            descriptor.display_name()
+                        ));
+                    }
+                }
+            }
             ExprKind::Binary {
                 operator,
                 left,
@@ -5218,11 +5372,17 @@ impl<'a> GenericInference<'a> {
                 if inferring_unannotated {
                     self.closure_inference_depth += 1;
                 }
+                self.propagation_boundaries.push(None);
                 let result = self.infer_block(body, &closure_environment, result_expected);
+                let requirement = self
+                    .propagation_boundaries
+                    .pop()
+                    .expect("closure boundary exists");
                 if inferring_unannotated {
                     self.closure_inference_depth -= 1;
                 }
-                let inferred_result = result?;
+                let inferred_result =
+                    self.finish_propagation_boundary(result?, result_expected, requirement)?;
                 let function = TypeDescriptor::Function {
                     parameters: parameter_types,
                     result: Box::new(local_result.unwrap_or(inferred_result)),
@@ -5886,6 +6046,7 @@ fn expression_references_names(
             expression_references_names(&block.value.result, names, &block_bound)
         }
         ExprKind::Unary { operand, .. }
+        | ExprKind::Propagate { operand }
         | ExprKind::Field {
             receiver: operand, ..
         } => expression_references_names(operand, names, bound),
@@ -6110,7 +6271,9 @@ fn infer_expr_with(
                 .collect(),
         ),
         ExprKind::Block(block) => infer_block_with(block, environment, record),
-        ExprKind::Unary { operand, .. } => infer_expr_with(operand, environment, record),
+        ExprKind::Unary { operand, .. } | ExprKind::Propagate { operand } => {
+            infer_expr_with(operand, environment, record)
+        }
         ExprKind::Binary {
             operator,
             left,
@@ -6255,7 +6418,7 @@ fn check_interpolations(
             }
         }
         ExprKind::Block(block) => check_block_interpolations(block, environment, sources)?,
-        ExprKind::Unary { operand, .. } => {
+        ExprKind::Unary { operand, .. } | ExprKind::Propagate { operand } => {
             check_interpolations(operand, environment, sources)?;
         }
         ExprKind::Binary { left, right, .. } => {

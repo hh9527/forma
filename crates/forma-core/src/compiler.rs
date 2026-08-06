@@ -838,6 +838,7 @@ impl<'a> Compiler<'a> {
                 }
                 Ok(dst)
             }
+            ExprKind::Propagate { operand } => self.compile_propagate(operand, expression.location),
             ExprKind::Binary {
                 operator,
                 left,
@@ -930,6 +931,66 @@ impl<'a> Compiler<'a> {
             }
         }
         Ok(())
+    }
+
+    fn compile_propagate(
+        &mut self,
+        operand: &Expr,
+        location: Location,
+    ) -> Result<RegisterId, FrontendError> {
+        let value = self.compile_expr(operand)?;
+        let success = self.new_label();
+        let check_ok = self.new_label();
+        let some = self.load_constant(atom_value("Some"), location);
+        let condition = self.allocate();
+        self.emit(
+            Operation::TaggedTagEquals {
+                dst: condition,
+                value,
+                tag: some,
+            },
+            location,
+        );
+        self.emit(
+            Operation::JumpIfFalse {
+                condition,
+                target: check_ok,
+            },
+            location,
+        );
+        self.emit_synthetic(Operation::Jump { target: success }, location);
+        self.mark_label(check_ok);
+        let ok = self.load_constant(atom_value("Ok"), location);
+        let condition = self.allocate();
+        self.emit(
+            Operation::TaggedTagEquals {
+                dst: condition,
+                value,
+                tag: ok,
+            },
+            location,
+        );
+        let failure = self.new_label();
+        self.emit(
+            Operation::JumpIfFalse {
+                condition,
+                target: failure,
+            },
+            location,
+        );
+        self.emit_synthetic(Operation::Jump { target: success }, location);
+        self.mark_label(failure);
+        self.emit_synthetic(Operation::Return { src: value }, location);
+        self.mark_label(success);
+        let payload = self.allocate();
+        self.emit(
+            Operation::GetTaggedPayload {
+                dst: payload,
+                value,
+            },
+            location,
+        );
+        Ok(payload)
     }
 
     fn compile_call_window(
@@ -1530,7 +1591,9 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
             let mut inner = bound.clone();
             free_block(block, &mut inner, free);
         }
-        ExprKind::Unary { operand, .. } => free_expr(operand, bound, free),
+        ExprKind::Unary { operand, .. } | ExprKind::Propagate { operand } => {
+            free_expr(operand, bound, free)
+        }
         ExprKind::Binary { left, right, .. } => {
             free_expr(left, bound, free);
             free_expr(right, bound, free);
@@ -1642,7 +1705,9 @@ pub(crate) fn collect_runtime_names(expression: &Expr, names: &mut HashSet<Strin
             }
         }
         ExprKind::Block(block) => collect_runtime_names_block(block, names),
-        ExprKind::Unary { operand, .. } => collect_runtime_names(operand, names),
+        ExprKind::Unary { operand, .. } | ExprKind::Propagate { operand } => {
+            collect_runtime_names(operand, names)
+        }
         ExprKind::Binary { left, right, .. } => {
             collect_runtime_names(left, names);
             collect_runtime_names(right, names);
@@ -2162,6 +2227,51 @@ let decorators = {
         }")
         .unwrap();
         assert_eq!(value.to_string(), "(1, \"Ada\", \"London\")");
+    }
+
+    #[test]
+    fn propagates_option_and_result_from_the_nearest_function() {
+        let option = run("let step: Fn(Option(Int)) -> Option(Int) = fn(value) { let item = value?; 'Some(item + 1) }; (step('Some(2)), step('None))").unwrap();
+        assert_eq!(option.to_string(), "('Some(3), 'None)");
+
+        let result = run("let step: Fn(Result(Int, String)) -> Result(Int, String) = fn(value) { let item = value?; 'Ok(item + 1) }; (step('Ok(2)), step('Err(\"bad\")))").unwrap();
+        assert_eq!(result.to_string(), "('Ok(3), 'Err(\"bad\"))");
+    }
+
+    #[test]
+    fn infers_propagation_boundary_from_success_constructor() {
+        let value = run("let step = fn(value: Option(Int)) { let item = { value? }; 'Some(item + 1) }; (step('Some(1)), step('None))").unwrap();
+        assert_eq!(value.to_string(), "('Some(2), 'None)");
+    }
+
+    #[test]
+    fn propagates_from_module_blocks_and_isolates_nested_functions() {
+        let module =
+            run("{ let value: Option(Int) = 'None; let item = value?; 'Some(item) }").unwrap();
+        assert_eq!(module.to_string(), "'None");
+
+        let nested = run("let outer = fn(value: Option(Int)) { let inner: Fn(Option(Int)) -> Option(Int) = fn(inner_value) { let item = inner_value?; 'Some(item + 1) }; 'Some(inner(value)) }; outer('None)").unwrap();
+        assert_eq!(nested.to_string(), "'Some('None)");
+    }
+
+    #[test]
+    fn rejects_mixed_and_unsupported_propagation() {
+        let mixed = compile_source("test", "let f = fn(a: Option(Int), b: Result(Int, String)) { let x = a?; let y = b?; 'Some(x + y) }; f").unwrap_err();
+        assert!(
+            mixed.message.contains("cannot mix Option and Result"),
+            "{}",
+            mixed.message
+        );
+
+        let unsupported =
+            compile_source("test", "let f = fn(value: Bool) { value? }; f").unwrap_err();
+        assert!(
+            unsupported
+                .message
+                .contains("Option-shaped or Result-shaped"),
+            "{}",
+            unsupported.message
+        );
     }
 
     #[test]

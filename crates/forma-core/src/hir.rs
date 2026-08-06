@@ -448,7 +448,7 @@ impl Resolver {
                 self.index_block(block, scopes, false);
                 None
             }
-            ExprKind::Unary { operand, .. } => {
+            ExprKind::Unary { operand, .. } | ExprKind::Propagate { operand } => {
                 self.index_expr(operand, scopes);
                 None
             }

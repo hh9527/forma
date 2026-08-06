@@ -74,6 +74,9 @@ pub enum ExprKind {
         operator: Located<UnaryOperator>,
         operand: Box<Expr>,
     },
+    Propagate {
+        operand: Box<Expr>,
+    },
     Binary {
         operator: Located<BinaryOperator>,
         left: Box<Expr>,
