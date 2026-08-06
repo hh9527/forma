@@ -21,6 +21,7 @@ pub struct ClosureParameter {
 pub struct ProgramKind {
     pub manifest: Option<Expr>,
     pub body: Block,
+    pub authored_result: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -57,6 +58,7 @@ pub enum BindingKind {
     Type,
     Import,
     OpenImport,
+    Export,
 }
 
 #[derive(Clone, Debug)]

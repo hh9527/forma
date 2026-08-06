@@ -184,10 +184,39 @@ impl<'a> Lowerer<'a> {
             .find(|node| self.rule(*node) == Some(Rule::Body))
             .or_else(|| self.first_rule(root))
             .ok_or_else(|| self.error(root, "program has no body"))?;
+        let authored_result = self
+            .children(body_node)
+            .any(|child| self.is_expression(child));
+        let body = self.block_body_with_destructuring(body_node, false)?;
+        let exports = body
+            .value
+            .bindings
+            .iter()
+            .filter(|binding| binding.value.kind == BindingKind::Export)
+            .collect::<Vec<_>>();
+        if authored_result && !exports.is_empty() {
+            return Err(self.error(
+                body_node,
+                "a module cannot mix explicit exports with a final expression",
+            ));
+        }
+        let mut public_names = HashMap::new();
+        for export in exports {
+            if let Some(first) =
+                public_names.insert(export.value.name.value.clone(), export.value.name.location)
+            {
+                return Err(Diagnostic::error(
+                    format!("duplicate export {:?}", export.value.name.value),
+                    export.value.name.location,
+                )
+                .with_secondary("first exported here", first));
+            }
+        }
         Ok(located(
             ProgramKind {
                 manifest: self.manifest()?,
-                body: self.block_body_with_destructuring(body_node, false)?,
+                body,
+                authored_result,
             },
             self.location(root),
         ))
@@ -225,10 +254,10 @@ impl<'a> Lowerer<'a> {
         if let Some(body) = root.body() {
             for binding in body.bindings() {
                 let node = binding.syntax().node_ref();
-                let lowered = if self.rule(node) == Some(Rule::ImportBinding) {
-                    self.import_bindings(node)
-                } else {
-                    self.binding(node).map(|binding| vec![binding])
+                let lowered = match self.rule(node) {
+                    Some(Rule::ImportBinding) => self.import_bindings(node),
+                    Some(Rule::ExportStatement) => self.export_bindings(node),
+                    _ => self.binding(node).map(|binding| vec![binding]),
                 };
                 match lowered {
                     Ok(lowered) => bindings.extend(lowered),
@@ -289,6 +318,17 @@ impl<'a> Lowerer<'a> {
                         .into_iter()
                         .map(BlockEntry::Binding),
                 ),
+                Some(Rule::ExportStatement) => entries.extend(if allow_destructuring {
+                    return Err(self.error(
+                        child,
+                        "export declarations are allowed only at module top level",
+                    ));
+                } else {
+                    self.export_bindings(child)?
+                        .into_iter()
+                        .map(BlockEntry::Binding)
+                        .collect::<Vec<_>>()
+                }),
                 Some(Rule::LetPatternBinding) => {
                     if !allow_destructuring {
                         return Err(self.error(
@@ -353,6 +393,18 @@ impl<'a> Lowerer<'a> {
                                 .into_iter()
                                 .map(BlockEntry::Binding),
                         );
+                    } else if self.rule(inner) == Some(Rule::ExportStatement) {
+                        if allow_destructuring {
+                            return Err(self.error(
+                                inner,
+                                "export declarations are allowed only at module top level",
+                            ));
+                        }
+                        entries.extend(
+                            self.export_bindings(inner)?
+                                .into_iter()
+                                .map(BlockEntry::Binding),
+                        );
                     } else {
                         entries.push(BlockEntry::Binding(self.binding(inner)?));
                     }
@@ -362,8 +414,13 @@ impl<'a> Lowerer<'a> {
                 None => {}
             }
         }
-        let result =
-            result.ok_or_else(|| self.error(body, "a block requires a result expression"))?;
+        let result = if let Some(result) = result {
+            result
+        } else if allow_destructuring {
+            return Err(self.error(body, "a block requires a result expression"));
+        } else {
+            located(ExprKind::Tuple(Vec::new()), self.location(body))
+        };
         let block_location = self.location(node);
         let mut block = located(
             BlockKind {
@@ -828,6 +885,61 @@ impl<'a> Lowerer<'a> {
                 .collect::<Result<Vec<_>, _>>()?,
         );
         Ok(bindings)
+    }
+
+    fn export_bindings(&self, node: NodeRef) -> Result<Vec<Binding>, Diagnostic> {
+        if let Some(binding_node) = self.rule_children(node).find(|child| {
+            matches!(
+                self.rule(*child),
+                Some(Rule::LetBinding | Rule::DefBinding | Rule::TypeBinding)
+            )
+        }) {
+            let binding = self.binding(binding_node)?;
+            let local = binding.value.name.clone();
+            let marker = located(
+                BindingData {
+                    decorators: Vec::new(),
+                    kind: BindingKind::Export,
+                    imported_name: Some(Box::new(local.clone())),
+                    name: local.clone(),
+                    type_parameters: Vec::new(),
+                    annotation: None,
+                    value: located(ExprKind::Variable(local), self.location(node)),
+                },
+                self.location(node),
+            );
+            return Ok(vec![binding, marker]);
+        }
+        let items = self
+            .rule_children(node)
+            .find(|child| self.rule(*child) == Some(Rule::ExportItems))
+            .ok_or_else(|| self.error(node, "export has no binding or item list"))?;
+        self.rule_children(items)
+            .filter(|child| self.rule(*child) == Some(Rule::ExportItem))
+            .map(|item| {
+                let names = self
+                    .token_children(item, Token::Identifier)
+                    .map(|name| self.identifier(name))
+                    .collect::<Vec<_>>();
+                let local = names
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| self.error(item, "export item has no local name"))?;
+                let public = names.get(1).cloned().unwrap_or_else(|| local.clone());
+                Ok(located(
+                    BindingData {
+                        decorators: Vec::new(),
+                        kind: BindingKind::Export,
+                        imported_name: Some(Box::new(local.clone())),
+                        name: public,
+                        type_parameters: Vec::new(),
+                        annotation: None,
+                        value: located(ExprKind::Variable(local), self.location(item)),
+                    },
+                    self.location(item),
+                ))
+            })
+            .collect()
     }
 
     fn expression(&self, node: NodeRef) -> Result<Expr, Diagnostic> {
@@ -2448,6 +2560,63 @@ mod tests {
                 .to_string()
                 .contains("destructuring let is allowed only inside a local block")
         );
+    }
+
+    #[test]
+    fn lowers_explicit_exports_without_creating_lexical_bindings() {
+        let program = parse(
+            "exports.forma",
+            r#"export let value = 1;
+export def identity = fn(item) { item };
+export @struct type User = { name: String };
+let private = 2;
+export { private as visible, identity as map };"#,
+        )
+        .unwrap();
+        assert!(!program.value.authored_result);
+        let bindings = &program.value.body.value.bindings;
+        assert_eq!(
+            bindings
+                .iter()
+                .filter(|binding| binding.value.kind == BindingKind::Export)
+                .count(),
+            5
+        );
+        assert_eq!(
+            bindings
+                .iter()
+                .filter(|binding| binding.value.kind == BindingKind::Let)
+                .count(),
+            2
+        );
+        let visible = bindings
+            .iter()
+            .find(|binding| {
+                binding.value.kind == BindingKind::Export && binding.value.name.value == "visible"
+            })
+            .unwrap();
+        assert_eq!(
+            visible.value.imported_name.as_deref().unwrap().value,
+            "private"
+        );
+    }
+
+    #[test]
+    fn diagnoses_duplicate_mixed_and_nested_exports() {
+        for (source, expected) in [
+            (
+                "export let value = 1; export { value };",
+                "duplicate export",
+            ),
+            ("export let value = 1; value", "cannot mix explicit exports"),
+            (
+                "let value = { export let nested = 1; nested }; value",
+                "only at module top level",
+            ),
+        ] {
+            let error = parse("exports.forma", source).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+        }
     }
 
     #[test]

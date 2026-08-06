@@ -131,6 +131,7 @@ pub enum Binding<'tree> {
     NativeType(NativeTypeBinding<'tree>),
     Type(TypeBinding<'tree>),
     Import(ImportBinding<'tree>),
+    Export(ExportBinding<'tree>),
 }
 
 impl<'tree> Binding<'tree> {
@@ -146,6 +147,7 @@ impl<'tree> Binding<'tree> {
             Rule::NativeTypeBinding => Some(Self::NativeType(NativeTypeBinding { syntax })),
             Rule::TypeBinding => Some(Self::Type(TypeBinding { syntax })),
             Rule::ImportBinding => Some(Self::Import(ImportBinding { syntax })),
+            Rule::ExportStatement => Some(Self::Export(ExportBinding { syntax })),
             _ => None,
         }
     }
@@ -159,6 +161,7 @@ impl<'tree> Binding<'tree> {
             Self::NativeType(node) => node.syntax,
             Self::Type(node) => node.syntax,
             Self::Import(node) => node.syntax,
+            Self::Export(node) => node.syntax,
         }
     }
 
@@ -171,6 +174,7 @@ impl<'tree> Binding<'tree> {
             Self::NativeType(node) => node.name(),
             Self::Type(node) => node.name(),
             Self::Import(node) => node.name(),
+            Self::Export(_) => None,
         }
     }
 }
@@ -201,6 +205,7 @@ binding_node!(NativeBinding);
 binding_node!(NativeTypeBinding);
 binding_node!(TypeBinding);
 binding_node!(ImportBinding);
+binding_node!(ExportBinding);
 
 #[derive(Clone, Copy)]
 pub struct Decorator<'tree> {
@@ -416,6 +421,7 @@ pub fn validate(source: SourceId, tree: &CstData) -> Vec<SyntaxIssue> {
     for binding in body.bindings() {
         if binding.name().is_none()
             && !matches!(binding, Binding::Import(import) if import.has_selector())
+            && !matches!(binding, Binding::Export(_))
         {
             issues.push(missing_after_keyword(source, binding));
         }
@@ -449,10 +455,15 @@ pub fn validate(source: SourceId, tree: &CstData) -> Vec<SyntaxIssue> {
             Binding::Import(node) if node.path().is_none() => {
                 issues.push(missing_at(source, node.syntax, ExpectedSyntax::ImportPath))
             }
+            Binding::Export(_) => {}
             _ => {}
         }
     }
-    if body.result().is_none() {
+    if body.result().is_none()
+        && !body
+            .bindings()
+            .any(|binding| matches!(binding, Binding::Export(_)))
+    {
         issues.push(missing_slot(
             source,
             body.result_slot(),
@@ -548,6 +559,7 @@ fn missing_after_keyword(source: SourceId, binding: Binding<'_>) -> SyntaxIssue 
         Binding::NativeType(_) => Token::Native,
         Binding::Type(_) => Token::Type,
         Binding::Import(_) => Token::Import,
+        Binding::Export(_) => Token::Export,
     };
     let syntax = binding.syntax();
     let mut found_keyword = false;

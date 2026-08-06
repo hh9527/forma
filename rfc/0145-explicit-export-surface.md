@@ -1,6 +1,6 @@
 # RFC 0145: Explicit export surface
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0144
 
 ## Summary
@@ -123,3 +123,22 @@ results. RFC 0146 consumes the table and defines host selection.
    result expression.
 8. Recovery retains valid bindings and export entries around malformed siblings.
 
+## Implementation result
+
+The lexer, lossless CST, typed syntax views, and AST lowering now recognize the
+complete export family. Exported bindings lower to their unchanged ordinary
+binding plus an interface-only marker; export lists lower only to markers.
+HIR, type-expression traversal, and bytecode compilation explicitly skip those
+markers as lexical definitions and executable work.
+
+Module lowering accepts no final expression when exports exist and records
+whether a result was authored. It rejects mixed mode, duplicate public names,
+and nested exports. Type analysis validates local references in source order
+after resolved external and open-provider names are available, retaining the
+ability to re-export an imported binding without permitting a forward local
+export.
+
+Tests cover lossless decorated and aliased forms, multiple export locations,
+marker lowering, optional module results, and duplicate, mixed, and nested
+diagnostics. The complete core suite continues to require results in ordinary
+blocks.

@@ -138,6 +138,26 @@ fn(settings, request) { {args: request.args} }"#;
     }
 
     #[test]
+    fn cst_preserves_multiple_explicit_exports_without_a_final_expression() {
+        let source = "export let value = 1; export @struct type User = { name: String }; export { value as output, User };";
+        let mut sources = crate::source::SourceDatabase::default();
+        let id = sources.add("exports.forma", source);
+        let parsed = parse(id, source);
+        assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
+        let mut reconstructed = String::new();
+        reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
+        assert_eq!(reconstructed, source);
+        assert!(
+            Program::cast(&parsed.syntax, NodeRef::ROOT)
+                .unwrap()
+                .body()
+                .unwrap()
+                .bindings()
+                .any(|binding| matches!(binding, Binding::Export(_)))
+        );
+    }
+
+    #[test]
     fn cst_preserves_dict_field_shorthand_losslessly() {
         let source = "let name = \"forma\"; { name, explicit: 1, ...extra }";
         let mut sources = crate::source::SourceDatabase::default();

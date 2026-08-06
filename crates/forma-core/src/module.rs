@@ -1178,7 +1178,12 @@ impl RecoverableWorkspaceBuilder<'_> {
                 .recovered
                 .bindings
                 .iter()
-                .filter(|binding| binding.value.kind != BindingKind::OpenImport)
+                .filter(|binding| {
+                    !matches!(
+                        binding.value.kind,
+                        BindingKind::OpenImport | BindingKind::Export
+                    )
+                })
                 .map(|binding| binding.value.name.value.as_str())
                 .collect::<HashSet<_>>();
             for (name, mut candidates) in open_candidates {
@@ -1979,7 +1984,12 @@ impl ModuleLoader {
             .value
             .bindings
             .iter()
-            .filter(|binding| binding.value.kind != BindingKind::OpenImport)
+            .filter(|binding| {
+                !matches!(
+                    binding.value.kind,
+                    BindingKind::OpenImport | BindingKind::Export
+                )
+            })
             .map(|binding| binding.value.name.value.as_str())
             .collect::<HashSet<_>>();
         for (name, mut candidates) in open_candidates {

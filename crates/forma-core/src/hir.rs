@@ -243,6 +243,7 @@ impl Resolver {
             BindingKind::Type => HirDefinitionKind::Type,
             BindingKind::Import => HirDefinitionKind::Import,
             BindingKind::OpenImport => HirDefinitionKind::Import,
+            BindingKind::Export => HirDefinitionKind::Import,
             BindingKind::Native | BindingKind::NativeType => HirDefinitionKind::Native,
         };
         let id = self.define_name(name, kind, binding.value.name.location, scope, top_level);
@@ -318,7 +319,10 @@ impl Resolver {
             }
         }
         for binding in bindings {
-            if binding.value.kind == BindingKind::OpenImport {
+            if matches!(
+                binding.value.kind,
+                BindingKind::OpenImport | BindingKind::Export
+            ) {
                 continue;
             }
             if let Some(annotation) = &binding.value.annotation {
@@ -370,6 +374,7 @@ impl Resolver {
                     self.hir.definitions[definition.index()].value = Some(value);
                 }
                 BindingKind::OpenImport => unreachable!("open imports are dependency edges"),
+                BindingKind::Export => unreachable!("exports are module interface edges"),
             }
         }
         if let Some(result) = result {

@@ -1483,6 +1483,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
         .filter(|(name, _)| !external_values.contains_key(*name))
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
+    let prelude_names = prelude.visible_names().cloned().collect::<Vec<_>>();
     let BootstrapPrelude {
         values: mut tool_values,
         types: mut static_environment,
@@ -1499,7 +1500,12 @@ pub(crate) fn analyze_program_with_bindings_observed(
         .value
         .bindings
         .iter()
-        .filter(|binding| binding.value.kind != BindingKind::OpenImport)
+        .filter(|binding| {
+            !matches!(
+                binding.value.kind,
+                BindingKind::OpenImport | BindingKind::Export
+            )
+        })
         .map(|binding| binding.value.name.value.as_str())
         .collect::<HashSet<_>>();
     for (name, value) in external_values {
@@ -1520,6 +1526,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
             binding_schemes.insert(name.clone(), scheme);
         }
     }
+    validate_export_references(program, prelude_names.iter(), external_values, sources)?;
 
     // Tool-stage descriptors are currently trees. Predeclare type names with
     // conservative metadata so self and forward references can be evaluated;
@@ -1676,7 +1683,7 @@ pub(crate) fn analyze_program_with_bindings_observed(
             infer_expr_recorded(annotation, &static_environment, &mut expression_descriptors);
         }
         match binding.value.kind {
-            BindingKind::OpenImport => continue,
+            BindingKind::OpenImport | BindingKind::Export => continue,
             BindingKind::Decl => continue,
             BindingKind::Native | BindingKind::NativeType => {
                 let value = external_values
@@ -2091,7 +2098,11 @@ pub(crate) fn analyze_program_with_bindings_observed(
     for binding in &program.value.body.value.bindings {
         if matches!(
             binding.value.kind,
-            BindingKind::Decl | BindingKind::Native | BindingKind::Import | BindingKind::OpenImport
+            BindingKind::Decl
+                | BindingKind::Native
+                | BindingKind::Import
+                | BindingKind::OpenImport
+                | BindingKind::Export
         ) {
             if binding.value.kind == BindingKind::Import {
                 let scheme = external_interfaces
@@ -6606,6 +6617,56 @@ pub(crate) fn program_references_name(program: &Program, name: &str) -> bool {
         .any(|reference| {
             reference.name == name && reference.resolution == HirResolution::Unresolved
         })
+}
+
+fn validate_export_references<'a>(
+    program: &Program,
+    prelude: impl Iterator<Item = &'a String>,
+    external_values: &BTreeMap<String, Value>,
+    sources: &SourceDatabase,
+) -> Result<(), FrontendError> {
+    let authored = program
+        .value
+        .body
+        .value
+        .bindings
+        .iter()
+        .filter(|binding| {
+            !matches!(
+                binding.value.kind,
+                BindingKind::OpenImport | BindingKind::Export
+            )
+        })
+        .map(|binding| binding.value.name.value.as_str())
+        .collect::<HashSet<_>>();
+    let mut visible = prelude.cloned().collect::<HashSet<_>>();
+    visible.extend(
+        external_values
+            .keys()
+            .filter(|name| !authored.contains(name.as_str()))
+            .cloned(),
+    );
+    for binding in &program.value.body.value.bindings {
+        if binding.value.kind == BindingKind::Export {
+            let local = binding
+                .value
+                .imported_name
+                .as_deref()
+                .expect("export markers retain their local name");
+            if !visible.contains(&local.value) {
+                return Err(FrontendError::from_diagnostic(
+                    sources,
+                    Diagnostic::error(
+                        format!("cannot export unknown or forward binding {:?}", local.value),
+                        local.location,
+                    ),
+                ));
+            }
+        } else if binding.value.kind != BindingKind::OpenImport {
+            visible.insert(binding.value.name.value.clone());
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn recovered_reference_locations(

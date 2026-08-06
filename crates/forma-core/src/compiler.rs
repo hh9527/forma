@@ -212,6 +212,7 @@ pub(crate) fn compile_metadata_initializer(
                 },
                 program.value.body.location,
             ),
+            authored_result: true,
         },
         program.location,
     );
@@ -417,7 +418,12 @@ impl<'a> Compiler<'a> {
             .value
             .bindings
             .iter()
-            .filter(|binding| binding.value.kind != BindingKind::OpenImport)
+            .filter(|binding| {
+                !matches!(
+                    binding.value.kind,
+                    BindingKind::OpenImport | BindingKind::Export
+                )
+            })
             .map(|binding| binding.value.name.value.as_str())
             .collect::<HashSet<_>>();
         for (name, value) in &analysis.external_values {
@@ -662,7 +668,7 @@ impl<'a> Compiler<'a> {
 
         for binding in &block.value.bindings {
             match binding.value.kind {
-                BindingKind::OpenImport => continue,
+                BindingKind::OpenImport | BindingKind::Export => continue,
                 BindingKind::Decl => continue,
                 BindingKind::Type => {
                     if self.retained_names.contains(&binding.value.name.value) {

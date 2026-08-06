@@ -61,6 +61,7 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
                 | Token::Native
                 | Token::Type
                 | Token::Import
+                | Token::Export
                 | Token::At
         ) || self.current == Token::Fn && self.peek(1) == Token::Identifier
     }
@@ -87,6 +88,9 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
                 _ => lookahead += 1,
             }
         }
+    }
+    fn predicate_binding_5(&self) -> bool {
+        self.current == Token::Export
     }
     fn predicate_manifest_dict_1(&self) -> bool {
         self.peek(1) != Token::RBrace
@@ -172,6 +176,9 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
         self.peek(1) != Token::RParen
     }
     fn predicate_import_items_1(&self) -> bool {
+        self.peek(1) != Token::RBrace
+    }
+    fn predicate_export_items_1(&self) -> bool {
         self.peek(1) != Token::RBrace
     }
     fn predicate_interpreter_intrinsic_1(&self) -> bool {
