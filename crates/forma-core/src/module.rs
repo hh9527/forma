@@ -7166,6 +7166,37 @@ unchanged", "|"),
     }
 
     #[test]
+    fn host_invocation_materializes_ready_definition_captures() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        fs::write(
+            &main,
+            r#"def helper = fn(value) { value + 1 };
+               def helper2 = fn(value) { helper(value) + 1 };
+               export def factory: Fn(Int) -> Fn(Int) -> Int = fn(offset) {
+                   fn(value) { helper2(value) + offset }
+               };"#,
+        )
+        .unwrap();
+
+        let engine = recovery_engine();
+        let loaded = engine.load_module(&main, BTreeMap::new()).unwrap();
+        let Value::Dict(exports) = engine.execute(&loaded).unwrap() else {
+            panic!("expected export record")
+        };
+        let factory = exports.get("factory").unwrap();
+        let generated = engine.invoke(&loaded, factory, &[Value::Int(2)]).unwrap();
+        assert_eq!(
+            engine
+                .invoke(&loaded, &generated, &[Value::Int(38)])
+                .unwrap()
+                .to_string(),
+            "42"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn recoverable_workspace_blocks_failed_imports_and_keeps_independent_facts() {
         let directory = fixture_dir();
         let model = directory.join("model.forma");

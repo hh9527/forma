@@ -261,6 +261,7 @@ pub(crate) fn compile_expression_with_bindings(
         function_name: function_name.to_owned(),
         environment: HashMap::new(),
         up_link_bindings: HashSet::new(),
+        ready_up_link_bindings: HashSet::new(),
         preserved_up_link_reads: HashSet::new(),
         definition_bindings: HashSet::new(),
         constants: Vec::new(),
@@ -308,6 +309,7 @@ struct Compiler<'a> {
     function_name: String,
     environment: HashMap<String, RegisterId>,
     up_link_bindings: HashSet<String>,
+    ready_up_link_bindings: HashSet<String>,
     preserved_up_link_reads: HashSet<String>,
     definition_bindings: HashSet<String>,
     constants: Vec<Value>,
@@ -373,6 +375,7 @@ impl<'a> Compiler<'a> {
             function_name: source_name.to_owned(),
             environment: HashMap::new(),
             up_link_bindings: HashSet::new(),
+            ready_up_link_bindings: HashSet::new(),
             preserved_up_link_reads: HashSet::new(),
             definition_bindings: HashSet::new(),
             constants: Vec::new(),
@@ -488,6 +491,7 @@ impl<'a> Compiler<'a> {
             function_name,
             environment,
             up_link_bindings: captured_up_links.clone(),
+            ready_up_link_bindings: HashSet::new(),
             preserved_up_link_reads: HashSet::new(),
             definition_bindings: captured_definitions.clone(),
             constants: Vec::new(),
@@ -548,6 +552,7 @@ impl<'a> Compiler<'a> {
     ) -> Result<Option<RegisterId>, FrontendError> {
         let outer = self.environment.clone();
         let outer_up_links = self.up_link_bindings.clone();
+        let outer_ready_up_links = self.ready_up_link_bindings.clone();
         let outer_definitions = self.definition_bindings.clone();
         let mut declared = HashMap::<String, (RegisterId, Location, Option<u32>)>::new();
         let mut type_links = HashMap::<String, (RegisterId, Location)>::new();
@@ -766,6 +771,7 @@ impl<'a> Compiler<'a> {
                     },
                     binding.location,
                 );
+                self.ready_up_link_bindings.insert(name);
             } else {
                 self.environment.insert(name.clone(), value);
                 self.up_link_bindings.remove(&name);
@@ -790,6 +796,7 @@ impl<'a> Compiler<'a> {
         };
         self.environment = outer;
         self.up_link_bindings = outer_up_links;
+        self.ready_up_link_bindings = outer_ready_up_links;
         self.definition_bindings = outer_definitions;
         Ok(result)
     }
@@ -1165,17 +1172,31 @@ impl<'a> Compiler<'a> {
         let mut free = BTreeSet::new();
         free_block(body, &mut bound, &mut free);
         let captures = free.into_iter().collect::<Vec<_>>();
-        let capture_registers = captures
-            .iter()
-            .map(|name| {
-                self.environment.get(name).copied().ok_or_else(|| {
-                    frontend_error(self.source_name, format!("unknown binding {name:?}"))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+        let mut capture_registers = Vec::with_capacity(captures.len());
+        for name in &captures {
+            let register = self.environment.get(name).copied().ok_or_else(|| {
+                frontend_error(self.source_name, format!("unknown binding {name:?}"))
+            })?;
+            if self.ready_up_link_bindings.contains(name) {
+                let value = self.allocate();
+                self.emit(
+                    Operation::ReadUpLink {
+                        dst: value,
+                        link: register,
+                    },
+                    location,
+                );
+                capture_registers.push(value);
+            } else {
+                capture_registers.push(register);
+            }
+        }
         let captured_up_links = captures
             .iter()
-            .filter(|name| self.up_link_bindings.contains(*name))
+            .filter(|name| {
+                self.up_link_bindings.contains(*name)
+                    && !self.ready_up_link_bindings.contains(*name)
+            })
             .cloned()
             .collect::<HashSet<_>>();
         let captured_definitions = captures

@@ -208,3 +208,19 @@ The acceptance boundary remains useful: future heap, export, or compiler work
 must keep this regression passing, and an exact end-to-end wrapper failure must
 be reduced independently rather than attributed to cross-module closure
 ownership by default.
+
+### Host invocation amendment
+
+The full RFC 0166 fixture later reproduced a narrower boundary omitted above:
+`Engine::execute` exports a Function through the legacy `Value` projection,
+which resolves hidden up-links, and `Engine::invoke` imports that Function
+again. Nested closure bytecode still expected captured initialized definitions
+to be up-links and failed when reading the now-materialized value.
+
+The compiler now tracks which predeclared definition up-links are initialized.
+When constructing a closure, ready definition captures are read once and stored
+as ordinary values; self, forward, and mutual-recursion captures that are not
+ready remain up-links. A focused regression executes an exported factory and
+its returned closure through two separate Host invocations, while the existing
+recursive-definition suite verifies that unresolved links retain their role.
+The GCC fixture and `std/argv` no longer contain manual materialization.

@@ -111,19 +111,15 @@ actions and deterministic rewritten argv; ar reuses the compiler package with
 one install and no sysroot. Missing TARGET, conflicting authoritative options,
 repeatability, and no-cache dry-run behavior are covered through the real CLI.
 
-The fixture exposed two remaining correctness gaps, so this RFC remains
-Proposed:
+The fixture exposed two correctness gaps. Ready definition captures are now
+materialized by the compiler while unresolved recursive links remain up-links;
+the fixture and `std/argv` no longer need source-level workarounds. One gap
+therefore remains and this RFC stays Proposed:
 
-1. promoted nested closures cannot directly retain a module-level `def`
-   uplink across every closure layer. The fixture explicitly materializes
-   initialized helper Functions as ordinary local values before returning its
-   `ExecFn`; this is semantically correct but does not satisfy the umbrella's
-   no-workaround closure criterion;
-2. malformed imported JSON is rejected at the authored `validate` rule, but
+1. malformed imported JSON is rejected at the authored `validate` rule, but
    its original `source.json` provenance is lost after crossing the dependency
    and promoted-closure boundary. The diagnostic must eventually carry both
    anchors before acceptance criterion 8 is complete.
 
 No partial plan is printed in either failure. RFC 0157 and this RFC stay
-Proposed until those two cross-module preservation issues are fixed and the
-fixture can remove the helper materialization.
+Proposed until the cross-module provenance issue is fixed.
