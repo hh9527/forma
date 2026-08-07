@@ -1,6 +1,6 @@
 # RFC 0170: Synthetic Host entry modules
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0057, RFC 0059, RFC 0157 through RFC 0169
 
 ## Summary
@@ -191,3 +191,18 @@ Work returns to discussion if a child requires transitive privilege,
 user-controlled trusted imports, ambient globals, weakened type checking,
 partial publication, a second protocol schema in Rust, or real external
 effects.
+
+## Implementation result
+
+RFCs 0171 through 0173 completed the phase. `ModuleId::Entry` and exact
+resolver permissions establish the non-transitive trusted root; synthetic
+loading and entry-only injected source modules expose closed Host snapshots;
+and `forma exec --dry-run` now uses a generated Forma adapter for its contract,
+invocation, structured encoding, and atomic publication.
+
+The implementation does not add ambient globals, delegated privilege, an
+effect system, or a parallel Rust protocol checker. Ordinary modules cannot
+resolve `@entry`, `@main`, or entry-only inputs outside the explicitly allowed
+edges. Full resolver, module, value-literal, adversarial CLI, GCC-wrapper, and
+workspace tests provide the phase evidence described by the shared acceptance
+criteria.

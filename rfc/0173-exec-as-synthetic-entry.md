@@ -1,6 +1,6 @@
 # RFC 0173: Exec as a synthetic entry
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0159, RFC 0167 through RFC 0172
 
 ## Summary
@@ -157,3 +157,27 @@ assembly remain.
 Work returns to discussion if completion requires weakening ExecFn checking,
 letting Rust reinterpret plan fields, partial publication, exposing private
 inputs to main, or bypassing Forma codecs.
+
+## Implementation result
+
+Implemented in `forma exec --dry-run`. The CLI performs a preliminary load for
+option discovery, freezes closed runtime and ordered option snapshots as two
+entry-only source modules, and compiles the generated adapter through the
+ordinary resolver, checker, compiler, VM, codec, and JSON modules. The adapter
+assigns `main.exec` to `ExecFn`, constructs typed settings/request values,
+invokes it, and exports encoded `install` and `exec_opts` Strings.
+
+The previous Rust `ExecEnv`/`Install` traversal and canonical serializer were
+removed. Rust now knows only how to prepare narrow snapshots, reject malformed
+adapter exports defensively, and assemble the two already encoded fragments
+into one envelope. Entry analysis failures gain a primary diagnostic at the
+real top-level `@main.exec` definition while retaining the detailed `@entry`
+contract failure.
+
+CLI coverage demonstrates that inferred functions and a separately named,
+structurally equivalent `MyExecFn` pass; non-functions, wrong results, unknown
+variants, missing install fields, and malformed environment/cwd values fail
+before stdout publication. The GCC-wrapper fixture retains dual-source JSON
+provenance, deterministic recipe identities, install `file`/`dest` values,
+target-selected sysroots, command-line prefix rewriting, and explicit process
+environment policy.

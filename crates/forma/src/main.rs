@@ -1,6 +1,6 @@
 use forma_core::{
-    DebugEvent, DebugSink, DefinitionKind, Engine, EngineConfig, LoadedModule, Location, Quota,
-    TextRange, Value, Vm, WorkspaceSnapshot, WorkspaceTypeId, parse_json,
+    DebugEvent, DebugSink, DefinitionKind, Diagnostic, Engine, EngineConfig, LoadedModule,
+    Location, Quota, TextRange, Value, Vm, WorkspaceSnapshot, WorkspaceTypeId, parse_json,
 };
 use std::collections::BTreeMap;
 use std::env;
@@ -132,20 +132,161 @@ fn exec_command(arguments: &[String]) -> Result<(), String> {
         }
     };
     let engine = engine();
-    let module = engine
+    let main = engine
         .load_module(module_path, BTreeMap::new())
         .map_err(|error| error.to_string())?;
-    let exports = engine.execute(&module).map_err(|error| error.to_string())?;
-    let entry = select_host_entry(&module, exports, "exec", "exec")?;
     let mut values = Vm::new();
     let settings = exec_settings(&mut values)?;
-    let captures = exec_environment_captures(&module)?;
+    let captures = exec_environment_captures(&main)?;
     let request = exec_request(&mut values, request_args, &captures)?;
-    let plan = engine
-        .invoke(&module, &entry, &[settings, request])
-        .map_err(|error| error.to_string())?;
-    println!("{}", canonical_exec_json(&plan)?);
+    let injected = exec_injected_modules(&mut values, &main, settings, request)?;
+    let entry = engine
+        .load_synthetic_entry_with_modules(
+            module_path,
+            EXEC_ENTRY_SOURCE,
+            BTreeMap::new(),
+            injected,
+        )
+        .map_err(|error| exec_entry_error(&main, error.to_string()))?;
+    let exports = engine.execute(&entry).map_err(|error| error.to_string())?;
+    let Value::Dict(exports) = exports else {
+        return Err("exec entry must export a record".into());
+    };
+    if exports.shape().fields() != ["exec_opts", "install"] {
+        return Err("exec entry must export exactly exec_opts and install".into());
+    }
+    let install = expect_string_export(&exports, "install")?;
+    let exec_opts = expect_string_export(&exports, "exec_opts")?;
+    println!(r#"{{"install":{install},"exec_opts":{exec_opts}}}"#);
     Ok(())
+}
+
+fn exec_entry_error(main: &LoadedModule, detail: String) -> String {
+    let Some(definition) = main
+        .analysis
+        .hir
+        .definitions()
+        .iter()
+        .find(|definition| definition.top_level && definition.name == "exec")
+    else {
+        return detail;
+    };
+    let diagnostic = Diagnostic::error(
+        "exported exec does not satisfy the forma exec entry contract",
+        definition.location,
+    );
+    format!(
+        "{}\nentry contract detail:\n{detail}",
+        main.sources.render(&diagnostic)
+    )
+}
+
+const EXEC_ENTRY_SOURCE: &str = r#"
+import "@main" as main;
+import "std/codec" as codec;
+import "std/json" as json;
+import "std/rt-types/exec.forma" {
+    ExecFn,
+    ExecSettings,
+    ExecRequest,
+    ExecEnvironment,
+    Install,
+};
+import "std/rt.native.forma" as rt;
+import "std/opts.priv.forma" as opts;
+
+@struct type ExecOpts = {
+    cwd: Option(String),
+    bin: String,
+    args: Array(String),
+    env: ExecEnvironment,
+};
+
+let checked: ExecFn = main.exec;
+let settings: ExecSettings = rt.settings;
+let request: ExecRequest = {
+    args: rt.args,
+    env: rt.env,
+    cwd: rt.cwd,
+};
+let option_actions = opts.actions;
+let output = checked(settings, request);
+
+let install = match codec.encode(Array(Install), output.install) {
+    'Ok(value) => json.stringify(value),
+    'Err(error) => reraise!(error),
+};
+let exec_opts = match codec.encode(ExecOpts, {
+    cwd: output.cwd,
+    bin: output.bin,
+    args: output.args,
+    env: output.env,
+}) {
+    'Ok(value) => json.stringify(value),
+    'Err(error) => reraise!(error),
+};
+
+export { install, exec_opts };
+"#;
+
+fn expect_string_export<'a>(exports: &'a forma_core::Dict, name: &str) -> Result<&'a str, String> {
+    match exports.get(name) {
+        Some(Value::String(value)) => Ok(value),
+        Some(value) => Err(format!(
+            "exec entry export {name:?} must be a String, found {}",
+            value.type_name()
+        )),
+        None => Err(format!("exec entry omitted export {name:?}")),
+    }
+}
+
+fn exec_injected_modules(
+    vm: &mut Vm,
+    main: &LoadedModule,
+    settings: Value,
+    request: Value,
+) -> Result<BTreeMap<String, String>, String> {
+    let Value::Dict(request) = request else {
+        return Err("internal ExecRequest snapshot is not a Dict".into());
+    };
+    let runtime_source = format!(
+        "import \"std/rt-types/exec.forma\" {{ ExecSettings }};\n\
+         export let settings: ExecSettings = {};\n\
+         export let args: Array(String) = {};\n\
+         export let env: Dict(String) = {};\n\
+         export let cwd: String = {};\n",
+        settings.to_forma_literal()?,
+        request
+            .get("args")
+            .expect("ExecRequest args")
+            .to_forma_literal()?,
+        request
+            .get("env")
+            .expect("ExecRequest env")
+            .to_forma_literal()?,
+        request
+            .get("cwd")
+            .expect("ExecRequest cwd")
+            .to_forma_literal()?,
+    );
+    let actions = main
+        .option_actions()
+        .iter()
+        .map(|action| {
+            vm.make_dict(vec![
+                ("key".into(), Value::string(action.key.clone())),
+                ("value".into(), action.value.clone()),
+            ])
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let option_source = format!(
+        "export let actions: Array(Any) = {};\n",
+        Value::Array(actions.into()).to_forma_literal()?
+    );
+    Ok(BTreeMap::from([
+        ("std/opts.priv.forma".into(), option_source),
+        ("std/rt.native.forma".into(), runtime_source),
+    ]))
 }
 
 fn build_command(arguments: &[String]) -> Result<(), String> {
@@ -357,218 +498,6 @@ fn path_string(path: &Path) -> Result<String, String> {
     path.to_str()
         .map(ToOwned::to_owned)
         .ok_or_else(|| format!("path is not UTF-8: {}", path.display()))
-}
-
-fn canonical_exec_json(value: &Value) -> Result<String, String> {
-    fn expect_dict<'a>(
-        value: &'a Value,
-        path: &str,
-        fields: &[&str],
-    ) -> Result<&'a forma_core::Dict, String> {
-        let Value::Dict(dict) = value else {
-            return Err(format!(
-                "{path} must be a Dict, found {}",
-                value.type_name()
-            ));
-        };
-        if !dict
-            .shape()
-            .fields()
-            .iter()
-            .map(String::as_str)
-            .eq(fields.iter().copied())
-        {
-            return Err(format!("{path} has an invalid field shape"));
-        }
-        Ok(dict)
-    }
-
-    fn expect_string<'a>(value: &'a Value, path: &str) -> Result<&'a str, String> {
-        let Value::String(value) = value else {
-            return Err(format!(
-                "{path} must be a String, found {}",
-                value.type_name()
-            ));
-        };
-        Ok(value)
-    }
-
-    fn write_string(output: &mut String, value: &str) {
-        output.push('"');
-        for character in value.chars() {
-            match character {
-                '"' => output.push_str("\\\""),
-                '\\' => output.push_str("\\\\"),
-                '\n' => output.push_str("\\n"),
-                '\r' => output.push_str("\\r"),
-                '\t' => output.push_str("\\t"),
-                character if character.is_control() => {
-                    write!(output, "\\u{:04x}", u32::from(character)).unwrap();
-                }
-                character => output.push(character),
-            }
-        }
-        output.push('"');
-    }
-
-    fn write_option_string(output: &mut String, value: &Value, path: &str) -> Result<(), String> {
-        match value {
-            Value::Atom(atom) if atom.name() == "None" => output.push_str("null"),
-            Value::Tagged { tag, payload } if tag.name() == "Some" => {
-                write_string(output, expect_string(payload, path)?);
-            }
-            _ => return Err(format!("{path} must be Option(String)")),
-        }
-        Ok(())
-    }
-
-    fn write_string_array(output: &mut String, value: &Value, path: &str) -> Result<(), String> {
-        let Value::Array(values) = value else {
-            return Err(format!(
-                "{path} must be an Array, found {}",
-                value.type_name()
-            ));
-        };
-        output.push('[');
-        for (index, value) in values.iter().enumerate() {
-            if index > 0 {
-                output.push(',');
-            }
-            write_string(output, expect_string(value, &format!("{path}[{index}]"))?);
-        }
-        output.push(']');
-        Ok(())
-    }
-
-    fn write_environment(output: &mut String, value: &Value, path: &str) -> Result<(), String> {
-        let environment = expect_dict(value, path, &["clear", "update"])?;
-        let Value::Atom(clear) = environment.get("clear").expect("field checked") else {
-            return Err(format!("{path}.clear must be a Bool Atom"));
-        };
-        let clear = match clear.name() {
-            "True" => true,
-            "False" => false,
-            _ => return Err(format!("{path}.clear must be 'True or 'False")),
-        };
-        let Value::Dict(updates) = environment.get("update").expect("field checked") else {
-            return Err(format!("{path}.update must be a Dict"));
-        };
-        write!(output, "{{\"clear\":{clear},\"update\":{{").unwrap();
-        for (index, (name, value)) in updates
-            .shape()
-            .fields()
-            .iter()
-            .zip(updates.values())
-            .enumerate()
-        {
-            if index > 0 {
-                output.push(',');
-            }
-            write_string(output, name);
-            output.push(':');
-            write_option_string(output, value, &format!("{path}.update.{name}"))?;
-        }
-        output.push_str("}}");
-        Ok(())
-    }
-
-    fn write_unpack(output: &mut String, value: &Value, path: &str) -> Result<(), String> {
-        let Value::Tagged { tag, payload } = value else {
-            return Err(format!("{path} must be an Install Tagged value"));
-        };
-        if tag.name() != "Unpack" {
-            return Err(format!(
-                "{path} has unknown Install variant {:?}",
-                tag.name()
-            ));
-        }
-        let path = format!("{path}.Unpack");
-        let unpack = expect_dict(
-            payload,
-            &path,
-            &["dest", "digest", "file", "src", "strip", "ty"],
-        )?;
-        let dest = expect_string(
-            unpack.get("dest").expect("field checked"),
-            &format!("{path}.dest"),
-        )?;
-        let src = expect_string(
-            unpack.get("src").expect("field checked"),
-            &format!("{path}.src"),
-        )?;
-        let file = expect_string(
-            unpack.get("file").expect("field checked"),
-            &format!("{path}.file"),
-        )?;
-        let Value::Int(strip) = unpack.get("strip").expect("field checked") else {
-            return Err(format!("{path}.strip must be an Int"));
-        };
-        let Value::Atom(ty) = unpack.get("ty").expect("field checked") else {
-            return Err(format!("{path}.ty must be an UnpackType Atom"));
-        };
-        if !matches!(ty.name(), "TarGzip" | "Tar") {
-            return Err(format!(
-                "{path}.ty has unknown UnpackType variant {:?}",
-                ty.name()
-            ));
-        }
-
-        output.push_str("{\"Unpack\":{");
-        output.push_str("\"dest\":");
-        write_string(output, dest);
-        output.push_str(",\"digest\":");
-        write_option_string(
-            output,
-            unpack.get("digest").expect("field checked"),
-            &format!("{path}.digest"),
-        )?;
-        output.push_str(",\"file\":");
-        write_string(output, file);
-        output.push_str(",\"src\":");
-        write_string(output, src);
-        write!(output, ",\"strip\":{strip},\"ty\":").unwrap();
-        write_string(output, ty.name());
-        output.push_str("}}");
-        Ok(())
-    }
-
-    let plan = expect_dict(value, "ExecEnv", &["args", "bin", "cwd", "env", "install"])?;
-    let mut output = String::new();
-    output.push_str("{\"args\":");
-    write_string_array(
-        &mut output,
-        plan.get("args").expect("field checked"),
-        "ExecEnv.args",
-    )?;
-    output.push_str(",\"bin\":");
-    write_string(
-        &mut output,
-        expect_string(plan.get("bin").expect("field checked"), "ExecEnv.bin")?,
-    );
-    output.push_str(",\"cwd\":");
-    write_option_string(
-        &mut output,
-        plan.get("cwd").expect("field checked"),
-        "ExecEnv.cwd",
-    )?;
-    output.push_str(",\"env\":");
-    write_environment(
-        &mut output,
-        plan.get("env").expect("field checked"),
-        "ExecEnv.env",
-    )?;
-    output.push_str(",\"install\":[");
-    let Value::Array(installs) = plan.get("install").expect("field checked") else {
-        return Err("ExecEnv.install must be an Array".into());
-    };
-    for (index, install) in installs.iter().enumerate() {
-        if index > 0 {
-            output.push(',');
-        }
-        write_unpack(&mut output, install, &format!("ExecEnv.install[{index}]"))?;
-    }
-    output.push_str("]}");
-    Ok(output)
 }
 
 fn check_command(arguments: &[String]) -> Result<(), String> {

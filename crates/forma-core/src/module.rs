@@ -618,6 +618,10 @@ impl LoadedModule {
             .map(|option| &option.value)
     }
 
+    pub fn option_actions(&self) -> &[LoadedOptionAction] {
+        &self.options
+    }
+
     pub fn execute(&self, evaluation_fuel: usize) -> Result<Value, crate::RuntimeError> {
         self.execute_with_quota(Quota::with_fuel(evaluation_fuel))
     }

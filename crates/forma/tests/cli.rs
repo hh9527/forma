@@ -534,6 +534,18 @@ fn gcc_wrapper_fixture_builds_reusable_deterministic_plans() {
 #[test]
 fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
     let directory = fixture_dir();
+    let assert_contract_error = |output: &std::process::Output, source_name: &str| {
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("exported exec does not satisfy the forma exec entry contract"),
+            "{stderr}"
+        );
+        assert!(stderr.contains(source_name), "{stderr}");
+        assert!(stderr.contains("entry contract detail"), "{stderr}");
+        assert!(stderr.contains("@entry"), "{stderr}");
+    };
     let value = directory.join("value.forma");
     fs::write(&value, "export let exec = 42;").unwrap();
 
@@ -554,8 +566,7 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
         .args(["exec", "--dry-run", value.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(!not_function.status.success());
-    assert!(String::from_utf8_lossy(&not_function.stderr).contains("must be a function"));
+    assert_contract_error(&not_function, "value.forma");
 
     let not_dict = directory.join("not-dict.forma");
     fs::write(&not_dict, "export def exec = fn(settings, request) { 42 };").unwrap();
@@ -563,8 +574,7 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
         .args(["exec", "--dry-run", not_dict.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(!not_dict.status.success());
-    assert!(String::from_utf8_lossy(&not_dict.stderr).contains("ExecEnv must be a Dict"));
+    assert_contract_error(&not_dict, "not-dict.forma");
 
     let malformed = directory.join("malformed.forma");
     fs::write(
@@ -576,11 +586,7 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
         .args(["exec", "--dry-run", malformed.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(!malformed.status.success());
-    assert!(
-        String::from_utf8_lossy(&malformed.stderr)
-            .contains("ExecEnv.install[0] has unknown Install variant")
-    );
+    assert_contract_error(&malformed, "malformed.forma");
 
     let missing_file = directory.join("missing-file.forma");
     fs::write(
@@ -592,12 +598,8 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
         .args(["exec", "--dry-run", missing_file.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(!missing_file.status.success());
-    assert!(missing_file.stdout.is_empty());
-    assert!(
-        String::from_utf8_lossy(&missing_file.stderr)
-            .contains("ExecEnv.install[0].Unpack has an invalid field shape")
-    );
+    assert_contract_error(&missing_file, "missing-file.forma");
+    assert!(String::from_utf8_lossy(&missing_file.stderr).contains("file"));
 
     let bad_env = directory.join("bad-env.forma");
     fs::write(
@@ -609,12 +611,7 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
         .args(["exec", "--dry-run", bad_env.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(!bad_env.status.success());
-    assert!(bad_env.stdout.is_empty());
-    assert!(
-        String::from_utf8_lossy(&bad_env.stderr)
-            .contains("ExecEnv.env.update.BAD must be Option(String)")
-    );
+    assert_contract_error(&bad_env, "bad-env.forma");
 
     let bad_cwd = directory.join("bad-cwd.forma");
     fs::write(
@@ -626,9 +623,27 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
         .args(["exec", "--dry-run", bad_cwd.to_str().unwrap()])
         .output()
         .unwrap();
-    assert!(!bad_cwd.status.success());
-    assert!(bad_cwd.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&bad_cwd.stderr).contains("ExecEnv.cwd must be a String"));
+    assert_contract_error(&bad_cwd, "bad-cwd.forma");
+
+    let structural = directory.join("structural.forma");
+    fs::write(
+        &structural,
+        r#"import "std/rt-types/exec.forma" { ExecSettings, ExecRequest, ExecEnv };
+type MyExecFn = Fn(ExecSettings, ExecRequest) -> ExecEnv;
+export def exec: MyExecFn = fn(settings, request) {
+    {install: [], cwd: 'None, bin: "true", args: request.args, env: {clear: 'False, update: {}}}
+};"#,
+    )
+    .unwrap();
+    let structural = forma()
+        .args(["exec", "--dry-run", structural.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        structural.status.success(),
+        "{}",
+        String::from_utf8_lossy(&structural.stderr)
+    );
     fs::remove_dir_all(directory).unwrap();
 }
 
