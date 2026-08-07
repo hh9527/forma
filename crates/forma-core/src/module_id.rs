@@ -15,12 +15,13 @@ pub enum ModuleFormat {
 
 impl ModuleFormat {
     pub fn from_path(path: &Path) -> Result<Self, ResolveModuleError> {
-        if path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.ends_with(".forma-sys"))
-        {
-            return Ok(Self::Forma);
+        if has_penultimate_suffix(path, "native") && path.extension() != Some("forma".as_ref()) {
+            return Err(ResolveModuleError::InvalidModuleSuffix(
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("<non-UTF-8>")
+                    .into(),
+            ));
         }
         match path.extension().and_then(|extension| extension.to_str()) {
             Some("forma") => Ok(Self::Forma),
@@ -117,9 +118,10 @@ pub enum ResolveModuleError {
     UnknownFormat(String),
     UnknownDependency(String),
     InvalidImport(String),
+    InvalidModuleSuffix(String),
     CrateEscape(String),
-    SystemModuleAccess(String),
-    SystemModuleRoot,
+    PrivateModuleAccess(String),
+    PrivateModuleRoot,
     Manifest(String),
     FormatConflict {
         configured: ModuleFormat,
@@ -140,15 +142,19 @@ impl fmt::Display for ResolveModuleError {
             Self::UnknownFormat(format) => write!(formatter, "unknown module format {format:?}"),
             Self::UnknownDependency(name) => write!(formatter, "unknown dependency {name:?}"),
             Self::InvalidImport(request) => write!(formatter, "invalid module import {request:?}"),
+            Self::InvalidModuleSuffix(name) => write!(
+                formatter,
+                "module suffix .native is reserved for Forma source, not {name:?}"
+            ),
             Self::CrateEscape(request) => {
                 write!(formatter, "module import escapes its crate root: {request}")
             }
-            Self::SystemModuleAccess(request) => write!(
+            Self::PrivateModuleAccess(request) => write!(
                 formatter,
-                "system module {request:?} can only be imported from the same crate"
+                "private module {request:?} can only be imported from the same crate"
             ),
-            Self::SystemModuleRoot => {
-                formatter.write_str("a .forma-sys module cannot be used as the root module")
+            Self::PrivateModuleRoot => {
+                formatter.write_str("a private module cannot be used as the root module")
             }
             Self::Manifest(message) | Self::Io(message) => formatter.write_str(message),
             Self::FormatConflict {
@@ -268,8 +274,8 @@ impl ModuleResolver {
 
     pub fn resolve_root(&self, path: &Path) -> Result<ResolvedModule, ResolveModuleError> {
         let path = resolve_physical(path)?;
-        if is_system_source(&path) {
-            return Err(ResolveModuleError::SystemModuleRoot);
+        if is_private_file_name(&path) {
+            return Err(ResolveModuleError::PrivateModuleRoot);
         }
         let format = self.format_for(&ModuleId::Main, &path)?;
         Ok(ResolvedModule {
@@ -462,7 +468,7 @@ impl ModuleResolver {
         name: &str,
         path: PathBuf,
         original: &str,
-        allow_system: bool,
+        allow_private: bool,
     ) -> Result<ResolvedModule, ResolveModuleError> {
         let root = self
             .dependencies
@@ -478,6 +484,7 @@ impl ModuleResolver {
         if !physical.starts_with(&source_root) {
             return Err(ResolveModuleError::CrateEscape(original.into()));
         }
+        let private = is_private_module_path(&path);
         let id = ModuleId::Dependency {
             name: name.into(),
             path,
@@ -489,8 +496,8 @@ impl ModuleResolver {
             authority: authority_for_path(&physical),
             physical_path: Some(physical),
         };
-        if module.authority == ModuleAuthority::PackageSystem && !allow_system {
-            return Err(ResolveModuleError::SystemModuleAccess(original.into()));
+        if private && !allow_private {
+            return Err(ResolveModuleError::PrivateModuleAccess(original.into()));
         }
         Ok(module)
     }
@@ -503,6 +510,7 @@ impl ModuleResolver {
         let configured = self.formats.get(&id.to_string()).copied();
         let extension = ModuleFormat::from_path(physical);
         match (configured, extension) {
+            (Some(_), Err(error @ ResolveModuleError::InvalidModuleSuffix(_))) => Err(error),
             (Some(configured), Ok(extension)) if configured != extension => {
                 Err(ResolveModuleError::FormatConflict {
                     configured,
@@ -585,14 +593,28 @@ fn resolve_physical(path: &Path) -> Result<PathBuf, ResolveModuleError> {
     Ok(resolved)
 }
 
-fn is_system_source(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.ends_with(".forma-sys"))
+fn is_private_file_name(path: &Path) -> bool {
+    has_penultimate_suffix(path, "priv") || is_package_system_source(path)
+}
+
+fn is_private_module_path(path: &Path) -> bool {
+    is_private_file_name(path)
+}
+
+fn has_penultimate_suffix(path: &Path, suffix: &str) -> bool {
+    path.file_stem()
+        .and_then(|stem| Path::new(stem).extension())
+        .and_then(|extension| extension.to_str())
+        == Some(suffix)
+}
+
+fn is_package_system_source(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("forma")
+        && has_penultimate_suffix(path, "native")
 }
 
 fn authority_for_path(path: &Path) -> ModuleAuthority {
-    if is_system_source(path) {
+    if is_package_system_source(path) {
         ModuleAuthority::PackageSystem
     } else {
         ModuleAuthority::Ordinary
@@ -688,7 +710,7 @@ mod tests {
     }
 
     #[test]
-    fn builtins_precede_vtops_and_system_sources_stay_crate_local() {
+    fn builtins_precede_vtops_and_private_modules_stay_crate_local() {
         let temporary = std::env::temp_dir().join(format!(
             "forma-module-authority-test-{}",
             std::process::id()
@@ -701,13 +723,16 @@ mod tests {
         std::fs::create_dir_all(shadow.join("src")).unwrap();
         let main = app.join("main.forma");
         std::fs::write(&main, "0").unwrap();
-        std::fs::write(app.join("src/local.forma-sys"), "0").unwrap();
+        std::fs::write(app.join("src/local.priv.forma"), "0").unwrap();
+        std::fs::write(app.join("src/host.native.forma"), "0").unwrap();
         std::fs::write(dependency.join("src/public.forma"), "0").unwrap();
-        std::fs::write(dependency.join("src/internal.forma-sys"), "0").unwrap();
+        std::fs::write(dependency.join("src/internal.priv.forma"), "0").unwrap();
+        std::fs::write(dependency.join("src/value.priv.json"), "0").unwrap();
+        std::fs::write(dependency.join("src/bad.native.json"), "0").unwrap();
         std::fs::write(shadow.join("src/array"), "0").unwrap();
         std::fs::write(
             app.join("forma-deps.json"),
-            r#"{"dependencies":{"dep":{"path":"../dependency"},"std":{"path":"../shadow"}},"formats":{"std/array":"forma"}}"#,
+            r#"{"dependencies":{"dep":{"path":"../dependency"},"std":{"path":"../shadow"}},"formats":{"std/array":"forma","dep/bad.native.json":"json"}}"#,
         )
         .unwrap();
 
@@ -720,25 +745,37 @@ mod tests {
         assert_eq!(builtin.authority, ModuleAuthority::RuntimeSystem);
 
         let local = resolver
-            .resolve_import(&root.id, "@src/local.forma-sys")
+            .resolve_import(&root.id, "@src/local.priv.forma")
             .unwrap();
-        assert_eq!(local.authority, ModuleAuthority::PackageSystem);
+        assert_eq!(local.authority, ModuleAuthority::Ordinary);
+        let native = resolver
+            .resolve_import(&root.id, "@src/host.native.forma")
+            .unwrap();
+        assert_eq!(native.authority, ModuleAuthority::PackageSystem);
 
         assert!(matches!(
-            resolver.resolve_import(&root.id, "dep/internal.forma-sys"),
-            Err(ResolveModuleError::SystemModuleAccess(_))
+            resolver.resolve_import(&root.id, "dep/internal.priv.forma"),
+            Err(ResolveModuleError::PrivateModuleAccess(_))
+        ));
+        assert!(matches!(
+            resolver.resolve_import(&root.id, "dep/value.priv.json"),
+            Err(ResolveModuleError::PrivateModuleAccess(_))
+        ));
+        assert!(matches!(
+            resolver.resolve_import(&root.id, "dep/bad.native.json"),
+            Err(ResolveModuleError::InvalidModuleSuffix(_))
         ));
         let dependency_module = resolver
             .resolve_import(&root.id, "dep/public.forma")
             .unwrap();
         let internal = resolver
-            .resolve_import(&dependency_module.id, "./internal.forma-sys")
+            .resolve_import(&dependency_module.id, "./internal.priv.forma")
             .unwrap();
-        assert_eq!(internal.authority, ModuleAuthority::PackageSystem);
+        assert_eq!(internal.authority, ModuleAuthority::Ordinary);
         assert!(matches!(
-            ModuleResolver::for_root(&app.join("src/local.forma-sys"))
-                .and_then(|resolver| resolver.resolve_root(&app.join("src/local.forma-sys"))),
-            Err(ResolveModuleError::SystemModuleRoot)
+            ModuleResolver::for_root(&app.join("src/local.priv.forma"))
+                .and_then(|resolver| resolver.resolve_root(&app.join("src/local.priv.forma"))),
+            Err(ResolveModuleError::PrivateModuleRoot)
         ));
         std::fs::remove_dir_all(temporary).unwrap();
     }

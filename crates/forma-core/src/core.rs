@@ -38,13 +38,13 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 1,
             name: EQ_MODULE,
-            source: include_str!("../modules/std/eq.forma-sys"),
+            source: include_str!("../modules/std/eq.native.forma"),
             functions: vec![("equal", NativeFunction::core_eq(CoreEqFunction::Equal))],
         },
         CoreModuleSpec {
             native_id: 2,
             name: DYN_MODULE,
-            source: include_str!("../modules/std/dyn.forma-sys"),
+            source: include_str!("../modules/std/dyn.native.forma"),
             functions: vec![
                 ("pack", NativeFunction::core_dyn(CoreDynFunction::Pack)),
                 ("desc", NativeFunction::core_dyn(CoreDynFunction::Desc)),
@@ -85,7 +85,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 3,
             name: TYPE_DESC_MODULE,
-            source: include_str!("../modules/std/type-desc.forma-sys"),
+            source: include_str!("../modules/std/type-desc.native.forma"),
             functions: vec![
                 (
                     "children",
@@ -108,7 +108,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 4,
             name: ATTRIBUTES_MODULE,
-            source: include_str!("../modules/std/attributes.forma-sys"),
+            source: include_str!("../modules/std/attributes.native.forma"),
             functions: vec![
                 (
                     "add",
@@ -139,7 +139,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 5,
             name: ARRAY_MODULE,
-            source: include_str!("../modules/std/array.forma-sys"),
+            source: include_str!("../modules/std/array.native.forma"),
             functions: vec![
                 ("all", NativeFunction::core_array(CoreArrayFunction::All)),
                 ("any", NativeFunction::core_array(CoreArrayFunction::Any)),
@@ -173,7 +173,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 6,
             name: DICT_MODULE,
-            source: include_str!("../modules/std/dict.forma-sys"),
+            source: include_str!("../modules/std/dict.native.forma"),
             functions: vec![
                 (
                     "filter",
@@ -200,7 +200,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 7,
             name: STRING_MODULE,
-            source: include_str!("../modules/std/string.forma-sys"),
+            source: include_str!("../modules/std/string.native.forma"),
             functions: vec![
                 (
                     "contains",
@@ -275,7 +275,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 8,
             name: PATH_MODULE,
-            source: include_str!("../modules/std/path.forma-sys"),
+            source: include_str!("../modules/std/path.native.forma"),
             functions: vec![
                 (
                     "file_name",
@@ -301,7 +301,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 10,
             name: DEBUG_MODULE,
-            source: include_str!("../modules/std/debug.forma-sys"),
+            source: include_str!("../modules/std/debug.native.forma"),
             functions: vec![
                 ("dbg", NativeFunction::core_debug(CoreDebugFunction::Dbg)),
                 (
@@ -325,7 +325,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 13,
             name: CODEC_MODULE,
-            source: include_str!("../modules/std/codec.forma-sys"),
+            source: include_str!("../modules/std/codec.native.forma"),
             functions: vec![
                 (
                     "decode",
@@ -346,7 +346,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 15,
             name: RESULT_MODULE,
-            source: include_str!("../modules/std/result.forma-sys"),
+            source: include_str!("../modules/std/result.native.forma"),
             functions: vec![(
                 "unwrap",
                 NativeFunction::core_result(CoreResultFunction::Unwrap),
@@ -355,7 +355,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 16,
             name: HASH_MODULE,
-            source: include_str!("../modules/std/hash.forma-sys"),
+            source: include_str!("../modules/std/hash.native.forma"),
             functions: vec![
                 (
                     "sha256",
@@ -411,7 +411,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 17,
             name: JSON_MODULE,
-            source: include_str!("../modules/std/json.forma-sys"),
+            source: include_str!("../modules/std/json.native.forma"),
             functions: vec![
                 ("parse", NativeFunction::core_json(CoreJsonFunction::Parse)),
                 (
@@ -459,7 +459,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 18,
             name: PRELUDE_MODULE,
-            source: include_str!("../modules/core/prelude.forma-sys"),
+            source: include_str!("../modules/core/prelude.native.forma"),
             functions: vec![
                 (
                     "struct",
@@ -479,7 +479,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 19,
             name: REGEX_MODULE,
-            source: include_str!("../modules/std/regex.forma-sys"),
+            source: include_str!("../modules/std/regex.native.forma"),
             functions: vec![
                 (
                     "compile",
@@ -513,7 +513,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
         CoreModuleSpec {
             native_id: 20,
             name: FMT_MODULE,
-            source: include_str!("../modules/std/fmt.forma-sys"),
+            source: include_str!("../modules/std/fmt.native.forma"),
             functions: vec![
                 (
                     "prepare",

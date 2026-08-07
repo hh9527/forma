@@ -1028,7 +1028,7 @@ impl RecoverableWorkspaceBuilder<'_> {
             {
                 diagnostics.push(Diagnostic::error(
                     format!(
-                        "native symbol {:?} is only allowed in built-in or .forma-sys modules",
+                        "native symbol {:?} is only allowed in built-in or *.native.forma modules",
                         binding.value.name.value
                     ),
                     binding.location,
@@ -2119,7 +2119,7 @@ impl ModuleLoader {
         }) {
             let message = if authority == ModuleAuthority::Ordinary {
                 format!(
-                    "native symbol {:?} is only allowed in built-in or .forma-sys modules",
+                    "native symbol {:?} is only allowed in built-in or *.native.forma modules",
                     binding.value.name.value
                 )
             } else {
@@ -3612,7 +3612,7 @@ name = "rustc"
         assert!(recovered.diagnostics().iter().any(|diagnostic| {
             diagnostic
                 .message
-                .contains("only allowed in built-in or .forma-sys modules")
+                .contains("only allowed in built-in or *.native.forma modules")
         }));
 
         fs::write(
@@ -3634,13 +3634,13 @@ name = "rustc"
         );
 
         fs::write(
-            directory.join("system.forma-sys"),
+            directory.join("system.native.forma"),
             "native missing: Fn(Int) -> Int; missing(1)",
         )
         .unwrap();
         fs::write(
             directory.join("system-user.forma"),
-            "import \"./system.forma-sys\" as system; system",
+            "import \"./system.native.forma\" as system; system",
         )
         .unwrap();
         let system = load_module(
