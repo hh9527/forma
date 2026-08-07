@@ -324,6 +324,7 @@ cargo run -p forma -- lsp
 
 ## Documentation
 
+- [INTRO.md](INTRO.md): the problem domain, prior art, and the GCC wrapper case
 - [VISION.md](VISION.md): the design thesis and feature admission rule
 - [rfc/](rfc/): numbered design documents with acceptance evidence
 - [README.zh.md](README.zh.md): Chinese introduction

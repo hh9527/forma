@@ -215,6 +215,7 @@ cargo run -p forma -- lsp
 
 ## 文档
 
+- [INTRO.zh.md](INTRO.zh.md)：从问题域、既有方案和 GCC wrapper 案例介绍 Forma
 - [VISION.md](VISION.md)：设计命题与功能准入原则
 - [rfc/](rfc/)：带有验收证据的编号设计文档
 - [README.md](README.md)：English
