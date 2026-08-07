@@ -16,7 +16,9 @@ Forma 代码将合法意图逐步 lowering 为 SQLite SQL。
   entity 自动选择、合并并去重 join；
 - RFC 0183：已完成，many-to-one 安全路径与 one-to-many fan-out 路径分离，
   Product 维度对 Order grain 的拒绝由关系证明产生；
-- 下一步：RFC 0184，扩展意图并显式分离 semantic、relational 和 SQL 阶段。
+- RFC 0184：已完成，意图支持 filter、显式排序、limit 和 render mode，并形成
+  `SemanticPlan → RelationalPlan → SqlPlan` 三个 typed lowering 阶段；
+- 下一步：RFC 0185，定义 Host 可核对、可序列化且不携带执行权限的最终计划。
 
 ## 文件
 
@@ -72,6 +74,9 @@ cargo run -p forma -- run examples/intelligent-reporting/invalid.forma
 - 多个 dimension 共享的路径只产生一次 join；
 - relation 带有 cardinality；planner 区分安全可达、需要 fan-out policy 和完全
   不可达，诊断仍指向原始 dimension；
+- filter 本身也声明所需 entity，因此会参与同一关系规划；排序只能引用已经
+  选择的 dimension，limit 与 render mode 保留在 typed plan 中；
+- semantic、relational、SQL 三个中间计划都是普通 Forma 值和显式函数边界；
 - 失败结果不发布 SQL，成功结果可以直接被 SQLite 执行。
 
 ## RFC 0181 的边界发现
@@ -102,7 +107,7 @@ group 和 order。任意深度表达式及嵌套 CTE 暂不支持；未来修复
 policy。后续阶段还需要：
 
 - 预聚合与 allocation policy；
-- filter、参数、排序、limit、drill 和 render 意图；
+- 参数、drill 和更丰富的 render 意图；
 - 分阶段的 semantic/relational/SQL plan；
 - 结果 schema 与 Host 执行边界；
 - provenance 穿过所有中间计划；

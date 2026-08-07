@@ -3,4 +3,8 @@ import "./ontology.forma" { compile };
 export let output = compile({
     measures: ['NetRevenue, 'UnitsSold],
     dimensions: ['ProductCategory, 'EmployeeKind, 'ProductSku],
+    filters: [],
+    order_by: ['CustomerRegion],
+    limit: 'Some(20),
+    render: 'Table,
 });

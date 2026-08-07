@@ -10,6 +10,7 @@ import "std/string" as string;
 @enum type BinaryOp = {
     Equal: 'None,
     NotEqual: 'None,
+    GreaterEqual: 'None,
     Subtract: 'None,
 };
 
@@ -53,9 +54,10 @@ import "std/string" as string;
     projections: Array(Projection),
     from: Source,
     joins: Array(Join),
-    filter: Option(SqlScalar),
+    filters: Array(SqlScalar),
     group_by: Array(SqlScalar),
     order_by: Array(Order),
+    limit: Option(Int),
 };
 
 @struct type CommonTable = { name: String, query: SelectBody };
@@ -74,7 +76,7 @@ def render_function: Fn(Function) -> String = fn(value) {
 };
 
 def render_binary_op: Fn(BinaryOp) -> String = fn(value) {
-    match value { 'Equal => "=", 'NotEqual => "!=", 'Subtract => "-" }
+    match value { 'Equal => "=", 'NotEqual => "!=", 'GreaterEqual => ">=", 'Subtract => "-" }
 };
 
 def render_atom: Fn(SqlAtom) -> String = fn(value) {
@@ -129,9 +131,8 @@ def render_body: Fn(SelectBody) -> String = fn(value) {
     let joins = if array.length(value.joins) == 0 { "" } else {
         `\n\{string.join(array.map(value.joins, render_join), "\n")}`
     };
-    let filter = match value.filter {
-        'Some(expr) => `\nWHERE \{render_scalar(expr)}`,
-        'None => "",
+    let filters = if array.length(value.filters) == 0 { "" } else {
+        `\nWHERE \{string.join(array.map(value.filters, render_scalar), " AND ")}`
     };
     let groups = if array.length(value.group_by) == 0 { "" } else {
         `\nGROUP BY \{string.join(array.map(value.group_by, render_scalar), ", ")}`
@@ -139,7 +140,8 @@ def render_body: Fn(SelectBody) -> String = fn(value) {
     let orders = if array.length(value.order_by) == 0 { "" } else {
         `\nORDER BY \{string.join(array.map(value.order_by, fn(item) { render_scalar(item.expr) }), ", ")}`
     };
-    `SELECT \{projections}\nFROM \{render_source(value.from)}\{joins}\{filter}\{groups}\{orders}`
+    let limit = match value.limit { 'Some(count) => `\nLIMIT \{count}`, 'None => "" };
+    `SELECT \{projections}\nFROM \{render_source(value.from)}\{joins}\{filters}\{groups}\{orders}\{limit}`
 };
 
 def render_select: Fn(Select) -> String = fn(value) {

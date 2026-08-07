@@ -3,6 +3,10 @@ import "./ontology.forma" { compile };
 let compilation = compile({
     measures: ['NetRevenue],
     dimensions: ['OrderMonth, 'CustomerRegion],
+    filters: [],
+    order_by: ['OrderMonth, 'CustomerRegion],
+    limit: 'Some(10),
+    render: 'Table,
 });
 
 export let output = match compilation.sql {

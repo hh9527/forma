@@ -35,7 +35,14 @@ import "./relations.forma" { Entity, Relation, PathPlan, plan };
 @struct type ReportIntent = {
     measures: Array(Measure),
     dimensions: Array(Dimension),
+    filters: Array(Filter),
+    order_by: Array(Dimension),
+    limit: Option(Int),
+    render: RenderMode,
 };
+
+@enum type Filter = { CustomerRegion: String };
+@enum type RenderMode = { Table: 'None, Json: 'None };
 
 @struct type QueryPlan = {
     measure: Measure,
@@ -44,7 +51,7 @@ import "./relations.forma" { Entity, Relation, PathPlan, plan };
     common_tables: Array(CommonTable),
     from: Source,
     joins: Array(Join),
-    filter: Option(SqlScalar),
+    filters: Array(SqlScalar),
     measure_projection: Projection,
 };
 
@@ -60,8 +67,34 @@ import "./relations.forma" { Entity, Relation, PathPlan, plan };
     diagnostics: Array(BlameError),
 };
 
+@struct type FilterRequirement = {
+    source: Filter,
+    expression: SqlScalar,
+    required_entity: Entity,
+};
+
+@struct type SemanticPlan = {
+    query_plan: QueryPlan,
+    requirements: Array(GroupRequirement),
+    filter_requirements: Array(FilterRequirement),
+    order_by: Array(Dimension),
+    limit: Option(Int),
+    render: RenderMode,
+};
+
+@struct type RelationalPlan = {
+    semantic: SemanticPlan,
+    paths: PathPlan,
+};
+
+@struct type SqlPlan = {
+    query: Select,
+    render: RenderMode,
+};
+
 @struct type Compilation = {
     sql: Option(String),
+    render: RenderMode,
     diagnostics: Array(BlameError),
 };
 
@@ -181,7 +214,8 @@ def payment_by_order: SelectBody = {
     ],
     from: source("payments", "payments"),
     joins: [],
-    filter: 'Some(equals(column("payments", "status"), 'Int(2))),
+    filters: [equals(column("payments", "status"), 'Int(2))],
+    limit: 'None,
     group_by: [scalar(term(column("payments", "order_id")))],
     order_by: [],
 };
@@ -197,7 +231,8 @@ def refund_by_order: SelectBody = {
         source("payments", "payments"),
         equals(column("payments", "id"), column("refunds", "payment_id")),
     )],
-    filter: 'Some(equals(column("refunds", "status"), 'Int(2))),
+    filters: [equals(column("refunds", "status"), 'Int(2))],
+    limit: 'None,
     group_by: [scalar(term(column("payments", "order_id")))],
     order_by: [],
 };
@@ -218,7 +253,7 @@ def net_revenue: MeasureCapability = {
                 join('Left, source("payment_by_order", "p"), equals(column("p", "order_id"), column("o", "id"))),
                 join('Left, source("refund_by_order", "f"), equals(column("f", "order_id"), column("o", "id"))),
             ],
-            filter: 'Some(equals(column("o", "status"), 'Int(2))),
+            filters: [equals(column("o", "status"), 'Int(2))],
             measure_projection: aggregate_projection(
                 'Sum,
                 binary(
@@ -242,7 +277,7 @@ def units_sold: MeasureCapability = {
             common_tables: [],
             from: source("order_items", "oi"),
             joins: [],
-            filter: 'Some(binary(term(column("o", "status")), 'NotEqual, term('Int(3)))),
+            filters: [binary(term(column("o", "status")), 'NotEqual, term('Int(3)))],
             measure_projection: aggregate_projection('Sum, scalar(term(column("oi", "quantity"))), "units_sold"),
         }
     },
@@ -332,10 +367,42 @@ def successful_requirements: Fn(Array(RequirementCompilation)) -> Array(GroupReq
     })
 };
 
-def required_targets: Fn(QueryPlan, Array(GroupRequirement)) -> Array(Entity) = fn(query_plan, requirements) {
+def compile_filters: Fn(Array(Filter)) -> Array(FilterRequirement) = fn(filters) {
+    array.map(filters, fn(filter) {
+        match filter {
+            'CustomerRegion(value) => {
+                source: filter,
+                expression: equals(column("r", "name"), 'Text(value)),
+                required_entity: 'Region,
+            },
+        }
+    })
+};
+
+def order_diagnostics: Fn(ReportIntent) -> Array(BlameError) = fn(intent) {
+    array.flat_map(intent.order_by, fn(ordered) {
+        if array.any(intent.dimensions, fn(dimension) { dimension == ordered }) {
+            []
+        } else {
+            [blame!(ordered, "an ordered dimension must also be selected")]
+        }
+    })
+};
+
+def ordered_expressions: Fn(Array(Dimension), Array(GroupRequirement)) -> Array(SqlScalar) = fn(ordered, requirements) {
+    array.flat_map(ordered, fn(dimension) {
+        array.map(
+            array.filter(requirements, fn(requirement) { requirement.dimension == dimension }),
+            fn(requirement) { requirement.group_expression },
+        )
+    })
+};
+
+def required_targets: Fn(QueryPlan, Array(GroupRequirement), Array(FilterRequirement)) -> Array(Entity) = fn(query_plan, requirements, filters) {
     array.concat([
         query_plan.required_entities,
         array.map(requirements, fn(requirement) { requirement.required_entity }),
+        array.map(filters, fn(filter) { filter.required_entity }),
     ])
 };
 
@@ -358,22 +425,56 @@ def relationship_diagnostics: Fn(PathPlan, Array(GroupRequirement)) -> Array(Bla
     ])
 };
 
-def finalize_sql: Fn(QueryPlan, Array(GroupRequirement), PathPlan) -> String = fn(query_plan, requirements, paths) {
+def lower_semantics: Fn(ReportIntent, QueryPlan, Array(GroupRequirement), Array(FilterRequirement)) -> SemanticPlan = fn(intent, query_plan, requirements, filter_requirements) {
+    {
+        query_plan,
+        requirements,
+        filter_requirements,
+        order_by: intent.order_by,
+        limit: intent.limit,
+        render: intent.render,
+    }
+};
+
+def lower_relationships: Fn(SemanticPlan) -> RelationalPlan = fn(semantic) {
+    {
+        semantic,
+        paths: plan(
+            semantic.query_plan.base_entity,
+            required_targets(semantic.query_plan, semantic.requirements, semantic.filter_requirements),
+        ),
+    }
+};
+
+def lower_sql: Fn(RelationalPlan) -> SqlPlan = fn(relational) {
+    let semantic = relational.semantic;
+    let query_plan = semantic.query_plan;
+    let requirements = semantic.requirements;
     let groups = array.map(requirements, fn(requirement) { requirement.group_expression });
-    render_select({
-        common_tables: query_plan.common_tables,
-        body: {
-            projections: array.push(
-                array.map(requirements, fn(requirement) { requirement.projection }),
-                query_plan.measure_projection,
-            ),
-            from: query_plan.from,
-            joins: array.concat([query_plan.joins, array.map(paths.relations, relation_join)]),
-            filter: query_plan.filter,
-            group_by: groups,
-            order_by: array.map(groups, fn(expr) { {expr} }),
+    {
+        query: {
+            common_tables: query_plan.common_tables,
+            body: {
+                projections: array.push(
+                    array.map(requirements, fn(requirement) { requirement.projection }),
+                    query_plan.measure_projection,
+                ),
+                from: query_plan.from,
+                joins: array.concat([query_plan.joins, array.map(relational.paths.relations, relation_join)]),
+                filters: array.concat([
+                    query_plan.filters,
+                    array.map(semantic.filter_requirements, fn(filter) { filter.expression }),
+                ]),
+                group_by: groups,
+                order_by: array.map(
+                    ordered_expressions(semantic.order_by, requirements),
+                    fn(expr) { {expr} },
+                ),
+                limit: semantic.limit,
+            },
         },
-    })
+        render: semantic.render,
+    }
 };
 
 export def compile: Fn(ReportIntent) -> Compilation = fn(intent) {
@@ -382,19 +483,24 @@ export def compile: Fn(ReportIntent) -> Compilation = fn(intent) {
     let query_plan = capability.lower();
     let requirement_compilations = compile_requirements(measure, intent.dimensions);
     let requirements = successful_requirements(requirement_compilations);
-    let paths = plan(query_plan.base_entity, required_targets(query_plan, requirements));
+    let filter_requirements = compile_filters(intent.filters);
+    let semantic = lower_semantics(intent, query_plan, requirements, filter_requirements);
+    let relational = lower_relationships(semantic);
+    let paths = relational.paths;
     let diagnostics = array.concat([
         measure_diagnostics(intent),
         requirement_diagnostics(requirement_compilations),
         relationship_diagnostics(paths, requirements),
+        order_diagnostics(intent),
     ]);
     if array.length(diagnostics) == 0 {
         {
-            sql: 'Some(finalize_sql(query_plan, requirements, paths)),
+            sql: 'Some(render_select(lower_sql(relational).query)),
+            render: intent.render,
             diagnostics,
         }
     } else {
-        {sql: 'None, diagnostics}
+        {sql: 'None, render: intent.render, diagnostics}
     }
 };
 
@@ -405,4 +511,10 @@ export {
     Compilation,
     MeasureCapability,
     DimensionCapability,
+    SemanticPlan,
+    RelationalPlan,
+    SqlPlan,
+    lower_semantics,
+    lower_relationships,
+    lower_sql,
 };
