@@ -1,0 +1,75 @@
+import "std/array" as array;
+
+@enum type Entity = {
+    Region: 'None,
+    Organization: 'None,
+    Customer: 'None,
+    Order: 'None,
+    OrderItem: 'None,
+    Product: 'None,
+    Category: 'None,
+};
+
+@struct type Relation = {
+    from: Entity,
+    to: Entity,
+    table: String,
+    alias: String,
+    left_alias: String,
+    left_column: String,
+    right_alias: String,
+    right_column: String,
+};
+
+@struct type PathPlan = {
+    relations: Array(Relation),
+    missing: Array(Entity),
+};
+
+def catalog: Array(Relation) = [
+    {from: 'OrderItem, to: 'Order, table: "orders", alias: "o", left_alias: "o", left_column: "id", right_alias: "oi", right_column: "order_id"},
+    {from: 'Order, to: 'Customer, table: "customers", alias: "c", left_alias: "c", left_column: "id", right_alias: "o", right_column: "customer_id"},
+    {from: 'Customer, to: 'Organization, table: "organizations", alias: "org", left_alias: "org", left_column: "id", right_alias: "c", right_column: "org_id"},
+    {from: 'Organization, to: 'Region, table: "regions", alias: "r", left_alias: "r", left_column: "id", right_alias: "org", right_column: "region_id"},
+    {from: 'OrderItem, to: 'Product, table: "products", alias: "product", left_alias: "product", left_column: "id", right_alias: "oi", right_column: "product_id"},
+    {from: 'Product, to: 'Category, table: "categories", alias: "cat", left_alias: "cat", left_column: "id", right_alias: "product", right_column: "category_id"},
+];
+
+def contains: Fn(Array(Entity), Entity) -> Bool = fn(values, expected) {
+    array.any(values, fn(value) { value == expected })
+};
+
+def backward_once: Fn(Array(Entity)) -> Array(Entity) = fn(needed) {
+    array.fold(catalog, needed, fn(next, relation) {
+        if contains(next, relation.to) { array.push(next, relation.from) } else { next }
+    })
+};
+
+def forward_once: Fn(Array(Entity)) -> Array(Entity) = fn(reachable) {
+    array.fold(catalog, reachable, fn(next, relation) {
+        if contains(next, relation.from) { array.push(next, relation.to) } else { next }
+    })
+};
+
+# The bounded ontology has paths no longer than six edges. Repeated expansion
+# computes a deterministic fixed point without adding recursion to the model.
+def close_backward: Fn(Array(Entity)) -> Array(Entity) = fn(values) {
+    backward_once(backward_once(backward_once(backward_once(backward_once(backward_once(values))))))
+};
+
+def close_forward: Fn(Array(Entity)) -> Array(Entity) = fn(values) {
+    forward_once(forward_once(forward_once(forward_once(forward_once(forward_once(values))))))
+};
+
+def plan: Fn(Entity, Array(Entity)) -> PathPlan = fn(base, targets) {
+    let needed = close_backward(targets);
+    let reachable = close_forward([base]);
+    {
+        relations: array.filter(catalog, fn(relation) {
+            contains(reachable, relation.from) && contains(needed, relation.to)
+        }),
+        missing: array.filter(targets, fn(target) { contains(reachable, target) == 'False }),
+    }
+};
+
+export { Entity, Relation, PathPlan, plan };

@@ -12,13 +12,16 @@ Forma 代码将合法意图逐步 lowering 为 SQLite SQL。
 - RFC 0180：伞 RFC 已接受，确定五阶段实验路线；
 - RFC 0181：已完成，领域 capability 产生结构化 SQL AST，由统一 renderer
   负责 SQL 字符串和 quoting；
-- 下一步：RFC 0182，将 measure 中硬编码的 join 列表替换为关系图与路径选择。
+- RFC 0182：已完成，关系 catalog 与双向闭包 planner 根据 base grain 和目标
+  entity 自动选择、合并并去重 join；
+- 下一步：RFC 0183，为 relation 增加 cardinality，并证明路径是否保持 grain。
 
 ## 文件
 
 - `schema.sql`：十张 SQLite 表及确定性测试数据；
 - `DOMAIN.md`：文字形式的本体和业务规则；
 - `sql.forma`：最小 SQL AST 与 SQLite renderer；
+- `relations.forma`：关系 catalog、可达性分析和 join 路径规划；
 - `ontology.forma`：领域校验和 lowering；
 - `valid.forma`：按月份、客户区域统计净收入；
 - `valid-units.forma`：按月份、品类、SKU 统计销量；
@@ -62,6 +65,9 @@ cargo run -p forma -- run examples/intelligent-reporting/invalid.forma
   组合产生诊断，不需要平行的 Boolean 兼容矩阵；
 - 各 dimension lowerer 独立运行，一次编译可以累计四个错误；
 - capability 不再拼接 SQL，标识符和字面量只由 renderer 转义；
+- measure 只声明 base entity 和自身语义需要的 entity，dimension 只声明目标
+  entity；关系 planner 从 catalog 计算二者之间的最小相关 edge 集合；
+- 多个 dimension 共享的路径只产生一次 join；
 - 失败结果不发布 SQL，成功结果可以直接被 SQLite 执行。
 
 ## RFC 0181 的边界发现
@@ -86,10 +92,10 @@ group 和 order。任意深度表达式及嵌套 CTE 暂不支持；未来修复
 
 ## 尚未解决
 
-这还不是通用查询规划器。关系路径仍直接写在 measure capability 中，grain
+这还不是通用查询规划器。当前 catalog 是有序、无代价的有向关系集合，使用
+固定六轮闭包覆盖这个有界本体；它不在多条语义不同的路径之间猜测。grain
 规则仍主要隐含在实现里。后续阶段还需要：
 
-- 数据化的关系图和确定性路径选择；
 - cardinality、fan-out、预聚合与 allocation policy；
 - filter、参数、排序、limit、drill 和 render 意图；
 - 分阶段的 semantic/relational/SQL plan；
