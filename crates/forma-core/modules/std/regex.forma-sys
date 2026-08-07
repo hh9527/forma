@@ -1,4 +1,4 @@
-native type Regex = @0;
+native type Regex @0;
 
 native compile: Fn(String) -> Regex;
 native is_match: Fn(Regex, String) -> Bool;

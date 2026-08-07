@@ -2897,7 +2897,7 @@ export { private as visible, identity as map };"#,
     fn lowers_native_type_declarations_with_explicit_slots() {
         let program = parse(
             "native-type.forma",
-            "native type State = @3; native new: Fn() -> State; State",
+            "native type State @3; native new: Fn() -> State; State",
         )
         .unwrap();
         let binding = &program.value.body.value.bindings[0];
@@ -2905,8 +2905,8 @@ export { private as visible, identity as map };"#,
         assert_eq!(binding.value.name.value, "State");
         assert!(binding.value.annotation.is_none());
         assert!(matches!(binding.value.value.value, ExprKind::Int(3)));
-        assert_eq!(binding.value.value.location.range(), 21..22);
-        assert_eq!(binding.location.range(), 0..23);
+        assert_eq!(binding.value.value.location.range(), 19..20);
+        assert_eq!(binding.location.range(), 0..21);
     }
 
     #[test]

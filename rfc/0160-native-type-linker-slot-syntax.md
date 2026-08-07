@@ -1,6 +1,6 @@
 # RFC 0160: Native type linker slot syntax
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0116, RFC 0134
 
 ## Summary
@@ -83,3 +83,11 @@ registry contract beyond this syntax correction.
 2. migrate embedded native type declarations and test fixtures;
 3. add positive and negative syntax coverage;
 4. record implementation results and mark this RFC Implemented.
+
+## Implementation result
+
+Implemented in the Forma grammar and lowering pipeline. Embedded native modules
+and active fixtures now use `native type Name @slot;`; the CST suite verifies
+lossless reconstruction of the new spelling and rejection of the removed
+`= @slot` form. Existing linker validation continues to enforce `u32` range,
+module-local uniqueness, and order-independent identity.

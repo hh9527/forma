@@ -263,7 +263,7 @@ fn(settings, request) { {args: request.args} }"#;
 
     #[test]
     fn native_type_slots_are_lossless_and_required() {
-        let source = "native type State = @3; State";
+        let source = "native type State @3; State";
         let mut sources = crate::source::SourceDatabase::default();
         let id = sources.add("native-type.forma", source);
         let parsed = parse(id, source);
@@ -272,8 +272,9 @@ fn(settings, request) { {args: request.args} }"#;
         reconstruct(&parsed.syntax, source, NodeRef::ROOT, &mut reconstructed);
         assert_eq!(reconstructed, source);
 
-        let id = sources.add("legacy-native-type.forma", "native type State; State");
-        assert!(parse(id, "native type State; State").has_errors());
+        let legacy = "native type State = @3; State";
+        let id = sources.add("legacy-native-type.forma", legacy);
+        assert!(parse(id, legacy).has_errors());
     }
 
     #[test]

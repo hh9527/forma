@@ -29,7 +29,7 @@ let_else_binding: 'let' pattern '=' expression 'else' block ';';
 decl_binding: 'decl' Identifier ':' type_scheme ';';
 def_binding: 'def' Identifier [':' type_scheme] '=' expression ';';
 native_binding: 'native' Identifier ':' type_scheme ';';
-native_type_binding: 'native' 'type' Identifier '=' '@' Int ';';
+native_type_binding: 'native' 'type' Identifier '@' Int ';';
 type_scheme: ['for' type_parameters] contract;
 type_parameters: '(' Identifier (?1 ',' Identifier)* [','] ')';
 type_binding: decorator* 'type' Identifier '=' expression ';';

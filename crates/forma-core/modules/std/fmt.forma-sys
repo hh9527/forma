@@ -1,4 +1,4 @@
-native type DisplayTemplate = @0;
+native type DisplayTemplate @0;
 
 native prepare: Fn(String, Any, Any) -> Any;
 native display: for(A) Fn(TypeOf(A), A) -> String;

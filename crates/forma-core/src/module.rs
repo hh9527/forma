@@ -2738,22 +2738,20 @@ import "./library.forma" *;
             )
         }
 
-        let forward =
-            declarations("native type First = @7; native type Second = @2; First").unwrap();
-        let reversed =
-            declarations("native type Second = @2; native type First = @7; First").unwrap();
+        let forward = declarations("native type First @7; native type Second @2; First").unwrap();
+        let reversed = declarations("native type Second @2; native type First @7; First").unwrap();
         assert_eq!(forward.get(&2).unwrap().1, reversed.get(&2).unwrap().1);
         assert_eq!(forward.get(&7).unwrap().1, reversed.get(&7).unwrap().1);
 
         let duplicate =
-            declarations("native type First = @7; native type Second = @7; First").unwrap_err();
+            declarations("native type First @7; native type Second @7; First").unwrap_err();
         assert!(
             duplicate
                 .to_string()
                 .contains("duplicate native type slot @7")
         );
 
-        let overflow = declarations("native type Huge = @4294967296; Huge").unwrap_err();
+        let overflow = declarations("native type Huge @4294967296; Huge").unwrap_err();
         assert!(overflow.to_string().contains("must fit the u32 range"));
     }
 
@@ -2762,7 +2760,7 @@ import "./library.forma" *;
         fn spec(name: &str) -> NativeModuleSpec {
             NativeModuleSpec::new(
                 name,
-                "native type Token = @7; native make: Fn() -> Token; {Token: Token, make: make}",
+                "native type Token @7; native make: Fn() -> Token; {Token: Token, make: make}",
                 vec![(
                     "make",
                     crate::NativeFunction::new_with_native_type(
@@ -2872,7 +2870,7 @@ import "./library.forma" *;
                 Some(1_500),
                 NativeModuleSpec::new(
                     "acme/runtime",
-                    "native type Token = @9; native answer: Fn() -> Int; export { Token, answer };",
+                    "native type Token @9; native answer: Fn() -> Int; export { Token, answer };",
                     vec![(
                         "answer",
                         crate::NativeFunction::new(
@@ -3619,7 +3617,7 @@ name = "rustc"
 
         fs::write(
             directory.join("missing-native-type.forma"),
-            "native type State = @1; State",
+            "native type State @1; State",
         )
         .unwrap();
         let missing_type = load_module(
