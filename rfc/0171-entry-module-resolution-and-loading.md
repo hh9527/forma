@@ -1,6 +1,6 @@
 # RFC 0171: Entry module resolution and loading
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0057, RFC 0059, RFC 0170
 
 ## Summary
@@ -97,3 +97,20 @@ RFC 0173 owns the final user-facing adapter diagnostic.
 Work returns to discussion if implementation requires writing a temporary
 source file, making `@main` generally importable, transitive privilege, or a
 parallel compiler path for entry source.
+
+## Implementation result
+
+Implemented in August 2026. `ModuleId::Entry` and its exact resolver permission
+matrix are part of the ordinary resolver. Direct entry requests can load the
+real `@main`, main-crate source, dependencies, built-ins, and private dependency
+modules; imported modules retain their own unprivileged requester identities.
+Entry-relative imports and every request for `@entry` are rejected.
+
+`Engine::load_synthetic_entry` registers in-memory source as `@entry` and uses
+the existing ModuleLoader, parser, checker, compiler, quota, cache, and Main
+world. The real main and transitive physical files remain ordinary dependency
+records while the virtual semantic input has no fabricated path. Entry-only
+external values are now published as persistent roots by the same general
+root-binding path used during compilation. Tests cover permissions, main
+import/evaluation, injected binding isolation, dependency recording, and
+virtual-source diagnostics.

@@ -66,6 +66,7 @@ pub enum ModuleAuthority {
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ModuleId {
+    Entry,
     Main,
     Source(PathBuf),
     Builtin(String),
@@ -81,6 +82,7 @@ impl ModuleId {
 impl fmt::Display for ModuleId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Entry => formatter.write_str("@entry"),
             Self::Main => formatter.write_str("@main"),
             Self::Source(path) => write!(formatter, "@src/{}", path.display()),
             Self::Builtin(name) => formatter.write_str(name),
@@ -311,7 +313,22 @@ impl ModuleResolver {
                 physical_path: None,
             });
         }
-        if target == "@main" || target.starts_with("@main/") {
+        if target == "@entry" || target.starts_with("@entry/") {
+            return Err(ResolveModuleError::InvalidImport(target.into()));
+        }
+        if target == "@main" {
+            if *importer != ModuleId::Entry {
+                return Err(ResolveModuleError::InvalidImport(target.into()));
+            }
+            let format = self.format_for(&ModuleId::Main, &self.main_path)?;
+            return Ok(ResolvedModule {
+                id: ModuleId::Main,
+                format,
+                authority: ModuleAuthority::Ordinary,
+                physical_path: Some(self.main_path.clone()),
+            });
+        }
+        if target.starts_with("@main/") {
             return Err(ResolveModuleError::InvalidImport(target.into()));
         }
         if let Some(path) = target.strip_prefix("@src/") {
@@ -319,6 +336,9 @@ impl ModuleResolver {
         }
         if target.starts_with("./") || target.starts_with("../") {
             return match importer {
+                ModuleId::Entry => Err(ResolveModuleError::InvalidImport(
+                    "@entry cannot use relative imports".into(),
+                )),
                 ModuleId::Main => {
                     let logical = lexical_normalize_relative(Path::new(target))
                         .ok_or_else(|| ResolveModuleError::CrateEscape(target.into()))?;
@@ -346,7 +366,7 @@ impl ModuleResolver {
         if target.starts_with('@') {
             return Err(ResolveModuleError::InvalidImport(target.into()));
         }
-        self.resolve_dependency(target, target)
+        self.resolve_dependency(target, target, *importer == ModuleId::Entry)
     }
 
     fn load_manifest(&mut self, manifest: &Path) -> Result<(), ResolveModuleError> {
@@ -499,6 +519,7 @@ impl ModuleResolver {
         &self,
         rest: &str,
         original: &str,
+        allow_private: bool,
     ) -> Result<ResolvedModule, ResolveModuleError> {
         let (name, path) = rest
             .split_once('/')
@@ -508,7 +529,7 @@ impl ModuleResolver {
         }
         let path = lexical_normalize_relative(Path::new(path))
             .ok_or_else(|| ResolveModuleError::CrateEscape(original.into()))?;
-        self.resolve_dependency_parts(name, path, original, false)
+        self.resolve_dependency_parts(name, path, original, allow_private)
     }
 
     fn resolve_in_owner(
@@ -520,6 +541,7 @@ impl ModuleResolver {
         let path = lexical_normalize_relative(path)
             .ok_or_else(|| ResolveModuleError::CrateEscape(original.into()))?;
         match importer {
+            ModuleId::Entry => self.resolve_source(path, original),
             ModuleId::Main | ModuleId::Source(_) => self.resolve_source(path, original),
             ModuleId::Dependency { name, .. } => {
                 self.resolve_dependency_parts(name, path, original, true)
@@ -856,6 +878,16 @@ mod tests {
             resolver.resolve_import(&root.id, "dep/value.priv.json"),
             Err(ResolveModuleError::PrivateModuleAccess(_))
         ));
+        let entry_private = resolver
+            .resolve_import(&ModuleId::Entry, "dep/internal.priv.forma")
+            .unwrap();
+        assert_eq!(
+            entry_private.id,
+            ModuleId::Dependency {
+                name: "dep".into(),
+                path: "internal.priv.forma".into(),
+            }
+        );
         assert!(matches!(
             resolver.resolve_import(&root.id, "dep/bad.native.json"),
             Err(ResolveModuleError::InvalidModuleSuffix(_))
@@ -863,6 +895,10 @@ mod tests {
         let dependency_module = resolver
             .resolve_import(&root.id, "dep/public.forma")
             .unwrap();
+        assert!(matches!(
+            resolver.resolve_import(&dependency_module.id, "@main"),
+            Err(ResolveModuleError::InvalidImport(_))
+        ));
         let internal = resolver
             .resolve_import(&dependency_module.id, "./internal.priv.forma")
             .unwrap();
@@ -924,6 +960,20 @@ mod tests {
         );
         assert!(matches!(
             resolver.resolve_import(&local.id, "@main"),
+            Err(ResolveModuleError::InvalidImport(_))
+        ));
+        let entry = ModuleId::Entry;
+        assert_eq!(entry.to_string(), "@entry");
+        assert_eq!(
+            resolver.resolve_import(&entry, "@main").unwrap().id,
+            ModuleId::Main
+        );
+        assert!(matches!(
+            resolver.resolve_import(&ModuleId::Main, "@entry"),
+            Err(ResolveModuleError::InvalidImport(_))
+        ));
+        assert!(matches!(
+            resolver.resolve_import(&entry, "./model/a.forma"),
             Err(ResolveModuleError::InvalidImport(_))
         ));
         std::fs::remove_dir_all(temporary).unwrap();
