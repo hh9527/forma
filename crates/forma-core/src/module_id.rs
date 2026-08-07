@@ -613,7 +613,7 @@ pub fn resolve_root_module(path: &Path) -> Result<ResolvedModule, ResolveModuleE
     ModuleResolver::for_root(path)?.resolve_root(path)
 }
 
-fn immediate_value(expression: &Expr, vm: &mut Vm) -> Result<Value, ResolveModuleError> {
+pub(crate) fn immediate_value(expression: &Expr, vm: &mut Vm) -> Result<Value, ResolveModuleError> {
     match &expression.value {
         ExprKind::Int(value) => Ok(Value::Int(*value)),
         ExprKind::Float(value) if value.is_finite() => Ok(Value::Float(*value)),

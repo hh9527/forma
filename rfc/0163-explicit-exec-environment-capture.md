@@ -1,6 +1,6 @@
 # RFC 0163: Explicit exec environment capture
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0062, RFC 0113, RFC 0157, RFC 0159, RFC 0162
 
 ## Summary
@@ -110,3 +110,17 @@ a future execution cache key. This RFC does not add that cache.
 Work returns to discussion if implementation requires runtime evaluation of an
 option, a Forma-visible environment capability, import-dependent option
 values, or a command-specific field added to the shared `ExecRequest` type.
+
+## Implementation result
+
+Implemented in August 2026. `LoadedModule` now retains validated immediate
+option values and exposes a read-only keyed iterator to embedding Hosts. The
+exec adapter folds all `exec.capture-envs` actions, deduplicates names by first
+occurrence, and performs named Host lookups instead of enumerating the ambient
+environment. No declaration therefore produces an empty request environment.
+
+Validation remains in `forma-core` and labels the authored option. CLI tests
+cover repeated actions, missing names, undeclared secret exclusion, canonical
+dry-run output, and malformed payloads. Module tests cover metadata exposure
+and rejection from imported modules. The VM and standard library gained no
+environment capability.

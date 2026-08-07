@@ -139,7 +139,8 @@ fn exec_command(arguments: &[String]) -> Result<(), String> {
     let entry = select_host_entry(&module, exports, "exec", "exec")?;
     let mut values = Vm::new();
     let settings = exec_settings(&mut values)?;
-    let request = exec_request(&mut values, request_args)?;
+    let captures = exec_environment_captures(&module)?;
+    let request = exec_request(&mut values, request_args, &captures)?;
     let plan = engine
         .invoke(&module, &entry, &[settings, request])
         .map_err(|error| error.to_string())?;
@@ -294,16 +295,35 @@ fn exec_settings(vm: &mut Vm) -> Result<Value, String> {
     ])
 }
 
-fn exec_request(vm: &mut Vm, arguments: &[String]) -> Result<Value, String> {
+fn exec_environment_captures(module: &LoadedModule) -> Result<Vec<String>, String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut captures = Vec::new();
+    for value in module.options("exec.capture-envs") {
+        let Value::Array(names) = value else {
+            return Err("option \"exec.capture-envs\" must contain an Array(String)".into());
+        };
+        for name in names.iter() {
+            let Value::String(name) = name else {
+                return Err("option \"exec.capture-envs\" must contain an Array(String)".into());
+            };
+            if seen.insert(name.to_string()) {
+                captures.push(name.to_string());
+            }
+        }
+    }
+    Ok(captures)
+}
+
+fn exec_request(vm: &mut Vm, arguments: &[String], captures: &[String]) -> Result<Value, String> {
     let mut environment = Vec::new();
-    for (name, value) in env::vars_os() {
-        let name = name
-            .into_string()
-            .map_err(|_| "exec environment contains a non-UTF-8 name".to_owned())?;
+    for name in captures {
+        let Some(value) = env::var_os(name) else {
+            continue;
+        };
         let value = value
             .into_string()
             .map_err(|_| format!("exec environment variable {name:?} is not UTF-8"))?;
-        environment.push((name, Value::string(value)));
+        environment.push((name.clone(), Value::string(value)));
     }
     let environment = vm.make_dict(environment)?;
     vm.make_dict(vec![

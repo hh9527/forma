@@ -227,6 +227,7 @@ fn exec_dry_run_invokes_explicit_pure_entry() {
 import "std/array" as arrays;
 import "std/rt-types/exec.forma" { ExecFn };
 import "std/hash" as hash;
+option "exec.capture-envs" ["FORMA_EXEC_TEST", "FORMA_EXEC_TEST"];
 export def exec: ExecFn = fn(settings, request) {
     let platform = `\{settings.platform.os}-\{settings.platform.arch}`;
     let compiler_url = `https://example.invalid/gcc-\{platform}.tar.gz`;
@@ -312,6 +313,57 @@ export def exec: ExecFn = fn(settings, request) {
         "{}",
         String::from_utf8_lossy(&shown.stdout)
     );
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_captures_only_declared_environment_names() {
+    let directory = fixture_dir();
+    let main = directory.join("capture.forma");
+    fs::write(
+        &main,
+        r#"option "exec.capture-envs" ["FORMA_CAPTURED", "FORMA_MISSING"];
+option "exec.capture-envs" ["FORMA_CAPTURED"];
+export def exec = fn(settings, request) {
+    {install: [], cwd: 'None, bin: "true", args: [], env: request.env}
+};"#,
+    )
+    .unwrap();
+
+    let output = forma()
+        .env("FORMA_CAPTURED", "visible")
+        .env("FORMA_UNDECLARED", "secret")
+        .env_remove("FORMA_MISSING")
+        .args(["exec", "--dry-run", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains(r#""env":{"FORMA_CAPTURED":"visible"}"#),
+        "{stdout}"
+    );
+    assert!(!stdout.contains("FORMA_UNDECLARED"), "{stdout}");
+    assert!(!stdout.contains("FORMA_MISSING"), "{stdout}");
+
+    fs::write(
+        &main,
+        "option \"exec.capture-envs\" [\"GOOD\", 1]; export def exec = fn(a, b) { {} };",
+    )
+    .unwrap();
+    let malformed = forma()
+        .args(["exec", "--dry-run", main.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!malformed.status.success());
+    let stderr = String::from_utf8_lossy(&malformed.stderr);
+    assert!(stderr.contains(":1:1:"), "{stderr}");
+    assert!(stderr.contains("Array(String)"), "{stderr}");
     fs::remove_dir_all(directory).unwrap();
 }
 

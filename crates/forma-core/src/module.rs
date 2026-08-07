@@ -7,7 +7,9 @@ use crate::compiler::{
 use crate::core::{PRELUDE_MODULE, module_specs};
 use crate::heap::{Heap, PersistentValue, publish_root, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
-use crate::module_id::{ModuleAuthority, ModuleFormat, ModuleId, ModuleResolver, ResolvedModule};
+use crate::module_id::{
+    ModuleAuthority, ModuleFormat, ModuleId, ModuleResolver, ResolvedModule, immediate_value,
+};
 use crate::parser::parse_registered;
 use crate::semantic::{
     SemanticImport, SemanticModuleInput, WorkspaceModuleKind, WorkspaceModuleState,
@@ -205,7 +207,21 @@ pub struct LoadedModule {
     pub function: BytecodeFunction,
     pub sources: SourceDatabase,
     pub workspace: WorkspaceSnapshot,
+    options: Vec<LoadedOptionAction>,
     runtime: Arc<ModuleRuntime>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LoadedOptionAction {
+    pub key: String,
+    pub value: Value,
+}
+
+struct CompiledFormaModule {
+    analysis: Analysis,
+    function: BytecodeFunction,
+    externals: HashMap<String, PersistentValue>,
+    options: Vec<LoadedOptionAction>,
 }
 
 struct ModuleRuntime {
@@ -549,6 +565,13 @@ impl fmt::Debug for ModuleRuntime {
 impl LoadedModule {
     pub const fn uses_explicit_exports(&self) -> bool {
         self.analysis.explicit_exports
+    }
+
+    pub fn options(&self, key: &str) -> impl Iterator<Item = &Value> {
+        self.options
+            .iter()
+            .filter(move |option| option.key == key)
+            .map(|option| &option.value)
     }
 
     pub fn execute(&self, evaluation_fuel: usize) -> Result<Value, crate::RuntimeError> {
@@ -1706,7 +1729,12 @@ impl ModuleLoader {
             &mut account,
         );
         self.leave(&module_id);
-        let (analysis, function, externals) = result?;
+        let CompiledFormaModule {
+            analysis,
+            function,
+            externals,
+            options,
+        } = result?;
         let workspace = WorkspaceSnapshot::build(
             self.sources.clone(),
             self.semantic_inputs.values().cloned().collect(),
@@ -1719,6 +1747,7 @@ impl ModuleLoader {
             function,
             sources: self.sources.clone(),
             workspace,
+            options,
             runtime: Arc::new(ModuleRuntime { main, externals }),
         })
     }
@@ -1803,7 +1832,13 @@ impl ModuleLoader {
                         false,
                         &mut account,
                     )
-                    .and_then(|(analysis, function, externals)| {
+                    .and_then(|compiled| {
+                        let CompiledFormaModule {
+                            analysis,
+                            function,
+                            externals,
+                            ..
+                        } = compiled;
                         let arena = Vm::new()
                             .with_debug_sink(Arc::clone(&self.debug_sink))
                             .execute_in_work(
@@ -1858,7 +1893,7 @@ impl ModuleLoader {
         mut external_bindings: BTreeMap<String, Value>,
         is_root: bool,
         account: &mut QuotaAccount,
-    ) -> Result<(Analysis, BytecodeFunction, HashMap<String, PersistentValue>), ModuleError> {
+    ) -> Result<CompiledFormaModule, ModuleError> {
         let source = read(path)?;
         let source_name = path.display().to_string();
         let source_id = self.sources.add(source_name.clone(), source);
@@ -1881,6 +1916,37 @@ impl ModuleLoader {
                     .join("\n"),
             )
         })?;
+        let mut option_vm = Vm::new();
+        let options = parsed
+            .options
+            .iter()
+            .map(|option| {
+                immediate_value(&option.value, &mut option_vm)
+                    .and_then(|value| {
+                        if option.key.value == "exec.capture-envs"
+                            && !matches!(
+                                &value,
+                                Value::Array(names)
+                                    if names.iter().all(|name| matches!(name, Value::String(_)))
+                            )
+                        {
+                            return Err(crate::ResolveModuleError::Manifest(
+                                "option \"exec.capture-envs\" must contain an Array(String)".into(),
+                            ));
+                        }
+                        Ok(LoadedOptionAction {
+                            key: option.key.value.clone(),
+                            value,
+                        })
+                    })
+                    .map_err(|error| {
+                        ModuleError::new(
+                            self.sources
+                                .render(&Diagnostic::error(error.to_string(), option.location)),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let has_explicit_exports = program
             .value
             .body
@@ -2249,7 +2315,12 @@ impl ModuleLoader {
                 diagnostics: Vec::new(),
             },
         );
-        Ok((analysis, function, external_roots))
+        Ok(CompiledFormaModule {
+            analysis,
+            function,
+            externals: external_roots,
+            options,
+        })
     }
 
     fn load_native_module(
@@ -7576,6 +7647,7 @@ unchanged", "|"),
         fs::write(
             &main,
             r#"option "crate.dependency" {name: "dep", source: 'Path({path: "../dependency"})};
+               option "exec.capture-envs" ["TARGET"];
                import "dep/answer.forma" as answer;
                option "module.documentation" {category: "tooling"};
                export let output = answer.answer;
@@ -7608,9 +7680,17 @@ unchanged", "|"),
                 .collect::<Vec<_>>(),
             vec![
                 "crate.dependency",
+                "exec.capture-envs",
                 "module.documentation",
                 "module.documentation"
             ]
+        );
+        assert_eq!(
+            loaded
+                .options("exec.capture-envs")
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            vec!["[\"TARGET\"]"]
         );
 
         fs::write(
@@ -7621,6 +7701,14 @@ unchanged", "|"),
         fs::write(
             &main,
             "import \"@src/helper.forma\" as helper; export { helper as output };",
+        )
+        .unwrap();
+        let error = engine.load_module(&main, BTreeMap::new()).unwrap_err();
+        assert!(error.message().contains("only allowed in @main"));
+
+        fs::write(
+            app.join("src/helper.forma"),
+            "option \"exec.capture-envs\" [\"TARGET\"]; export let value = 1;",
         )
         .unwrap();
         let error = engine.load_module(&main, BTreeMap::new()).unwrap_err();
