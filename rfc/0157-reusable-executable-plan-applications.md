@@ -32,7 +32,7 @@ import "gcc-wrapper/toolchain.forma" { wrap_gcc };
 export def exec: ExecFn = wrap_gcc(source);
 ```
 
-This is an umbrella RFC. Child RFCs will repair cross-module Function
+This is an umbrella RFC. Child RFCs will verify cross-module Function
 execution, establish ordinary runtime-protocol type modules, add literal-only
 top-level Host options, define pinned external dependency resolution, fill the
 small Dict/argv library gaps exposed by the wrapper, and finally validate the
@@ -58,11 +58,11 @@ The GCC wrapper thought experiment combines them into a real requirement:
 6. produce a complete `ExecEnv` before any external effect occurs.
 
 Trying this program exposed more useful priorities than adding isolated
-syntax. A source module can currently pass checking while an exported closure
-that reads its definition module fails at runtime with `up-link read operand
-is not an up-link`. Dict lookup cannot yet express a domain-specific missing
-TARGET error. Dependency manifests accept local paths but cannot carry the
-pinned publication form shown above. The stable exec protocol also remains
+syntax. The initial temporary audit reported an exported-closure up-link
+failure, so the first child must reduce and verify that correctness boundary
+before changing the VM. Dict lookup cannot yet express a domain-specific
+missing TARGET error. Dependency manifests accept local paths but cannot carry
+the pinned publication form shown above. The stable exec protocol also remains
 coupled to its current module placement rather than an explicit runtime-types
 surface.
 
@@ -98,7 +98,7 @@ effects, or a toolchain-specific DSL.
 
 The planned child sequence is:
 
-1. RFC 0158: repair and specify promoted cross-module Function environments,
+1. RFC 0158: verify and specify promoted cross-module Function environments,
    including exported higher-order closures and module-level helper reads;
 2. RFC 0159: define the `std/rt-types/exec.forma` protocol surface and the
    `ExecFn` alias while keeping effect interpretation in the Host adapter;

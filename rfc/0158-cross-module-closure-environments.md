@@ -1,6 +1,6 @@
 # RFC 0158: Cross-module closure environments
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0012, RFC 0013, RFC 0034, RFC 0050, RFC 0144 through
   RFC 0147, RFC 0157
 
@@ -176,3 +176,35 @@ Work returns to discussion if the fix requires:
 4. weakening recursive-definition initialization checks;
 5. making module cache identity depend on physical heap addresses; or
 6. changing public Function or module semantics beyond this correctness repair.
+
+## Implementation result
+
+The reduced production regression did not reproduce the provisional
+GCC-audit failure. Current module publication already preserves initialized
+up-link objects through `publish_root`; named and namespace imports both bind
+the persistent module root rather than the legacy exported `Value` projection.
+No VM or heap change was therefore justified.
+
+The new regression exercises the complete shape that matters to RFC 0157:
+
+- namespace import of a source module;
+- imported runtime TypeMetadata rebound for authored Function contracts;
+- native-module and module-helper captures in one closure;
+- a directly exported Function and a higher-order returned closure;
+- a `Fn(String) -> Fn(ExecSettings, ExecRequest) -> ExecEnv` factory;
+- nested module-helper calls, mixed ordinary/up-link captures, and Struct
+  arguments;
+- mutually recursive exported Functions; and
+- execution of the resulting plan-shaped value from a requester module.
+
+All cases execute successfully after persistent publication. The implementation
+evidence therefore closes this RFC as a verified correctness invariant and
+regression gap, not as a runtime repair. The earlier temporary audit most
+likely contained a fixture-specific mismatch that was not preserved after the
+temporary files were removed; it is not sufficient evidence for changing
+closure representation.
+
+The acceptance boundary remains useful: future heap, export, or compiler work
+must keep this regression passing, and an exact end-to-end wrapper failure must
+be reduced independently rather than attributed to cross-module closure
+ownership by default.

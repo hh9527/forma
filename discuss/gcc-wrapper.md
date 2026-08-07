@@ -90,9 +90,9 @@ resolver 与发布体验的路线。
 ## 共享工具链模块
 
 下面的代码使用当前的 import/export 语法、普通类型、函数、模式匹配和
-`std/exec` 数据协议。它是一份能够通过当前 `forma check` 的目标程序，而不
-是一份已经能够端到端执行的演示：跨模块调用导出闭包仍有一个运行时缺口，
-后文会单独说明。URL 和 digest 是示例值，不代表真实发行地址。
+`std/exec` 数据协议。URL 和 digest 是示例值，不代表真实发行地址。RFC 0158
+已经用缩减的 `Fn(String) -> ExecFn` 形状验证跨模块闭包、模块 helper、混合
+捕获和互递归；完整示例仍应在最终端到端 fixture 中单独验收。
 
 ```forma
 # src/toolchain.forma
@@ -222,7 +222,7 @@ export def command:
 - 安装位置由 package 的稳定身份计算，而不是临时目录或下载时序决定。
 - source map 在 Forma 中根据显式 `cwd` 计算，Host 不再补做字符串替换。
 - `ar` 复用 GCC 包，但不下载 sysroot，也不注入编译参数。
-- `command(tool)` 返回符合 Host 协议的普通函数；在语言模型上，共享逻辑不需要 VM 或 CLI 知道“工具链”这个领域概念。当前 VM 尚不能正确执行这个跨模块闭包，不能把这一点误写成已经落地的能力。
+- `command(tool)` 返回符合 Host 协议的普通函数；共享逻辑不需要 VM 或 CLI 知道“工具链”这个领域概念。
 
 ## 薄入口
 
@@ -260,9 +260,9 @@ export let exec = toolchain.command("ar");
 
 目标中的复用单位是普通模块和函数。顶层静态依赖选项足以描述发布单元，不
 要求把依赖源码合并进入口文件。是否提供 multicall 文件或多个符号链接，是
-工具与 Host 的决定，不应改变应用逻辑。不过，以上入口目前只能通过
-`forma check`；实际 `exec --dry-run` 会在
-调用 `toolchain.command` 返回的闭包时触发 VM up-link 错误。
+工具与 Host 的决定，不应改变应用逻辑。RFC 0158 的生产回归已经验证这一
+跨模块高阶调用形状；完整 wrapper 的 canonical dry-run 留给 RFC 0157 的最终
+验收。
 
 ## 调用与计划
 
@@ -274,8 +274,7 @@ TARGET=aarch64-linux-gnu \
   -c /workspace/src/hello.c -o /workspace/out/hello.o
 ```
 
-消除后文所述的跨模块闭包缺口以后，它应产生类似下面的 canonical plan。
-路径 hash 在此缩写：
+完整端到端 fixture 应产生类似下面的 canonical plan。路径 hash 在此缩写：
 
 ```json
 {
@@ -380,19 +379,19 @@ Host adapter 仍应拒绝它，因为 `cwd` 不符合 `ExecEnv`。这形成两�
 | 确定的安装位置 | 表达已具备 | `hash.sha256` 与显式 `install_prefix` |
 | command line rewrite | 表达已具备 | Array combinator、concat 与 String interpolation |
 | 确定性 source/debug map | 表达已具备 | `cwd` 是显式输入，最终参数是具体 String |
-| gcc/g++/ar 共享实现 | 有运行时缺口 | 模块接口可检查，跨模块导出闭包读取模块环境时 VM up-link 失败 |
+| gcc/g++/ar 共享实现 | 基础已验证 | RFC 0158 覆盖 namespace import、高阶闭包、模块 helper 与 ExecFn 形状 |
 | 最终计划类型约束 | 已具备 | `Fn(ExecSettings, ExecRequest) -> ExecEnv` |
 | Host 边界再次校验 | 已具备 | `forma exec --dry-run` 校验并输出 canonical JSON |
 | 有界纯求值 | 已具备 | fuel、栈、调用深度和分配配额 |
 | 规则位置诊断 | 已具备 | runtime/type diagnostics 保留 Forma 来源 |
 
 这说明核心应用逻辑距离当前 Forma 并不远。多资源计划、平台选择和参数改写
-已经能够由普通应用代码表达；但“模块复用后仍能完成 dry-run”尚未成立，不能
-因为类型检查通过就宣称端到端能力已经具备。
+已经能够由普通应用代码表达；完整远程依赖入口的 dry-run 尚未成立，仍不能
+用局部回归代替端到端能力证据。
 
 ## 仍然存在的缺口
 
-### 1. 跨模块导出闭包的运行时环境
+### 1. 跨模块导出闭包的回归边界
 
 当前代码可以通过：
 
@@ -400,14 +399,14 @@ Host adapter 仍应拒绝它，因为 `cwd` 不符合 `ExecEnv`。这形成两�
 forma check bin-src/gcc.forma
 ```
 
-但 `forma exec --dry-run` 调用 `toolchain.command("gcc")` 产生的函数时，会报告
-`up-link read operand is not an up-link`。改成从共享模块直接导出
-`gcc(settings, request)` 仍会在它读取模块级 helper 时失败，所以这不是 curry
-或 `command(tool)` API 自身的问题。
+早期临时审计曾在调用 `toolchain.command("gcc")` 时观察到
+`up-link read operand is not an up-link`，但临时 fixture 删除后无法复现。RFC
+0158 增加的生产回归覆盖 namespace import、直接与高阶导出、模块 helper、
+混合捕获、导入 TypeMetadata、`ExecFn` 形状和互递归，均能正确执行。
 
-这是本思想实验发现的具体实现缺口：导出函数必须能够稳定捕获并读取其定义
-模块的环境。修复之前，可以把所有逻辑复制进每个入口来演示 dry-run，但那会
-回避而不是验证“gcc/g++/ar 共享实现”这个核心诉求，因此本文不采用这种假象。
+因此当前没有证据支持修改 VM 闭包表示。该问题转化为一条持续回归边界：完整
+wrapper 若再次失败，必须保留并缩减具体 fixture，再按实际根因处理，不能默认
+归因于跨模块 up-link。
 
 ### 2. `Dict` 的安全读取接口
 
@@ -499,24 +498,23 @@ Forma 已经能追踪静态文件和规则来源，但 wrapper 还需要验证�
 ## 距离判断
 
 如果把“外部工具不算”作为边界，这个 GCC wrapper 的数据模型和单入口计算
-主体已经可达，但可复用的端到端程序还差一个明确的 VM 修复：
+主体与跨模块复用基础已经可达，但目标入口仍需后续 RFC 完成：
 
 ```text
 多个包
   + Host/TARGET 选择
   + 确定安装路径
   + 命令行改写
-  + 多入口复用（当前运行时缺口）
+  + 多入口复用
   + typed ExecEnv
   + dry-run
 ```
 
-当前距离主要在一项实现正确性和三类应用基础设施：
+当前距离主要在三类应用基础设施：
 
-1. 跨模块导出闭包的 VM up-link 正确性；
-2. `Dict`/argv/path 等标准库组合能力；
-3. Host 输入与改写结果的精细 provenance；
-4. 顶层静态依赖选项、远程 dependency provider 与真实 exec adapter。
+1. `Dict`/argv/path 等标准库组合能力；
+2. Host 输入与改写结果的精细 provenance；
+3. 顶层静态依赖选项、远程 dependency provider 与真实 exec adapter。
 
 这对 Forma 是一个有价值的信号：不需要为了 GCC wrapper 引入 effect system、trait、可变状态或专用构建语法。更合理的推进方式是保持应用主体不变，逐步补齐标准库和 Host 协议。
 

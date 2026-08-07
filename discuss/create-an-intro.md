@@ -265,9 +265,9 @@ GCC wrapper 不是一个孤立 demo。替换输入和最终协议以后，同一
 选择、hash 安装位置、字符串插值、数组组合和 typed `ExecEnv`，单文件
 `forma exec --dry-run` 也已有可执行证据。
 
-但完整案例尚未成立：跨模块导出闭包读取定义模块环境时会触发 VM up-link
-错误；顶层静态 `option`、GitHub dependency provider、稳定的 runtime protocol
-模块、Dict 安全读取和成熟 argv rewrite API 也仍需推进。
+但完整案例尚未成立：RFC 0158 已验证跨模块高阶闭包和缩减的 `ExecFn` 形状，
+顶层静态 `option`、GitHub dependency provider、稳定的 runtime protocol 模块、
+Dict 安全读取和成熟 argv rewrite API 仍需推进。
 
 介绍文档必须区分：
 

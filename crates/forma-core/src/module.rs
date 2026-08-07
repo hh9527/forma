@@ -6891,6 +6891,87 @@ unchanged", "|"),
     }
 
     #[test]
+    fn exported_closures_preserve_module_up_links() {
+        let directory = fixture_dir();
+        let library = directory.join("library.forma");
+        let main = directory.join("main.forma");
+        fs::write(
+            &library,
+            r#"import "std/exec" as exec_types;
+               import "std/hash" as hash;
+               type ExecSettings = exec_types.ExecSettings;
+               type ExecRequest = exec_types.ExecRequest;
+               type ExecEnv = exec_types.ExecEnv;
+               @struct type Platform = {os: String, arch: String};
+               @struct type Config = {platform: Platform, offset: Int};
+               def helper = fn(value) { value + 1 };
+               def helper2 = fn(value) { helper(value) + 1 };
+               def select = fn(platform) {
+                   let host = `\{platform.os}-\{platform.arch}`;
+                   match host {
+                       "linux-x86_64" => 1,
+                       _ => 0,
+                   }
+               };
+               def even = fn(value: Int) {
+                   if value == 0 { 'True } else { odd(value - 1) }
+               };
+               def odd = fn(value: Int) {
+                   if value == 0 { 'False } else { even(value - 1) }
+               };
+               export { even };
+               export def direct = fn(value) { helper(value) };
+               export def factory:
+                   Fn(Config) -> Fn(Int) -> Int = fn(config) {
+                   fn(value) {
+                       let ignored = hash.sha256("gcc");
+                       helper2(value) + config.offset + select(config.platform) - 2
+                   }
+               };
+               export def command:
+                   Fn(String) -> Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(tool) {
+                   fn(settings, request) {
+                       let selected = select(settings.platform);
+                       let suffix = helper(selected);
+                       {
+                           install: [],
+                           cwd: 'Some(request.cwd),
+                           bin: `\{settings.install_prefix}/\{tool}-\{suffix}`,
+                           args: request.args,
+                           env: request.env,
+                       }
+                   }
+               };"#,
+        )
+        .unwrap();
+        fs::write(
+            &main,
+            r#"import "./library.forma" as library;
+               export let output = (
+                   library.direct(40),
+                   library.factory({platform: {os: "linux", arch: "x86_64"}, offset: 2})(39),
+                   library.command("gcc")(
+                       {
+                           platform: {os: "linux", arch: "x86_64"},
+                           install_prefix: "/cache",
+                       },
+                       {args: ["-c", "x.c"], env: {TARGET: "aarch64"}, cwd: "/work"},
+                   ),
+                   library.even(10),
+               );"#,
+        )
+        .unwrap();
+
+        let engine = recovery_engine();
+        let loaded = engine.load_module(&main, BTreeMap::new()).unwrap();
+        assert_eq!(
+            named_output(engine.execute(&loaded).unwrap()).to_string(),
+            "(41, 42, {args: [\"-c\", \"x.c\"], bin: \"/cache/gcc-2\", cwd: 'Some(\"/work\"), env: {TARGET: \"aarch64\"}, install: []}, 'True)"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn recoverable_workspace_blocks_failed_imports_and_keeps_independent_facts() {
         let directory = fixture_dir();
         let model = directory.join("model.forma");
