@@ -3759,6 +3759,66 @@ fn run_core_dict(
     account: &mut QuotaAccount,
 ) -> Result<VmAction, RuntimeError> {
     let value = match operation {
+        CoreDictFunction::Get => {
+            let RuntimeValue::Dict(handle) = arguments[0].value else {
+                let view = HeapView {
+                    current,
+                    background: Some(background),
+                };
+                return Err(runtime_type_error(
+                    "Dict",
+                    &arguments[0],
+                    &view,
+                    function,
+                    pc,
+                ));
+            };
+            let view = HeapView {
+                current,
+                background: Some(background),
+            };
+            let Some(key) = view
+                .string_text(arguments[1])
+                .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+            else {
+                return Err(runtime_type_error(
+                    "String",
+                    &arguments[1],
+                    &view,
+                    function,
+                    pc,
+                ));
+            };
+            match view
+                .dict_get_text(handle, key)
+                .map_err(|heap_error| core_dict_heap_error(heap_error, function, pc))?
+            {
+                Some(payload) => {
+                    charge_allocation(
+                        account,
+                        logical_value_bytes(2).map_err(|native_error| {
+                            allocation_error(native_error.message, function, pc)
+                        })?,
+                        function,
+                        pc,
+                    )?;
+                    RichValue::new(
+                        RuntimeValue::Tagged(current.allocate(Object::Tagged {
+                            tag: RichValue::new(
+                                RuntimeValue::BuiltinAtom(BuiltinAtom::Some),
+                                arguments[0].loc(),
+                            ),
+                            payload,
+                        })),
+                        arguments[0].loc(),
+                    )
+                }
+                None => RichValue::new(
+                    RuntimeValue::BuiltinAtom(BuiltinAtom::None),
+                    arguments[0].loc(),
+                ),
+            }
+        }
         CoreDictFunction::Keys => {
             let entries =
                 core_dict_entries(arguments[0], "Dict", function, pc, current, background)?;

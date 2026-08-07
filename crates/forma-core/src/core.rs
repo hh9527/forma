@@ -12,6 +12,7 @@ pub(crate) const DICT_MODULE: &str = "std/dict";
 pub(crate) const DEBUG_MODULE: &str = "std/debug";
 pub(crate) const BUILD_MODULE: &str = "std/build";
 pub(crate) const EXEC_MODULE: &str = "std/rt-types/exec.forma";
+pub(crate) const ARGV_MODULE: &str = "std/argv";
 pub(crate) const CODEC_MODULE: &str = "std/codec";
 pub(crate) const OPTION_MODULE: &str = "std/option";
 pub(crate) const RESULT_MODULE: &str = "std/result";
@@ -180,6 +181,7 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
                     NativeFunction::core_dict(CoreDictFunction::Filter),
                 ),
                 ("fold", NativeFunction::core_dict(CoreDictFunction::Fold)),
+                ("get", NativeFunction::core_dict(CoreDictFunction::Get)),
                 (
                     "from_pairs",
                     NativeFunction::core_dict(CoreDictFunction::FromPairs),
@@ -533,6 +535,12 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
             native_id: 21,
             name: EXEC_MODULE,
             source: include_str!("../modules/std/rt-types/exec.forma"),
+            functions: vec![],
+        },
+        CoreModuleSpec {
+            native_id: 22,
+            name: ARGV_MODULE,
+            source: include_str!("../modules/std/argv.forma"),
             functions: vec![],
         },
     ]

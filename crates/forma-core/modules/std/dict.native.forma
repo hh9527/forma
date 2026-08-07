@@ -6,4 +6,5 @@ native merge: Fn(Any, Any) -> Any;
 native map_values: for(A, B) Fn(Dict(A), Fn(A) -> B) -> Dict(B);
 native filter: for(A) Fn(Dict(A), Fn(A) -> Bool) -> Dict(A);
 native fold: for(A, B) Fn(Dict(A), B, Fn(B, String, A) -> B) -> B;
-export { keys, values, pairs, from_pairs, merge, map_values, filter, fold };
+native get: for(A) Fn(Dict(A), String) -> Option(A);
+export { keys, values, pairs, from_pairs, merge, map_values, filter, fold, get };

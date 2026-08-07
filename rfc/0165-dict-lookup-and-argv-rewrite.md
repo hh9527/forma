@@ -1,6 +1,6 @@
 # RFC 0165: Dict lookup and argv rewrite combinators
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0053, RFC 0097, RFC 0107, RFC 0157, RFC 0163
 
 ## Summary
@@ -67,8 +67,11 @@ the following argument, normalize spelling, or inspect response files.
 `reject_option` returns the original immutable Array in `'Ok` when no match
 exists. On the first matching argument it returns `'Err(blame!(argument,
 message))`, preserving the Host request value as the diagnostic subject.
-Callers may chain several policies with `?` before prepending authoritative
-arguments.
+Validation Functions returning `Result` may chain several policies with `?`
+before prepending authoritative arguments. The current `ExecFn` returns
+`ExecEnv`, not `Result`; an executable wrapper must therefore handle the error
+explicitly at that boundary, for example by converting its message to
+`panic!`. This RFC does not silently change the Host protocol.
 
 `prepend(prefix, arguments)` is equivalent to `array.concat([prefix,
 arguments])`; the named operation makes rewrite intent explicit at call sites.
@@ -113,7 +116,8 @@ policy. The wrapper module owns the list and ordering.
 4. option matching distinguishes `--x`, `--x=value`, and `--xyz`;
 5. rejection reports the first conflicting argument as its blame subject;
 6. prepend preserves prefix order and the complete original argv order;
-7. the module composes with `?` in an exported wrapper Function;
+7. the module composes with `?` in an exported validation Function, while an
+   `ExecFn` handles the resulting error explicitly;
 8. quota and invalid-native-argument behavior follow existing Dict/Array
    primitives;
 9. no API performs effects or mutates an Array/Dict;
@@ -131,3 +135,23 @@ policy. The wrapper module owns the list and ordering.
 
 Work returns to discussion if implementation needs mutable collections, a
 general CLI grammar, dynamic return widening, or a Host/VM-specific GCC path.
+
+## Implementation result
+
+Implemented in August 2026. `std/dict.get` is a generic native primitive that
+returns `Option(A)` and allocates only the `'Some` wrapper when a key exists.
+`std/argv` is embedded source at reserved module ID 22; its matching,
+rejection, and prepend behavior is authored in Forma over existing Array and
+String combinators.
+
+Supporting a source-only composed standard module closed one bootstrap gap:
+built-in source modules may now namespace- or selectively import an earlier
+registered built-in and receive its ordinary value, persistent root, and typed
+interface. Registration order is explicit, missing earlier dependencies are
+sourced errors, and no runtime loading or import cycle mechanism was added.
+
+Tests cover exact and `=value` matching, prefix false positives, typed present
+and missing Dict lookup, immutable prepend order, first-conflict blame data,
+and `?` composition inside an exported Result-returning Function. The GCC
+thought experiment now handles those Results explicitly at the non-Result
+`ExecFn` boundary.

@@ -237,6 +237,7 @@ pub(crate) enum CoreArrayFunction {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CoreDictFunction {
+    Get,
     Keys,
     Values,
     Pairs,
@@ -558,6 +559,7 @@ impl CoreDebugFunction {
 impl CoreDictFunction {
     pub(crate) const fn name(self) -> &'static str {
         match self {
+            Self::Get => "std/dict.get",
             Self::Keys => "std/dict.keys",
             Self::Values => "std/dict.values",
             Self::Pairs => "std/dict.pairs",
@@ -572,6 +574,7 @@ impl CoreDictFunction {
     pub(crate) const fn arity(self) -> usize {
         match self {
             Self::Keys | Self::Values | Self::Pairs | Self::FromPairs => 1,
+            Self::Get => 2,
             Self::Merge | Self::MapValues | Self::Filter => 2,
             Self::Fold => 3,
         }

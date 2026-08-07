@@ -97,6 +97,7 @@ resolver 与发布体验的路线。
 # src/toolchain.forma
 
 import "std/array" as arrays;
+import "std/argv" as argv;
 import "std/dict" as dicts;
 import "std/rt-types/exec.forma" as exec_types;
 import "std/hash" as hash;
@@ -161,14 +162,26 @@ def sysroot_package = fn(target) {
 };
 
 def compiler_args = fn(request, sysroot_dest) {
-    arrays.concat([
+    let arguments = match argv.reject_option(request.args, "--sysroot") {
+        'Ok(arguments) => arguments,
+        'Err(error) => panic!(error.message),
+    };
+    let arguments = match argv.reject_option(arguments, "-ffile-prefix-map") {
+        'Ok(arguments) => arguments,
+        'Err(error) => panic!(error.message),
+    };
+    let arguments = match argv.reject_option(arguments, "-fdebug-prefix-map") {
+        'Ok(arguments) => arguments,
+        'Err(error) => panic!(error.message),
+    };
+    argv.prepend(
         [
             `--sysroot=\{sysroot_dest}`,
             `-ffile-prefix-map=\{request.cwd}=.`,
             `-fdebug-prefix-map=\{request.cwd}=.`,
         ],
-        request.args,
-    ])
+        arguments,
+    )
 };
 
 def command_args = fn(tool, request, sysroot_dest) {
@@ -193,8 +206,10 @@ export def command:
     Fn(String) -> Fn(ExecSettings, ExecRequest) -> ExecEnv =
     fn(tool) {
         fn(settings, request) {
-            # 第一版通过显式 Host 输入读取 TARGET；后文讨论更好的协议。
-            let target = request.env.TARGET;
+            let target = match dicts.get(request.env, "TARGET") {
+                'Some(target) => target,
+                'None => panic!("TARGET is required by the GCC wrapper"),
+            };
             let compiler = compiler_package(settings.platform);
             let sysroot = sysroot_package(target);
             let compiler_dest = install_dest(settings, compiler);

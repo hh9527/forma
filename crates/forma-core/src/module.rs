@@ -313,7 +313,7 @@ fn install_native_modules(
     debug_sink: &Arc<dyn DebugSink>,
     host_modules: &[RegisteredNativeModule],
 ) -> Result<HashMap<String, (Value, PersistentValue, ModuleInterface)>, ModuleError> {
-    let mut modules = HashMap::new();
+    let mut modules: HashMap<String, (Value, PersistentValue, ModuleInterface)> = HashMap::new();
     let mut specs = module_specs()
         .into_iter()
         .map(|spec| TrustedNativeModule {
@@ -376,6 +376,49 @@ fn install_native_modules(
         let implementations = spec.functions.into_iter().collect::<HashMap<_, _>>();
         let mut external_values = BTreeMap::new();
         let mut external_roots = HashMap::new();
+        let mut external_interfaces = BTreeMap::new();
+        for binding in &program.value.body.value.bindings {
+            if binding.value.kind != BindingKind::Import {
+                continue;
+            }
+            let ExprKind::String(request) = &binding.value.value.value else {
+                return Err(ModuleError::new("built-in import path must be a String"));
+            };
+            let (module_value, module_root, module_interface) =
+                modules.get(request.as_str()).ok_or_else(|| {
+                    ModuleError::new(sources.render(&Diagnostic::error(
+                        format!(
+                            "built-in module {} imports unavailable earlier built-in {request:?}",
+                            spec.name
+                        ),
+                        binding.value.value.location,
+                    )))
+                })?;
+            let (value, root, interface) =
+                if let Some(imported_name) = binding.value.imported_name.as_ref() {
+                    let (value, interface) = select_import_value(
+                        module_value.clone(),
+                        module_interface.clone(),
+                        Some(imported_name),
+                        &binding.value.name.value,
+                    )?;
+                    let root = module_root
+                        .dict_get(&main.heap, &imported_name.value)
+                        .map_err(|error| ModuleError::new(error.to_string()))?
+                        .ok_or_else(|| {
+                            ModuleError::new(format!(
+                                "built-in module {request:?} has no root for export {:?}",
+                                imported_name.value
+                            ))
+                        })?;
+                    (value, root, interface)
+                } else {
+                    (module_value.clone(), *module_root, module_interface.clone())
+                };
+            external_values.insert(binding.value.name.value.clone(), value);
+            external_roots.insert(binding.value.name.value.clone(), root);
+            external_interfaces.insert(binding.value.name.value.clone(), interface);
+        }
         let native_module = crate::value::NativeModuleId(spec.id);
         let native_types = declared_native_types(&program, native_module, &spec.name, sources)?;
         for (name, native_type) in native_types.values() {
@@ -434,11 +477,12 @@ fn install_native_modules(
             external_values.insert(symbol.to_owned(), value);
             external_roots.insert(symbol.to_owned(), root);
         }
-        if external_values.len() - native_types.len() != implementations.len() {
-            let undeclared = implementations
-                .keys()
-                .find(|symbol| !external_values.contains_key(*symbol))
-                .expect("registry size differs");
+        if let Some(undeclared) = implementations.keys().find(|symbol| {
+            !program.value.body.value.bindings.iter().any(|binding| {
+                binding.value.kind == BindingKind::Native
+                    && binding.value.name.value.as_str() == symbol.as_str()
+            })
+        }) {
             return Err(ModuleError::new(format!(
                 "native symbol {undeclared:?} for {} has no XL declaration",
                 spec.name
@@ -453,7 +497,7 @@ fn install_native_modules(
             &HashSet::new(),
             sources,
             &BTreeMap::new(),
-            &BTreeMap::new(),
+            &external_interfaces,
             debug_sink,
         )
         .map_err(|error| {
@@ -4904,6 +4948,72 @@ unchanged", "|"),
         assert_eq!(result.get("empty_keys").unwrap().to_string(), "[]");
         assert_eq!(result.get("empty_pairs").unwrap().to_string(), "[]");
         assert_eq!(result.get("empty_from_pairs").unwrap().to_string(), "{}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn typed_dict_lookup_and_argv_rewrites_compose_in_user_code() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("main.forma"),
+            r#"import "std/dict" as dict;
+               import "std/argv" as argv;
+               let environment: Dict(String) = {TARGET: "aarch64-linux-gnu"};
+               let target: Option(String) = dict.get(environment, "TARGET");
+               let missing: Option(String) = dict.get(environment, "MISSING");
+               def rewrite:
+                   Fn(Array(String)) -> Result(Array(String), BlameError) = fn(arguments) {
+                       let arguments = argv.reject_option(arguments, "--sysroot")?;
+                       let arguments = argv.reject_option(arguments, "-fdebug-prefix-map")?;
+                       'Ok(argv.prepend(
+                           ["--sysroot=/sdk", "-fdebug-prefix-map=/work=."],
+                           arguments,
+                       ))
+                   };
+               export let output = {
+                   target,
+                   missing,
+                   exact: [
+                       argv.matches_option("--sysroot", "--sysroot"),
+                       argv.matches_option("--sysroot=/x", "--sysroot"),
+                       argv.matches_option("--sysrooted", "--sysroot"),
+                   ],
+                   contains: argv.contains_option(["-c", "--sysroot=/x"], "--sysroot"),
+                   rewritten: rewrite(["-c", "main.c"]),
+                   rejected: rewrite(["-c", "--sysroot=/other"]),
+               };"#,
+        )
+        .unwrap();
+
+        let engine = recovery_engine();
+        let module = engine
+            .load_module(directory.join("main.forma"), BTreeMap::new())
+            .unwrap();
+        let output = named_output(engine.execute(&module).unwrap());
+        let Value::Dict(output) = output else {
+            panic!("expected output Dict")
+        };
+        assert_eq!(
+            output.get("target").unwrap().to_string(),
+            "'Some(\"aarch64-linux-gnu\")"
+        );
+        assert_eq!(output.get("missing").unwrap().to_string(), "'None");
+        assert_eq!(
+            output.get("exact").unwrap().to_string(),
+            "['True, 'True, 'False]"
+        );
+        assert_eq!(output.get("contains").unwrap().to_string(), "'True");
+        assert_eq!(
+            output.get("rewritten").unwrap().to_string(),
+            "'Ok([\"--sysroot=/sdk\", \"-fdebug-prefix-map=/work=.\", \"-c\", \"main.c\"])",
+        );
+        let rejected = output.get("rejected").unwrap().to_string();
+        assert!(rejected.contains("'Err("), "{rejected}");
+        assert!(rejected.contains("--sysroot=/other"), "{rejected}");
+        assert!(
+            rejected.contains("conflicting argument: --sysroot"),
+            "{rejected}"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
