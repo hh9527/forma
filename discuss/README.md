@@ -10,6 +10,10 @@ goals, non-goals, acceptance criteria, and an implementation plan.
 
 Current discussions:
 
+- `intent-compiler-libraries.md`: Forma as a high-level intent carrier and a
+  language for versioned domain compiler libraries;
+- `intelligent-reporting-intent-compiler.md`: an executable analytics ontology
+  lowering report intent into SQL, result schema, and render plans;
 - `typed-accumulation-channels.md`: caller-selected typed accumulation;
 - `type-directed-capability-factories.md`: deriving typed `Eq`/`Hash`-like
   functions from `TypeOf(A)` without trait resolution; and
