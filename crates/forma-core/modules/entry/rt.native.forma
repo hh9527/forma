@@ -9,6 +9,8 @@ native var: Fn(ModuleHandle, String) -> Option(String);
 native platform: Fn(ModuleHandle) -> Any;
 native download_prefix: Fn(ModuleHandle) -> String;
 native install_prefix: Fn(ModuleHandle) -> String;
+native inject_module:
+    for(A) Fn(ModuleHandle, String, TypeOf(A), A) -> Result(Bool, BlameError);
 native initialize_module:
     Fn(ModuleHandle) -> Result(InstantiatedModule, BlameError);
 native module_export:
@@ -28,6 +30,7 @@ export {
     platform,
     download_prefix,
     install_prefix,
+    inject_module,
     initialize_module,
     module_export,
     check_type,

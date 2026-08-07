@@ -166,6 +166,26 @@ pub(crate) fn native_install_prefix(context: &mut CallContext<'_, '_>) -> Result
     context.set_string(context.result(), cache_path("installs")?)
 }
 
+pub(crate) fn native_inject_module(context: &mut CallContext<'_, '_>) -> Result<(), NativeError> {
+    let pending = pending(context, 0)?;
+    let id = context
+        .value(context.argument(1)?)?
+        .as_str()
+        .ok_or_else(|| NativeError::new("injected module ID must be a String"))?
+        .to_owned();
+    let witness = context.export_value(context.argument(2)?)?;
+    let descriptor =
+        crate::types::decode_type(&witness, "inject_module.type").map_err(NativeError::new)?;
+    let value = context.export_value(context.argument(3)?)?;
+    match pending.inject_module(id, descriptor, value) {
+        Ok(()) => {
+            let success = Value::bool(true);
+            result_ok_value(context, &success)
+        }
+        Err(error) => result_error(context, error.to_string()),
+    }
+}
+
 fn cache_path(child: &str) -> Result<String, NativeError> {
     let root = std::env::var_os("FORMA_CACHE_HOME")
         .or_else(|| std::env::var_os("XDG_CACHE_HOME"))

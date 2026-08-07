@@ -18,8 +18,9 @@ use crate::semantic::{
 use crate::source::{Diagnostic, SourceDatabase};
 use crate::toml::parse_toml_registered;
 use crate::types::{
-    Analysis, ModuleInterface, PartialAnalysisControl, analyze_partial_types_recovered_with_query,
-    analyze_program_with_bindings_observed, program_references_name, recovered_reference_locations,
+    Analysis, ModuleInterface, PartialAnalysisControl, TypeDescriptor,
+    analyze_partial_types_recovered_with_query, analyze_program_with_bindings_observed,
+    program_references_name, recovered_reference_locations,
 };
 use crate::yaml::parse_yaml_registered;
 use crate::{
@@ -229,10 +230,16 @@ struct PendingModuleInner {
 }
 
 enum PendingModuleState {
-    Pending,
+    Pending(BTreeMap<String, InjectedValueModule>),
     Initializing,
     Ready(InstantiatedModule),
     Failed(ModuleError),
+}
+
+#[derive(Clone, Debug)]
+struct InjectedValueModule {
+    value: Value,
+    interface: ModuleInterface,
 }
 
 #[derive(Clone, Debug)]
@@ -261,15 +268,92 @@ impl PendingModule {
         ))
     }
 
-    pub fn initialize(&self) -> Result<InstantiatedModule, ModuleError> {
+    pub(crate) fn inject_module(
+        &self,
+        id: String,
+        descriptor: TypeDescriptor,
+        value: Value,
+    ) -> Result<(), ModuleError> {
+        if id.is_empty()
+            || id.starts_with(['.', '@'])
+            || id.starts_with("entry/")
+            || id.ends_with(".priv.forma")
+            || id.ends_with(".native.forma")
+            || id == "@main"
         {
+            return Err(ModuleError::new(format!(
+                "invalid injected module ID {id:?}"
+            )));
+        }
+        if builtin_list(&self.inner.native_modules)
+            .iter()
+            .any(|(name, _)| name == &id)
+        {
+            return Err(ModuleError::new(format!(
+                "injected module {id:?} would shadow a built-in"
+            )));
+        }
+        let TypeDescriptor::Struct(fields) = descriptor else {
+            return Err(ModuleError::new(
+                "injected module type must be a structural record",
+            ));
+        };
+        let Value::Dict(runtime_fields) = &value else {
+            return Err(ModuleError::new(
+                "injected module value must be a structural record",
+            ));
+        };
+        if !runtime_fields.shape().fields().iter().eq(fields.keys()) {
+            return Err(ModuleError::new(
+                "injected module value does not match its type witness",
+            ));
+        }
+        let interface = ModuleInterface {
+            exports: fields
+                .into_iter()
+                .map(|(name, body)| {
+                    (
+                        name,
+                        crate::TypeScheme {
+                            parameters: Vec::new(),
+                            body,
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("pending module state poisoned");
+        let PendingModuleState::Pending(modules) = &mut *state else {
+            return Err(ModuleError::new(
+                "cannot inject a module after initialization has started",
+            ));
+        };
+        if modules.contains_key(&id) {
+            return Err(ModuleError::new(format!(
+                "injected module {id:?} is already registered"
+            )));
+        }
+        modules.insert(id, InjectedValueModule { value, interface });
+        Ok(())
+    }
+
+    pub fn initialize(&self) -> Result<InstantiatedModule, ModuleError> {
+        let modules = {
             let mut state = self
                 .inner
                 .state
                 .lock()
                 .expect("pending module state poisoned");
-            match &*state {
-                PendingModuleState::Pending => *state = PendingModuleState::Initializing,
+            match &mut *state {
+                PendingModuleState::Pending(modules) => {
+                    let modules = std::mem::take(modules);
+                    *state = PendingModuleState::Initializing;
+                    modules
+                }
                 PendingModuleState::Initializing => {
                     return Err(ModuleError::new(
                         "module initialization is already in progress",
@@ -278,10 +362,11 @@ impl PendingModule {
                 PendingModuleState::Ready(module) => return Ok(module.clone()),
                 PendingModuleState::Failed(error) => return Err(error.clone()),
             }
-        }
+        };
         let result = load_module_with_native_modules(
             &self.inner.path,
             BTreeMap::new(),
+            modules,
             self.inner.config.module_quota,
             Arc::clone(&self.inner.debug_sink),
             &self.inner.native_modules,
@@ -970,6 +1055,7 @@ impl Engine {
         load_module_with_native_modules(
             path,
             external_bindings,
+            BTreeMap::new(),
             self.config.module_quota,
             Arc::clone(&self.debug_sink),
             &self.native_modules,
@@ -1048,7 +1134,7 @@ impl Engine {
                 config: self.config,
                 debug_sink: Arc::clone(&self.debug_sink),
                 native_modules: Arc::clone(&self.native_modules),
-                state: Mutex::new(PendingModuleState::Pending),
+                state: Mutex::new(PendingModuleState::Pending(BTreeMap::new())),
             }),
         })
     }
@@ -1906,6 +1992,7 @@ pub fn evaluate_expression_module_with_quota_and_debug_sink(
     load_module_with_native_modules(
         path,
         external_bindings,
+        BTreeMap::new(),
         module_quota,
         debug_sink,
         &[],
@@ -1943,6 +2030,7 @@ impl<'a> FormaModuleSource<'a> {
 fn load_module_with_native_modules(
     path: impl AsRef<Path>,
     external_bindings: BTreeMap<String, Value>,
+    injected_modules: BTreeMap<String, InjectedValueModule>,
     module_quota: Quota,
     debug_sink: Arc<dyn DebugSink>,
     native_modules: &[RegisteredNativeModule],
@@ -1950,7 +2038,8 @@ fn load_module_with_native_modules(
 ) -> Result<LoadedModule, ModuleError> {
     let resolver = ModuleResolver::for_root(path.as_ref())
         .map_err(|error| ModuleError::new(error.to_string()))?
-        .with_builtins(builtin_list(native_modules));
+        .with_builtins(builtin_list(native_modules))
+        .with_virtual_modules(injected_modules.keys().cloned());
     let root_module = resolver
         .resolve_root(path.as_ref())
         .map_err(|error| ModuleError::new(error.to_string()))?;
@@ -1974,6 +2063,7 @@ fn load_module_with_native_modules(
         semantic_inputs: BTreeMap::new(),
         source_policy,
     };
+    loader.install_injected_values(injected_modules)?;
     loader.load_root(root_module, external_bindings)
 }
 
@@ -2050,6 +2140,19 @@ enum ModuleState {
 }
 
 impl ModuleLoader {
+    fn install_injected_values(
+        &mut self,
+        modules: BTreeMap<String, InjectedValueModule>,
+    ) -> Result<(), ModuleError> {
+        for (name, module) in modules {
+            let root = publish_value(&mut self.main.heap, &module.value)
+                .map_err(|error| ModuleError::new(error.to_string()))?;
+            self.core_modules
+                .insert(name, (module.value, root, module.interface));
+        }
+        Ok(())
+    }
+
     fn install_injected_modules(
         &mut self,
         context_path: &Path,
@@ -7616,6 +7719,59 @@ unchanged", "|"),
             named_output(engine.execute(first.module()).unwrap()).to_string(),
             "42"
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn pending_modules_freeze_isolated_typed_value_modules() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        fs::write(
+            &main,
+            r#"import "runtime/config" { answer, bump };
+               export let output = bump(answer);"#,
+        )
+        .unwrap();
+        let engine = recovery_engine();
+        let pending = engine.prepare_module(&main).unwrap();
+        let value = crate::run_source(
+            "injected",
+            "{ answer: 41, bump: fn(value: Int) { value + 1 } }",
+            100_000,
+        )
+        .unwrap();
+        let descriptor = TypeDescriptor::Struct(BTreeMap::from([
+            ("answer".into(), TypeDescriptor::Int),
+            (
+                "bump".into(),
+                TypeDescriptor::Function {
+                    parameters: vec![TypeDescriptor::Int],
+                    result: Box::new(TypeDescriptor::Int),
+                },
+            ),
+        ]));
+        pending
+            .inject_module("runtime/config".into(), descriptor.clone(), value.clone())
+            .unwrap();
+        assert!(
+            pending
+                .inject_module("runtime/config".into(), descriptor.clone(), value.clone())
+                .unwrap_err()
+                .to_string()
+                .contains("already registered")
+        );
+        let initialized = pending.initialize().unwrap();
+        assert_eq!(initialized.export("output").unwrap().0.to_string(), "42");
+        assert!(
+            pending
+                .inject_module("runtime/late".into(), descriptor, value)
+                .unwrap_err()
+                .to_string()
+                .contains("after initialization")
+        );
+
+        let isolated = engine.prepare_module(&main).unwrap();
+        assert!(isolated.initialize().is_err());
         fs::remove_dir_all(directory).unwrap();
     }
 

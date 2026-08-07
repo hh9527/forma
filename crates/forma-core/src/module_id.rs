@@ -180,6 +180,7 @@ pub struct ModuleResolver {
     builtins: BTreeMap<String, u32>,
     selected_entry: Option<ModuleId>,
     injected_modules: BTreeSet<String>,
+    virtual_modules: BTreeSet<String>,
 }
 
 impl ModuleResolver {
@@ -231,6 +232,7 @@ impl ModuleResolver {
             builtins: BTreeMap::new(),
             selected_entry: None,
             injected_modules: BTreeSet::new(),
+            virtual_modules: BTreeSet::new(),
         };
         let has_external_manifest = manifest.is_some();
         if let Some(manifest) = manifest {
@@ -293,6 +295,14 @@ impl ModuleResolver {
         self
     }
 
+    pub(crate) fn with_virtual_modules(
+        mut self,
+        modules: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.virtual_modules = modules.into_iter().collect();
+        self
+    }
+
     pub fn resolve_root(&self, path: &Path) -> Result<ResolvedModule, ResolveModuleError> {
         let path = resolve_physical(path)?;
         if is_private_file_name(&path) {
@@ -316,6 +326,14 @@ impl ModuleResolver {
             return Err(ResolveModuleError::EmptyPath);
         }
         let privileged = self.selected_entry.as_ref() == Some(importer);
+        if self.virtual_modules.contains(target) {
+            return Ok(ResolvedModule {
+                id: ModuleId::builtin(target),
+                format: ModuleFormat::Forma,
+                authority: ModuleAuthority::RuntimeSystem,
+                physical_path: None,
+            });
+        }
         if self.injected_modules.contains(target) {
             if !privileged {
                 return Err(ResolveModuleError::PrivateModuleAccess(target.into()));

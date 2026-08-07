@@ -637,6 +637,15 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
                     ),
                 ),
                 (
+                    "inject_module",
+                    NativeFunction::new_with_native_type(
+                        "entry/rt.inject_module",
+                        4,
+                        crate::entry_runtime::HANDLE_LOCAL,
+                        crate::entry_runtime::native_inject_module,
+                    ),
+                ),
+                (
                     "initialize_module",
                     NativeFunction::new_with_native_type(
                         "entry/rt.initialize_module",

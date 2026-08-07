@@ -21,7 +21,7 @@ native def platform: Fn(ModuleHandle) -> Platform;
 native def cache_root: Fn(ModuleHandle) -> String;
 native def inject_module:
     for(A) Fn(ModuleHandle, String, TypeOf(A), A)
-        -> Result(None, BlameError);
+        -> Result(Bool, BlameError);
 native def initialize_module:
     Fn(ModuleHandle) -> Result(InstantiatedModule, BlameError);
 ```
@@ -54,7 +54,8 @@ module ID is normalized by the ordinary resolver rules. Injection:
 - is visible only to the main graph owned by the same handle;
 - succeeds only while lifecycle state is `Pending`.
 
-The explicit type witness is decoded by Forma's metadata decoder and becomes
+`True` reports successful installation. The explicit type witness is decoded
+by Forma's metadata decoder and becomes
 the injected module's interface. Runtime validation confirms the supplied
 value is assignable to that witness before registry mutation.
 
