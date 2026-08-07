@@ -1,5 +1,21 @@
 import "std/array" as array;
-import "std/string" as string;
+import "./sql.forma" {
+    Function,
+    BinaryOp,
+    SqlAtom,
+    SqlTerm,
+    SqlScalar,
+    SqlSelectExpr,
+    Projection,
+    Source,
+    JoinKind,
+    Join,
+    Order,
+    CommonTable,
+    SelectBody,
+    Select,
+    render_select,
+};
 
 @enum type Measure = {
     NetRevenue: 'None,
@@ -22,15 +38,16 @@ import "std/string" as string;
 
 @struct type QueryPlan = {
     measure: Measure,
-    prefix: String,
-    from_clause: String,
-    where_clause: String,
-    measure_expression: String,
+    common_tables: Array(CommonTable),
+    from: Source,
+    joins: Array(Join),
+    filter: Option(SqlScalar),
+    measure_projection: Projection,
 };
 
 @struct type GroupRequirement = {
-    select_expression: String,
-    group_expression: String,
+    projection: Projection,
+    group_expression: SqlScalar,
 };
 
 @struct type RequirementCompilation = {
@@ -56,9 +73,9 @@ type DimensionLowerer = Fn(Measure) -> RequirementCompilation;
     lower: DimensionLowerer,
 };
 
-def complete_requirement: Fn(String, String) -> RequirementCompilation = fn(select_expression, group_expression) {
+def complete_requirement: Fn(Projection, SqlScalar) -> RequirementCompilation = fn(projected, group_expression) {
     {
-        requirement: 'Some({select_expression, group_expression}),
+        requirement: 'Some({projection: projected, group_expression}),
         diagnostics: [],
     }
 };
@@ -72,23 +89,23 @@ def rejected_requirement: Fn(Dimension, String) -> RequirementCompilation = fn(v
 
 # A higher-order compiler factory: construct a dimension capability whose
 # lowering is valid for every current measure.
-def universal_dimension: Fn(Dimension, String, String) -> DimensionCapability = fn(id, select_expression, group_expression) {
+def universal_dimension: Fn(Dimension, Projection, SqlScalar) -> DimensionCapability = fn(id, projected, group_expression) {
     {
         id,
         lower: fn(measure) {
-            complete_requirement(select_expression, group_expression)
+            complete_requirement(projected, group_expression)
         },
     }
 };
 
 # A second compiler factory: construct a capability restricted to one measure.
 # The same function both verifies the semantic edge and lowers it.
-def measure_dimension: Fn(Dimension, Measure, String, String) -> DimensionCapability = fn(id, required_measure, select_expression, group_expression) {
+def measure_dimension: Fn(Dimension, Measure, Projection, SqlScalar) -> DimensionCapability = fn(id, required_measure, projected, group_expression) {
     {
         id,
         lower: fn(actual_measure) {
             if actual_measure == required_measure {
-                complete_requirement(select_expression, group_expression)
+                complete_requirement(projected, group_expression)
             } else {
                 rejected_requirement(
                     id,
@@ -108,28 +125,115 @@ def unsupported_dimension: Fn(Dimension, String) -> DimensionCapability = fn(id,
     }
 };
 
-def net_revenue = {
+def column: Fn(String, String) -> SqlAtom = fn(relation, name) {
+    'Column({relation, name})
+};
+
+def call: Fn(Function, Array(SqlAtom)) -> SqlTerm = fn(function, args) {
+    'Call({function, args})
+};
+
+def binary: Fn(SqlTerm, BinaryOp, SqlTerm) -> SqlScalar = fn(left, op, right) {
+    'Binary({left, op, right})
+};
+
+def term: Fn(SqlAtom) -> SqlTerm = fn(value) { 'Atom(value) };
+def scalar: Fn(SqlTerm) -> SqlScalar = fn(value) { 'Term(value) };
+
+def projection: Fn(SqlScalar, String) -> Projection = fn(expr, alias) {
+    {expr: 'Scalar(expr), alias: 'Some(alias)}
+};
+
+def aggregate_projection: Fn(Function, SqlScalar, String) -> Projection = fn(function, value, alias) {
+    {expr: 'Aggregate({function, value}), alias: 'Some(alias)}
+};
+
+def source: Fn(String, String) -> Source = fn(name, alias) { {name, alias} };
+
+def join: Fn(JoinKind, Source, SqlScalar) -> Join = fn(kind, joined_source, on) {
+    {kind, source: joined_source, on}
+};
+
+def equals: Fn(SqlAtom, SqlAtom) -> SqlScalar = fn(left, right) {
+    binary(term(left), 'Equal, term(right))
+};
+
+def payment_by_order: SelectBody = {
+    projections: [
+        projection(scalar(term(column("payments", "order_id"))), "order_id"),
+        aggregate_projection('Sum, scalar(term(column("payments", "amount_cents"))), "captured_cents"),
+    ],
+    from: source("payments", "payments"),
+    joins: [],
+    filter: 'Some(equals(column("payments", "status"), 'Int(2))),
+    group_by: [scalar(term(column("payments", "order_id")))],
+    order_by: [],
+};
+
+def refund_by_order: SelectBody = {
+    projections: [
+        projection(scalar(term(column("payments", "order_id"))), "order_id"),
+        aggregate_projection('Sum, scalar(term(column("refunds", "amount_cents"))), "refunded_cents"),
+    ],
+    from: source("refunds", "refunds"),
+    joins: [join(
+        'Inner,
+        source("payments", "payments"),
+        equals(column("payments", "id"), column("refunds", "payment_id")),
+    )],
+    filter: 'Some(equals(column("refunds", "status"), 'Int(2))),
+    group_by: [scalar(term(column("payments", "order_id")))],
+    order_by: [],
+};
+
+def net_revenue: MeasureCapability = {
     id: 'NetRevenue,
     lower: fn() {
         {
             measure: 'NetRevenue,
-            prefix: "WITH payment_by_order AS (\n  SELECT order_id, SUM(amount_cents) AS captured_cents\n  FROM payments WHERE status = 2 GROUP BY order_id\n), refund_by_order AS (\n  SELECT p.order_id, SUM(r.amount_cents) AS refunded_cents\n  FROM refunds r JOIN payments p ON p.id = r.payment_id\n  WHERE r.status = 2 GROUP BY p.order_id\n)",
-            from_clause: "FROM orders o\nJOIN customers c ON c.id = o.customer_id\nJOIN organizations org ON org.id = c.org_id\nJOIN regions r ON r.id = org.region_id\nLEFT JOIN payment_by_order p ON p.order_id = o.id\nLEFT JOIN refund_by_order f ON f.order_id = o.id",
-            where_clause: "WHERE o.status = 2",
-            measure_expression: "SUM(COALESCE(p.captured_cents, 0) - COALESCE(f.refunded_cents, 0)) AS net_revenue_cents",
+            common_tables: [
+                {name: "payment_by_order", query: payment_by_order},
+                {name: "refund_by_order", query: refund_by_order},
+            ],
+            from: source("orders", "o"),
+            joins: [
+                join('Inner, source("customers", "c"), equals(column("c", "id"), column("o", "customer_id"))),
+                join('Inner, source("organizations", "org"), equals(column("org", "id"), column("c", "org_id"))),
+                join('Inner, source("regions", "r"), equals(column("r", "id"), column("org", "region_id"))),
+                join('Left, source("payment_by_order", "p"), equals(column("p", "order_id"), column("o", "id"))),
+                join('Left, source("refund_by_order", "f"), equals(column("f", "order_id"), column("o", "id"))),
+            ],
+            filter: 'Some(equals(column("o", "status"), 'Int(2))),
+            measure_projection: aggregate_projection(
+                'Sum,
+                binary(
+                    call('Coalesce, [column("p", "captured_cents"), 'Int(0)]),
+                    'Subtract,
+                    call('Coalesce, [column("f", "refunded_cents"), 'Int(0)]),
+                ),
+                "net_revenue_cents",
+            ),
         }
     },
 };
 
-def units_sold = {
+def units_sold: MeasureCapability = {
     id: 'UnitsSold,
     lower: fn() {
         {
             measure: 'UnitsSold,
-            prefix: "",
-            from_clause: "FROM order_items oi\nJOIN orders o ON o.id = oi.order_id\nJOIN customers c ON c.id = o.customer_id\nJOIN organizations org ON org.id = c.org_id\nJOIN regions r ON r.id = org.region_id\nJOIN products product ON product.id = oi.product_id\nJOIN categories cat ON cat.id = product.category_id",
-            where_clause: "WHERE o.status != 3",
-            measure_expression: "SUM(oi.quantity) AS units_sold",
+            common_tables: [],
+            from: source("order_items", "oi"),
+            joins: [
+                join('Inner, source("orders", "o"), equals(column("o", "id"), column("oi", "order_id"))),
+                join('Inner, source("customers", "c"), equals(column("c", "id"), column("o", "customer_id"))),
+                join('Inner, source("organizations", "org"), equals(column("org", "id"), column("c", "org_id"))),
+                join('Inner, source("regions", "r"), equals(column("r", "id"), column("org", "region_id"))),
+                join('Inner, source("products", "product"), equals(column("product", "id"), column("oi", "product_id"))),
+                join('Inner, source("categories", "cat"), equals(column("cat", "id"), column("product", "category_id"))),
+            ],
+            filter: 'Some(binary(term(column("o", "status")), 'NotEqual, term('Int(3)))),
+            measure_projection: aggregate_projection('Sum, scalar(term(column("oi", "quantity"))), "units_sold"),
         }
     },
 };
@@ -145,25 +249,25 @@ def dimension_capability: Fn(Dimension) -> DimensionCapability = fn(dimension) {
     match dimension {
         'OrderMonth => universal_dimension(
             dimension,
-            "substr(o.ordered_at, 1, 7) AS order_month",
-            "order_month",
+            projection(scalar(call('Substr, [column("o", "ordered_at"), 'Int(1), 'Int(7)])), "order_month"),
+            scalar(call('Substr, [column("o", "ordered_at"), 'Int(1), 'Int(7)])),
         ),
         'CustomerRegion => universal_dimension(
             dimension,
-            "r.name AS customer_region",
-            "customer_region",
+            projection(scalar(term(column("r", "name"))), "customer_region"),
+            scalar(term(column("r", "name"))),
         ),
         'OrganizationKind => measure_dimension(
             dimension,
             'NetRevenue,
-            "org.kind AS organization_kind",
-            "organization_kind",
+            projection(scalar(term(column("org", "kind"))), "organization_kind"),
+            scalar(term(column("org", "kind"))),
         ),
         'ProductCategory => measure_dimension(
             dimension,
             'UnitsSold,
-            "cat.name AS product_category",
-            "product_category",
+            projection(scalar(term(column("cat", "name"))), "product_category"),
+            scalar(term(column("cat", "name"))),
         ),
         'EmployeeKind => unsupported_dimension(
             dimension,
@@ -172,8 +276,8 @@ def dimension_capability: Fn(Dimension) -> DimensionCapability = fn(dimension) {
         'ProductSku => measure_dimension(
             dimension,
             'UnitsSold,
-            "product.sku AS product_sku",
-            "product_sku",
+            projection(scalar(term(column("product", "sku"))), "product_sku"),
+            scalar(term(column("product", "sku"))),
         ),
     }
 };
@@ -215,19 +319,22 @@ def successful_requirements: Fn(Array(RequirementCompilation)) -> Array(GroupReq
     })
 };
 
-def finalize_sql = fn(plan, requirements) {
-    let selects = array.push(
-        array.map(requirements, fn(requirement) { requirement.select_expression }),
-        plan.measure_expression,
-    );
+def finalize_sql: Fn(QueryPlan, Array(GroupRequirement)) -> String = fn(plan, requirements) {
     let groups = array.map(requirements, fn(requirement) { requirement.group_expression });
-    let prefix = if plan.prefix == "" { "" } else { `\{plan.prefix}\n` };
-    let group_clause = if array.length(groups) == 0 {
-        ""
-    } else {
-        `\nGROUP BY \{string.join(groups, ", ")}\nORDER BY \{string.join(groups, ", ")}`
-    };
-    `\{prefix}SELECT \{string.join(selects, ",\n       ")}\n\{plan.from_clause}\n\{plan.where_clause}\{group_clause};`
+    render_select({
+        common_tables: plan.common_tables,
+        body: {
+            projections: array.push(
+                array.map(requirements, fn(requirement) { requirement.projection }),
+                plan.measure_projection,
+            ),
+            from: plan.from,
+            joins: plan.joins,
+            filter: plan.filter,
+            group_by: groups,
+            order_by: array.map(groups, fn(expr) { {expr} }),
+        },
+    })
 };
 
 export def compile: Fn(ReportIntent) -> Compilation = fn(intent) {

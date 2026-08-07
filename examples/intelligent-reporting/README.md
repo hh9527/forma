@@ -1,25 +1,32 @@
-# Intelligent reporting experiment
+# 智能报表实验
 
-This is the first executable slice of the intent-compiler discussions. It
-models a ten-table B2B commerce domain, accepts a small high-level report
-intent, validates domain compatibility, and lowers accepted intent to SQLite
-SQL using ordinary Forma code.
+这个目录是“意图编译器”讨论的第一个可执行切片。它描述一个包含十张表的
+B2B 商业领域，接受接近业务语义的报表意图，校验组合是否合法，并用普通
+Forma 代码将合法意图逐步 lowering 为 SQLite SQL。
 
-Read [DOMAIN.md](DOMAIN.md) first. It defines the physical schema, semantic
-identities, relationships, measure grain, and initial legal combinations.
+建议先阅读 [DOMAIN.md](DOMAIN.md)，其中定义了物理模型、语义身份、关系、
+度量 grain 和第一批合法组合。
 
-## Files
+## 当前状态
 
-- `schema.sql`: ten SQLite tables and deterministic fixture rows;
-- `DOMAIN.md`: the textual ontology and business rules;
-- `ontology.forma`: domain validation and SQL lowering;
-- `valid.forma`: net revenue by month and customer region;
-- `valid-units.forma`: units sold by month and product category;
-- `invalid.forma`: four independently discoverable domain errors;
-- `valid-sql.forma`: exposes generated SQL for SQLite execution;
-- `net-revenue.sql`: hand-written reference query.
+- RFC 0180：伞 RFC 已接受，确定五阶段实验路线；
+- RFC 0181：已完成，领域 capability 产生结构化 SQL AST，由统一 renderer
+  负责 SQL 字符串和 quoting；
+- 下一步：RFC 0182，将 measure 中硬编码的 join 列表替换为关系图与路径选择。
 
-## Run
+## 文件
+
+- `schema.sql`：十张 SQLite 表及确定性测试数据；
+- `DOMAIN.md`：文字形式的本体和业务规则；
+- `sql.forma`：最小 SQL AST 与 SQLite renderer；
+- `ontology.forma`：领域校验和 lowering；
+- `valid.forma`：按月份、客户区域统计净收入；
+- `valid-units.forma`：按月份、品类、SKU 统计销量；
+- `invalid.forma`：一次暴露四个独立领域错误；
+- `valid-sql.forma`：导出生成的 SQL，供 SQLite 执行；
+- `net-revenue.sql`：手写参考查询。
+
+## 运行
 
 ```sh
 cargo run -p forma -- check examples/intelligent-reporting/valid.forma
@@ -28,56 +35,67 @@ cargo run -p forma -- run examples/intelligent-reporting/valid-units.forma
 cargo run -p forma -- run examples/intelligent-reporting/invalid.forma
 ```
 
-With sqlite installed through mise, the reference fixture can be checked with:
-
-```sh
-mise x -- sqlite3 :memory: \
-  ".read examples/intelligent-reporting/schema.sql" \
-  ".read examples/intelligent-reporting/net-revenue.sql"
-```
-
-The SQL emitted by `valid-sql.forma` was also fed directly into the same
-SQLite session. Both paths produce:
+生成的 SQL 已直接送入 SQLite。净收入结果为：
 
 ```text
 2026-01|East|10000
 2026-02|West|12000
 ```
 
-## What this proves
+销量结果为：
 
-- A Forma library can carry a small operational ontology and business rules.
-- A Code Agent-facing intent stays close to measures and dimensions rather
-  than tables, joins, CTEs, payment/refund semantics, or SQL syntax.
-- Measures and dimensions form statically checked enum vocabularies rather
-  than an open set of string keys.
-- Capability records pair each vocabulary item with a lowering function.
-  Higher-order factory functions define universal, measure-specific, and
-  unsupported dimension families without a parallel compatibility matrix.
-- Validation and lowering are one operation: a legal dimension produces a
-  grouping requirement, while an unsupported measure/dimension combination
-  produces a diagnostic instead.
-- Dimension lowerers run independently, allowing one compilation to
-  accumulate four errors before linking successful requirements.
-- A rejected compilation publishes no SQL.
-- A successful compilation emits SQL that SQLite can execute without another
-  layer interpreting domain policy.
+```text
+2026-01|Keyboards|KB-1|2
+2026-01|Mice|MS-1|1
+2026-02|Mice|MS-1|4
+```
 
-## Deliberate limitations
+## 当前证明了什么
 
-This is not yet a general query planner. The closed vocabulary and its
-capabilities are encoded directly in Forma functions, and SQL FROM/CTE
-fragments are defined per measure. The experiment does not yet implement:
+- Forma 库可以承载一个小型、可执行的领域本体和业务规则；
+- 面向 Code Agent 的意图只包含 measure 和 dimension，不暴露表、join、CTE、
+  支付/退款语义或 SQL 语法；
+- measure 和 dimension 是静态检查的 enum，而不是开放字符串；
+- capability record 将领域概念与 lowering 函数绑定；
+- 高阶 factory 可以表达通用、特定 measure 和暂不支持的 dimension 家族；
+- 校验与 lowering 是同一过程：合法 dimension 产生 grouping requirement，非法
+  组合产生诊断，不需要平行的 Boolean 兼容矩阵；
+- 各 dimension lowerer 独立运行，一次编译可以累计四个错误；
+- capability 不再拼接 SQL，标识符和字面量只由 renderer 转义；
+- 失败结果不发布 SQL，成功结果可以直接被 SQLite 执行。
 
-- data-driven ontology registries and relation-path search;
-- typed field/expression facades;
-- drill and roll-up rules;
-- filters, parameters, authorization, or catalog context;
-- a structured SQL AST;
-- result schema or render lowering;
-- causal blocked facts or automatic cascade suppression;
-- ergonomic diagnostic accumulation.
+## RFC 0181 的边界发现
 
-The explicit `RequirementCompilation` values and diagnostic arrays are useful
-evidence: they achieve multi-error feedback, but they also expose the
-bookkeeping cost that a narrow accumulation facility would need to remove.
+最自然的 SQL AST 是递归的，但当前 Forma 的递归类型元数据不能跨 legacy
+module value boundary 发布，会报告：
+
+```text
+cyclic heap values cannot cross the legacy Value boundary
+```
+
+本实验没有退回字符串，而是采用可跨模块的非递归分层 AST：
+
+```text
+SqlAtom -> SqlTerm -> SqlScalar -> SqlSelectExpr
+SelectBody -> Select（仅顶层包含 CTE）
+```
+
+它覆盖当前需要的列、常量、调用、二元表达式、聚合、CTE、join、filter、
+group 和 order。任意深度表达式及嵌套 CTE 暂不支持；未来修复递归元数据发布
+边界后，可以替换表示而不改变领域 capability 的职责。
+
+## 尚未解决
+
+这还不是通用查询规划器。关系路径仍直接写在 measure capability 中，grain
+规则仍主要隐含在实现里。后续阶段还需要：
+
+- 数据化的关系图和确定性路径选择；
+- cardinality、fan-out、预聚合与 allocation policy；
+- filter、参数、排序、limit、drill 和 render 意图；
+- 分阶段的 semantic/relational/SQL plan；
+- 结果 schema 与 Host 执行边界；
+- provenance 穿过所有中间计划；
+- 更自然的诊断累积能力。
+
+显式的 `RequirementCompilation` 和诊断数组证明了多错误反馈可行，也清楚暴露
+了未来窄化 accumulation 能力所要消除的样板代码。
