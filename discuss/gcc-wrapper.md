@@ -50,17 +50,11 @@ bin-src/ar.forma
 
 option "crate.dependency" {
     name: "gcc-toolchain-define",
-    source: 'GithubRepo({
-        repo: "hh9527/gcc-toolchain-define",
-        rev: "0123456789abcdef",
-    }),
+    source: 'Path({path: "../gcc-toolchain-define"}),
 };
 option "crate.dependency" {
     name: "gcc-wrapper",
-    source: 'GithubRepo({
-        repo: "hh9527/gcc-wrapper.forma",
-        rev: "0123456789abcdef",
-    }),
+    source: 'Path({path: "../gcc-wrapper"}),
 };
 option "exec.capture-envs" ["TARGET"];
 
@@ -87,7 +81,7 @@ runtime protocol 类型模块。import 只取得协议；用户选择 `forma exe
 
 当前对应能力分别是 `crate.dependency` option、`forma-deps.json` 中的 path dependency，以及
 显式的 `Fn(ExecSettings, ExecRequest) -> ExecEnv`。尚待推进的是静态 `option`
-表面语法、GitHub dependency provider、runtime protocol 类型模块和 `ExecFn`
+表面语法、Path dependency、runtime protocol 类型模块和 `ExecFn`
 类型名。
 这个思想实验先用当前可检查的展开代码验证应用层计算，再用上述短入口约束
 resolver 与发布体验的路线。
@@ -466,14 +460,14 @@ Parse、Display、codec 和 validator 已经提供构建这些领域类型的路
 `forma-deps.json` 承担的依赖约束：
 
 - `option "crate.dependency"` 只能包含 Host 可静态读取的立即数；
-- `GithubRepo` 以完整 revision 锁定依赖，不能在求值期间漂移；
-- resolver 先取得远程依赖，再执行普通 import 解析；
+- 当前阶段使用 `Path` 固定依赖图；远程发布以后再由 pinned provider 补上；
+- resolver 取得依赖 crate root 后，再执行普通 import 解析；
 - 依赖名与包内路径需要确定、无歧义的映射；
 - `std/rt-types/exec.forma` 只描述协议，只有 `forma exec` Host 解释 `ExecFn`
   导出；
 - 同一 wrapper 模块可以被 gcc/g++/ar 三个薄入口复用。
 
-这些是 resolver 和 Host dependency provider 的工作，不应改变 wrapper 的纯函数
+这些是 resolver 和 Host dependency boundary 的工作，不应改变 wrapper 的纯函数
 主体。`forma exec URL`、源码物理合并和独立 packager 都不是这个思想实验的
 前置条件。
 
@@ -520,7 +514,7 @@ Forma 已经能追踪静态文件和规则来源，但 wrapper 还需要验证�
 
 1. `Dict`/argv/path 等标准库组合能力；
 2. Host 输入与改写结果的精细 provenance；
-3. 顶层静态依赖选项、远程 dependency provider 与真实 exec adapter。
+3. 顶层静态依赖选项与真实 exec adapter；远程 dependency provider 留给发布阶段。
 
 这对 Forma 是一个有价值的信号：不需要为了 GCC wrapper 引入 effect system、trait、可变状态或专用构建语法。更合理的推进方式是保持应用主体不变，逐步补齐标准库和 Host 协议。
 

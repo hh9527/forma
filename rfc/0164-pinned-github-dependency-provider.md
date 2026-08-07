@@ -3,6 +3,12 @@
 - Status: Proposed
 - Depends on: RFC 0059, RFC 0140, RFC 0157, RFC 0162, RFC 0163
 
+> Phase note (August 2026): implementation is deferred. The RFC 0157
+> GCC-wrapper milestone uses existing exact Path dependencies so acquisition,
+> cache, authentication, and asynchronous provider engineering do not block
+> validation of the application model. This proposal remains the intended
+> publication direction but is not on the current phase's critical path.
+
 ## Summary
 
 `crate.dependency` gains one exact external source form:

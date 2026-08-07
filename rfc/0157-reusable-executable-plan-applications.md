@@ -16,17 +16,11 @@ and reusable Forma logic, and exports a typed pure `ExecFn` that `forma exec
 
 option "crate.dependency" {
     name: "gcc-toolchain-define",
-    source: 'GithubRepo({
-        repo: "hh9527/gcc-toolchain-define",
-        rev: "0123456789abcdef",
-    }),
+    source: 'Path({path: "../gcc-toolchain-define"}),
 };
 option "crate.dependency" {
     name: "gcc-wrapper",
-    source: 'GithubRepo({
-        repo: "hh9527/gcc-wrapper.forma",
-        rev: "0123456789abcdef",
-    }),
+    source: 'Path({path: "../gcc-wrapper"}),
 };
 option "exec.capture-envs" ["TARGET"];
 
@@ -39,7 +33,7 @@ export def exec: ExecFn = wrap_gcc(source);
 
 This is an umbrella RFC. Child RFCs will verify cross-module Function
 execution, establish ordinary runtime-protocol type modules, add literal-only
-top-level Host options, define pinned external dependency resolution, fill the
+top-level Host options, use exact local dependency resolution, fill the
 small Dict/argv library gaps exposed by the wrapper, and finally validate the
 complete source-data-to-canonical-plan path.
 
@@ -66,8 +60,8 @@ Trying this program exposed more useful priorities than adding isolated
 syntax. The initial temporary audit reported an exported-closure up-link
 failure, so the first child must reduce and verify that correctness boundary
 before changing the VM. Dict lookup cannot yet express a domain-specific
-missing TARGET error. Dependency manifests accept local paths but cannot carry
-the pinned publication form shown above. The stable exec protocol also remains
+missing TARGET error. Exact Path dependencies are sufficient to validate this
+phase without coupling it to remote acquisition. The stable exec protocol also remains
 coupled to its current module placement rather than an explicit runtime-types
 surface.
 
@@ -79,7 +73,7 @@ composition milestone.
 The target preserves three distinct layers:
 
 ```text
-pinned dependency data
+fixed dependency data
     -> pure Forma validation and transformation
     -> typed executable plan
     -> Host dry-run
@@ -111,12 +105,10 @@ The planned child sequence is:
    including the initial path dependency and exact format consumers;
 4. RFC 0163: define explicit Host environment capture for executable entries,
    including deterministic request construction and cache identity;
-5. RFC 0164: define pinned external dependency specifications, canonical
-   module identities, provider/cache boundaries, and dependency-relative
-   paths such as `gcc-wrapper/toolchain.forma`;
-6. RFC 0165: add the minimum type-preserving Dict lookup and argv-rewrite
+5. RFC 0165: add the minimum type-preserving Dict lookup and argv-rewrite
    combinators needed for explicit input validation and conflict handling;
-7. RFC 0166: add the end-to-end GCC-wrapper fixture, source-data blame,
+6. RFC 0166: add the end-to-end GCC-wrapper fixture with injected Path
+   dependencies, source-data blame,
    canonical dry-run output, cancellation/quota coverage, and documentation
    evidence.
 
@@ -131,7 +123,7 @@ shared acceptance criteria.
 2. expose executable Host contracts as ordinary importable Forma type
    metadata with one convenient `ExecFn` name;
 3. let a top-level entry carry literal, statically extractable Host options;
-4. resolve locked external dependency names and package-internal paths to
+4. resolve fixed Path dependency names and package-internal paths to
    deterministic module identities;
 5. let applications validate required Dict input and rewrite argv without
    dynamic-field failures or mutable state;
@@ -231,24 +223,19 @@ Repeated actions preserve option order while the effective name set is
 deduplicated deterministically. A captured name that is absent from the Host
 environment remains absent from the Dict for explicit user-space validation.
 
-## Pinned dependency resolution
+## Fixed dependency resolution
 
-The initial external specification is exact rather than solved:
+The phase uses the existing exact local specification:
 
 ```forma
-'GithubRepo({repo: "owner/repository", rev: "full-commit-id"})
+'Path({path: "../gcc-wrapper"})
 ```
 
-`rev` denotes an immutable revision. Branches, tags whose target may move,
-semver ranges, and transitive constraint solving are outside this phase.
-Provider acquisition is a Host concern and must terminate in an immutable
-crate root plus a deterministic logical identity. Physical cache paths never
-become public module IDs or Forma-visible values.
-
-Tests need not rely on the public network. The provider boundary must be
-injectable so fixtures can map an exact repository/revision pair to a local
-crate while exercising the same identity, containment, cache, and diagnostic
-rules.
+The path is resolved relative to the project root before ordinary module
+resolution. Dependency keys still produce deterministic logical identities,
+and relative imports remain contained within their dependency crate. RFC 0164
+retains the future pinned GitHub provider design, but neither its provider nor
+network/cache behavior is required by this phase.
 
 ## Application combinators
 
@@ -294,7 +281,7 @@ entries. It must record that boundary rather than fabricate a file source.
    dependent payloads before evaluation;
 5. option/manifest conflicts and duplicate dependency keys produce stable
    source diagnostics;
-6. exact external dependency specifications resolve to canonical logical
+6. exact Path dependency specifications resolve to canonical logical
    module IDs independent of physical cache paths;
 7. relative imports cannot escape a dependency crate and dependencies cannot
    import the main-only entry;
@@ -336,6 +323,6 @@ fixture with injected exact dependencies, completes `forma exec --dry-run` and
 the canonical plan demonstrates two independently selected install resources,
 argv rewriting, module reuse, and sourced rejection paths.
 
-If implementation evidence narrows `option`, provider, `ExecFn`, or argv APIs,
+If implementation evidence narrows `option`, `ExecFn`, or argv APIs,
 this umbrella must be amended before it is marked Implemented. The introduction
 may use the target program as implemented evidence only after this gate passes.
