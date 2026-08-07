@@ -474,6 +474,10 @@ impl Resolver {
                 self.index_expr(message, scopes);
                 None
             }
+            ExprKind::Reraise { error } => {
+                self.index_expr(error, scopes);
+                None
+            }
             ExprKind::Binary { left, right, .. } => {
                 self.index_expr(left, scopes);
                 self.index_expr(right, scopes);

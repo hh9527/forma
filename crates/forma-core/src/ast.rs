@@ -95,6 +95,9 @@ pub enum ExprKind {
     Panic {
         message: Box<Expr>,
     },
+    Reraise {
+        error: Box<Expr>,
+    },
     Binary {
         operator: Located<BinaryOperator>,
         left: Box<Expr>,

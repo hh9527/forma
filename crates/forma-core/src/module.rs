@@ -2450,6 +2450,7 @@ fn expression_has_import(expression: &Expr) -> bool {
         }
         ExprKind::Return { value } => expression_has_import(value),
         ExprKind::Panic { message } => expression_has_import(message),
+        ExprKind::Reraise { error } => expression_has_import(error),
         ExprKind::Binary { left, right, .. } => {
             expression_has_import(left) || expression_has_import(right)
         }

@@ -678,6 +678,7 @@ pub enum RuntimeErrorKind {
     MissingField,
     NoPatternMatched,
     Panic,
+    ReraisedBlame,
     StackLimitExceeded,
     TypeMismatch,
     UninitializedDefinition,
@@ -719,6 +720,7 @@ impl RuntimeError {
             | RuntimeErrorKind::MissingField
             | RuntimeErrorKind::NoPatternMatched
             | RuntimeErrorKind::Panic
+            | RuntimeErrorKind::ReraisedBlame
             | RuntimeErrorKind::TypeMismatch
             | RuntimeErrorKind::UninitializedDefinition
             | RuntimeErrorKind::DuplicateDefinition => FailureClass::Recoverable,
@@ -2131,6 +2133,76 @@ impl Vm {
                             }
                         };
                         return Err(error(RuntimeErrorKind::Panic, text, function, pc));
+                    }
+                    Opcode::Reraise {
+                        error: error_register,
+                    } => {
+                        let structured = *read_register(&registers, *error_register, function, pc)?;
+                        let RuntimeValue::Dict(handle) = structured.value else {
+                            return Err(runtime_type_error(
+                                "BlameError",
+                                &structured,
+                                &view,
+                                function,
+                                pc,
+                            ));
+                        };
+                        let fields = view.dict_fields(handle).map_err(|heap_error| {
+                            error(
+                                RuntimeErrorKind::InvalidBytecode,
+                                heap_error.to_string(),
+                                function,
+                                pc,
+                            )
+                        })?;
+                        if fields.as_slice() != ["data", "message", "rule"] {
+                            return Err(runtime_type_error(
+                                "BlameError",
+                                &structured,
+                                &view,
+                                function,
+                                pc,
+                            ));
+                        }
+                        let get_field = |name| {
+                            view.dict_get_text(handle, name)
+                                .map_err(|heap_error| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        heap_error.to_string(),
+                                        function,
+                                        pc,
+                                    )
+                                })?
+                                .ok_or_else(|| {
+                                    error(
+                                        RuntimeErrorKind::InvalidBytecode,
+                                        format!("BlameError is missing {name}"),
+                                        function,
+                                        pc,
+                                    )
+                                })
+                        };
+                        let data = get_field("data")?;
+                        let message = get_field("message")?;
+                        let rule = get_field("rule")?;
+                        let text = view.string_text(message).map_err(|heap_error| {
+                            error(
+                                RuntimeErrorKind::InvalidBytecode,
+                                heap_error.to_string(),
+                                function,
+                                pc,
+                            )
+                        })?;
+                        let Some(text) = text else {
+                            return Err(runtime_type_error(
+                                "String", &message, &view, function, pc,
+                            ));
+                        };
+                        let mut runtime =
+                            error(RuntimeErrorKind::ReraisedBlame, text, function, pc);
+                        runtime.set_locations(data.loc(), rule.loc());
+                        return Err(runtime);
                     }
                 }
                 frames.last_mut().expect("execution frame").pc += 1;

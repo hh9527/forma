@@ -2825,6 +2825,15 @@ fn collect_nested_annotation_types(
             debug_sink,
             annotations,
         )?,
+        ExprKind::Reraise { error } => collect_nested_annotation_types(
+            source_name,
+            error,
+            bindings,
+            account,
+            sources,
+            debug_sink,
+            annotations,
+        )?,
         ExprKind::Binary { left, right, .. } => {
             for expression in [left.as_ref(), right.as_ref()] {
                 collect_nested_annotation_types(
@@ -5495,6 +5504,10 @@ impl<'a> GenericInference<'a> {
                 self.infer(message, environment, Some(&TypeDescriptor::String))?;
                 TypeDescriptor::Never
             }
+            ExprKind::Reraise { error } => {
+                self.infer(error, environment, Some(&blame_error_descriptor()))?;
+                TypeDescriptor::Never
+            }
             ExprKind::Binary {
                 operator,
                 left,
@@ -6549,6 +6562,7 @@ fn expression_references_names(
         } => expression_references_names(operand, names, bound),
         ExprKind::Return { value } => expression_references_names(value, names, bound),
         ExprKind::Panic { message } => expression_references_names(message, names, bound),
+        ExprKind::Reraise { error } => expression_references_names(error, names, bound),
         ExprKind::Binary { left, right, .. } => {
             expression_references_names(left, names, bound)
                 || expression_references_names(right, names, bound)
@@ -6913,6 +6927,10 @@ fn infer_expr_with(
             infer_expr_with(message, environment, record);
             TypeDescriptor::Never
         }
+        ExprKind::Reraise { error } => {
+            infer_expr_with(error, environment, record);
+            TypeDescriptor::Never
+        }
         ExprKind::Binary {
             operator,
             left,
@@ -7088,6 +7106,7 @@ fn check_interpolations(
         }
         ExprKind::Return { value } => check_interpolations(value, environment, sources)?,
         ExprKind::Panic { message } => check_interpolations(message, environment, sources)?,
+        ExprKind::Reraise { error } => check_interpolations(error, environment, sources)?,
         ExprKind::Binary { left, right, .. } => {
             check_interpolations(left, environment, sources)?;
             check_interpolations(right, environment, sources)?;

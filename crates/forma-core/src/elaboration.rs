@@ -57,6 +57,7 @@ impl Elaborator<'_> {
             }
             ExprKind::Return { value } => self.expression(value),
             ExprKind::Panic { message } => self.expression(message),
+            ExprKind::Reraise { error } => self.expression(error),
             ExprKind::Binary {
                 operator,
                 left,

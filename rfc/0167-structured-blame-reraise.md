@@ -1,6 +1,6 @@
 # RFC 0167: Structured blame re-raise
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0056, RFC 0107, RFC 0166
 
 ## Summary
@@ -87,3 +87,17 @@ the current source position. It is not an alias for `reraise!`.
 Work returns to discussion if implementation requires catchable exceptions,
 implicit Result conversion, a general effect system, fabricated source
 locations, or changing the public shape of `BlameError`.
+
+## Implementation result
+
+Implemented in August 2026. `reraise!` lowers to a dedicated AST, LIR, and
+bytecode operation. Static analysis requires canonical `BlameError` and gives
+the expression type `Never`; the VM independently verifies the record and
+String message before constructing a terminal `ReraisedBlame` runtime failure.
+
+The VM takes diagnostic anchors from the rich `data` and `rule` fields and
+keeps the opcode origin in the ordinary trace. Focused tests cover arity,
+operand type, message preservation, distinct anchors, and trace presence. The
+GCC-wrapper fixture uses the intrinsic for validation and argv failures; its
+malformed dependency data test observes both `source.json` and
+`toolchain.forma`. Existing `panic!` behavior is unchanged.

@@ -23,10 +23,10 @@ def require: for(A) Fn(Dict(A), String, String) -> A = fn(values, key, message) 
     }
 };
 
-def source_or_panic: Fn(Any) -> ToolchainSource = fn(raw) {
+def validated_source: Fn(Any) -> ToolchainSource = fn(raw) {
     match validate(ToolchainSource, raw) {
         'Ok(source) => source,
-        'Err(error) => panic!(error.message),
+        'Err(error) => reraise!(error),
     }
 };
 
@@ -48,15 +48,15 @@ def unpack = fn(package, dest) {
 def checked_compiler_args = fn(request, sysroot_dest) {
     let arguments = match argv.reject_option(request.args, "--sysroot") {
         'Ok(arguments) => arguments,
-        'Err(error) => panic!(error.message),
+        'Err(error) => reraise!(error),
     };
     let arguments = match argv.reject_option(arguments, "-ffile-prefix-map") {
         'Ok(arguments) => arguments,
-        'Err(error) => panic!(error.message),
+        'Err(error) => reraise!(error),
     };
     let arguments = match argv.reject_option(arguments, "-fdebug-prefix-map") {
         'Ok(arguments) => arguments,
-        'Err(error) => panic!(error.message),
+        'Err(error) => reraise!(error),
     };
     argv.prepend([
         `--sysroot=\{sysroot_dest}`,
@@ -66,7 +66,7 @@ def checked_compiler_args = fn(request, sysroot_dest) {
 };
 
 export def command: Fn(String, Any) -> ExecFn = fn(tool, raw) {
-    let source = source_or_panic(raw);
+    let source = validated_source(raw);
     fn(settings, request) {
         let host = `\{settings.platform.os}-\{settings.platform.arch}`;
         let compiler = require(source.compilers, host, `unsupported GCC host: \{host}`);

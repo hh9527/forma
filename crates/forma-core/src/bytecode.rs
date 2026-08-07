@@ -161,6 +161,9 @@ pub enum Instruction {
     Panic {
         message: Register,
     },
+    Reraise {
+        error: Register,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -310,6 +313,9 @@ pub enum Opcode {
     },
     Panic {
         message: Register,
+    },
+    Reraise {
+        error: Register,
     },
 }
 
@@ -637,6 +643,7 @@ fn link_instruction(instruction: Instruction, links: &mut LinkingTable) -> Opcod
         Instruction::Return { src } => Opcode::Return { src },
         Instruction::Fail { message } => Opcode::Fail { message },
         Instruction::Panic { message } => Opcode::Panic { message },
+        Instruction::Reraise { error } => Opcode::Reraise { error },
     }
 }
 

@@ -472,6 +472,10 @@ fn gcc_wrapper_fixture_builds_reusable_deterministic_plans() {
         malformed_stderr.contains("toolchain.forma"),
         "{malformed_stderr}"
     );
+    assert!(
+        malformed_stderr.contains("source.json"),
+        "{malformed_stderr}"
+    );
     assert!(malformed_stderr.contains("compilers"), "{malformed_stderr}");
     fs::remove_dir_all(directory).unwrap();
 }

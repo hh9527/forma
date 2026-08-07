@@ -1432,7 +1432,7 @@ impl<'a> Lowerer<'a> {
                     .next()
                     .ok_or_else(|| self.error(node, "contextual intrinsic has no name"))?;
                 let name_text = self.text(name);
-                if name_text == "blame" || name_text == "panic" {
+                if matches!(name_text.as_ref(), "blame" | "panic" | "reraise") {
                     let bang = self.first_token(node, Token::Bang)?;
                     let arguments = self
                         .children(node)
@@ -1449,17 +1449,18 @@ impl<'a> Lowerer<'a> {
                             return Err(self.error(
                                 node,
                                 format!(
-                                    "panic! expects exactly one argument, found {}",
+                                    "{name_text}! expects exactly one argument, found {}",
                                     arguments.len()
                                 ),
                             ));
                         }
-                        Ok(located(
-                            ExprKind::Panic {
-                                message: Box::new(arguments.into_iter().next().unwrap()),
-                            },
-                            self.location(node),
-                        ))
+                        let argument = Box::new(arguments.into_iter().next().unwrap());
+                        let kind = if name_text == "panic" {
+                            ExprKind::Panic { message: argument }
+                        } else {
+                            ExprKind::Reraise { error: argument }
+                        };
+                        Ok(located(kind, self.location(node)))
                     }
                 } else if matches!(name_text.as_ref(), "file" | "line") {
                     Err(self.error(

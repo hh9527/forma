@@ -1,6 +1,6 @@
 # RFC 0157: Reusable executable-plan applications
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0057 through RFC 0059, RFC 0062, RFC 0063, RFC 0100,
   RFC 0113 through RFC 0117, RFC 0140 through RFC 0147
 
@@ -326,3 +326,23 @@ argv rewriting, module reuse, and sourced rejection paths.
 If implementation evidence narrows `option`, `ExecFn`, or argv APIs,
 this umbrella must be amended before it is marked Implemented. The introduction
 may use the target program as implemented evidence only after this gate passes.
+
+## Implementation result
+
+The phase completed in August 2026 through RFC 0158, RFC 0159, RFC 0162,
+RFC 0163, RFC 0165, RFC 0166, and RFC 0167. The saved gcc, g++, and ar entries
+resolve exact Path dependencies, validate imported source data, share one
+higher-order wrapper, capture only TARGET, and produce deterministic canonical
+plans through the real `forma exec --dry-run` adapter.
+
+The implementation materializes initialized definition captures before
+exporting closures while preserving unresolved recursive up-links. Structured
+validation and argv failures cross the strict `ExecFn` boundary through
+`reraise!`, retaining their data/rule provenance instead of converting the
+error to a String panic. The malformed-data fixture consequently identifies
+both `source.json` and the authored rule in `toolchain.forma`.
+
+The fixture performs no acquisition, installation, or process effect. Repeated
+dry-runs are byte-identical, do not create the configured cache, and strict
+quota failure cannot publish a partial plan. The umbrella's network,
+packaging, and real-execution non-goals remain deferred.

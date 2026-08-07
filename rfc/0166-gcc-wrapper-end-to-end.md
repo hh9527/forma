@@ -1,6 +1,6 @@
 # RFC 0166: GCC-wrapper end-to-end fixture
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0157 through RFC 0159, RFC 0162, RFC 0163, RFC 0165
 
 ## Summary
@@ -51,11 +51,11 @@ Imported source data is explicitly validated before use. Invalid data must
 identify the JSON source and authored type rule through existing validation
 diagnostics. Missing TARGET and conflicting argv are Host-request failures.
 
-`ExecFn` currently returns `ExecEnv`, not `Result`. The wrapper therefore
-converts those two user-space `BlameError` paths into sourced `panic!` at the
-entry computation boundary. This is an explicit protocol limitation, not an
-implicit widening or partial plan. A later RFC may consider a Result-returning
-Host protocol; this fixture does not change it.
+`ExecFn` returns `ExecEnv`, not `Result`. The wrapper therefore uses
+`reraise!` to terminate at the strict entry computation boundary while
+preserving an existing `BlameError` and its data/rule provenance. This is an
+explicit terminal boundary, not an implicit widening or partial plan. The
+fixture does not make `ExecFn` Result-returning and does not add exceptions.
 
 ## Goals
 
@@ -113,13 +113,15 @@ repeatability, and no-cache dry-run behavior are covered through the real CLI.
 
 The fixture exposed two correctness gaps. Ready definition captures are now
 materialized by the compiler while unresolved recursive links remain up-links;
-the fixture and `std/argv` no longer need source-level workarounds. One gap
-therefore remains and this RFC stays Proposed:
+the fixture and `std/argv` no longer need source-level workarounds.
 
-1. malformed imported JSON is rejected at the authored `validate` rule, but
-   its original `source.json` provenance is lost after crossing the dependency
-   and promoted-closure boundary. The diagnostic must eventually carry both
-   anchors before acceptance criterion 8 is complete.
+Further inspection corrected the initial provenance diagnosis: imported JSON
+and its validated fields retained their original locations across dependency
+publication and promoted closures. The wrapper discarded those locations by
+calling `panic!(error.message)`, which selected only the String field from the
+structured error. RFC 0167 added `reraise!`; the wrapper now propagates the
+whole `BlameError`, and malformed data diagnostics identify both `source.json`
+and the authored rule in `toolchain.forma`.
 
-No partial plan is printed in either failure. RFC 0157 and this RFC stay
-Proposed until the cross-module provenance issue is fixed.
+All acceptance criteria are covered through the real CLI fixture. No partial
+plan is printed on validation, Host-input, conflict, or quota failure.

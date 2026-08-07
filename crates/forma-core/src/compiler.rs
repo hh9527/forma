@@ -906,6 +906,11 @@ impl<'a> Compiler<'a> {
                 self.emit(Operation::Panic { message }, expression.location);
                 Ok(message)
             }
+            ExprKind::Reraise { error } => {
+                let error = self.compile_expr(error)?;
+                self.emit(Operation::Reraise { error }, expression.location);
+                Ok(error)
+            }
             ExprKind::Binary {
                 operator,
                 left,
@@ -1729,6 +1734,7 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
         }
         ExprKind::Return { value } => free_expr(value, bound, free),
         ExprKind::Panic { message } => free_expr(message, bound, free),
+        ExprKind::Reraise { error } => free_expr(error, bound, free),
         ExprKind::Binary { left, right, .. } => {
             free_expr(left, bound, free);
             free_expr(right, bound, free);
@@ -1875,6 +1881,7 @@ pub(crate) fn collect_runtime_names(expression: &Expr, names: &mut HashSet<Strin
         }
         ExprKind::Return { value } => collect_runtime_names(value, names),
         ExprKind::Panic { message } => collect_runtime_names(message, names),
+        ExprKind::Reraise { error } => collect_runtime_names(error, names),
         ExprKind::Binary { left, right, .. } => {
             collect_runtime_names(left, names);
             collect_runtime_names(right, names);
@@ -2504,6 +2511,36 @@ let decorators = {
         assert!(wrong_type.message.contains("Int") && wrong_type.message.contains("String"));
 
         let wrong_arity = compile_source("test", "panic!()").unwrap_err();
+        assert!(wrong_arity.message.contains("exactly one argument"));
+    }
+
+    #[test]
+    fn reraise_preserves_structured_blame_locations() {
+        let error = run(
+            "let fail = fn() {\n  let data = 1;\n  reraise!(blame!(data, \"bad\"))\n};\nfail()",
+        )
+        .unwrap_err();
+        let ExecutionError::Runtime(error) = error else {
+            panic!("expected reraised blame")
+        };
+        assert_eq!(error.kind, RuntimeErrorKind::ReraisedBlame);
+        assert_eq!(error.message, "bad");
+        assert!(error.data_location().is_some());
+        assert!(error.rule_location().is_some());
+        assert_ne!(error.data_location(), error.rule_location());
+        assert!(error.trace.iter().any(|frame| frame.origin.is_some()));
+    }
+
+    #[test]
+    fn reraise_requires_one_blame_error() {
+        let wrong_type = compile_source("test", "reraise!(1)").unwrap_err();
+        assert!(
+            wrong_type.message.contains("Int") && wrong_type.message.contains("message"),
+            "{}",
+            wrong_type.message
+        );
+
+        let wrong_arity = compile_source("test", "reraise!()").unwrap_err();
         assert!(wrong_arity.message.contains("exactly one argument"));
     }
 
