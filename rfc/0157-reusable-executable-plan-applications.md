@@ -247,7 +247,7 @@ example:
 dict.get(request.env, "TARGET") # Option(String)
 ```
 
-The exact helper names belong to RFC 0164. Its scope is the minimum needed to
+The exact helper names belong to RFC 0165. Its scope is the minimum needed to
 detect required input, reject or normalize conflicting `--sysroot` and prefix
 map arguments, and build a new immutable argv. It does not introduce a generic
 command-line grammar or mutable builder.
