@@ -1077,6 +1077,107 @@ impl Value {
             Self::Dyn(_) => "Dyn",
         }
     }
+
+    pub fn to_forma_literal(&self) -> Result<String, String> {
+        fn render(value: &Value, output: &mut String) -> Result<(), String> {
+            match value {
+                Value::Int(value) => output.push_str(&value.to_string()),
+                Value::Float(value) if value.is_finite() => output.push_str(&format!("{value:?}")),
+                Value::Float(_) => return Err("non-finite Float has no Forma literal".into()),
+                Value::String(value) => output.push_str(&format!("{value:?}")),
+                Value::Bytes(value) => {
+                    output.push_str("b\"");
+                    for byte in value.iter() {
+                        output.push_str(&format!("\\x{byte:02x}"));
+                    }
+                    output.push('"');
+                }
+                Value::Dict(dict) => {
+                    output.push('{');
+                    for (index, (field, value)) in
+                        dict.shape().fields().iter().zip(dict.values()).enumerate()
+                    {
+                        if !is_forma_identifier(field) {
+                            return Err(format!(
+                                "Dict field {field:?} cannot be represented as a Forma literal"
+                            ));
+                        }
+                        if index > 0 {
+                            output.push_str(", ");
+                        }
+                        output.push_str(field);
+                        output.push_str(": ");
+                        render(value, output)?;
+                    }
+                    output.push('}');
+                }
+                Value::Array(values) => render_values("[", "]", values, output)?,
+                Value::Atom(atom) => {
+                    if !is_forma_identifier(atom.name()) {
+                        return Err(format!(
+                            "Atom {:?} cannot be represented as a Forma literal",
+                            atom.name()
+                        ));
+                    }
+                    output.push('\'');
+                    output.push_str(atom.name());
+                }
+                Value::Tagged { tag, payload } => {
+                    if !is_forma_identifier(tag.name()) {
+                        return Err(format!(
+                            "Tagged constructor {:?} cannot be represented as a Forma literal",
+                            tag.name()
+                        ));
+                    }
+                    output.push('\'');
+                    output.push_str(tag.name());
+                    output.push('(');
+                    render(payload, output)?;
+                    output.push(')');
+                }
+                Value::Tuple(values) => render_values("(", ")", values, output)?,
+                Value::NativeType(_) | Value::Opaque(_) | Value::Func(_) | Value::Dyn(_) => {
+                    return Err(format!(
+                        "{} cannot be represented as a Forma literal",
+                        value.type_name()
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        fn render_values(
+            start: &str,
+            end: &str,
+            values: &[Value],
+            output: &mut String,
+        ) -> Result<(), String> {
+            output.push_str(start);
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push_str(", ");
+                }
+                render(value, output)?;
+            }
+            if start == "(" && values.len() == 1 {
+                output.push(',');
+            }
+            output.push_str(end);
+            Ok(())
+        }
+
+        fn is_forma_identifier(value: &str) -> bool {
+            let mut characters = value.chars();
+            characters
+                .next()
+                .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+                && characters.all(|character| character == '_' || character.is_ascii_alphanumeric())
+        }
+
+        let mut output = String::new();
+        render(self, &mut output)?;
+        Ok(output)
+    }
 }
 
 impl fmt::Debug for Value {

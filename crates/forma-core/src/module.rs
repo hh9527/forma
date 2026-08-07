@@ -853,10 +853,26 @@ impl Engine {
         entry_source: &str,
         external_bindings: BTreeMap<String, Value>,
     ) -> Result<LoadedModule, ModuleError> {
+        self.load_synthetic_entry_with_modules(
+            main_path,
+            entry_source,
+            external_bindings,
+            BTreeMap::new(),
+        )
+    }
+
+    pub fn load_synthetic_entry_with_modules(
+        &self,
+        main_path: impl AsRef<Path>,
+        entry_source: &str,
+        external_bindings: BTreeMap<String, Value>,
+        injected_modules: BTreeMap<String, String>,
+    ) -> Result<LoadedModule, ModuleError> {
         load_synthetic_entry_with_native_modules(
             main_path,
             entry_source,
             external_bindings,
+            injected_modules,
             self.config.module_quota,
             Arc::clone(&self.debug_sink),
             &self.native_modules,
@@ -1766,13 +1782,15 @@ fn load_synthetic_entry_with_native_modules(
     main_path: impl AsRef<Path>,
     entry_source: &str,
     external_bindings: BTreeMap<String, Value>,
+    injected_modules: BTreeMap<String, String>,
     module_quota: Quota,
     debug_sink: Arc<dyn DebugSink>,
     native_modules: &[RegisteredNativeModule],
 ) -> Result<LoadedModule, ModuleError> {
     let resolver = ModuleResolver::for_root(main_path.as_ref())
         .map_err(|error| ModuleError::new(error.to_string()))?
-        .with_builtins(builtin_list(native_modules));
+        .with_builtins(builtin_list(native_modules))
+        .with_entry_modules(injected_modules.keys().cloned());
     let main_module = resolver
         .resolve_root(main_path.as_ref())
         .map_err(|error| ModuleError::new(error.to_string()))?;
@@ -1796,6 +1814,7 @@ fn load_synthetic_entry_with_native_modules(
         semantic_inputs: BTreeMap::new(),
         source_policy: ModuleSourcePolicy::ExplicitExports,
     };
+    loader.install_injected_modules(main_path.as_ref(), injected_modules)?;
     loader.load_entry(
         main_path.as_ref().to_owned(),
         entry_source,
@@ -1828,6 +1847,48 @@ enum ModuleState {
 }
 
 impl ModuleLoader {
+    fn install_injected_modules(
+        &mut self,
+        context_path: &Path,
+        modules: BTreeMap<String, String>,
+    ) -> Result<(), ModuleError> {
+        for (name, source) in modules {
+            let module_id = ModuleId::builtin(&name);
+            let mut account = QuotaAccount::new(self.module_quota);
+            let compiled = self.compile_xl(
+                &module_id,
+                ModuleAuthority::RuntimeSystem,
+                FormaModuleSource::Synthetic {
+                    name: &name,
+                    context_path,
+                    source: &source,
+                },
+                BTreeMap::new(),
+                false,
+                &mut account,
+            )?;
+            let arena = Vm::new()
+                .with_debug_sink(Arc::clone(&self.debug_sink))
+                .execute_in_work(
+                    &self.main.heap,
+                    &compiled.externals,
+                    &compiled.function,
+                    &[],
+                    &mut account,
+                )
+                .map_err(|error| ModuleError::new(error.with_sources(&self.sources).to_string()))?;
+            let value = arena
+                .export(&self.main.heap)
+                .map_err(|error| ModuleError::new(error.to_string()))?;
+            let root = arena
+                .publish(&mut self.main.heap)
+                .map_err(|error| ModuleError::new(error.to_string()))?;
+            self.core_modules
+                .insert(name, (value, root, compiled.analysis.module_interface));
+        }
+        Ok(())
+    }
+
     fn load_entry(
         &mut self,
         main_path: PathBuf,
@@ -2062,6 +2123,7 @@ impl ModuleLoader {
         account: &mut QuotaAccount,
     ) -> Result<CompiledFormaModule, ModuleError> {
         let path = module_source.context_path();
+        let synthetic = matches!(module_source, FormaModuleSource::Synthetic { .. });
         let (source_name, source) = match module_source {
             FormaModuleSource::File(path) => (path.display().to_string(), read(path)?),
             FormaModuleSource::Synthetic { name, source, .. } => {
@@ -2481,7 +2543,7 @@ impl ModuleLoader {
             key.clone(),
             SemanticModuleInput {
                 key,
-                path: (*module_id != ModuleId::Entry).then(|| path.to_owned()),
+                path: (!synthetic).then(|| path.to_owned()),
                 kind: WorkspaceModuleKind::Forma,
                 source: Some(source_id),
                 program: Some(program),
@@ -7328,6 +7390,71 @@ unchanged", "|"),
             )
             .unwrap_err();
         assert!(error.message().contains("@entry"), "{error}");
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn synthetic_entry_modules_are_exact_private_and_ordered() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        fs::write(&main, "export let value = 1;").unwrap();
+        let mut value_vm = Vm::new();
+        let environment = value_vm
+            .make_dict(vec![("TARGET".into(), Value::string("x86_64-linux-gnu"))])
+            .unwrap();
+        let runtime_source = format!(
+            "export let args = [\"-c\", \"main.c\"];\n\
+             export let cwd = \"/work\";\n\
+             export let env = {};",
+            environment.to_forma_literal().unwrap()
+        );
+        let injected = BTreeMap::from([
+            (
+                "std/opts.priv.forma".into(),
+                r#"export let actions = [
+                    {key: "exec.capture-envs", value: ["TARGET"]},
+                    {key: "exec.capture-envs", value: ["CCACHE_DIR"]},
+                ];"#
+                .into(),
+            ),
+            ("std/rt.native.forma".into(), runtime_source),
+        ]);
+        let engine = recovery_engine();
+        let entry = engine
+            .load_synthetic_entry_with_modules(
+                &main,
+                r#"import "std/rt.native.forma" as rt;
+                   import "std/opts.priv.forma" as opts;
+                   export let output = (rt.args, rt.cwd, rt.env, opts.actions);"#,
+                BTreeMap::new(),
+                injected.clone(),
+            )
+            .unwrap();
+        let output = named_output(engine.execute(&entry).unwrap()).to_string();
+        assert!(output.contains("[\"-c\", \"main.c\"]"), "{output}");
+        assert!(
+            output.find("TARGET").unwrap() < output.rfind("CCACHE_DIR").unwrap(),
+            "{output}"
+        );
+
+        fs::write(
+            &main,
+            r#"import "std/rt.native.forma" as rt; export { rt as output };"#,
+        )
+        .unwrap();
+        let denied = engine
+            .load_synthetic_entry_with_modules(
+                &main,
+                r#"import "@main" as main; export { main as output };"#,
+                BTreeMap::new(),
+                injected,
+            )
+            .unwrap_err();
+        assert!(denied.message().contains("private module"), "{denied}");
+        let unsafe_environment = value_vm
+            .make_dict(vec![("NOT-AN-IDENTIFIER".into(), Value::string("x"))])
+            .unwrap();
+        assert!(unsafe_environment.to_forma_literal().is_err());
         fs::remove_dir_all(directory).unwrap();
     }
 

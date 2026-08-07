@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 
@@ -180,6 +180,7 @@ pub struct ModuleResolver {
     dependencies: BTreeMap<String, PathBuf>,
     formats: BTreeMap<String, ModuleFormat>,
     builtins: BTreeMap<String, u32>,
+    entry_modules: BTreeSet<String>,
 }
 
 impl ModuleResolver {
@@ -229,6 +230,7 @@ impl ModuleResolver {
             dependencies: BTreeMap::new(),
             formats: BTreeMap::new(),
             builtins: BTreeMap::new(),
+            entry_modules: BTreeSet::new(),
         };
         let has_external_manifest = manifest.is_some();
         if let Some(manifest) = manifest {
@@ -281,6 +283,11 @@ impl ModuleResolver {
         self
     }
 
+    pub fn with_entry_modules(mut self, modules: impl IntoIterator<Item = String>) -> Self {
+        self.entry_modules = modules.into_iter().collect();
+        self
+    }
+
     pub fn resolve_root(&self, path: &Path) -> Result<ResolvedModule, ResolveModuleError> {
         let path = resolve_physical(path)?;
         if is_private_file_name(&path) {
@@ -302,6 +309,17 @@ impl ModuleResolver {
     ) -> Result<ResolvedModule, ResolveModuleError> {
         if target.is_empty() {
             return Err(ResolveModuleError::EmptyPath);
+        }
+        if self.entry_modules.contains(target) {
+            if *importer != ModuleId::Entry {
+                return Err(ResolveModuleError::PrivateModuleAccess(target.into()));
+            }
+            return Ok(ResolvedModule {
+                id: ModuleId::builtin(target),
+                format: ModuleFormat::Forma,
+                authority: ModuleAuthority::RuntimeSystem,
+                physical_path: None,
+            });
         }
         if !target.starts_with(['.', '@'])
             && let Some(_registration_id) = self.builtins.get(target)

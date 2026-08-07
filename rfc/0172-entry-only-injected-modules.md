@@ -1,6 +1,6 @@
 # RFC 0172: Entry-only injected modules
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0162, RFC 0163, RFC 0170, RFC 0171
 
 ## Summary
@@ -115,3 +115,19 @@ Rust does not hand-author a parallel `ModuleInterface`.
 Work returns to discussion if completion requires ambient mutable state,
 transitive privilege, hand-built semantic interfaces, lossy option merging,
 or bypassing ordinary Forma compilation.
+
+## Implementation result
+
+Implemented in August 2026. Synthetic entry loading accepts an exact map of
+logical module names to in-memory Forma sources. Those names are registered in
+a resolver allowlist visible only to `ModuleId::Entry`; importing one from
+`@main` or a transitive module produces a private-module diagnostic.
+
+Injected modules compile, evaluate, publish, and derive interfaces through the
+ordinary ModuleLoader before entry compilation. They have virtual source
+identities and no fabricated physical paths. `Value::to_forma_literal`
+serializes the closed immediate value subset used by runtime snapshots and
+option actions while rejecting functions, opaque/dynamic/type values,
+non-finite floats, unsafe Dict keys, and unsafe constructors. Tests generate a
+runtime module from Host values, preserve repeated option action order, verify
+entry visibility and main denial, and exercise unsupported-value rejection.
