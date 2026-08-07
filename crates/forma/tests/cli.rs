@@ -369,6 +369,115 @@ export def exec = fn(settings, request) {
 
 #[cfg(unix)]
 #[test]
+fn gcc_wrapper_fixture_builds_reusable_deterministic_plans() {
+    let fixture =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/gcc-wrapper/app/bin-src");
+    let directory = fixture_dir();
+    let cache = directory.join("cache");
+    let invoke = |entry: &str, arguments: &[&str], target: Option<&str>| {
+        let mut command = forma();
+        command.env("FORMA_CACHE_HOME", &cache);
+        command.env_remove("TARGET");
+        if let Some(target) = target {
+            command.env("TARGET", target);
+        }
+        command.args(["exec", "--dry-run"]);
+        command.arg(fixture.join(entry));
+        if !arguments.is_empty() {
+            command.arg("--").args(arguments);
+        }
+        command.output().unwrap()
+    };
+
+    let gcc = invoke("gcc.forma", &["-c", "main.c"], Some("x86_64-linux-gnu"));
+    assert!(
+        gcc.status.success(),
+        "{}",
+        String::from_utf8_lossy(&gcc.stderr)
+    );
+    let gcc_stdout = String::from_utf8(gcc.stdout).unwrap();
+    assert_eq!(gcc_stdout.matches(r#""Unpack""#).count(), 2, "{gcc_stdout}");
+    assert!(gcc_stdout.contains("/bin/gcc"), "{gcc_stdout}");
+    assert!(gcc_stdout.contains("--sysroot="), "{gcc_stdout}");
+    assert!(gcc_stdout.contains("-ffile-prefix-map="), "{gcc_stdout}");
+    assert!(gcc_stdout.contains("-fdebug-prefix-map="), "{gcc_stdout}");
+    assert!(gcc_stdout.contains(r#""env":{"TARGET":"x86_64-linux-gnu"}"#));
+    assert!(!cache.exists());
+
+    let repeated = invoke("gcc.forma", &["-c", "main.c"], Some("x86_64-linux-gnu"));
+    assert!(repeated.status.success());
+    assert_eq!(repeated.stdout, gcc_stdout.as_bytes());
+
+    let gxx = invoke("g++.forma", &["main.cc"], Some("aarch64-linux-gnu"));
+    assert!(
+        gxx.status.success(),
+        "{}",
+        String::from_utf8_lossy(&gxx.stderr)
+    );
+    let gxx_stdout = String::from_utf8(gxx.stdout).unwrap();
+    assert!(gxx_stdout.contains("/bin/g++"), "{gxx_stdout}");
+    assert_eq!(gxx_stdout.matches(r#""Unpack""#).count(), 2);
+
+    let ar = invoke("ar.forma", &["rcs", "lib.a"], None);
+    assert!(
+        ar.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ar.stderr)
+    );
+    let ar_stdout = String::from_utf8(ar.stdout).unwrap();
+    assert!(ar_stdout.contains("/bin/ar"), "{ar_stdout}");
+    assert_eq!(ar_stdout.matches(r#""Unpack""#).count(), 1);
+    assert!(!ar_stdout.contains("--sysroot="));
+
+    let missing = invoke("gcc.forma", &[], None);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("TARGET is required"));
+    let conflict = invoke("gcc.forma", &["--sysroot=/other"], Some("x86_64-linux-gnu"));
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("conflicting argument: --sysroot"));
+    assert!(!cache.exists());
+
+    let malformed_root = directory.join("malformed");
+    fs::create_dir_all(malformed_root.join("app/bin-src")).unwrap();
+    fs::create_dir_all(malformed_root.join("gcc-toolchain-define/src")).unwrap();
+    fs::create_dir_all(malformed_root.join("gcc-wrapper/src")).unwrap();
+    fs::write(
+        malformed_root.join("app/bin-src/gcc.forma"),
+        include_str!("../../../examples/gcc-wrapper/app/bin-src/gcc.forma"),
+    )
+    .unwrap();
+    fs::write(
+        malformed_root.join("gcc-wrapper/src/toolchain.forma"),
+        include_str!("../../../examples/gcc-wrapper/gcc-wrapper/src/toolchain.forma"),
+    )
+    .unwrap();
+    fs::write(
+        malformed_root.join("gcc-toolchain-define/src/source.json"),
+        r#"{"compilers":[],"sysroots":{}}"#,
+    )
+    .unwrap();
+    let malformed = {
+        let mut command = forma();
+        command
+            .env("FORMA_CACHE_HOME", &cache)
+            .env("TARGET", "x86_64-linux-gnu")
+            .args(["exec", "--dry-run"])
+            .arg(malformed_root.join("app/bin-src/gcc.forma"))
+            .output()
+            .unwrap()
+    };
+    assert!(!malformed.status.success());
+    let malformed_stderr = String::from_utf8_lossy(&malformed.stderr);
+    assert!(
+        malformed_stderr.contains("toolchain.forma"),
+        "{malformed_stderr}"
+    );
+    assert!(malformed_stderr.contains("compilers"), "{malformed_stderr}");
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
 fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
     let directory = fixture_dir();
     let value = directory.join("value.forma");
