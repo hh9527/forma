@@ -94,24 +94,47 @@ Only the first-level dimensions are lowered in the initial experiment. The
 hierarchy records why drill is an ontology operation rather than merely adding
 another `GROUP BY`.
 
+The executable experiment also includes `product_sku`, at the same
+`OrderItem` grain, to demonstrate that several independently lowered
+requirements can be linked into one query.
+
+## Compiler vocabulary and capabilities
+
+`Measure` and `Dimension` are Forma enums. This makes the Code Agent-facing
+vocabulary closed and statically checked: misspelled or invented concepts do
+not enter the semantic compiler as arbitrary strings.
+
+Each enum value resolves to a capability record containing a lowering
+function. Measure lowerers produce a base query plan. Dimension lowerers take
+the selected measure and either produce a `GroupRequirement` or a diagnostic.
+Factory functions build reusable families of dimension lowerers:
+
+- universal dimensions accepted by every current measure;
+- dimensions supported at one explicit measure grain;
+- known dimensions whose relation to measures is not yet verified.
+
+There is deliberately no separate Boolean table of legal combinations. The
+ability to construct a lowering requirement is the evidence that a
+combination is supported.
+
 ## Initial report intents
 
 Accepted:
 
 ```text
 net_revenue by order_month and customer_region
-units_sold by order_month and product_category
+units_sold by order_month, product_category, and product_sku
 ```
 
 Rejected in one compilation:
 
 ```text
-unknown measure "revenue"
+more than one measure without a grain-alignment policy
 net_revenue grouped by product_category
-render field not selected (reserved for the next experiment)
+net_revenue grouped by product_sku
+employee_kind without a verified Employee-to-measure relation
 ```
 
 The first implementation lowers only to SQL. Rendering, authorization,
-catalog injection, dynamic relation search, and diagnostic accumulation are
-explicitly outside this slice.
-
+catalog injection, dynamic relation search, and ergonomic diagnostic
+accumulation are explicitly outside this slice.

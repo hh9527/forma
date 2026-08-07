@@ -1,9 +1,41 @@
 import "std/array" as array;
 import "std/string" as string;
 
+@enum type Measure = {
+    NetRevenue: 'None,
+    UnitsSold: 'None,
+};
+
+@enum type Dimension = {
+    OrderMonth: 'None,
+    CustomerRegion: 'None,
+    OrganizationKind: 'None,
+    ProductCategory: 'None,
+    EmployeeKind: 'None,
+    ProductSku: 'None,
+};
+
 @struct type ReportIntent = {
-    measures: Array(String),
-    dimensions: Array(String),
+    measures: Array(Measure),
+    dimensions: Array(Dimension),
+};
+
+@struct type QueryPlan = {
+    measure: Measure,
+    prefix: String,
+    from_clause: String,
+    where_clause: String,
+    measure_expression: String,
+};
+
+@struct type GroupRequirement = {
+    select_expression: String,
+    group_expression: String,
+};
+
+@struct type RequirementCompilation = {
+    requirement: Option(GroupRequirement),
+    diagnostics: Array(BlameError),
 };
 
 @struct type Compilation = {
@@ -11,138 +43,217 @@ import "std/string" as string;
     diagnostics: Array(BlameError),
 };
 
-def known_measure = fn(key) {
-    key == "net_revenue" || key == "units_sold"
+type MeasureLowerer = Fn() -> QueryPlan;
+type DimensionLowerer = Fn(Measure) -> RequirementCompilation;
+
+@struct type MeasureCapability = {
+    id: Measure,
+    lower: MeasureLowerer,
 };
 
-def known_dimension = fn(key) {
-    key == "order_month"
-        || key == "customer_region"
-        || key == "organization_kind"
-        || key == "product_category"
+@struct type DimensionCapability = {
+    id: Dimension,
+    lower: DimensionLowerer,
 };
 
-def dimension_allowed = fn(measure, dimension) {
-    dimension == "order_month"
-        || dimension == "customer_region"
-        || (measure == "net_revenue" && dimension == "organization_kind")
-        || (measure == "units_sold" && dimension == "product_category")
-};
-
-def measure_diagnostics = fn(intent) {
-    let diagnostics = array.flat_map(intent.measures, fn(measure) {
-        if known_measure(measure) {
-            []
-        } else {
-            [blame!(measure, `unknown measure "\{measure}"`)]
-        }
-    });
-    if array.length(intent.measures) == 1 {
-        diagnostics
-    } else {
-        array.push(
-            diagnostics,
-            blame!(intent.measures, "the initial compiler requires exactly one measure"),
-        )
+def complete_requirement: Fn(String, String) -> RequirementCompilation = fn(select_expression, group_expression) {
+    {
+        requirement: 'Some({select_expression, group_expression}),
+        diagnostics: [],
     }
 };
 
-def first_measure = fn(intent) {
-    match array.find(intent.measures, known_measure) {
-        'Some(measure) => measure,
-        'None => "",
+def rejected_requirement: Fn(Dimension, String) -> RequirementCompilation = fn(value, message) {
+    {
+        requirement: 'None,
+        diagnostics: [blame!(value, message)],
     }
 };
 
-def dimension_diagnostics = fn(intent, measure) {
-    array.flat_map(intent.dimensions, fn(dimension) {
-        if known_dimension(dimension) == 'False {
-            [blame!(dimension, `unknown dimension "\{dimension}"`)]
-        } else {
-            if known_measure(measure) && (dimension_allowed(measure, dimension) == 'False) {
-                [blame!(dimension, `measure "\{measure}" cannot be grouped by "\{dimension}" at its current grain`)]
+# A higher-order compiler factory: construct a dimension capability whose
+# lowering is valid for every current measure.
+def universal_dimension: Fn(Dimension, String, String) -> DimensionCapability = fn(id, select_expression, group_expression) {
+    {
+        id,
+        lower: fn(measure) {
+            complete_requirement(select_expression, group_expression)
+        },
+    }
+};
+
+# A second compiler factory: construct a capability restricted to one measure.
+# The same function both verifies the semantic edge and lowers it.
+def measure_dimension: Fn(Dimension, Measure, String, String) -> DimensionCapability = fn(id, required_measure, select_expression, group_expression) {
+    {
+        id,
+        lower: fn(actual_measure) {
+            if actual_measure == required_measure {
+                complete_requirement(select_expression, group_expression)
             } else {
-                []
+                rejected_requirement(
+                    id,
+                    `dimension \{id} is not compatible with measure \{actual_measure} at its current grain`,
+                )
             }
+        },
+    }
+};
+
+def unsupported_dimension: Fn(Dimension, String) -> DimensionCapability = fn(id, reason) {
+    {
+        id,
+        lower: fn(measure) {
+            rejected_requirement(id, `dimension \{id} is not available: \{reason}`)
+        },
+    }
+};
+
+def net_revenue = {
+    id: 'NetRevenue,
+    lower: fn() {
+        {
+            measure: 'NetRevenue,
+            prefix: "WITH payment_by_order AS (\n  SELECT order_id, SUM(amount_cents) AS captured_cents\n  FROM payments WHERE status = 2 GROUP BY order_id\n), refund_by_order AS (\n  SELECT p.order_id, SUM(r.amount_cents) AS refunded_cents\n  FROM refunds r JOIN payments p ON p.id = r.payment_id\n  WHERE r.status = 2 GROUP BY p.order_id\n)",
+            from_clause: "FROM orders o\nJOIN customers c ON c.id = o.customer_id\nJOIN organizations org ON org.id = c.org_id\nJOIN regions r ON r.id = org.region_id\nLEFT JOIN payment_by_order p ON p.order_id = o.id\nLEFT JOIN refund_by_order f ON f.order_id = o.id",
+            where_clause: "WHERE o.status = 2",
+            measure_expression: "SUM(COALESCE(p.captured_cents, 0) - COALESCE(f.refunded_cents, 0)) AS net_revenue_cents",
+        }
+    },
+};
+
+def units_sold = {
+    id: 'UnitsSold,
+    lower: fn() {
+        {
+            measure: 'UnitsSold,
+            prefix: "",
+            from_clause: "FROM order_items oi\nJOIN orders o ON o.id = oi.order_id\nJOIN customers c ON c.id = o.customer_id\nJOIN organizations org ON org.id = c.org_id\nJOIN regions r ON r.id = org.region_id\nJOIN products product ON product.id = oi.product_id\nJOIN categories cat ON cat.id = product.category_id",
+            where_clause: "WHERE o.status != 3",
+            measure_expression: "SUM(oi.quantity) AS units_sold",
+        }
+    },
+};
+
+def measure_capability: Fn(Measure) -> MeasureCapability = fn(measure) {
+    match measure {
+        'NetRevenue => net_revenue,
+        'UnitsSold => units_sold,
+    }
+};
+
+def dimension_capability: Fn(Dimension) -> DimensionCapability = fn(dimension) {
+    match dimension {
+        'OrderMonth => universal_dimension(
+            dimension,
+            "substr(o.ordered_at, 1, 7) AS order_month",
+            "order_month",
+        ),
+        'CustomerRegion => universal_dimension(
+            dimension,
+            "r.name AS customer_region",
+            "customer_region",
+        ),
+        'OrganizationKind => measure_dimension(
+            dimension,
+            'NetRevenue,
+            "org.kind AS organization_kind",
+            "organization_kind",
+        ),
+        'ProductCategory => measure_dimension(
+            dimension,
+            'UnitsSold,
+            "cat.name AS product_category",
+            "product_category",
+        ),
+        'EmployeeKind => unsupported_dimension(
+            dimension,
+            "the ontology has no verified Employee-to-measure relation",
+        ),
+        'ProductSku => measure_dimension(
+            dimension,
+            'UnitsSold,
+            "product.sku AS product_sku",
+            "product_sku",
+        ),
+    }
+};
+
+def measure_diagnostics: Fn(ReportIntent) -> Array(BlameError) = fn(intent) {
+    if array.length(intent.measures) == 1 {
+        []
+    } else {
+        [blame!(intent.measures, "the initial compiler requires exactly one measure")]
+    }
+};
+
+def selected_measure: Fn(ReportIntent) -> Measure = fn(intent) {
+    match array.find(intent.measures, fn(ignored) { 'True }) {
+        'Some(measure) => measure,
+        'None => 'NetRevenue,
+    }
+};
+
+def compile_requirements: Fn(Measure, Array(Dimension)) -> Array(RequirementCompilation) = fn(measure, dimensions) {
+    array.map(dimensions, fn(dimension) {
+        let capability = dimension_capability(dimension);
+        capability.lower(measure)
+    })
+};
+
+def requirement_diagnostics: Fn(Array(RequirementCompilation)) -> Array(BlameError) = fn(compilations) {
+    array.flat_map(compilations, fn(compilation) {
+        compilation.diagnostics
+    })
+};
+
+def successful_requirements: Fn(Array(RequirementCompilation)) -> Array(GroupRequirement) = fn(compilations) {
+    array.flat_map(compilations, fn(compilation) {
+        match compilation.requirement {
+            'Some(requirement) => [requirement],
+            'None => [],
         }
     })
 };
 
-def dimension_expression = fn(key) {
-    match key {
-        "order_month" => "substr(o.ordered_at, 1, 7) AS order_month",
-        "customer_region" => "r.name AS customer_region",
-        "organization_kind" => "org.kind AS organization_kind",
-        "product_category" => "cat.name AS product_category",
-        _ => "",
-    }
-};
-
-def dimension_alias = fn(key) {
-    match key {
-        "order_month" => "order_month",
-        "customer_region" => "customer_region",
-        "organization_kind" => "organization_kind",
-        "product_category" => "product_category",
-        _ => "",
-    }
-};
-
-def net_revenue_sql = fn(dimensions) {
-    let selects = array.push(array.map(dimensions, dimension_expression),
-        "SUM(COALESCE(p.captured_cents, 0) - COALESCE(f.refunded_cents, 0)) AS net_revenue_cents");
-    let groups = array.map(dimensions, dimension_alias);
-    let group_clause = if array.length(groups) == 0 { "" } else { `\nGROUP BY \{string.join(groups, ", ")}` };
-    `WITH payment_by_order AS (
-  SELECT order_id, SUM(amount_cents) AS captured_cents
-  FROM payments WHERE status = 2 GROUP BY order_id
-), refund_by_order AS (
-  SELECT p.order_id, SUM(r.amount_cents) AS refunded_cents
-  FROM refunds r JOIN payments p ON p.id = r.payment_id
-  WHERE r.status = 2 GROUP BY p.order_id
-)
-SELECT \{string.join(selects, ",\n       ")}
-FROM orders o
-JOIN customers c ON c.id = o.customer_id
-JOIN organizations org ON org.id = c.org_id
-JOIN regions r ON r.id = org.region_id
-LEFT JOIN payment_by_order p ON p.order_id = o.id
-LEFT JOIN refund_by_order f ON f.order_id = o.id
-WHERE o.status = 2\{group_clause}
-ORDER BY \{string.join(groups, ", ")};`
-};
-
-def units_sold_sql = fn(dimensions) {
-    let selects = array.push(array.map(dimensions, dimension_expression),
-        "SUM(oi.quantity) AS units_sold");
-    let groups = array.map(dimensions, dimension_alias);
-    let group_clause = if array.length(groups) == 0 { "" } else { `\nGROUP BY \{string.join(groups, ", ")}` };
-    `SELECT \{string.join(selects, ",\n       ")}
-FROM order_items oi
-JOIN orders o ON o.id = oi.order_id
-JOIN customers c ON c.id = o.customer_id
-JOIN organizations org ON org.id = c.org_id
-JOIN regions r ON r.id = org.region_id
-JOIN products product ON product.id = oi.product_id
-JOIN categories cat ON cat.id = product.category_id
-WHERE o.status != 3\{group_clause}
-ORDER BY \{string.join(groups, ", ")};`
+def finalize_sql = fn(plan, requirements) {
+    let selects = array.push(
+        array.map(requirements, fn(requirement) { requirement.select_expression }),
+        plan.measure_expression,
+    );
+    let groups = array.map(requirements, fn(requirement) { requirement.group_expression });
+    let prefix = if plan.prefix == "" { "" } else { `\{plan.prefix}\n` };
+    let group_clause = if array.length(groups) == 0 {
+        ""
+    } else {
+        `\nGROUP BY \{string.join(groups, ", ")}\nORDER BY \{string.join(groups, ", ")}`
+    };
+    `\{prefix}SELECT \{string.join(selects, ",\n       ")}\n\{plan.from_clause}\n\{plan.where_clause}\{group_clause};`
 };
 
 export def compile: Fn(ReportIntent) -> Compilation = fn(intent) {
-    let measure = first_measure(intent);
-    let diagnostics = measure_diagnostics(intent);
-    let diagnostics = array.concat([diagnostics, dimension_diagnostics(intent, measure)]);
+    let measure = selected_measure(intent);
+    let capability = measure_capability(measure);
+    let plan = capability.lower();
+    let requirement_compilations = compile_requirements(measure, intent.dimensions);
+    let diagnostics = array.concat([
+        measure_diagnostics(intent),
+        requirement_diagnostics(requirement_compilations),
+    ]);
     if array.length(diagnostics) == 0 {
-        let sql = match measure {
-            "net_revenue" => net_revenue_sql(intent.dimensions),
-            "units_sold" => units_sold_sql(intent.dimensions),
-            _ => "",
-        };
-        {sql: 'Some(sql), diagnostics}
+        {
+            sql: 'Some(finalize_sql(plan, successful_requirements(requirement_compilations))),
+            diagnostics,
+        }
     } else {
         {sql: 'None, diagnostics}
     }
 };
 
-export { ReportIntent, Compilation };
+export {
+    Measure,
+    Dimension,
+    ReportIntent,
+    Compilation,
+    MeasureCapability,
+    DimensionCapability,
+};

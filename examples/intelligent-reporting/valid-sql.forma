@@ -1,8 +1,8 @@
 import "./ontology.forma" { compile };
 
 let compilation = compile({
-    measures: ["net_revenue"],
-    dimensions: ["order_month", "customer_region"],
+    measures: ['NetRevenue],
+    dimensions: ['OrderMonth, 'CustomerRegion],
 });
 
 export let output = match compilation.sql {

@@ -49,18 +49,25 @@ SQLite session. Both paths produce:
 - A Forma library can carry a small operational ontology and business rules.
 - A Code Agent-facing intent stays close to measures and dimensions rather
   than tables, joins, CTEs, payment/refund semantics, or SQL syntax.
-- Validation and lowering are one operation: an unsupported measure/dimension
-  grain combination is rejected while constructing the query plan.
-- Independent validation passes can accumulate four errors in one result.
+- Measures and dimensions form statically checked enum vocabularies rather
+  than an open set of string keys.
+- Capability records pair each vocabulary item with a lowering function.
+  Higher-order factory functions define universal, measure-specific, and
+  unsupported dimension families without a parallel compatibility matrix.
+- Validation and lowering are one operation: a legal dimension produces a
+  grouping requirement, while an unsupported measure/dimension combination
+  produces a diagnostic instead.
+- Dimension lowerers run independently, allowing one compilation to
+  accumulate four errors before linking successful requirements.
 - A rejected compilation publishes no SQL.
 - A successful compilation emits SQL that SQLite can execute without another
   layer interpreting domain policy.
 
 ## Deliberate limitations
 
-This is not yet a general query planner. The registry and relation paths are
-encoded directly in Forma functions, and SQL FROM/CTE fragments are defined
-per measure. The experiment does not yet implement:
+This is not yet a general query planner. The closed vocabulary and its
+capabilities are encoded directly in Forma functions, and SQL FROM/CTE
+fragments are defined per measure. The experiment does not yet implement:
 
 - data-driven ontology registries and relation-path search;
 - typed field/expression facades;
@@ -71,7 +78,6 @@ per measure. The experiment does not yet implement:
 - causal blocked facts or automatic cascade suppression;
 - ergonomic diagnostic accumulation.
 
-The explicit diagnostic arrays are useful evidence: they achieve multi-error
-feedback, but they also expose the bookkeeping cost that a narrow accumulation
-facility would need to remove.
-
+The explicit `RequirementCompilation` values and diagnostic arrays are useful
+evidence: they achieve multi-error feedback, but they also expose the
+bookkeeping cost that a narrow accumulation facility would need to remove.
