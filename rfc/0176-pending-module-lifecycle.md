@@ -1,6 +1,6 @@
 # RFC 0176: Pending module lifecycle
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0175
 
 ## Summary
@@ -101,3 +101,15 @@ initialization.
 - typed export projection, defined by RFC 0178;
 - changing ordinary import eagerness;
 - exposing pending handles to ordinary main code by default.
+
+## Implementation result
+
+`Engine::prepare_module[_with_arguments]` parses root options without opening
+imports and returns an identity-opaque `PendingModule`. Initialization caches
+`Pending`, `Initializing`, `Ready`, and `Failed` outcomes and never holds its
+lifecycle lock while loading or evaluating main.
+
+The entry argument is the handle itself rather than the draft `Module` record.
+`module_options(handle)` and the other entry runtime operations expose the
+record's intended fields explicitly. Tests cover deferred imports, ordered
+options, stable repetitions, and handle-local injected state.

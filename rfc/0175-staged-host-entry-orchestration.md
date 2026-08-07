@@ -1,6 +1,6 @@
 # RFC 0175: Staged Host entry orchestration
 
-- Status: Proposed
+- Status: Implemented
 - Amends: RFC 0170 through RFC 0174
 
 ## Summary
@@ -110,3 +110,16 @@ Return to discussion if implementation requires making main initialization
 implicit, exposing entry runtime modules ambiently, weakening export type
 checks to unchecked `Any`, allowing registry mutation after freeze, or adding
 a second Rust implementation of Forma's type compatibility relation.
+
+## Implementation result
+
+RFCs 0176 through 0179 implement the staged boundary. The Host prepares an
+opaque handle, evaluates the selected entry independently, and invokes its
+exported function. Main loading starts only at explicit initialization. Typed
+modules are invocation-local and frozen by that call; export projection uses
+Forma type schemes, including inferred generic exports. Exec remains dry-run
+and emits no partial output on failure.
+
+The ABI passes `ModuleHandle` directly instead of wrapping it in a `Module`
+record. Ordered options and invocation inputs are explicit queries on that
+handle, retaining the same authority without duplicating an aggregate shape.

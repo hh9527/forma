@@ -1,6 +1,6 @@
 # RFC 0178: Typed instantiated-module exports
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0176, RFC 0177
 
 ## Summary
@@ -58,3 +58,15 @@ parameters, results, opaque nominal IDs, and unresolved `Any` fail.
 - implicit field syntax on an unknown export record;
 - unchecked projection from `Any`;
 - general dynamic imports for main code.
+
+## Implementation result
+
+Initialized exports cross the entry boundary in `Dyn` with their unchanged
+value, full `TypeScheme`, and a stable source anchor. `check_type` binds a
+generic scheme consistently against the requested witness, then applies the
+existing assignability relation. Inferred structural and generic functions
+pass; incompatible exports fail before invocation.
+
+Dyn heap transitions retain the scheme and source anchor. Failures report the
+main definition, actual and requested types, and the entry check site. No
+exec-specific checker exists in Rust.

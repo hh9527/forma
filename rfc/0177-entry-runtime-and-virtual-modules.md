@@ -1,6 +1,6 @@
 # RFC 0177: Entry runtime and virtual modules
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0176
 
 ## Summary
@@ -93,3 +93,14 @@ entry may pass any runtime function into main as an ordinary value.
   function and owning handle;
 - filesystem/network convenience APIs beyond the initial Host observations;
 - installation or process execution.
+
+## Implementation result
+
+`entry/rt.native.forma` is visible only to the Host-selected entry and offers
+explicit-handle observations, injection, and initialization operations.
+
+`inject_module` accepts a structural record witness and matching record value,
+returning `True` on success. Each field becomes a module export scheme. Heap
+publication preserves closures, native functions, opaque values, and identity;
+no serialization is involved. Duplicate, built-in-shadowing, private,
+relative, and late injections fail, and separate handles remain isolated.

@@ -1,6 +1,6 @@
 # RFC 0179: Exec as a staged entry function
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0175 through RFC 0178
 
 ## Summary
@@ -57,3 +57,16 @@ native functions, but those effects require separate protocol RFCs.
 - external entry selection;
 - migrating run/build;
 - changing the public ExecFn protocol.
+
+## Implementation result
+
+`entry/exec.forma` exports `entry(handle)` and owns option selection,
+settings/request construction, export projection, invocation, codec, and JSON
+encoding policy. The CLI only prepares main, invokes the entry, and prints its
+two encoded channels; it no longer synthesizes runtime/options modules or
+interprets exec schemas.
+
+Forma selects environment names from ordered `exec.capture-envs` actions; the
+narrow native `capture_vars` operation materializes only those names. Existing
+install IDs, argument rewriting, provenance, diagnostics, and atomic dry-run
+output are retained by integration tests.
