@@ -62,6 +62,7 @@ option "crate.dependency" {
         rev: "0123456789abcdef",
     }),
 };
+option "exec.capture-envs" ["TARGET"];
 
 import "std/rt-types/exec.forma" { ExecFn };
 import "gcc-toolchain-define/source.json" as source;
@@ -94,7 +95,7 @@ resolver 与发布体验的路线。
 ## 共享工具链模块
 
 下面的代码使用当前的 import/export 语法、普通类型、函数、模式匹配和
-`std/exec` 数据协议。URL 和 digest 是示例值，不代表真实发行地址。RFC 0158
+`std/rt-types/exec.forma` 数据协议。URL 和 digest 是示例值，不代表真实发行地址。RFC 0158
 已经用缩减的 `Fn(String) -> ExecFn` 形状验证跨模块闭包、模块 helper、混合
 捕获和互递归；完整示例仍应在最终端到端 fixture 中单独验收。
 
@@ -103,7 +104,7 @@ resolver 与发布体验的路线。
 
 import "std/array" as arrays;
 import "std/dict" as dicts;
-import "std/exec" as exec_types;
+import "std/rt-types/exec.forma" as exec_types;
 import "std/hash" as hash;
 
 type ExecSettings = exec_types.ExecSettings;
@@ -430,9 +431,10 @@ dict.get(request.env, "TARGET") # Option(String)
 
 ### 3. ExecRequest 的结构化调用上下文
 
-把 TARGET 放进 `env` 是显式的，但仍然偏约定。工具链 Host 可以提供更丰富的请求类型，或者 `std/exec.ExecRequest` 将常见 target 概念纳入稳定字段。是否进入通用协议需要谨慎：TARGET 可能是 GCC wrapper 的领域输入，而不是所有命令都拥有的通用概念。
-
-更保守的路线是保留 `ExecRequest`，由 wrapper 自己解析 `env` 和 `args`。
+入口通过 `option "exec.capture-envs" ["TARGET"];` 显式声明 Host 输入。Host
+只把声明过且实际存在的环境变量写入 `ExecRequest.env`；未声明变量不能影响
+求值、dry-run 输出或未来的缓存键。TARGET 因而仍是 GCC wrapper 的领域输入，
+不需要进入所有命令共享的稳定协议字段；wrapper 继续从 `env` 中解析并验证它。
 
 ### 4. 参数解析与改写工具
 
@@ -456,7 +458,7 @@ dict.get(request.env, "TARGET") # Option(String)
 - package identity 是否覆盖所有影响安装结果的 action；
 - 相同 `dest` 是否描述相同安装动作。
 
-Parse、Display、codec 和 validator 已经提供构建这些领域类型的路径，但 `std/exec` 还没有把它们产品化为更强的 package 类型。
+Parse、Display、codec 和 validator 已经提供构建这些领域类型的路径，但 `std/rt-types/exec.forma` 还没有把它们产品化为更强的 package 类型。
 
 ### 6. 静态依赖入口
 

@@ -28,6 +28,7 @@ option "crate.dependency" {
         rev: "0123456789abcdef",
     }),
 };
+option "exec.capture-envs" ["TARGET"];
 
 import "std/rt-types/exec.forma" { ExecFn };
 import "gcc-toolchain-define/source.json" as source;
@@ -108,12 +109,14 @@ The planned child sequence is:
    `ExecFn` alias while keeping effect interpretation in the Host adapter;
 3. RFC 0162: replace `@@manifest` with scoped ordered option actions,
    including the initial path dependency and exact format consumers;
-4. RFC 0163: define pinned external dependency specifications, canonical
+4. RFC 0163: define explicit Host environment capture for executable entries,
+   including deterministic request construction and cache identity;
+5. RFC 0164: define pinned external dependency specifications, canonical
    module identities, provider/cache boundaries, and dependency-relative
    paths such as `gcc-wrapper/toolchain.forma`;
-5. RFC 0164: add the minimum type-preserving Dict lookup and argv-rewrite
+6. RFC 0165: add the minimum type-preserving Dict lookup and argv-rewrite
    combinators needed for explicit input validation and conflict handling;
-6. RFC 0165: add the end-to-end GCC-wrapper fixture, source-data blame,
+7. RFC 0166: add the end-to-end GCC-wrapper fixture, source-data blame,
    canonical dry-run output, cancellation/quota coverage, and documentation
    evidence.
 
@@ -214,6 +217,19 @@ Host extracts and validates options before resolving ordinary imports.
 RFC 0162 defines coexistence with `forma-deps.json` and removes the existing
 `@@manifest`. Conflicts are deterministic and diagnostic; silent merging or
 last-writer-wins behavior is not accepted.
+
+Executable entries declare the Host environment inputs they consume:
+
+```forma
+option "exec.capture-envs" ["TARGET"];
+```
+
+The Host constructs `ExecRequest.env` from exactly those names. This option
+does not read the process environment during Forma evaluation, and undeclared
+variables cannot affect evaluation, dry-run output, or a future cache key.
+Repeated actions preserve option order while the effective name set is
+deduplicated deterministically. A captured name that is absent from the Host
+environment remains absent from the Dict for explicit user-space validation.
 
 ## Pinned dependency resolution
 
