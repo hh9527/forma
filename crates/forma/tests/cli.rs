@@ -225,12 +225,9 @@ fn exec_dry_run_invokes_explicit_pure_entry() {
         &main,
         r#"#!/usr/bin/env -S forma exec --dry-run
 import "std/array" as arrays;
-import "std/exec" as exec_types;
+import "std/rt-types/exec.forma" { ExecFn };
 import "std/hash" as hash;
-type ExecSettings = exec_types.ExecSettings;
-type ExecRequest = exec_types.ExecRequest;
-type ExecEnv = exec_types.ExecEnv;
-export let exec: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
+export def exec: ExecFn = fn(settings, request) {
     let platform = `\{settings.platform.os}-\{settings.platform.arch}`;
     let compiler_url = `https://example.invalid/gcc-\{platform}.tar.gz`;
     let sysroot_url = `https://example.invalid/sysroot-\{platform}.tar.gz`;

@@ -1,6 +1,6 @@
 # RFC 0159: Runtime exec protocol types
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0051, RFC 0062, RFC 0113, RFC 0134, RFC 0142, RFC 0145,
   RFC 0157, RFC 0158
 
@@ -193,3 +193,17 @@ Work returns to discussion if the implementation requires:
 4. retaining two independently evolving protocol definitions;
 5. implicit mode-dependent names in ordinary lexical scope; or
 6. a general type-alias or parameterized-type feature.
+
+## Implementation result
+
+Implemented in August 2026. The embedded source moved to
+`std/rt-types/exec.forma`, now owns reserved module ID 21, and exports the
+seven existing protocol descriptions plus the monomorphic `ExecFn` Function
+metadata binding. The former request `std/exec` and module ID 12 were removed;
+ID 12 remains an asserted tombstone.
+
+The implementation also closed a tool-stage ordering gap exposed by the
+authored surface. Resolved selective imports are now available while annotated
+definition contracts are evaluated, so `export def exec: ExecFn = ...` retains
+the imported metadata rather than widening it or requiring a local alias.
+Parser/HIR scope coverage and the CLI dry-run fixture exercise that exact form.

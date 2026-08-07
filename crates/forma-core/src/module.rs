@@ -2517,6 +2517,8 @@ mod tests {
             identities.values().copied().collect::<HashSet<_>>().len(),
             specs.len()
         );
+        assert_eq!(identities.get(crate::core::EXEC_MODULE), Some(&21));
+        assert!(!identities.values().any(|id| *id == 12));
         let reordered = specs
             .iter()
             .rev()
@@ -6908,7 +6910,7 @@ unchanged", "|"),
         let main = directory.join("main.forma");
         fs::write(
             &library,
-            r#"import "std/exec" as exec_types;
+            r#"import "std/rt-types/exec.forma" as exec_types;
                import "std/hash" as hash;
                type ExecSettings = exec_types.ExecSettings;
                type ExecRequest = exec_types.ExecRequest;

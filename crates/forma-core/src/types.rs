@@ -1558,6 +1558,20 @@ pub(crate) fn analyze_program_with_bindings_observed(
         binding_types.insert(name.clone(), TypeDescriptor::Any);
     }
 
+    // Definition contracts are evaluated before the source-order binding pass.
+    // Make resolved imports available at that same tool stage so selectively
+    // imported TypeMetadata can be used directly as a contract.
+    for binding in &program.value.body.value.bindings {
+        if binding.value.kind != BindingKind::Import {
+            continue;
+        }
+        let name = &binding.value.name.value;
+        let value = external_values.get(name).cloned().ok_or_else(|| {
+            frontend_error(source_name, format!("import {name} has not been resolved"))
+        })?;
+        tool_values.insert(name.clone(), value);
+    }
+
     let mut definition_contracts = HashMap::new();
     let mut declaration_locations = HashMap::new();
     let mut definition_counts = HashMap::<String, usize>::new();

@@ -11,7 +11,7 @@ pub(crate) const ATTRIBUTES_MODULE: &str = "std/attributes";
 pub(crate) const DICT_MODULE: &str = "std/dict";
 pub(crate) const DEBUG_MODULE: &str = "std/debug";
 pub(crate) const BUILD_MODULE: &str = "std/build";
-pub(crate) const EXEC_MODULE: &str = "std/exec";
+pub(crate) const EXEC_MODULE: &str = "std/rt-types/exec.forma";
 pub(crate) const CODEC_MODULE: &str = "std/codec";
 pub(crate) const OPTION_MODULE: &str = "std/option";
 pub(crate) const RESULT_MODULE: &str = "std/result";
@@ -317,12 +317,6 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
             functions: vec![],
         },
         CoreModuleSpec {
-            native_id: 12,
-            name: EXEC_MODULE,
-            source: include_str!("../modules/std/exec.forma"),
-            functions: vec![],
-        },
-        CoreModuleSpec {
             native_id: 13,
             name: CODEC_MODULE,
             source: include_str!("../modules/std/codec.native.forma"),
@@ -534,6 +528,12 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
                     ),
                 ),
             ],
+        },
+        CoreModuleSpec {
+            native_id: 21,
+            name: EXEC_MODULE,
+            source: include_str!("../modules/std/rt-types/exec.forma"),
+            functions: vec![],
         },
     ]
 }

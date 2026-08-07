@@ -3053,6 +3053,32 @@ export { private as visible, identity as map };"#,
     }
 
     #[test]
+    fn selective_imports_are_in_scope_for_exported_definition_contracts() {
+        let program = parse(
+            "selective-type.forma",
+            r#"import "std/rt-types/exec.forma" { ExecFn };
+               export def exec: ExecFn = fn(settings, request) { request };"#,
+        )
+        .unwrap();
+        assert_eq!(
+            program
+                .value
+                .body
+                .value
+                .bindings
+                .iter()
+                .map(|binding| binding.value.name.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ExecFn", "exec", "exec"]
+        );
+        let hir = crate::hir::HirProgram::resolve(&program, Vec::<String>::new());
+        assert!(
+            hir.unresolved().next().is_none(),
+            "selective import must precede the exported contract"
+        );
+    }
+
+    #[test]
     fn preserves_interpreter_operand_in_ast() {
         let program = parse(
             "interpreter.forma",
