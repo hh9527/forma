@@ -249,15 +249,22 @@ impl ModuleResolver {
             let mut sources = crate::SourceDatabase::default();
             let source_id = sources.add(root.display().to_string(), source);
             let parsed = crate::parser::parse_registered(&sources, source_id);
-            if let Some(manifest) = parsed.manifest {
+            let crate_options = parsed
+                .options
+                .iter()
+                .filter(|option| option.key.value.starts_with("crate."))
+                .collect::<Vec<_>>();
+            if !crate_options.is_empty() {
                 if has_external_manifest {
                     return Err(ResolveModuleError::Manifest(
-                        "@main cannot use both forma-deps.json and @@manifest".into(),
+                        "@main cannot use both forma-deps.json and embedded crate options".into(),
                     ));
                 }
                 let mut values = Vm::new();
-                let manifest = immediate_value(&manifest, &mut values)?;
-                resolver.apply_manifest(&manifest)?;
+                for option in crate_options {
+                    let value = immediate_value(&option.value, &mut values)?;
+                    resolver.apply_option(option.key.value.as_str(), &value)?;
+                }
             }
         }
         Ok(resolver)
@@ -409,6 +416,85 @@ impl ModuleResolver {
         Ok(())
     }
 
+    fn apply_option(&mut self, key: &str, value: &Value) -> Result<(), ResolveModuleError> {
+        let Value::Dict(fields) = value else {
+            return Err(ResolveModuleError::Manifest(format!(
+                "option {key:?} must contain a Dict"
+            )));
+        };
+        match key {
+            "crate.dependency" => {
+                let name = match fields.get("name") {
+                    Some(Value::String(name)) => name.as_ref(),
+                    _ => {
+                        return Err(ResolveModuleError::Manifest(
+                            "crate.dependency field \"name\" must be a String".into(),
+                        ));
+                    }
+                };
+                let path = match fields.get("source") {
+                    Some(Value::Tagged { tag, payload }) if tag.name() == "Path" => {
+                        let Value::Dict(source) = payload.as_ref() else {
+                            return Err(ResolveModuleError::Manifest(
+                                "crate.dependency Path payload must be a Dict".into(),
+                            ));
+                        };
+                        match source.get("path") {
+                            Some(Value::String(path)) => path.as_ref(),
+                            _ => {
+                                return Err(ResolveModuleError::Manifest(
+                                    "crate.dependency Path field \"path\" must be a String".into(),
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        return Err(ResolveModuleError::Manifest(
+                            "crate.dependency field \"source\" must be 'Path({path: String})"
+                                .into(),
+                        ));
+                    }
+                };
+                if self.dependencies.contains_key(name) {
+                    return Err(ResolveModuleError::Manifest(format!(
+                        "duplicate crate dependency {name:?}"
+                    )));
+                }
+                let root = resolve_physical(&self.workspace_root.join(path))?;
+                self.dependencies.insert(name.into(), root);
+            }
+            "crate.format" => {
+                let module = match fields.get("module") {
+                    Some(Value::String(module)) => module.as_ref(),
+                    _ => {
+                        return Err(ResolveModuleError::Manifest(
+                            "crate.format field \"module\" must be a String".into(),
+                        ));
+                    }
+                };
+                let format = match fields.get("format") {
+                    Some(Value::String(format)) => ModuleFormat::parse(format.as_ref())?,
+                    _ => {
+                        return Err(ResolveModuleError::Manifest(
+                            "crate.format field \"format\" must be a String".into(),
+                        ));
+                    }
+                };
+                if self.formats.insert(module.into(), format).is_some() {
+                    return Err(ResolveModuleError::Manifest(format!(
+                        "duplicate crate format module {module:?}"
+                    )));
+                }
+            }
+            _ => {
+                return Err(ResolveModuleError::Manifest(format!(
+                    "unknown pre-resolution option {key:?}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn resolve_dependency(
         &self,
         rest: &str,
@@ -532,9 +618,7 @@ fn immediate_value(expression: &Expr, vm: &mut Vm) -> Result<Value, ResolveModul
         ExprKind::Int(value) => Ok(Value::Int(*value)),
         ExprKind::Float(value) if value.is_finite() => Ok(Value::Float(*value)),
         ExprKind::String(value) => Ok(Value::string(value.as_str())),
-        ExprKind::Atom(name) if matches!(name.as_str(), "None" | "True" | "False") => {
-            Ok(Value::atom(name.clone()))
-        }
+        ExprKind::Atom(name) => Ok(Value::atom(name.clone())),
         ExprKind::Array(values) => values
             .iter()
             .map(|value| immediate_value(value, vm))
@@ -560,8 +644,19 @@ fn immediate_value(expression: &Expr, vm: &mut Vm) -> Result<Value, ResolveModul
                 .collect::<Result<Vec<_>, _>>()?;
             vm.make_dict(entries).map_err(ResolveModuleError::Manifest)
         }
+        ExprKind::Call { callee, arguments }
+            if matches!(callee.value, ExprKind::Atom(_)) && arguments.len() == 1 =>
+        {
+            let ExprKind::Atom(tag) = &callee.value else {
+                unreachable!("guarded above")
+            };
+            Ok(Value::tagged(
+                crate::value::Atom::named(tag.clone()),
+                immediate_value(&arguments[0], vm)?,
+            ))
+        }
         _ => Err(ResolveModuleError::Manifest(
-            "@@manifest accepts only JSON-compatible immediate values".into(),
+            "option accepts only immediate values".into(),
         )),
     }
 }
@@ -835,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_manifest_marks_the_crate_root_and_supplies_dependencies() {
+    fn embedded_crate_options_mark_the_root_and_supply_dependencies() {
         let temporary = std::env::temp_dir().join(format!(
             "forma-embedded-manifest-test-{}",
             std::process::id()
@@ -848,12 +943,14 @@ mod tests {
         let main = app.join("bin-src/tool.forma");
         std::fs::write(
             &main,
-            r#"@@manifest {name: "tool", dependencies: {dep: {path: "../dependency"}}};
+            r#"option "crate.dependency" {name: "dep", source: 'Path({path: "../dependency"})};
 import "dep/value.forma" as value;
-value"#,
+export { value };
+option "crate.format" {module: "dep/raw.data", format: "json"};"#,
         )
         .unwrap();
-        std::fs::write(dependency.join("src/value.forma"), "42").unwrap();
+        std::fs::write(dependency.join("src/value.forma"), "export let value = 42;").unwrap();
+        std::fs::write(dependency.join("src/raw.data"), "{\"value\":42}").unwrap();
 
         let resolver = ModuleResolver::for_root(&main).unwrap();
         assert_eq!(resolver.workspace_root(), app);
@@ -866,12 +963,19 @@ value"#,
                 .to_string(),
             "dep/value.forma"
         );
+        assert_eq!(
+            resolver
+                .resolve_import(&root.id, "dep/raw.data")
+                .unwrap()
+                .format,
+            ModuleFormat::Json
+        );
 
         std::fs::write(app.join("forma-deps.json"), r#"{"dependencies":{}}"#).unwrap();
         assert!(matches!(
             ModuleResolver::for_root(&main),
             Err(ResolveModuleError::Manifest(message))
-                if message.contains("both forma-deps.json and @@manifest")
+                if message.contains("both forma-deps.json and embedded crate options")
         ));
         std::fs::remove_dir_all(temporary).unwrap();
     }

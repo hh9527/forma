@@ -106,10 +106,6 @@ impl<'tree> Body<'tree> {
     pub fn result(self) -> Option<Expr<'tree>> {
         expression_slots(self.syntax).into_iter().last().flatten()
     }
-
-    fn result_slot(self) -> Option<SyntaxNode<'tree>> {
-        expression_slot_nodes(self.syntax).into_iter().last()
-    }
 }
 
 impl<'tree> AstNode<'tree> for Body<'tree> {
@@ -131,6 +127,7 @@ pub enum Binding<'tree> {
     NativeType(NativeTypeBinding<'tree>),
     Type(TypeBinding<'tree>),
     Import(ImportBinding<'tree>),
+    Option(OptionBinding<'tree>),
     Export(ExportBinding<'tree>),
 }
 
@@ -147,6 +144,7 @@ impl<'tree> Binding<'tree> {
             Rule::NativeTypeBinding => Some(Self::NativeType(NativeTypeBinding { syntax })),
             Rule::TypeBinding => Some(Self::Type(TypeBinding { syntax })),
             Rule::ImportBinding => Some(Self::Import(ImportBinding { syntax })),
+            Rule::OptionBinding => Some(Self::Option(OptionBinding { syntax })),
             Rule::ExportStatement => Some(Self::Export(ExportBinding { syntax })),
             _ => None,
         }
@@ -161,6 +159,7 @@ impl<'tree> Binding<'tree> {
             Self::NativeType(node) => node.syntax,
             Self::Type(node) => node.syntax,
             Self::Import(node) => node.syntax,
+            Self::Option(node) => node.syntax,
             Self::Export(node) => node.syntax,
         }
     }
@@ -174,6 +173,7 @@ impl<'tree> Binding<'tree> {
             Self::NativeType(node) => node.name(),
             Self::Type(node) => node.name(),
             Self::Import(node) => node.name(),
+            Self::Option(_) => None,
             Self::Export(_) => None,
         }
     }
@@ -205,6 +205,7 @@ binding_node!(NativeBinding);
 binding_node!(NativeTypeBinding);
 binding_node!(TypeBinding);
 binding_node!(ImportBinding);
+binding_node!(OptionBinding);
 binding_node!(ExportBinding);
 
 #[derive(Clone, Copy)]
@@ -390,7 +391,6 @@ pub enum ExpectedSyntax {
     BindingValue,
     BindingContract,
     ImportPath,
-    ResultExpression,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -421,7 +421,7 @@ pub fn validate(source: SourceId, tree: &CstData) -> Vec<SyntaxIssue> {
     for binding in body.bindings() {
         if binding.name().is_none()
             && !matches!(binding, Binding::Import(import) if import.has_selector())
-            && !matches!(binding, Binding::Export(_))
+            && !matches!(binding, Binding::Option(_) | Binding::Export(_))
         {
             issues.push(missing_after_keyword(source, binding));
         }
@@ -458,19 +458,6 @@ pub fn validate(source: SourceId, tree: &CstData) -> Vec<SyntaxIssue> {
             Binding::Export(_) => {}
             _ => {}
         }
-    }
-    if body.result().is_none()
-        && !body
-            .bindings()
-            .any(|binding| matches!(binding, Binding::Export(_)))
-    {
-        issues.push(missing_slot(
-            source,
-            body.result_slot(),
-            body.syntax,
-            None,
-            ExpectedSyntax::ResultExpression,
-        ));
     }
     issues
 }
@@ -559,6 +546,7 @@ fn missing_after_keyword(source: SourceId, binding: Binding<'_>) -> SyntaxIssue 
         Binding::NativeType(_) => Token::Native,
         Binding::Type(_) => Token::Type,
         Binding::Import(_) => Token::Import,
+        Binding::Option(_) => Token::Option,
         Binding::Export(_) => Token::Export,
     };
     let syntax = binding.syntax();
@@ -617,6 +605,5 @@ fn expected_name(expected: &ExpectedSyntax) -> &'static str {
         ExpectedSyntax::BindingValue => "binding value",
         ExpectedSyntax::BindingContract => "binding contract",
         ExpectedSyntax::ImportPath => "import path",
-        ExpectedSyntax::ResultExpression => "result expression",
     }
 }

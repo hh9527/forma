@@ -1,8 +1,8 @@
 use crate::ast::{
     BinaryOperator, Binding, BindingData, BindingKind, Block, BlockKind, ClosureParameter,
     Decorator, DecoratorKind, DictFieldKind, Expr, ExprKind, Identifier, MatchArm, MatchArmKind,
-    Pattern, PatternKind, Program, ProgramKind, StringPartKind, StructPatternField, TypeArgument,
-    TypeArgumentKind, UnaryOperator, located,
+    OptionAction, Pattern, PatternKind, Program, ProgramKind, StringPartKind, StructPatternField,
+    TypeArgument, TypeArgumentKind, UnaryOperator, located,
 };
 use crate::lexer::{FrontendError, SourceLocation};
 use crate::source::{Diagnostic, Location, SourceDatabase, SourceId};
@@ -13,7 +13,7 @@ use std::collections::HashMap;
 #[derive(Debug)]
 pub struct FrontendParse {
     pub cst: CstData,
-    pub manifest: Option<Expr>,
+    pub options: Vec<OptionAction>,
     pub program: Option<Program>,
     pub recovered: RecoveredProgram,
     pub diagnostics: Vec<Diagnostic>,
@@ -45,16 +45,16 @@ pub fn parse_registered(sources: &SourceDatabase, source_id: SourceId) -> Fronte
     let parsed = crate::syntax::forma::parse_document(source_id, source.text());
     let mut diagnostics = parsed.diagnostics;
     let lowerer = Lowerer::new(source_id, source.text(), &parsed.syntax);
-    let manifest = match lowerer.manifest() {
-        Ok(manifest) => manifest,
+    let options = match lowerer.option_actions() {
+        Ok(options) => options,
         Err(diagnostic) => {
             push_unique_diagnostic(&mut diagnostics, diagnostic);
-            None
+            Vec::new()
         }
     };
     let recovered = lowerer.recover_program(&mut diagnostics);
     let program = if diagnostics.is_empty() {
-        match lowerer.program() {
+        match lowerer.program(options.clone()) {
             Ok(program) => Some(program),
             Err(diagnostic) => {
                 diagnostics.push(diagnostic);
@@ -66,7 +66,7 @@ pub fn parse_registered(sources: &SourceDatabase, source_id: SourceId) -> Fronte
     };
     FrontendParse {
         cst: parsed.syntax,
-        manifest,
+        options,
         program,
         recovered,
         diagnostics,
@@ -129,27 +129,39 @@ enum CallArgument {
     },
 }
 
-fn validate_manifest_literal(expression: &Expr) -> Result<(), Diagnostic> {
+fn validate_option_literal(expression: &Expr) -> Result<(), Diagnostic> {
     let valid = match &expression.value {
         ExprKind::Int(_) | ExprKind::String(_) => true,
         ExprKind::Float(value) => value.is_finite(),
-        ExprKind::Atom(name) => matches!(name.as_str(), "None" | "True" | "False"),
+        ExprKind::Atom(_) => true,
         ExprKind::Array(values) => {
             for value in values {
-                validate_manifest_literal(value)?;
+                validate_option_literal(value)?;
             }
             true
         }
         ExprKind::Dict(fields) => {
             for field in fields {
-                if !field.value.decorators.is_empty() {
+                if field.value.name.is_none() {
                     return Err(Diagnostic::error(
-                        "@@manifest fields cannot have decorators",
+                        "option Dicts cannot contain spread fields",
                         field.location,
                     ));
                 }
-                validate_manifest_literal(&field.value.value)?;
+                if !field.value.decorators.is_empty() {
+                    return Err(Diagnostic::error(
+                        "option fields cannot have decorators",
+                        field.location,
+                    ));
+                }
+                validate_option_literal(&field.value.value)?;
             }
+            true
+        }
+        ExprKind::Call { callee, arguments }
+            if matches!(callee.value, ExprKind::Atom(_)) && arguments.len() == 1 =>
+        {
+            validate_option_literal(&arguments[0])?;
             true
         }
         _ => false,
@@ -158,10 +170,28 @@ fn validate_manifest_literal(expression: &Expr) -> Result<(), Diagnostic> {
         Ok(())
     } else {
         Err(Diagnostic::error(
-            "@@manifest accepts only JSON-compatible immediate values",
+            "option accepts only immediate values",
             expression.location,
         ))
     }
+}
+
+fn valid_option_key(key: &str) -> bool {
+    let mut segments = key.split('.');
+    let Some(first) = segments.next() else {
+        return false;
+    };
+    let rest = segments.collect::<Vec<_>>();
+    !rest.is_empty()
+        && std::iter::once(first).chain(rest).all(|segment| {
+            let mut characters = segment.chars();
+            characters
+                .next()
+                .is_some_and(|character| character.is_ascii_lowercase())
+                && characters.all(|character| {
+                    character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+                })
+        })
 }
 
 impl<'a> Lowerer<'a> {
@@ -177,7 +207,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    fn program(&self) -> Result<Program, Diagnostic> {
+    fn program(&self, options: Vec<OptionAction>) -> Result<Program, Diagnostic> {
         let root = NodeRef::ROOT;
         let body_node = self
             .rule_children(root)
@@ -220,7 +250,7 @@ impl<'a> Lowerer<'a> {
         }
         Ok(located(
             ProgramKind {
-                manifest: self.manifest()?,
+                options,
                 body,
                 authored_result,
             },
@@ -228,27 +258,49 @@ impl<'a> Lowerer<'a> {
         ))
     }
 
-    fn manifest(&self) -> Result<Option<Expr>, Diagnostic> {
-        let Some(node) = self
+    fn option_actions(&self) -> Result<Vec<OptionAction>, Diagnostic> {
+        let body = self
             .rule_children(NodeRef::ROOT)
-            .find(|node| self.rule(*node) == Some(Rule::ModuleManifest))
-        else {
-            return Ok(None);
-        };
-        let name = self
-            .children(node)
-            .find(|child| matches!(self.cst.get(*child), Node::Token(Token::Identifier, _)))
-            .ok_or_else(|| self.error(node, "module directive has no name"))?;
-        if self.text(name) != "manifest" {
-            return Err(self.error(name, "unknown module directive; expected @@manifest"));
+            .find(|node| self.rule(*node) == Some(Rule::Body))
+            .ok_or_else(|| self.error(NodeRef::ROOT, "program has no body"))?;
+        let mut options = Vec::new();
+        for child in self.children(body) {
+            let node = if self.rule(child) == Some(Rule::Binding) {
+                self.first_rule(child)
+                    .ok_or_else(|| self.error(child, "empty binding"))?
+            } else {
+                child
+            };
+            if self.rule(node) != Some(Rule::OptionBinding) {
+                continue;
+            }
+            let key_node = self
+                .rule_children(node)
+                .find(|child| self.rule(*child) == Some(Rule::StringLiteral))
+                .ok_or_else(|| self.error(node, "option has no key"))?;
+            let key = self.plain_string(key_node, "option key")?;
+            if !valid_option_key(&key) {
+                return Err(self.error(
+                    key_node,
+                    "option key must contain lower-case dotted segments",
+                ));
+            }
+            let value_node = self
+                .children(node)
+                .find(|child| {
+                    self.is_expression(*child)
+                        && self.cst.span(*child).start >= self.cst.span(key_node).end
+                })
+                .ok_or_else(|| self.error(node, "option has no value"))?;
+            let value = self.expression(value_node)?;
+            validate_option_literal(&value)?;
+            options.push(OptionAction {
+                key: located(key, self.location(key_node)),
+                value,
+                location: self.location(node),
+            });
         }
-        let value = self
-            .rule_children(node)
-            .find(|child| self.rule(*child) == Some(Rule::DictExpr))
-            .ok_or_else(|| self.error(node, "@@manifest requires a Dict literal"))?;
-        let value = self.expression(value)?;
-        validate_manifest_literal(&value)?;
-        Ok(Some(value))
+        Ok(options)
     }
 
     fn recover_program(&self, diagnostics: &mut Vec<Diagnostic>) -> RecoveredProgram {
@@ -260,6 +312,9 @@ impl<'a> Lowerer<'a> {
         if let Some(body) = root.body() {
             for binding in body.bindings() {
                 let node = binding.syntax().node_ref();
+                if matches!(binding, crate::syntax::forma::ast::Binding::Option(_)) {
+                    continue;
+                }
                 let lowered = match self.rule(node) {
                     Some(Rule::ImportBinding) => self.import_bindings(node),
                     Some(Rule::ExportStatement) => self.export_bindings(node),
@@ -345,6 +400,14 @@ impl<'a> Lowerer<'a> {
                         .map(BlockEntry::Binding)
                         .collect::<Vec<_>>()
                 }),
+                Some(Rule::OptionBinding) => {
+                    if allow_destructuring {
+                        return Err(self.error(
+                            child,
+                            "option declarations are allowed only at module top level",
+                        ));
+                    }
+                }
                 Some(Rule::LetPatternBinding) => {
                     if !allow_destructuring {
                         return Err(self.error(
@@ -421,6 +484,13 @@ impl<'a> Lowerer<'a> {
                                 .into_iter()
                                 .map(BlockEntry::Binding),
                         );
+                    } else if self.rule(inner) == Some(Rule::OptionBinding) {
+                        if allow_destructuring {
+                            return Err(self.error(
+                                inner,
+                                "option declarations are allowed only at module top level",
+                            ));
+                        }
                     } else {
                         entries.push(BlockEntry::Binding(self.binding(inner)?));
                     }
@@ -2953,28 +3023,32 @@ export { private as visible, identity as map };"#,
     }
 
     #[test]
-    fn lowers_only_immediate_module_manifests() {
+    fn lowers_only_immediate_ordered_module_options() {
         let program = parse(
-            "manifest.forma",
-            r#"@@manifest {name: "tool", dependencies: {}, enabled: 'True}; 0"#,
+            "options.forma",
+            r#"option "module.documentation" {name: "tool"}; export let value = 0; option "module.documentation" 'Stable;"#,
         )
         .unwrap();
+        assert_eq!(program.value.options.len(), 2);
+        assert_eq!(program.value.options[0].key.value, "module.documentation");
         assert!(matches!(
-            program.value.manifest.as_ref().map(|value| &value.value),
-            Some(ExprKind::Dict(_))
+            program.value.options[0].value.value,
+            ExprKind::Dict(_)
+        ));
+        assert!(matches!(
+            program.value.options[1].value.value,
+            ExprKind::Atom(_)
         ));
 
         for invalid in [
-            "@@other {}; 0",
-            "@@manifest {name: value}; 0",
-            "@@manifest {name: `tool-\\{value}`}; 0",
-            "let value = 1; @@manifest {}; 0",
-            "@@manifest {}; @@manifest {}; 0",
+            "@@manifest {}; export let value = 0;",
+            "option \"documentation\" {}; export let value = 0;",
+            "option \"module.documentation\" value; export let value = 0;",
+            "option \"module.documentation\" `tool-\\{value}`; export let value = 0;",
+            "option \"module.documentation\" {...value}; export let value = 0;",
+            "export def f = fn() { option \"module.documentation\" {}; 0 };",
         ] {
-            assert!(
-                parse("invalid-manifest.forma", invalid).is_err(),
-                "{invalid}"
-            );
+            assert!(parse("invalid-option.forma", invalid).is_err(), "{invalid}");
         }
     }
 

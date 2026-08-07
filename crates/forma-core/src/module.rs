@@ -30,6 +30,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+fn option_requires_main(key: &str) -> bool {
+    key.starts_with("crate.") || key.starts_with("exec.")
+}
+
 struct StaticDataParse {
     value: Option<SourcedValue>,
     diagnostics: Vec<Diagnostic>,
@@ -977,7 +981,14 @@ impl RecoverableWorkspaceBuilder<'_> {
                 .sources
                 .add_document(path.display().to_string(), source);
             let parsed = parse_registered(&self.sources, source_id);
-            let has_manifest = parsed.manifest.is_some();
+            let invalid_scoped_options = parsed
+                .options
+                .iter()
+                .filter(|option| {
+                    module_id != ModuleId::Main && option_requires_main(option.key.value.as_str())
+                })
+                .cloned()
+                .collect::<Vec<_>>();
             let program = parsed.program.clone();
             let imports = parsed
                 .recovered
@@ -1010,10 +1021,10 @@ impl RecoverableWorkspaceBuilder<'_> {
             let mut open_candidates: BTreeMap<String, Vec<RecoveryOpenImportCandidate>> =
                 BTreeMap::new();
             let mut diagnostics = Vec::new();
-            if has_manifest && module_id != ModuleId::Main {
+            for option in &invalid_scoped_options {
                 diagnostics.push(Diagnostic::error(
-                    "@@manifest is only allowed in @main",
-                    parsed.manifest.as_ref().expect("checked manifest").location,
+                    format!("option {:?} is only allowed in @main", option.key.value),
+                    option.location,
                 ));
             }
             if authority == ModuleAuthority::Ordinary
@@ -1034,7 +1045,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                     binding.location,
                 ));
             }
-            let legacy_module = program.as_ref().is_some_and(|program| {
+            let missing_exports = program.as_ref().is_some_and(|program| {
                 !program
                     .value
                     .body
@@ -1043,14 +1054,12 @@ impl RecoverableWorkspaceBuilder<'_> {
                     .iter()
                     .any(|binding| binding.value.kind == BindingKind::Export)
             });
-            if legacy_module {
-                let program = program.as_ref().expect("legacy module was parsed");
-                let message = if program.value.authored_result {
-                    "module results were removed; publish a named value with export"
-                } else {
-                    "module requires at least one explicit export"
-                };
-                diagnostics.push(Diagnostic::error(message, program.value.body.location));
+            if missing_exports {
+                let program = program.as_ref().expect("module was parsed");
+                diagnostics.push(Diagnostic::error(
+                    "module requires at least one explicit export",
+                    program.value.body.location,
+                ));
             }
             for (name, imported_name, open, location, target) in imports {
                 let target_module = match self.resolver.resolve_import(&module_id, &target) {
@@ -1263,8 +1272,8 @@ impl RecoverableWorkspaceBuilder<'_> {
             );
             let mut runtime_diagnostics = Vec::new();
             let strict = if self.cycle_members.contains(&module_id)
-                || has_manifest && module_id != ModuleId::Main
-                || legacy_module
+                || !invalid_scoped_options.is_empty()
+                || missing_exports
             {
                 None
             } else {
@@ -1300,7 +1309,7 @@ impl RecoverableWorkspaceBuilder<'_> {
             };
             diagnostics.extend(runtime_diagnostics);
             let strict_value = strict.as_ref().map(|(_, value)| value);
-            let state = if legacy_module {
+            let state = if missing_exports {
                 WorkspaceModuleState::Unavailable
             } else if strict_value.is_some() {
                 WorkspaceModuleState::Known
@@ -1854,9 +1863,12 @@ impl ModuleLoader {
         let source_name = path.display().to_string();
         let source_id = self.sources.add(source_name.clone(), source);
         let parsed = parse_registered(&self.sources, source_id);
-        if parsed.manifest.is_some() && *module_id != ModuleId::Main {
+        if let Some(option) = parsed.options.iter().find(|option| {
+            *module_id != ModuleId::Main && option_requires_main(option.key.value.as_str())
+        }) {
             return Err(ModuleError::new(format!(
-                "{source_name}: @@manifest is only allowed in @main"
+                "{source_name}: option {:?} is only allowed in @main",
+                option.key.value
             )));
         }
         let program = parsed.program.ok_or_else(|| {
@@ -1877,11 +1889,7 @@ impl ModuleLoader {
             .iter()
             .any(|binding| binding.value.kind == BindingKind::Export);
         if self.source_policy == ModuleSourcePolicy::ExplicitExports && !has_explicit_exports {
-            let message = if program.value.authored_result {
-                "module results were removed; publish a named value with export"
-            } else {
-                "module requires at least one explicit export"
-            };
+            let message = "module requires at least one explicit export";
             return Err(ModuleError::new(
                 self.sources
                     .render(&Diagnostic::error(message, program.value.body.location)),
@@ -2694,31 +2702,36 @@ import "./library.forma" *;
     }
 
     #[test]
-    fn production_modules_require_explicit_exports_but_expression_harness_does_not() {
+    fn production_modules_require_explicit_exports() {
         let directory = fixture_dir();
-        let legacy = directory.join("legacy.forma");
-        fs::write(&legacy, "40 + 2").unwrap();
+        let module = directory.join("missing-export.forma");
+        fs::write(&module, "let value = 42;").unwrap();
 
         let engine = recovery_engine();
-        let error = engine.load_module(&legacy, BTreeMap::new()).unwrap_err();
-        assert!(error.message().contains("module results were removed"));
+        let error = engine.load_module(&module, BTreeMap::new()).unwrap_err();
+        assert!(
+            error
+                .message()
+                .contains("requires at least one explicit export"),
+            "{}",
+            error.message()
+        );
 
-        let snapshot = engine.recover_workspace(&legacy).unwrap();
+        let snapshot = engine.recover_workspace(&module).unwrap();
         let module = snapshot
-            .module_by_path(&canonicalize(&legacy).unwrap())
+            .module_by_path(&canonicalize(&module).unwrap())
             .unwrap();
         assert_eq!(module.state, WorkspaceModuleState::Unavailable);
         assert_eq!(
             snapshot
                 .diagnostics()
                 .iter()
-                .filter(|diagnostic| diagnostic.message.contains("module results were removed"))
+                .filter(|diagnostic| diagnostic
+                    .message
+                    .contains("requires at least one explicit export"))
                 .count(),
             1
         );
-
-        let expression = load_module(&legacy, BTreeMap::new(), 100_000).unwrap();
-        assert_eq!(expression.execute(100_000).unwrap().to_string(), "42");
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -7550,7 +7563,7 @@ unchanged", "|"),
     }
 
     #[test]
-    fn embedded_manifest_resolves_before_imports_and_is_root_only() {
+    fn embedded_crate_options_resolve_before_imports_and_are_root_only() {
         let directory = fixture_dir();
         let app = directory.join("app");
         let dependency = directory.join("dependency");
@@ -7560,9 +7573,11 @@ unchanged", "|"),
         let main = app.join("bin-src/tool.forma");
         fs::write(
             &main,
-            r#"@@manifest {name: "tool", dependencies: {dep: {path: "../dependency"}}};
+            r#"option "crate.dependency" {name: "dep", source: 'Path({path: "../dependency"})};
                import "dep/answer.forma" as answer;
-               export let output = answer.answer;"#,
+               option "module.documentation" {category: "tooling"};
+               export let output = answer.answer;
+               option "module.documentation" {stability: "experimental"};"#,
         )
         .unwrap();
         fs::write(
@@ -7577,10 +7592,28 @@ unchanged", "|"),
             named_output(engine.execute(&loaded).unwrap()).to_string(),
             "42"
         );
+        let main_module = loaded
+            .workspace
+            .modules()
+            .iter()
+            .find(|module| module.name == "@main")
+            .unwrap();
+        assert_eq!(
+            main_module
+                .options
+                .iter()
+                .map(|option| option.key.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "crate.dependency",
+                "module.documentation",
+                "module.documentation"
+            ]
+        );
 
         fs::write(
             app.join("src/helper.forma"),
-            "@@manifest {name: \"nested\", dependencies: {}}; export let value = 1;",
+            "option \"crate.dependency\" {name: \"nested\", source: 'Path({path: \".\"})}; export let value = 1;",
         )
         .unwrap();
         fs::write(

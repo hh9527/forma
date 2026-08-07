@@ -1,6 +1,6 @@
 # RFC 0162: Scoped module option actions
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0059, RFC 0134, RFC 0147, RFC 0157
 
 ## Summary
@@ -158,3 +158,25 @@ is not a resolver-visible module form.
 5. remove legacy production trailing-result export coverage;
 6. expose option metadata to workspace/tooling snapshots;
 7. record implementation results and mark this RFC Implemented.
+
+## Implementation result
+
+The Forma frontend now recognizes `option` contextually only when it precedes
+a String key, so existing bindings and parameters named `option` remain valid.
+Top-level actions lower into an ordered `OptionAction` sequence separate from
+bindings and runtime expressions. Lowering validates dotted lower-case keys,
+closed immediate data including Tagged literals, and rejects options inside
+ordinary blocks.
+
+The resolver consumes repeated `crate.dependency` and `crate.format` actions
+before imports, enforces root-only scope, duplicate identities, exact formats,
+and external/embedded configuration exclusion. Workspace module snapshots
+publish option keys and source/value locations in authored order; option values
+never enter HIR, type inference, bytecode, exports, or evaluation.
+
+The `@@manifest` syntax and implementation path have been removed. Production
+module coverage now tests the explicit-export requirement without treating a
+trailing expression as a historical export; the isolated expression harness
+remains internal test infrastructure. RFC 0157 and its active GCC-wrapper
+discussion examples use repeated `crate.dependency` actions and carry the
+renumbered remaining child sequence.

@@ -8,9 +8,6 @@ pub(crate) fn elaborate_program(
     families: &HashMap<Location, PropagationFamily>,
 ) {
     let mut elaborator = Elaborator { families, next: 0 };
-    if let Some(manifest) = &mut program.value.manifest {
-        elaborator.expression(manifest);
-    }
     elaborator.block(&mut program.value.body);
 }
 

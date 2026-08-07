@@ -100,12 +100,13 @@ mod tests {
     }
 
     #[test]
-    fn cst_preserves_a_leading_module_manifest() {
+    fn cst_preserves_interleaved_module_options() {
         let source = r#"#!/usr/bin/env -S forma exec
-@@manifest {name: "tool", dependencies: {}};
-fn(settings, request) { {args: request.args} }"#;
+option "module.documentation" {name: "tool"};
+export def run = fn(settings, request) { {args: request.args} };
+option "module.documentation" {stability: "experimental"};"#;
         let mut sources = crate::source::SourceDatabase::default();
-        let id = sources.add("manifest.forma", source);
+        let id = sources.add("options.forma", source);
         let parsed = parse(id, source);
         assert!(!parsed.has_errors(), "{:?}", parsed.diagnostics);
         let mut reconstructed = String::new();

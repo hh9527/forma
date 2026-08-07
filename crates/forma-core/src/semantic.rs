@@ -140,6 +140,13 @@ pub struct WorkspaceImport {
     pub target: WorkspaceModuleId,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceOption {
+    pub key: String,
+    pub location: Location,
+    pub value_location: Location,
+}
+
 #[derive(Clone, Debug)]
 pub struct WorkspaceModule {
     pub id: WorkspaceModuleId,
@@ -149,6 +156,7 @@ pub struct WorkspaceModule {
     pub state: WorkspaceModuleState,
     pub source: Option<SourceId>,
     pub imports: Vec<WorkspaceImport>,
+    pub options: Vec<WorkspaceOption>,
     pub result_location: Option<Location>,
     pub result_type: Option<WorkspaceTypeId>,
 }
@@ -533,6 +541,7 @@ impl WorkspaceSnapshot {
                 state: WorkspaceModuleState::Partial,
                 source: Some(source),
                 imports: Vec::new(),
+                options: Vec::new(),
                 result_location: parsed
                     .recovered
                     .result
@@ -970,6 +979,22 @@ impl WorkspaceSnapshot {
                 .analysis
                 .as_ref()
                 .map(|analysis| type_maps[index][analysis.result_type.index()]);
+            let options = input
+                .program
+                .as_ref()
+                .map(|program| {
+                    program
+                        .value
+                        .options
+                        .iter()
+                        .map(|option| WorkspaceOption {
+                            key: option.key.value.clone(),
+                            location: option.location,
+                            value_location: option.value.location,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             modules.push(WorkspaceModule {
                 id,
                 name: input.key.clone(),
@@ -978,6 +1003,7 @@ impl WorkspaceSnapshot {
                 state: input.state,
                 source: input.source,
                 imports,
+                options,
                 result_location: input
                     .program
                     .as_ref()

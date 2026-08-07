@@ -49,9 +49,6 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
             .with_message(message)
             .with_label(Label::primary((), span))
     }
-    fn predicate_program_1(&self) -> bool {
-        self.current == Token::At && self.peek(1) == Token::At
-    }
     fn predicate_body_1(&self) -> bool {
         matches!(
             self.current,
@@ -59,6 +56,7 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
                 | Token::Decl
                 | Token::Def
                 | Token::Native
+                | Token::Option
                 | Token::Type
                 | Token::Import
                 | Token::Export
@@ -92,8 +90,8 @@ impl<'a> ParserCallbacks<'a> for Parser<'a> {
     fn predicate_binding_5(&self) -> bool {
         self.current == Token::Export
     }
-    fn predicate_manifest_dict_1(&self) -> bool {
-        self.peek(1) != Token::RBrace
+    fn predicate_binding_6(&self) -> bool {
+        self.current == Token::Option
     }
     fn predicate_primary_1(&self) -> bool {
         self.peek(1) != Token::RParen

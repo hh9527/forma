@@ -14,12 +14,16 @@ and reusable Forma logic, and exports a typed pure `ExecFn` that `forma exec
 ```forma
 #!/usr/bin/env -S forma exec --dry-run --
 
-option "dependencies" {
-    "gcc-toolchain-define": 'GithubRepo({
+option "crate.dependency" {
+    name: "gcc-toolchain-define",
+    source: 'GithubRepo({
         repo: "hh9527/gcc-toolchain-define",
         rev: "0123456789abcdef",
     }),
-    "gcc-wrapper": 'GithubRepo({
+};
+option "crate.dependency" {
+    name: "gcc-wrapper",
+    source: 'GithubRepo({
         repo: "hh9527/gcc-wrapper.forma",
         rev: "0123456789abcdef",
     }),
@@ -85,7 +89,7 @@ importing `ExecFn` grants no effect capability. The user selects `forma exec`;
 that Host supplies `ExecSettings` and `ExecRequest`, calls the explicit `exec`
 export, validates the resulting `ExecEnv`, and prints a canonical plan.
 
-`option "dependencies"` is static Host input, not a runtime Forma expression
+`option "crate.dependency"` is static Host input, not a runtime Forma expression
 that performs network access. The resolver reads it before module evaluation,
 obtains a fixed module graph, and then applies ordinary deterministic import
 resolution. Application code cannot add dependencies during evaluation.
@@ -102,14 +106,14 @@ The planned child sequence is:
    including exported higher-order closures and module-level helper reads;
 2. RFC 0159: define the `std/rt-types/exec.forma` protocol surface and the
    `ExecFn` alias while keeping effect interpretation in the Host adapter;
-3. RFC 0160: add literal-only top-level `option` declarations, main-module
-   restrictions, duplicate handling, and deterministic Host extraction;
-4. RFC 0161: define pinned external dependency specifications, canonical
+3. RFC 0162: replace `@@manifest` with scoped ordered option actions,
+   including the initial path dependency and exact format consumers;
+4. RFC 0163: define pinned external dependency specifications, canonical
    module identities, provider/cache boundaries, and dependency-relative
    paths such as `gcc-wrapper/toolchain.forma`;
-5. RFC 0162: add the minimum type-preserving Dict lookup and argv-rewrite
+5. RFC 0164: add the minimum type-preserving Dict lookup and argv-rewrite
    combinators needed for explicit input validation and conflict handling;
-6. RFC 0163: add the end-to-end GCC-wrapper fixture, source-data blame,
+6. RFC 0165: add the end-to-end GCC-wrapper fixture, source-data blame,
    canonical dry-run output, cancellation/quota coverage, and documentation
    evidence.
 
@@ -199,7 +203,7 @@ as an executable plan.
 An option declaration is allowed only in the non-importable top-level module:
 
 ```forma
-option "dependencies" { ... };
+option "crate.dependency" {name: "dependency-name", source: ...};
 ```
 
 Its payload is restricted to the same closed literal data accepted by the
@@ -207,9 +211,9 @@ embedded-manifest boundary. It cannot call a Function, reference a binding,
 read an import, interpolate Host input, or depend on evaluation order. The
 Host extracts and validates options before resolving ordinary imports.
 
-RFC 0160 must define coexistence and precedence with `forma-deps.json` and the
-existing `@@manifest`. Conflicts must be deterministic and diagnostic; silent
-merging or last-writer-wins behavior is not acceptable.
+RFC 0162 defines coexistence with `forma-deps.json` and removes the existing
+`@@manifest`. Conflicts are deterministic and diagnostic; silent merging or
+last-writer-wins behavior is not accepted.
 
 ## Pinned dependency resolution
 
@@ -240,7 +244,7 @@ example:
 dict.get(request.env, "TARGET") # Option(String)
 ```
 
-The exact helper names belong to RFC 0162. Its scope is the minimum needed to
+The exact helper names belong to RFC 0164. Its scope is the minimum needed to
 detect required input, reject or normalize conflicting `--sysroot` and prefix
 map arguments, and build a new immutable argv. It does not introduce a generic
 command-line grammar or mutable builder.

@@ -12,6 +12,13 @@ pub type Decorator = Located<DecoratorKind>;
 pub type StringPart = Located<StringPartKind>;
 
 #[derive(Clone, Debug)]
+pub struct OptionAction {
+    pub key: Located<String>,
+    pub value: Expr,
+    pub location: Location,
+}
+
+#[derive(Clone, Debug)]
 pub struct ClosureParameter {
     pub name: Identifier,
     pub annotation: Option<Expr>,
@@ -19,7 +26,7 @@ pub struct ClosureParameter {
 
 #[derive(Clone, Debug)]
 pub struct ProgramKind {
-    pub manifest: Option<Expr>,
+    pub options: Vec<OptionAction>,
     pub body: Block,
     pub authored_result: bool,
 }

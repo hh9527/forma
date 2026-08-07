@@ -26,6 +26,7 @@ pub enum Token {
     Decl,
     Def,
     Native,
+    Option,
     For,
     Type,
     Fn,
@@ -96,6 +97,8 @@ enum NormalToken {
     Def,
     #[token("native")]
     Native,
+    #[token("option")]
+    Option,
     #[token("for")]
     For,
     #[token("type")]
@@ -280,6 +283,14 @@ fn scan_raw_string(lexer: &mut Lexer<'_, NormalToken>) -> bool {
 }
 
 pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<Span>) {
+    tokenize_internal(source, diags, true)
+}
+
+fn tokenize_internal(
+    source: &str,
+    diags: &mut Vec<Diagnostic>,
+    contextualize: bool,
+) -> (Vec<Token>, Vec<Span>) {
     let mut tokens = Vec::new();
     let mut spans = Vec::new();
     let mut active = ActiveLexer::Normal(NormalToken::lexer(source));
@@ -408,7 +419,25 @@ pub fn tokenize(source: &str, diags: &mut Vec<Diagnostic>) -> (Vec<Token>, Vec<S
         spans.push(span);
         active = next;
     }
+    if contextualize {
+        contextualize_option_tokens(&mut tokens);
+    }
     (tokens, spans)
+}
+
+fn contextualize_option_tokens(tokens: &mut [Token]) {
+    for index in 0..tokens.len() {
+        if tokens[index] != Token::Option {
+            continue;
+        }
+        let next = tokens[index + 1..]
+            .iter()
+            .copied()
+            .find(|token| !matches!(token, Token::Whitespace | Token::Comment));
+        if !matches!(next, Some(Token::DoubleQuote | Token::RawString)) {
+            tokens[index] = Token::Identifier;
+        }
+    }
 }
 
 pub fn tokenize_document(
@@ -430,7 +459,7 @@ fn tokenize_fragments<'a>(
     for fragment in fragments {
         pending.push_str(fragment);
         let mut local_diags = Vec::new();
-        let (local_tokens, local_spans) = tokenize(&pending, &mut local_diags);
+        let (local_tokens, local_spans) = tokenize_internal(&pending, &mut local_diags, false);
         let commit = stable_root_prefix(&local_tokens, &local_spans, &pending);
         if commit == 0 {
             continue;
@@ -461,7 +490,7 @@ fn tokenize_fragments<'a>(
 
     if !pending.is_empty() {
         let mut local_diags = Vec::new();
-        let (local_tokens, local_spans) = tokenize(&pending, &mut local_diags);
+        let (local_tokens, local_spans) = tokenize_internal(&pending, &mut local_diags, false);
         tokens.extend(local_tokens);
         spans.extend(
             local_spans
@@ -476,6 +505,7 @@ fn tokenize_fragments<'a>(
         }
     }
 
+    contextualize_option_tokens(&mut tokens);
     (tokens, spans)
 }
 
@@ -543,6 +573,7 @@ impl From<NormalToken> for Token {
             NormalToken::Decl => Self::Decl,
             NormalToken::Def => Self::Def,
             NormalToken::Native => Self::Native,
+            NormalToken::Option => Self::Option,
             NormalToken::For => Self::For,
             NormalToken::Type => Self::Type,
             NormalToken::Fn => Self::Fn,
@@ -651,6 +682,24 @@ mod tests {
     }
 
     #[test]
+    fn option_is_contextual_before_a_string_key() {
+        let mut diagnostics = Vec::new();
+        let (tokens, _) = tokenize(
+            "let option = 1; option \"module.test\" {}; option",
+            &mut diagnostics,
+        );
+        assert_eq!(
+            tokens
+                .iter()
+                .copied()
+                .filter(|token| matches!(token, Token::Option | Token::Identifier))
+                .collect::<Vec<_>>(),
+            vec![Token::Identifier, Token::Option, Token::Identifier]
+        );
+        assert!(diagnostics.is_empty());
+    }
+
+    #[test]
     fn chunk_bridge_matches_contiguous_lexing() {
         let samples = [
             "#!/usr/bin/env -S forma run\nlet identifier = 123.456 # comment\nidentifier",
@@ -660,6 +709,7 @@ mod tests {
                 second \{name}`"#,
             "_12 |> transform\\(_1, 2)",
             "let 中 = \"emoji 😀 and escape \\n\"; 中",
+            "let option = 1; option \"module.test\" {}; option",
         ];
         for sample in samples {
             let mut expected_diags = Vec::new();

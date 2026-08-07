@@ -204,12 +204,16 @@ wrapper 这类应用级案例持续验证。
 ```forma
 #!/usr/bin/env -S forma exec --dry-run --
 
-option "dependencies" {
-    "gcc-toolchain-define": 'GithubRepo({
+option "crate.dependency" {
+    name: "gcc-toolchain-define",
+    source: 'GithubRepo({
         repo: "hh9527/gcc-toolchain-define",
         rev: "0123456789abcdef",
     }),
-    "gcc-wrapper": 'GithubRepo({
+};
+option "crate.dependency" {
+    name: "gcc-wrapper",
+    source: 'GithubRepo({
         repo: "hh9527/gcc-wrapper.forma",
         rev: "0123456789abcdef",
     }),

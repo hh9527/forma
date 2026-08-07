@@ -204,7 +204,7 @@ pub(crate) fn compile_metadata_initializer(
     );
     let metadata_program = located(
         ProgramKind {
-            manifest: None,
+            options: Vec::new(),
             body: located(
                 BlockKind {
                     bindings,

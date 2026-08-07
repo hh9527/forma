@@ -48,12 +48,16 @@ bin-src/ar.forma
 ```forma
 #!/usr/bin/env -S forma exec --dry-run --
 
-option "dependencies" {
-    "gcc-toolchain-define": 'GithubRepo({
+option "crate.dependency" {
+    name: "gcc-toolchain-define",
+    source: 'GithubRepo({
         repo: "hh9527/gcc-toolchain-define",
         rev: "0123456789abcdef",
     }),
-    "gcc-wrapper": 'GithubRepo({
+};
+option "crate.dependency" {
+    name: "gcc-wrapper",
+    source: 'GithubRepo({
         repo: "hh9527/gcc-wrapper.forma",
         rev: "0123456789abcdef",
     }),
@@ -66,7 +70,7 @@ import "gcc-wrapper/toolchain.forma" { wrap_gcc };
 export def exec: ExecFn = wrap_gcc(source);
 ```
 
-这里的 `option "dependencies"` 是 Host/resolver 消费的静态模块选项，不是运行
+这里的 `option "crate.dependency"` 是 Host/resolver 消费的静态模块选项，不是运行
 期求值产生的依赖，也不把下载能力交给 Forma 程序。它只包含立即数，锁定仓库
 和 revision；resolver 获取并注册模块以后，后面的 import 仍然服从普通的确定
 解析规则。`std/rt-types/exec.forma` 不属于这张远程依赖表：它是普通的内置
@@ -80,7 +84,7 @@ runtime protocol 类型模块。import 只取得协议；用户选择 `forma exe
 - `std/rt-types/exec.forma.ExecFn` 定义 `forma exec` Host 接受的稳定入口协议；
 - 顶层文件只装配依赖并导出 `exec`，没有隐式模板替换或构建 DSL。
 
-当前对应能力分别是 `@@manifest`、`forma-deps.json` 中的 path dependency，以及
+当前对应能力分别是 `crate.dependency` option、`forma-deps.json` 中的 path dependency，以及
 显式的 `Fn(ExecSettings, ExecRequest) -> ExecEnv`。尚待推进的是静态 `option`
 表面语法、GitHub dependency provider、runtime protocol 类型模块和 `ExecFn`
 类型名。
@@ -459,7 +463,7 @@ Parse、Display、codec 和 validator 已经提供构建这些领域类型的路
 不需要额外的源码打包机制。需要补齐的是让顶层入口直接表达开发阶段由
 `forma-deps.json` 承担的依赖约束：
 
-- `option "dependencies"` 只能包含 Host 可静态读取的立即数；
+- `option "crate.dependency"` 只能包含 Host 可静态读取的立即数；
 - `GithubRepo` 以完整 revision 锁定依赖，不能在求值期间漂移；
 - resolver 先取得远程依赖，再执行普通 import 解析；
 - 依赖名与包内路径需要确定、无歧义的映射；
