@@ -234,15 +234,20 @@ export def exec: ExecFn = fn(settings, request) {
     let sysroot_url = `https://example.invalid/sysroot-\{platform}.tar.gz`;
     let compiler = `\{settings.install_prefix}/\{hash.sha256(compiler_url)}`;
     let sysroot = `\{settings.install_prefix}/\{hash.sha256(sysroot_url)}`;
+    let compiler_file = `\{settings.download_prefix}/\{hash.sha256(compiler_url)}`;
+    let sysroot_file = `\{settings.download_prefix}/\{hash.sha256(sysroot_url)}`;
     {
         install: [
-            'Unpack({dest: compiler, ty: 'TarGzip, src: compiler_url, strip: 1, digest: 'None}),
-            'Unpack({dest: sysroot, ty: 'TarGzip, src: sysroot_url, strip: 1, digest: 'None}),
+            'Unpack({dest: compiler, file: compiler_file, ty: 'TarGzip, src: compiler_url, strip: 1, digest: 'None}),
+            'Unpack({dest: sysroot, file: sysroot_file, ty: 'TarGzip, src: sysroot_url, strip: 1, digest: 'None}),
         ],
         cwd: 'Some(request.cwd),
         bin: `\{compiler}/bin/gcc`,
         args: arrays.flat_map([[`--sysroot=\{sysroot}`], request.args], fn(part) { part }),
-        env: {VISIBLE: request.env.FORMA_EXEC_TEST},
+        env: {
+            clear: 'True,
+            update: {HIDDEN: 'None, VISIBLE: 'Some(request.env.FORMA_EXEC_TEST)},
+        },
     }
 };"#,
     )
@@ -276,11 +281,16 @@ export def exec: ExecFn = fn(settings, request) {
         "{stdout}"
     );
     assert!(
-        stdout.contains(r#""env":{"VISIBLE":"visible"}"#),
+        stdout.contains(r#""env":{"clear":true,"update":{"HIDDEN":null,"VISIBLE":"visible"}}"#),
         "{stdout}"
     );
     assert_eq!(stdout.matches(r#""Unpack""#).count(), 2, "{stdout}");
     assert!(stdout.contains(r#""ty":"TarGzip""#), "{stdout}");
+    assert!(stdout.contains(r#""file":"#), "{stdout}");
+    assert!(
+        stdout.contains(&format!("{}/forma/exec/downloads/", cache.display())),
+        "{stdout}"
+    );
     assert!(
         stdout.contains(&format!("{}/forma/exec/installs/", cache.display())),
         "{stdout}"
@@ -326,7 +336,10 @@ fn exec_captures_only_declared_environment_names() {
         r#"option "exec.capture-envs" ["FORMA_CAPTURED", "FORMA_MISSING"];
 option "exec.capture-envs" ["FORMA_CAPTURED"];
 export def exec = fn(settings, request) {
-    {install: [], cwd: 'None, bin: "true", args: [], env: request.env}
+    {install: [], cwd: 'None, bin: "true", args: [], env: {
+        clear: 'False,
+        update: {FORMA_CAPTURED: 'Some(request.env.FORMA_CAPTURED)},
+    }}
 };"#,
     )
     .unwrap();
@@ -345,7 +358,7 @@ export def exec = fn(settings, request) {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.contains(r#""env":{"FORMA_CAPTURED":"visible"}"#),
+        stdout.contains(r#""env":{"clear":false,"update":{"FORMA_CAPTURED":"visible"}}"#),
         "{stdout}"
     );
     assert!(!stdout.contains("FORMA_UNDECLARED"), "{stdout}");
@@ -401,7 +414,9 @@ fn gcc_wrapper_fixture_builds_reusable_deterministic_plans() {
     assert!(gcc_stdout.contains("--sysroot="), "{gcc_stdout}");
     assert!(gcc_stdout.contains("-ffile-prefix-map="), "{gcc_stdout}");
     assert!(gcc_stdout.contains("-fdebug-prefix-map="), "{gcc_stdout}");
-    assert!(gcc_stdout.contains(r#""env":{"TARGET":"x86_64-linux-gnu"}"#));
+    assert!(gcc_stdout.contains(r#""env":{"clear":false,"update":{}}"#));
+    assert!(!gcc_stdout.contains(r#""TARGET":"x86_64-linux-gnu""#));
+    assert_eq!(gcc_stdout.matches(r#""file":"#).count(), 2);
     assert!(!cache.exists());
 
     let repeated = invoke("gcc.forma", &["-c", "main.c"], Some("x86_64-linux-gnu"));
@@ -519,7 +534,7 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
     let malformed = directory.join("malformed.forma");
     fs::write(
         &malformed,
-        "export def exec = fn(settings, request) { {install: ['Copy({})], cwd: 'None, bin: \"x\", args: [], env: {}} };",
+        "export def exec = fn(settings, request) { {install: ['Copy({})], cwd: 'None, bin: \"x\", args: [], env: {clear: 'False, update: {}}} };",
     )
     .unwrap();
     let malformed = forma()
@@ -532,10 +547,27 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
             .contains("ExecEnv.install[0] has unknown Install variant")
     );
 
+    let missing_file = directory.join("missing-file.forma");
+    fs::write(
+        &missing_file,
+        "export def exec = fn(settings, request) { {install: ['Unpack({dest: \"/dest\", digest: 'None, src: \"https://example.invalid/a.tar\", strip: 1, ty: 'Tar})], cwd: 'None, bin: \"x\", args: [], env: {clear: 'False, update: {}}} };",
+    )
+    .unwrap();
+    let missing_file = forma()
+        .args(["exec", "--dry-run", missing_file.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!missing_file.status.success());
+    assert!(missing_file.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&missing_file.stderr)
+            .contains("ExecEnv.install[0].Unpack has an invalid field shape")
+    );
+
     let bad_env = directory.join("bad-env.forma");
     fs::write(
         &bad_env,
-        "export def exec = fn(settings, request) { {install: [], cwd: 'None, bin: \"x\", args: [], env: {BAD: 1}} };",
+        "export def exec = fn(settings, request) { {install: [], cwd: 'None, bin: \"x\", args: [], env: {clear: 'False, update: {BAD: 1}}} };",
     )
     .unwrap();
     let bad_env = forma()
@@ -544,12 +576,15 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
         .unwrap();
     assert!(!bad_env.status.success());
     assert!(bad_env.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&bad_env.stderr).contains("ExecEnv.env.BAD must be a String"));
+    assert!(
+        String::from_utf8_lossy(&bad_env.stderr)
+            .contains("ExecEnv.env.update.BAD must be Option(String)")
+    );
 
     let bad_cwd = directory.join("bad-cwd.forma");
     fs::write(
         &bad_cwd,
-        "export def exec = fn(settings, request) { {install: [], cwd: 'Some(1), bin: \"x\", args: [], env: {}} };",
+        "export def exec = fn(settings, request) { {install: [], cwd: 'Some(1), bin: \"x\", args: [], env: {clear: 'False, update: {}}} };",
     )
     .unwrap();
     let bad_cwd = forma()

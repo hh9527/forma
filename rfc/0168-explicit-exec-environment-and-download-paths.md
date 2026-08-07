@@ -1,6 +1,6 @@
 # RFC 0168: Explicit exec environment and download paths
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0062, RFC 0159, RFC 0163, RFC 0166
 
 ## Summary
@@ -152,3 +152,18 @@ atomically. An `ExecEnv` containing the old `Dict(String)` environment or an
 Work returns to discussion if completion requires performing effects, letting
 the Host derive an omitted path, automatically forwarding captured input, or
 introducing mutable/effectful plan construction.
+
+## Implementation result
+
+Implemented in August 2026. The authoritative source protocol now exports
+`ExecEnvironment`, gives `ExecSettings` separate download/install prefixes,
+requires `UnpackOpt.file`, and uses the explicit environment policy from
+`ExecEnv`. The CLI adapter supplies both prefixes and validates/renders the
+new shapes without deriving missing values.
+
+The GCC-wrapper fixture hashes each package URL under `download_prefix`, keeps
+its independent install identity under `install_prefix`, and returns
+`{clear: 'False, update: {}}`. Captured TARGET selects the sysroot but is not
+forwarded. CLI coverage also demonstrates explicit forwarding through
+`'Some`, renders deletion as `null`, and rejects old environment and Unpack
+shapes. Repeated dry-runs remain deterministic and do not create the cache.

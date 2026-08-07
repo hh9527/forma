@@ -4,6 +4,7 @@
 };
 @struct type ExecSettings = {
     platform: Platform,
+    download_prefix: String,
     install_prefix: String,
 };
 @struct type ExecRequest = {
@@ -16,11 +17,16 @@
     Tar: 'None,
 };
 @struct type UnpackOpt = {
+    file: String,
     dest: String,
     ty: UnpackType,
     src: String,
     strip: Int,
     digest: Option(String),
+};
+@struct type ExecEnvironment = {
+    clear: Bool,
+    update: Dict(Option(String)),
 };
 @enum type Install = {
     Unpack: UnpackOpt,
@@ -30,7 +36,7 @@
     cwd: Option(String),
     bin: String,
     args: Array(String),
-    env: Dict(String),
+    env: ExecEnvironment,
 };
 type ExecFn = Fn(ExecSettings, ExecRequest) -> ExecEnv;
 export {
@@ -40,6 +46,7 @@ export {
     UnpackType,
     UnpackOpt,
     Install,
+    ExecEnvironment,
     ExecEnv,
     ExecFn,
 };

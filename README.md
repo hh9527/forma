@@ -202,15 +202,21 @@ function:
 
 ```forma
 export def exec: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
-    # Purely compute the complete execution plan.
-    make_exec(settings, request)
+    let plan = make_exec(settings, request);
+    {
+        ...plan,
+        env: { clear: 'False, update: {} },
+    }
 };
 ```
 
-The host supplies the platform, install prefix, environment, arguments, and
-working directory. Forma returns a fully concrete value containing artifacts,
-paths, binary, arguments, and environment. The host expands no templates and
-reinterprets no policy.
+The host supplies the platform, download and install prefixes, captured input
+environment, arguments, and working directory. Capture only determines what
+Forma may observe; it does not implicitly forward variables to the target
+process. Forma explicitly returns a `{ clear, update }` environment policy and
+computes both the download file and installation directory for each action.
+The host derives no cache address, expands no templates, and reinterprets no
+policy.
 
 `forma run` reads the named export `output`; `forma exec` invokes `exec`; and
 `forma build` invokes `build`. A build entry can be written as

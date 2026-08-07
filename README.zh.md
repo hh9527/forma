@@ -142,12 +142,15 @@ type Endpoint = { host: String, port: Int };
 
 ```forma
 export def exec: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
-    # 纯粹地计算完整执行计划
-    make_exec(settings, request)
+    let plan = make_exec(settings, request);
+    {
+        ...plan,
+        env: { clear: 'False, update: {} },
+    }
 };
 ```
 
-Host 提供平台、安装前缀、环境、参数和工作目录。Forma 返回包含工件、路径、二进制、参数与环境的完整具体值。Host 不展开模板，也不重新解释政策。
+Host 提供平台、下载与安装前缀、捕获的输入环境、参数和工作目录。捕获只决定 Forma 可以观察哪些变量，不会隐式转发给目标进程。Forma 显式返回 `{ clear, update }` 环境策略，并为每个安装动作计算下载文件与安装目录。Host 不计算缓存地址、不展开模板，也不重新解释政策。
 
 `forma run` 读取命名导出 `output`；`forma exec` 调用 `exec`；`forma build` 调用 `build`。构建入口可写为 `export def build: Fn() -> build.OutputPlan = ...;`。adapter 校验规范化相对路径、拒绝重复目标并输出 canonical JSON。文本生成使用普通 String 与函数，而不是第二门模板语言。
 

@@ -288,6 +288,10 @@ fn exec_settings(vm: &mut Vm) -> Result<Value, String> {
     ])?;
     vm.make_dict(vec![
         (
+            "download_prefix".into(),
+            Value::string(path_string(&cache.join("downloads"))?),
+        ),
+        (
             "install_prefix".into(),
             Value::string(path_string(&cache.join("installs"))?),
         ),
@@ -437,18 +441,24 @@ fn canonical_exec_json(value: &Value) -> Result<String, String> {
     }
 
     fn write_environment(output: &mut String, value: &Value, path: &str) -> Result<(), String> {
-        let Value::Dict(environment) = value else {
-            return Err(format!(
-                "{path} must be a Dict, found {}",
-                value.type_name()
-            ));
+        let environment = expect_dict(value, path, &["clear", "update"])?;
+        let Value::Atom(clear) = environment.get("clear").expect("field checked") else {
+            return Err(format!("{path}.clear must be a Bool Atom"));
         };
-        output.push('{');
-        for (index, (name, value)) in environment
+        let clear = match clear.name() {
+            "True" => true,
+            "False" => false,
+            _ => return Err(format!("{path}.clear must be 'True or 'False")),
+        };
+        let Value::Dict(updates) = environment.get("update").expect("field checked") else {
+            return Err(format!("{path}.update must be a Dict"));
+        };
+        write!(output, "{{\"clear\":{clear},\"update\":{{").unwrap();
+        for (index, (name, value)) in updates
             .shape()
             .fields()
             .iter()
-            .zip(environment.values())
+            .zip(updates.values())
             .enumerate()
         {
             if index > 0 {
@@ -456,9 +466,9 @@ fn canonical_exec_json(value: &Value) -> Result<String, String> {
             }
             write_string(output, name);
             output.push(':');
-            write_string(output, expect_string(value, &format!("{path}.{name}"))?);
+            write_option_string(output, value, &format!("{path}.update.{name}"))?;
         }
-        output.push('}');
+        output.push_str("}}");
         Ok(())
     }
 
@@ -473,7 +483,11 @@ fn canonical_exec_json(value: &Value) -> Result<String, String> {
             ));
         }
         let path = format!("{path}.Unpack");
-        let unpack = expect_dict(payload, &path, &["dest", "digest", "src", "strip", "ty"])?;
+        let unpack = expect_dict(
+            payload,
+            &path,
+            &["dest", "digest", "file", "src", "strip", "ty"],
+        )?;
         let dest = expect_string(
             unpack.get("dest").expect("field checked"),
             &format!("{path}.dest"),
@@ -481,6 +495,10 @@ fn canonical_exec_json(value: &Value) -> Result<String, String> {
         let src = expect_string(
             unpack.get("src").expect("field checked"),
             &format!("{path}.src"),
+        )?;
+        let file = expect_string(
+            unpack.get("file").expect("field checked"),
+            &format!("{path}.file"),
         )?;
         let Value::Int(strip) = unpack.get("strip").expect("field checked") else {
             return Err(format!("{path}.strip must be an Int"));
@@ -504,6 +522,8 @@ fn canonical_exec_json(value: &Value) -> Result<String, String> {
             unpack.get("digest").expect("field checked"),
             &format!("{path}.digest"),
         )?;
+        output.push_str(",\"file\":");
+        write_string(output, file);
         output.push_str(",\"src\":");
         write_string(output, src);
         write!(output, ",\"strip\":{strip},\"ty\":").unwrap();

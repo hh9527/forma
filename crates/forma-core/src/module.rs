@@ -7133,7 +7133,7 @@ unchanged", "|"),
                            cwd: 'Some(request.cwd),
                            bin: `\{settings.install_prefix}/\{tool}-\{suffix}`,
                            args: request.args,
-                           env: request.env,
+                           env: {clear: 'False, update: {}},
                        }
                    }
                };"#,
@@ -7148,6 +7148,7 @@ unchanged", "|"),
                    library.command("gcc")(
                        {
                            platform: {os: "linux", arch: "x86_64"},
+                           download_prefix: "/downloads",
                            install_prefix: "/cache",
                        },
                        {args: ["-c", "x.c"], env: {TARGET: "aarch64"}, cwd: "/work"},
@@ -7161,7 +7162,7 @@ unchanged", "|"),
         let loaded = engine.load_module(&main, BTreeMap::new()).unwrap();
         assert_eq!(
             named_output(engine.execute(&loaded).unwrap()).to_string(),
-            "(41, 42, {args: [\"-c\", \"x.c\"], bin: \"/cache/gcc-2\", cwd: 'Some(\"/work\"), env: {TARGET: \"aarch64\"}, install: []}, 'True)"
+            "(41, 42, {args: [\"-c\", \"x.c\"], bin: \"/cache/gcc-2\", cwd: 'Some(\"/work\"), env: {clear: 'False, update: {}}, install: []}, 'True)"
         );
         fs::remove_dir_all(directory).unwrap();
     }
