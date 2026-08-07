@@ -1,0 +1,7 @@
+import "./ontology.forma" { compile };
+
+export let output = compile({
+    measures: ["net_revenue"],
+    dimensions: ["order_month", "customer_region"],
+});
+

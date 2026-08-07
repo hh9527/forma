@@ -1,0 +1,148 @@
+import "std/array" as array;
+import "std/string" as string;
+
+@struct type ReportIntent = {
+    measures: Array(String),
+    dimensions: Array(String),
+};
+
+@struct type Compilation = {
+    sql: Option(String),
+    diagnostics: Array(BlameError),
+};
+
+def known_measure = fn(key) {
+    key == "net_revenue" || key == "units_sold"
+};
+
+def known_dimension = fn(key) {
+    key == "order_month"
+        || key == "customer_region"
+        || key == "organization_kind"
+        || key == "product_category"
+};
+
+def dimension_allowed = fn(measure, dimension) {
+    dimension == "order_month"
+        || dimension == "customer_region"
+        || (measure == "net_revenue" && dimension == "organization_kind")
+        || (measure == "units_sold" && dimension == "product_category")
+};
+
+def measure_diagnostics = fn(intent) {
+    let diagnostics = array.flat_map(intent.measures, fn(measure) {
+        if known_measure(measure) {
+            []
+        } else {
+            [blame!(measure, `unknown measure "\{measure}"`)]
+        }
+    });
+    if array.length(intent.measures) == 1 {
+        diagnostics
+    } else {
+        array.push(
+            diagnostics,
+            blame!(intent.measures, "the initial compiler requires exactly one measure"),
+        )
+    }
+};
+
+def first_measure = fn(intent) {
+    match array.find(intent.measures, known_measure) {
+        'Some(measure) => measure,
+        'None => "",
+    }
+};
+
+def dimension_diagnostics = fn(intent, measure) {
+    array.flat_map(intent.dimensions, fn(dimension) {
+        if known_dimension(dimension) == 'False {
+            [blame!(dimension, `unknown dimension "\{dimension}"`)]
+        } else {
+            if known_measure(measure) && (dimension_allowed(measure, dimension) == 'False) {
+                [blame!(dimension, `measure "\{measure}" cannot be grouped by "\{dimension}" at its current grain`)]
+            } else {
+                []
+            }
+        }
+    })
+};
+
+def dimension_expression = fn(key) {
+    match key {
+        "order_month" => "substr(o.ordered_at, 1, 7) AS order_month",
+        "customer_region" => "r.name AS customer_region",
+        "organization_kind" => "org.kind AS organization_kind",
+        "product_category" => "cat.name AS product_category",
+        _ => "",
+    }
+};
+
+def dimension_alias = fn(key) {
+    match key {
+        "order_month" => "order_month",
+        "customer_region" => "customer_region",
+        "organization_kind" => "organization_kind",
+        "product_category" => "product_category",
+        _ => "",
+    }
+};
+
+def net_revenue_sql = fn(dimensions) {
+    let selects = array.push(array.map(dimensions, dimension_expression),
+        "SUM(COALESCE(p.captured_cents, 0) - COALESCE(f.refunded_cents, 0)) AS net_revenue_cents");
+    let groups = array.map(dimensions, dimension_alias);
+    let group_clause = if array.length(groups) == 0 { "" } else { `\nGROUP BY \{string.join(groups, ", ")}` };
+    `WITH payment_by_order AS (
+  SELECT order_id, SUM(amount_cents) AS captured_cents
+  FROM payments WHERE status = 2 GROUP BY order_id
+), refund_by_order AS (
+  SELECT p.order_id, SUM(r.amount_cents) AS refunded_cents
+  FROM refunds r JOIN payments p ON p.id = r.payment_id
+  WHERE r.status = 2 GROUP BY p.order_id
+)
+SELECT \{string.join(selects, ",\n       ")}
+FROM orders o
+JOIN customers c ON c.id = o.customer_id
+JOIN organizations org ON org.id = c.org_id
+JOIN regions r ON r.id = org.region_id
+LEFT JOIN payment_by_order p ON p.order_id = o.id
+LEFT JOIN refund_by_order f ON f.order_id = o.id
+WHERE o.status = 2\{group_clause}
+ORDER BY \{string.join(groups, ", ")};`
+};
+
+def units_sold_sql = fn(dimensions) {
+    let selects = array.push(array.map(dimensions, dimension_expression),
+        "SUM(oi.quantity) AS units_sold");
+    let groups = array.map(dimensions, dimension_alias);
+    let group_clause = if array.length(groups) == 0 { "" } else { `\nGROUP BY \{string.join(groups, ", ")}` };
+    `SELECT \{string.join(selects, ",\n       ")}
+FROM order_items oi
+JOIN orders o ON o.id = oi.order_id
+JOIN customers c ON c.id = o.customer_id
+JOIN organizations org ON org.id = c.org_id
+JOIN regions r ON r.id = org.region_id
+JOIN products product ON product.id = oi.product_id
+JOIN categories cat ON cat.id = product.category_id
+WHERE o.status != 3\{group_clause}
+ORDER BY \{string.join(groups, ", ")};`
+};
+
+export def compile: Fn(ReportIntent) -> Compilation = fn(intent) {
+    let measure = first_measure(intent);
+    let diagnostics = measure_diagnostics(intent);
+    let diagnostics = array.concat([diagnostics, dimension_diagnostics(intent, measure)]);
+    if array.length(diagnostics) == 0 {
+        let sql = match measure {
+            "net_revenue" => net_revenue_sql(intent.dimensions),
+            "units_sold" => units_sold_sql(intent.dimensions),
+            _ => "",
+        };
+        {sql: 'Some(sql), diagnostics}
+    } else {
+        {sql: 'None, diagnostics}
+    }
+};
+
+export { ReportIntent, Compilation };

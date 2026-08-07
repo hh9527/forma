@@ -1,0 +1,11 @@
+import "./ontology.forma" { compile };
+
+let compilation = compile({
+    measures: ["net_revenue"],
+    dimensions: ["order_month", "customer_region"],
+});
+
+export let output = match compilation.sql {
+    'Some(sql) => sql,
+    'None => panic!("expected the valid report to lower to SQL"),
+};
