@@ -19,20 +19,31 @@ import "std/array" as array;
     left_column: String,
     right_alias: String,
     right_column: String,
+    cardinality: Cardinality,
+};
+
+@enum type Cardinality = {
+    ManyToOne: 'None,
+    OneToMany: 'None,
 };
 
 @struct type PathPlan = {
     relations: Array(Relation),
+    fanout: Array(Entity),
     missing: Array(Entity),
 };
 
 def catalog: Array(Relation) = [
-    {from: 'OrderItem, to: 'Order, table: "orders", alias: "o", left_alias: "o", left_column: "id", right_alias: "oi", right_column: "order_id"},
-    {from: 'Order, to: 'Customer, table: "customers", alias: "c", left_alias: "c", left_column: "id", right_alias: "o", right_column: "customer_id"},
-    {from: 'Customer, to: 'Organization, table: "organizations", alias: "org", left_alias: "org", left_column: "id", right_alias: "c", right_column: "org_id"},
-    {from: 'Organization, to: 'Region, table: "regions", alias: "r", left_alias: "r", left_column: "id", right_alias: "org", right_column: "region_id"},
-    {from: 'OrderItem, to: 'Product, table: "products", alias: "product", left_alias: "product", left_column: "id", right_alias: "oi", right_column: "product_id"},
-    {from: 'Product, to: 'Category, table: "categories", alias: "cat", left_alias: "cat", left_column: "id", right_alias: "product", right_column: "category_id"},
+    {from: 'OrderItem, to: 'Order, table: "orders", alias: "o", left_alias: "o", left_column: "id", right_alias: "oi", right_column: "order_id", cardinality: 'ManyToOne},
+    {from: 'Order, to: 'Customer, table: "customers", alias: "c", left_alias: "c", left_column: "id", right_alias: "o", right_column: "customer_id", cardinality: 'ManyToOne},
+    {from: 'Customer, to: 'Organization, table: "organizations", alias: "org", left_alias: "org", left_column: "id", right_alias: "c", right_column: "org_id", cardinality: 'ManyToOne},
+    {from: 'Organization, to: 'Region, table: "regions", alias: "r", left_alias: "r", left_column: "id", right_alias: "org", right_column: "region_id", cardinality: 'ManyToOne},
+    {from: 'OrderItem, to: 'Product, table: "products", alias: "product", left_alias: "product", left_column: "id", right_alias: "oi", right_column: "product_id", cardinality: 'ManyToOne},
+    {from: 'Product, to: 'Category, table: "categories", alias: "cat", left_alias: "cat", left_column: "id", right_alias: "product", right_column: "category_id", cardinality: 'ManyToOne},
+];
+
+def fanout_catalog: Array(Relation) = [
+    {from: 'Order, to: 'OrderItem, table: "order_items", alias: "oi", left_alias: "oi", left_column: "order_id", right_alias: "o", right_column: "id", cardinality: 'OneToMany},
 ];
 
 def contains: Fn(Array(Entity), Entity) -> Bool = fn(values, expected) {
@@ -45,8 +56,8 @@ def backward_once: Fn(Array(Entity)) -> Array(Entity) = fn(needed) {
     })
 };
 
-def forward_once: Fn(Array(Entity)) -> Array(Entity) = fn(reachable) {
-    array.fold(catalog, reachable, fn(next, relation) {
+def forward_with: Fn(Array(Relation), Array(Entity)) -> Array(Entity) = fn(relations, reachable) {
+    array.fold(relations, reachable, fn(next, relation) {
         if contains(next, relation.from) { array.push(next, relation.to) } else { next }
     })
 };
@@ -58,18 +69,23 @@ def close_backward: Fn(Array(Entity)) -> Array(Entity) = fn(values) {
 };
 
 def close_forward: Fn(Array(Entity)) -> Array(Entity) = fn(values) {
-    forward_once(forward_once(forward_once(forward_once(forward_once(forward_once(values))))))
+    let all = array.concat([catalog, fanout_catalog]);
+    forward_with(all, forward_with(all, forward_with(all, forward_with(all, forward_with(all, forward_with(all, values))))))
 };
 
 def plan: Fn(Entity, Array(Entity)) -> PathPlan = fn(base, targets) {
     let needed = close_backward(targets);
-    let reachable = close_forward([base]);
+    let safe_reachable = forward_with(catalog, forward_with(catalog, forward_with(catalog, forward_with(catalog, forward_with(catalog, forward_with(catalog, [base]))))));
+    let all_reachable = close_forward([base]);
     {
         relations: array.filter(catalog, fn(relation) {
-            contains(reachable, relation.from) && contains(needed, relation.to)
+            contains(safe_reachable, relation.from) && contains(needed, relation.to)
         }),
-        missing: array.filter(targets, fn(target) { contains(reachable, target) == 'False }),
+        fanout: array.filter(targets, fn(target) {
+            contains(safe_reachable, target) == 'False && contains(all_reachable, target)
+        }),
+        missing: array.filter(targets, fn(target) { contains(all_reachable, target) == 'False }),
     }
 };
 
-export { Entity, Relation, PathPlan, plan };
+export { Entity, Cardinality, Relation, PathPlan, plan };

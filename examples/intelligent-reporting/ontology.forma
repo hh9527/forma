@@ -49,6 +49,7 @@ import "./relations.forma" { Entity, Relation, PathPlan, plan };
 };
 
 @struct type GroupRequirement = {
+    dimension: Dimension,
     projection: Projection,
     group_expression: SqlScalar,
     required_entity: Entity,
@@ -77,9 +78,9 @@ type DimensionLowerer = Fn(Measure) -> RequirementCompilation;
     lower: DimensionLowerer,
 };
 
-def complete_requirement: Fn(Projection, SqlScalar, Entity) -> RequirementCompilation = fn(projected, group_expression, required_entity) {
+def complete_requirement: Fn(Dimension, Projection, SqlScalar, Entity) -> RequirementCompilation = fn(dimension, projected, group_expression, required_entity) {
     {
-        requirement: 'Some({projection: projected, group_expression, required_entity}),
+        requirement: 'Some({dimension, projection: projected, group_expression, required_entity}),
         diagnostics: [],
     }
 };
@@ -97,7 +98,7 @@ def universal_dimension: Fn(Dimension, Projection, SqlScalar, Entity) -> Dimensi
     {
         id,
         lower: fn(measure) {
-            complete_requirement(projected, group_expression, required_entity)
+            complete_requirement(id, projected, group_expression, required_entity)
         },
     }
 };
@@ -109,7 +110,7 @@ def measure_dimension: Fn(Dimension, Measure, Projection, SqlScalar, Entity) -> 
         id,
         lower: fn(actual_measure) {
             if actual_measure == required_measure {
-                complete_requirement(projected, group_expression, required_entity)
+                complete_requirement(id, projected, group_expression, required_entity)
             } else {
                 rejected_requirement(
                     id,
@@ -275,9 +276,8 @@ def dimension_capability: Fn(Dimension) -> DimensionCapability = fn(dimension) {
             scalar(term(column("org", "kind"))),
             'Organization,
         ),
-        'ProductCategory => measure_dimension(
+        'ProductCategory => universal_dimension(
             dimension,
-            'UnitsSold,
             projection(scalar(term(column("cat", "name"))), "product_category"),
             scalar(term(column("cat", "name"))),
             'Category,
@@ -286,9 +286,8 @@ def dimension_capability: Fn(Dimension) -> DimensionCapability = fn(dimension) {
             dimension,
             "the ontology has no verified Employee-to-measure relation",
         ),
-        'ProductSku => measure_dimension(
+        'ProductSku => universal_dimension(
             dimension,
-            'UnitsSold,
             projection(scalar(term(column("product", "sku"))), "product_sku"),
             scalar(term(column("product", "sku"))),
             'Product,
@@ -333,13 +332,34 @@ def successful_requirements: Fn(Array(RequirementCompilation)) -> Array(GroupReq
     })
 };
 
-def finalize_sql: Fn(QueryPlan, Array(GroupRequirement)) -> String = fn(query_plan, requirements) {
-    let groups = array.map(requirements, fn(requirement) { requirement.group_expression });
-    let targets = array.concat([
+def required_targets: Fn(QueryPlan, Array(GroupRequirement)) -> Array(Entity) = fn(query_plan, requirements) {
+    array.concat([
         query_plan.required_entities,
         array.map(requirements, fn(requirement) { requirement.required_entity }),
-    ]);
-    let paths = plan(query_plan.base_entity, targets);
+    ])
+};
+
+def relationship_diagnostics: Fn(PathPlan, Array(GroupRequirement)) -> Array(BlameError) = fn(paths, requirements) {
+    array.concat([
+        array.flat_map(paths.fanout, fn(target) {
+            array.map(
+                array.filter(requirements, fn(requirement) { requirement.required_entity == target }),
+                fn(requirement) {
+                    blame!(requirement.dimension, `reaching \{target} expands the measure grain; define pre-aggregation or an allocation policy`)
+                },
+            )
+        }),
+        array.flat_map(paths.missing, fn(target) {
+            array.map(
+                array.filter(requirements, fn(requirement) { requirement.required_entity == target }),
+                fn(requirement) { blame!(requirement.dimension, `no verified relationship path reaches \{target}`) },
+            )
+        }),
+    ])
+};
+
+def finalize_sql: Fn(QueryPlan, Array(GroupRequirement), PathPlan) -> String = fn(query_plan, requirements, paths) {
+    let groups = array.map(requirements, fn(requirement) { requirement.group_expression });
     render_select({
         common_tables: query_plan.common_tables,
         body: {
@@ -359,15 +379,18 @@ def finalize_sql: Fn(QueryPlan, Array(GroupRequirement)) -> String = fn(query_pl
 export def compile: Fn(ReportIntent) -> Compilation = fn(intent) {
     let measure = selected_measure(intent);
     let capability = measure_capability(measure);
-    let plan = capability.lower();
+    let query_plan = capability.lower();
     let requirement_compilations = compile_requirements(measure, intent.dimensions);
+    let requirements = successful_requirements(requirement_compilations);
+    let paths = plan(query_plan.base_entity, required_targets(query_plan, requirements));
     let diagnostics = array.concat([
         measure_diagnostics(intent),
         requirement_diagnostics(requirement_compilations),
+        relationship_diagnostics(paths, requirements),
     ]);
     if array.length(diagnostics) == 0 {
         {
-            sql: 'Some(finalize_sql(plan, successful_requirements(requirement_compilations))),
+            sql: 'Some(finalize_sql(query_plan, requirements, paths)),
             diagnostics,
         }
     } else {

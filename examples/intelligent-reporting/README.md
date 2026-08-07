@@ -14,7 +14,9 @@ Forma 代码将合法意图逐步 lowering 为 SQLite SQL。
   负责 SQL 字符串和 quoting；
 - RFC 0182：已完成，关系 catalog 与双向闭包 planner 根据 base grain 和目标
   entity 自动选择、合并并去重 join；
-- 下一步：RFC 0183，为 relation 增加 cardinality，并证明路径是否保持 grain。
+- RFC 0183：已完成，many-to-one 安全路径与 one-to-many fan-out 路径分离，
+  Product 维度对 Order grain 的拒绝由关系证明产生；
+- 下一步：RFC 0184，扩展意图并显式分离 semantic、relational 和 SQL 阶段。
 
 ## 文件
 
@@ -68,6 +70,8 @@ cargo run -p forma -- run examples/intelligent-reporting/invalid.forma
 - measure 只声明 base entity 和自身语义需要的 entity，dimension 只声明目标
   entity；关系 planner 从 catalog 计算二者之间的最小相关 edge 集合；
 - 多个 dimension 共享的路径只产生一次 join；
+- relation 带有 cardinality；planner 区分安全可达、需要 fan-out policy 和完全
+  不可达，诊断仍指向原始 dimension；
 - 失败结果不发布 SQL，成功结果可以直接被 SQLite 执行。
 
 ## RFC 0181 的边界发现
@@ -93,10 +97,11 @@ group 和 order。任意深度表达式及嵌套 CTE 暂不支持；未来修复
 ## 尚未解决
 
 这还不是通用查询规划器。当前 catalog 是有序、无代价的有向关系集合，使用
-固定六轮闭包覆盖这个有界本体；它不在多条语义不同的路径之间猜测。grain
-规则仍主要隐含在实现里。后续阶段还需要：
+固定六轮闭包覆盖这个有界本体；它不在多条语义不同的路径之间猜测。当前也
+只有“保持 grain”与“fan-out”两级证明，尚未实现具体预聚合或 allocation
+policy。后续阶段还需要：
 
-- cardinality、fan-out、预聚合与 allocation policy；
+- 预聚合与 allocation policy；
 - filter、参数、排序、limit、drill 和 render 意图；
 - 分阶段的 semantic/relational/SQL plan；
 - 结果 schema 与 Host 执行边界；
