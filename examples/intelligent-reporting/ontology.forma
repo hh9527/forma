@@ -17,6 +17,7 @@ import "./sql.forma" {
     render_select,
 };
 import "./relations.forma" { Entity, Relation, PathPlan, plan };
+import "./execution.forma" { OutputMode, ExecutionPlan };
 
 @enum type Measure = {
     NetRevenue: 'None,
@@ -38,11 +39,10 @@ import "./relations.forma" { Entity, Relation, PathPlan, plan };
     filters: Array(Filter),
     order_by: Array(Dimension),
     limit: Option(Int),
-    render: RenderMode,
+    render: OutputMode,
 };
 
 @enum type Filter = { CustomerRegion: String };
-@enum type RenderMode = { Table: 'None, Json: 'None };
 
 @struct type QueryPlan = {
     measure: Measure,
@@ -79,7 +79,7 @@ import "./relations.forma" { Entity, Relation, PathPlan, plan };
     filter_requirements: Array(FilterRequirement),
     order_by: Array(Dimension),
     limit: Option(Int),
-    render: RenderMode,
+    render: OutputMode,
 };
 
 @struct type RelationalPlan = {
@@ -89,12 +89,11 @@ import "./relations.forma" { Entity, Relation, PathPlan, plan };
 
 @struct type SqlPlan = {
     query: Select,
-    render: RenderMode,
+    render: OutputMode,
 };
 
 @struct type Compilation = {
-    sql: Option(String),
-    render: RenderMode,
+    plan: Option(ExecutionPlan),
     diagnostics: Array(BlameError),
 };
 
@@ -495,12 +494,17 @@ export def compile: Fn(ReportIntent) -> Compilation = fn(intent) {
     ]);
     if array.length(diagnostics) == 0 {
         {
-            sql: 'Some(render_select(lower_sql(relational).query)),
-            render: intent.render,
+            plan: 'Some({
+                version: 1,
+                dialect: 'Sqlite,
+                statement: render_select(lower_sql(relational).query),
+                read_only: 'True,
+                output: intent.render,
+            }),
             diagnostics,
         }
     } else {
-        {sql: 'None, render: intent.render, diagnostics}
+        {plan: 'None, diagnostics}
     }
 };
 

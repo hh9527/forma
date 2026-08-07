@@ -18,7 +18,9 @@ Forma 代码将合法意图逐步 lowering 为 SQLite SQL。
   Product 维度对 Order grain 的拒绝由关系证明产生；
 - RFC 0184：已完成，意图支持 filter、显式排序、limit 和 render mode，并形成
   `SemanticPlan → RelationalPlan → SqlPlan` 三个 typed lowering 阶段；
-- 下一步：RFC 0185，定义 Host 可核对、可序列化且不携带执行权限的最终计划。
+- RFC 0185：已完成，成功结果发布 typed `ExecutionPlan`，边界模块将其编码为
+  带版本、方言、只读声明和输出模式的稳定 JSON；
+- RFC 0180：全部五个子阶段已经完成。
 
 ## 文件
 
@@ -26,11 +28,13 @@ Forma 代码将合法意图逐步 lowering 为 SQLite SQL。
 - `DOMAIN.md`：文字形式的本体和业务规则；
 - `sql.forma`：最小 SQL AST 与 SQLite renderer；
 - `relations.forma`：关系 catalog、可达性分析和 join 路径规划；
+- `execution.forma`：Host-facing typed plan 与显式 wire encoding；
 - `ontology.forma`：领域校验和 lowering；
 - `valid.forma`：按月份、客户区域统计净收入；
 - `valid-units.forma`：按月份、品类、SKU 统计销量；
 - `invalid.forma`：一次暴露四个独立领域错误；
 - `valid-sql.forma`：导出生成的 SQL，供 SQLite 执行；
+- `host-plan.forma`：模拟 Host shape 核对并输出 JSON plan；
 - `net-revenue.sql`：手写参考查询。
 
 ## 运行
@@ -77,6 +81,8 @@ cargo run -p forma -- run examples/intelligent-reporting/invalid.forma
 - filter 本身也声明所需 entity，因此会参与同一关系规划；排序只能引用已经
   选择的 dimension，limit 与 render mode 保留在 typed plan 中；
 - semantic、relational、SQL 三个中间计划都是普通 Forma 值和显式函数边界；
+- 成功编译只发布无权限的 `ExecutionPlan`；Host 可以静态核对 shape，再接收
+  显式版本化 JSON。失败编译始终得到 `plan: None`；
 - 失败结果不发布 SQL，成功结果可以直接被 SQLite 执行。
 
 ## RFC 0181 的边界发现
@@ -101,7 +107,7 @@ group 和 order。任意深度表达式及嵌套 CTE 暂不支持；未来修复
 
 ## 尚未解决
 
-这还不是通用查询规划器。当前 catalog 是有序、无代价的有向关系集合，使用
+这轮伞 RFC 已完成，但它还不是通用查询规划器。当前 catalog 是有序、无代价的有向关系集合，使用
 固定六轮闭包覆盖这个有界本体；它不在多条语义不同的路径之间猜测。当前也
 只有“保持 grain”与“fan-out”两级证明，尚未实现具体预聚合或 allocation
 policy。后续阶段还需要：

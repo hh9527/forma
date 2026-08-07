@@ -1,0 +1,18 @@
+import "./ontology.forma" { compile };
+import "./execution.forma" { ExecutionPlan, encode_plan };
+
+let compilation = compile({
+    measures: ['NetRevenue],
+    dimensions: ['OrderMonth, 'CustomerRegion],
+    filters: ['CustomerRegion("East")],
+    order_by: ['OrderMonth],
+    limit: 'Some(10),
+    render: 'Json,
+});
+
+let checked: Option(ExecutionPlan) = compilation.plan;
+
+export let output = match checked {
+    'Some(plan) => encode_plan(plan),
+    'None => "",
+};

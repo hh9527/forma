@@ -1,6 +1,6 @@
 # RFC 0180: Intelligent reporting intent compiler
 
-- Status: Accepted
+- Status: Implemented
 
 ## Summary
 
@@ -68,6 +68,16 @@ library combinator is acceptable when it has general value.
 
 ## Completion
 
-This umbrella is complete when RFCs 0181 through 0185 are implemented and this
-section records the resulting architecture, observed gaps, and any deliberate
-departures from the sequence.
+RFCs 0181 through 0185 are implemented. The experiment now lowers typed report
+intent through capability composition, deterministic relationship selection,
+cardinality proof, a bounded SQL AST, and a typed inert Host plan. Both valid
+queries execute against SQLite; invalid intent returns independent diagnostics
+and no plan.
+
+The principal departure is the SQL expression representation. A conventional
+recursive AST cannot currently cross the legacy module-value boundary because
+its recursive type metadata is cyclic. RFC 0181 therefore uses a bounded
+non-recursive hierarchy while retaining structured nodes and centralized
+rendering. Other remaining gaps are explicit policy support for safe fan-out,
+ambiguous-path diagnostics, provenance tests through every intermediate plan,
+and ergonomic diagnostic accumulation.
