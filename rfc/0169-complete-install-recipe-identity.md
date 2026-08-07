@@ -1,6 +1,6 @@
 # RFC 0169: Complete install recipe identity
 
-- Status: Proposed
+- Status: Implemented
 - Depends on: RFC 0166, RFC 0168
 
 ## Summary
@@ -96,3 +96,16 @@ application.
 Work returns to discussion if completion requires an effect, hashing physical
 cache locations, or prematurely standardizing a universal install-addressing
 protocol.
+
+## Implementation result
+
+Implemented in August 2026. The GCC wrapper now shares explicit `ty` and
+`strip` bindings between destination calculation and the emitted `Unpack`, so
+the hashed recipe cannot drift from the action. Its versioned identity covers
+package name, source URL, digest, unpack type, and strip count in the specified
+order.
+
+The CLI fixture locks the canonical GCC and sysroot suffixes, verifies those
+suffixes remain unchanged under a relocated cache root, and confirms ar reuses
+the identical compiler installation recipe. Download files remain independently
+addressed by source URL. Repeated dry-runs remain effect-free and deterministic.

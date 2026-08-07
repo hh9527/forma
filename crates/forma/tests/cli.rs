@@ -387,22 +387,28 @@ fn gcc_wrapper_fixture_builds_reusable_deterministic_plans() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/gcc-wrapper/app/bin-src");
     let directory = fixture_dir();
     let cache = directory.join("cache");
-    let invoke = |entry: &str, arguments: &[&str], target: Option<&str>| {
-        let mut command = forma();
-        command.env("FORMA_CACHE_HOME", &cache);
-        command.env_remove("TARGET");
-        if let Some(target) = target {
-            command.env("TARGET", target);
-        }
-        command.args(["exec", "--dry-run"]);
-        command.arg(fixture.join(entry));
-        if !arguments.is_empty() {
-            command.arg("--").args(arguments);
-        }
-        command.output().unwrap()
-    };
+    let invoke =
+        |cache: &std::path::Path, entry: &str, arguments: &[&str], target: Option<&str>| {
+            let mut command = forma();
+            command.env("FORMA_CACHE_HOME", cache);
+            command.env_remove("TARGET");
+            if let Some(target) = target {
+                command.env("TARGET", target);
+            }
+            command.args(["exec", "--dry-run"]);
+            command.arg(fixture.join(entry));
+            if !arguments.is_empty() {
+                command.arg("--").args(arguments);
+            }
+            command.output().unwrap()
+        };
 
-    let gcc = invoke("gcc.forma", &["-c", "main.c"], Some("x86_64-linux-gnu"));
+    let gcc = invoke(
+        &cache,
+        "gcc.forma",
+        &["-c", "main.c"],
+        Some("x86_64-linux-gnu"),
+    );
     assert!(
         gcc.status.success(),
         "{}",
@@ -417,13 +423,36 @@ fn gcc_wrapper_fixture_builds_reusable_deterministic_plans() {
     assert!(gcc_stdout.contains(r#""env":{"clear":false,"update":{}}"#));
     assert!(!gcc_stdout.contains(r#""TARGET":"x86_64-linux-gnu""#));
     assert_eq!(gcc_stdout.matches(r#""file":"#).count(), 2);
+    let compiler_suffix = "3c76b5039e9994e6c44145f0dbc8867439c77daa26aeae023aa74d4ef7dc0b46";
+    let sysroot_suffix = "8392c1d0e3a485930d5132005216c9bf8067848071215c13bbcf6e5ffe0f4d0c";
+    assert!(gcc_stdout.contains(compiler_suffix), "{gcc_stdout}");
+    assert!(gcc_stdout.contains(sysroot_suffix), "{gcc_stdout}");
     assert!(!cache.exists());
 
-    let repeated = invoke("gcc.forma", &["-c", "main.c"], Some("x86_64-linux-gnu"));
+    let repeated = invoke(
+        &cache,
+        "gcc.forma",
+        &["-c", "main.c"],
+        Some("x86_64-linux-gnu"),
+    );
     assert!(repeated.status.success());
     assert_eq!(repeated.stdout, gcc_stdout.as_bytes());
 
-    let gxx = invoke("g++.forma", &["main.cc"], Some("aarch64-linux-gnu"));
+    let relocated_cache = directory.join("relocated-cache");
+    let relocated = invoke(
+        &relocated_cache,
+        "gcc.forma",
+        &["-c", "main.c"],
+        Some("x86_64-linux-gnu"),
+    );
+    assert!(relocated.status.success());
+    let relocated_stdout = String::from_utf8(relocated.stdout).unwrap();
+    assert!(relocated_stdout.contains(compiler_suffix));
+    assert!(relocated_stdout.contains(sysroot_suffix));
+    assert!(relocated_stdout.contains(relocated_cache.to_str().unwrap()));
+    assert!(!relocated_cache.exists());
+
+    let gxx = invoke(&cache, "g++.forma", &["main.cc"], Some("aarch64-linux-gnu"));
     assert!(
         gxx.status.success(),
         "{}",
@@ -433,7 +462,7 @@ fn gcc_wrapper_fixture_builds_reusable_deterministic_plans() {
     assert!(gxx_stdout.contains("/bin/g++"), "{gxx_stdout}");
     assert_eq!(gxx_stdout.matches(r#""Unpack""#).count(), 2);
 
-    let ar = invoke("ar.forma", &["rcs", "lib.a"], None);
+    let ar = invoke(&cache, "ar.forma", &["rcs", "lib.a"], None);
     assert!(
         ar.status.success(),
         "{}",
@@ -442,12 +471,18 @@ fn gcc_wrapper_fixture_builds_reusable_deterministic_plans() {
     let ar_stdout = String::from_utf8(ar.stdout).unwrap();
     assert!(ar_stdout.contains("/bin/ar"), "{ar_stdout}");
     assert_eq!(ar_stdout.matches(r#""Unpack""#).count(), 1);
+    assert!(ar_stdout.contains(compiler_suffix));
     assert!(!ar_stdout.contains("--sysroot="));
 
-    let missing = invoke("gcc.forma", &[], None);
+    let missing = invoke(&cache, "gcc.forma", &[], None);
     assert!(!missing.status.success());
     assert!(String::from_utf8_lossy(&missing.stderr).contains("TARGET is required"));
-    let conflict = invoke("gcc.forma", &["--sysroot=/other"], Some("x86_64-linux-gnu"));
+    let conflict = invoke(
+        &cache,
+        "gcc.forma",
+        &["--sysroot=/other"],
+        Some("x86_64-linux-gnu"),
+    );
     assert!(!conflict.status.success());
     assert!(String::from_utf8_lossy(&conflict.stderr).contains("conflicting argument: --sysroot"));
     assert!(!cache.exists());

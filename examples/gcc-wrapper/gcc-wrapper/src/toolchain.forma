@@ -30,18 +30,18 @@ def validated_source: Fn(Any) -> ToolchainSource = fn(raw) {
     }
 };
 
-def install_dest = fn(settings, package) {
-    let identity = `\{package.name}\n\{package.src}\n\{package.digest}`;
+def install_dest = fn(settings, package, ty, strip) {
+    let identity = `unpack-v1\n\{package.name}\n\{package.src}\n\{package.digest}\n\{ty}\n\{strip}`;
     `\{settings.install_prefix}/\{hash.sha256(identity)}`
 };
 
-def unpack = fn(settings, package, dest) {
+def unpack = fn(settings, package, dest, ty, strip) {
     'Unpack({
         dest,
         file: `\{settings.download_prefix}/\{hash.sha256(package.src)}`,
-        ty: 'TarGzip,
+        ty,
         src: package.src,
-        strip: 1,
+        strip,
         digest: 'Some(package.digest),
     })
 };
@@ -71,8 +71,10 @@ export def command: Fn(String, Any) -> ExecFn = fn(tool, raw) {
     fn(settings, request) {
         let host = `\{settings.platform.os}-\{settings.platform.arch}`;
         let compiler = require(source.compilers, host, `unsupported GCC host: \{host}`);
-        let compiler_dest = install_dest(settings, compiler);
-        let compiler_install = unpack(settings, compiler, compiler_dest);
+        let unpack_ty = 'TarGzip;
+        let strip = 1;
+        let compiler_dest = install_dest(settings, compiler, unpack_ty, strip);
+        let compiler_install = unpack(settings, compiler, compiler_dest, unpack_ty, strip);
         match tool {
             "ar" => {
                 install: [compiler_install],
@@ -84,9 +86,9 @@ export def command: Fn(String, Any) -> ExecFn = fn(tool, raw) {
             "gcc" => {
                 let target: String = require(request.env, "TARGET", "TARGET is required");
                 let sysroot = require(source.sysroots, target, "unsupported GCC target");
-                let sysroot_dest = install_dest(settings, sysroot);
+                let sysroot_dest = install_dest(settings, sysroot, unpack_ty, strip);
                 {
-                    install: [compiler_install, unpack(settings, sysroot, sysroot_dest)],
+                    install: [compiler_install, unpack(settings, sysroot, sysroot_dest, unpack_ty, strip)],
                     cwd: 'Some(request.cwd),
                     bin: `\{compiler_dest}/bin/gcc`,
                     args: checked_compiler_args(request, sysroot_dest),
@@ -96,9 +98,9 @@ export def command: Fn(String, Any) -> ExecFn = fn(tool, raw) {
             "g++" => {
                 let target: String = require(request.env, "TARGET", "TARGET is required");
                 let sysroot = require(source.sysroots, target, "unsupported GCC target");
-                let sysroot_dest = install_dest(settings, sysroot);
+                let sysroot_dest = install_dest(settings, sysroot, unpack_ty, strip);
                 {
-                    install: [compiler_install, unpack(settings, sysroot, sysroot_dest)],
+                    install: [compiler_install, unpack(settings, sysroot, sysroot_dest, unpack_ty, strip)],
                     cwd: 'Some(request.cwd),
                     bin: `\{compiler_dest}/bin/g++`,
                     args: checked_compiler_args(request, sysroot_dest),
