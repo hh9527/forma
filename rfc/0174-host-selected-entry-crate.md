@@ -1,6 +1,6 @@
 # RFC 0174: Host-selected entry crate
 
-- Status: Proposed
+- Status: Implemented
 - Amends: RFC 0138, RFC 0170 through RFC 0173
 
 ## Summary
@@ -101,3 +101,23 @@ storage for that possibility.
 - migrating run/build in this RFC;
 - granting native declaration authority to entry modules;
 - defining file-local compiler options.
+
+## Implementation result
+
+Implemented in August 2026. The exec adapter now lives in the embedded
+`modules/entry/exec.forma` source and is loaded with the stable resolved ID
+`entry/exec.forma`. `Engine::load_entry` and `load_entry_with_modules` accept
+only registered entry names; unknown selections fail before resolver or VM
+work.
+
+`ModuleId::Entry` and generated exec source were removed. The resolver instead
+holds the exact selected `ModuleId` and compares every requester against it.
+Only that ID resolves `@main`, private dependency edges, and the exact injected
+`entry/rt.priv.forma` and `entry/opts.priv.forma` names. Ordinary `entry/`
+imports fail, and imported children do not inherit the selected-root identity.
+
+The strict and recoverable loaders now diagnose every option outside
+`ModuleId::Main` at its authored location. Main options retain their ordered,
+repeated action representation and continue to reach the exec entry snapshot.
+CLI contract, malformed-output atomicity, structural alias, environment,
+GCC-wrapper, and dual-source provenance coverage remains intact.

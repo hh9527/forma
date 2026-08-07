@@ -26,6 +26,14 @@ pub(crate) const DYN_MODULE: &str = "std/dyn";
 pub(crate) const EQ_MODULE: &str = "std/eq";
 pub(crate) const REGEX_MODULE: &str = "std/regex";
 pub(crate) const FMT_MODULE: &str = "std/fmt";
+pub(crate) const EXEC_ENTRY_MODULE: &str = "entry/exec.forma";
+
+pub(crate) fn entry_source(name: &str) -> Option<&'static str> {
+    match name {
+        EXEC_ENTRY_MODULE => Some(include_str!("../modules/entry/exec.forma")),
+        _ => None,
+    }
+}
 
 pub(crate) struct CoreModuleSpec {
     pub(crate) native_id: u32,

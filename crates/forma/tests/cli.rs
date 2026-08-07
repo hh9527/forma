@@ -544,7 +544,7 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
         );
         assert!(stderr.contains(source_name), "{stderr}");
         assert!(stderr.contains("entry contract detail"), "{stderr}");
-        assert!(stderr.contains("@entry"), "{stderr}");
+        assert!(stderr.contains("entry/exec.forma"), "{stderr}");
     };
     let value = directory.join("value.forma");
     fs::write(&value, "export let exec = 42;").unwrap();

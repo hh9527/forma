@@ -66,7 +66,6 @@ pub enum ModuleAuthority {
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ModuleId {
-    Entry,
     Main,
     Source(PathBuf),
     Builtin(String),
@@ -82,7 +81,6 @@ impl ModuleId {
 impl fmt::Display for ModuleId {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Entry => formatter.write_str("@entry"),
             Self::Main => formatter.write_str("@main"),
             Self::Source(path) => write!(formatter, "@src/{}", path.display()),
             Self::Builtin(name) => formatter.write_str(name),
@@ -180,7 +178,8 @@ pub struct ModuleResolver {
     dependencies: BTreeMap<String, PathBuf>,
     formats: BTreeMap<String, ModuleFormat>,
     builtins: BTreeMap<String, u32>,
-    entry_modules: BTreeSet<String>,
+    selected_entry: Option<ModuleId>,
+    injected_modules: BTreeSet<String>,
 }
 
 impl ModuleResolver {
@@ -230,7 +229,8 @@ impl ModuleResolver {
             dependencies: BTreeMap::new(),
             formats: BTreeMap::new(),
             builtins: BTreeMap::new(),
-            entry_modules: BTreeSet::new(),
+            selected_entry: None,
+            injected_modules: BTreeSet::new(),
         };
         let has_external_manifest = manifest.is_some();
         if let Some(manifest) = manifest {
@@ -283,8 +283,13 @@ impl ModuleResolver {
         self
     }
 
-    pub fn with_entry_modules(mut self, modules: impl IntoIterator<Item = String>) -> Self {
-        self.entry_modules = modules.into_iter().collect();
+    pub fn with_entry_context(
+        mut self,
+        entry: ModuleId,
+        modules: impl IntoIterator<Item = String>,
+    ) -> Self {
+        self.selected_entry = Some(entry);
+        self.injected_modules = modules.into_iter().collect();
         self
     }
 
@@ -310,8 +315,9 @@ impl ModuleResolver {
         if target.is_empty() {
             return Err(ResolveModuleError::EmptyPath);
         }
-        if self.entry_modules.contains(target) {
-            if *importer != ModuleId::Entry {
+        let privileged = self.selected_entry.as_ref() == Some(importer);
+        if self.injected_modules.contains(target) {
+            if !privileged {
                 return Err(ResolveModuleError::PrivateModuleAccess(target.into()));
             }
             return Ok(ResolvedModule {
@@ -331,11 +337,11 @@ impl ModuleResolver {
                 physical_path: None,
             });
         }
-        if target == "@entry" || target.starts_with("@entry/") {
+        if target.starts_with("entry/") {
             return Err(ResolveModuleError::InvalidImport(target.into()));
         }
         if target == "@main" {
-            if *importer != ModuleId::Entry {
+            if !privileged {
                 return Err(ResolveModuleError::InvalidImport(target.into()));
             }
             let format = self.format_for(&ModuleId::Main, &self.main_path)?;
@@ -354,9 +360,6 @@ impl ModuleResolver {
         }
         if target.starts_with("./") || target.starts_with("../") {
             return match importer {
-                ModuleId::Entry => Err(ResolveModuleError::InvalidImport(
-                    "@entry cannot use relative imports".into(),
-                )),
                 ModuleId::Main => {
                     let logical = lexical_normalize_relative(Path::new(target))
                         .ok_or_else(|| ResolveModuleError::CrateEscape(target.into()))?;
@@ -384,7 +387,7 @@ impl ModuleResolver {
         if target.starts_with('@') {
             return Err(ResolveModuleError::InvalidImport(target.into()));
         }
-        self.resolve_dependency(target, target, *importer == ModuleId::Entry)
+        self.resolve_dependency(target, target, privileged)
     }
 
     fn load_manifest(&mut self, manifest: &Path) -> Result<(), ResolveModuleError> {
@@ -559,7 +562,6 @@ impl ModuleResolver {
         let path = lexical_normalize_relative(path)
             .ok_or_else(|| ResolveModuleError::CrateEscape(original.into()))?;
         match importer {
-            ModuleId::Entry => self.resolve_source(path, original),
             ModuleId::Main | ModuleId::Source(_) => self.resolve_source(path, original),
             ModuleId::Dependency { name, .. } => {
                 self.resolve_dependency_parts(name, path, original, true)
@@ -871,9 +873,11 @@ mod tests {
         )
         .unwrap();
 
+        let entry = ModuleId::builtin("entry/exec.forma");
         let resolver = ModuleResolver::for_root(&main)
             .unwrap()
-            .with_builtins([("std/array".to_owned(), 5)]);
+            .with_builtins([("std/array".to_owned(), 5)])
+            .with_entry_context(entry.clone(), std::iter::empty());
         let root = resolver.resolve_root(&main).unwrap();
         let builtin = resolver.resolve_import(&root.id, "std/array").unwrap();
         assert_eq!(builtin.id, ModuleId::builtin("std/array"));
@@ -897,7 +901,7 @@ mod tests {
             Err(ResolveModuleError::PrivateModuleAccess(_))
         ));
         let entry_private = resolver
-            .resolve_import(&ModuleId::Entry, "dep/internal.priv.forma")
+            .resolve_import(&entry, "dep/internal.priv.forma")
             .unwrap();
         assert_eq!(
             entry_private.id,
@@ -948,7 +952,10 @@ mod tests {
         )
         .unwrap();
 
-        let resolver = ModuleResolver::for_root(&main).unwrap();
+        let entry = ModuleId::builtin("entry/exec.forma");
+        let resolver = ModuleResolver::for_root(&main)
+            .unwrap()
+            .with_entry_context(entry.clone(), ["entry/opts.priv.forma".to_owned()]);
         let root = resolver.resolve_root(&main).unwrap();
         assert_eq!(root.id, ModuleId::Main);
         assert_eq!(root.to_string(), "@main");
@@ -980,18 +987,28 @@ mod tests {
             resolver.resolve_import(&local.id, "@main"),
             Err(ResolveModuleError::InvalidImport(_))
         ));
-        let entry = ModuleId::Entry;
-        assert_eq!(entry.to_string(), "@entry");
+        assert_eq!(entry.to_string(), "entry/exec.forma");
         assert_eq!(
             resolver.resolve_import(&entry, "@main").unwrap().id,
             ModuleId::Main
         );
+        assert_eq!(
+            resolver
+                .resolve_import(&entry, "entry/opts.priv.forma")
+                .unwrap()
+                .id,
+            ModuleId::builtin("entry/opts.priv.forma")
+        );
+        assert!(matches!(
+            resolver.resolve_import(&ModuleId::Main, "entry/opts.priv.forma"),
+            Err(ResolveModuleError::PrivateModuleAccess(_))
+        ));
         assert!(matches!(
             resolver.resolve_import(&ModuleId::Main, "@entry"),
             Err(ResolveModuleError::InvalidImport(_))
         ));
         assert!(matches!(
-            resolver.resolve_import(&entry, "./model/a.forma"),
+            resolver.resolve_import(&ModuleId::Main, "entry/exec.forma"),
             Err(ResolveModuleError::InvalidImport(_))
         ));
         std::fs::remove_dir_all(temporary).unwrap();

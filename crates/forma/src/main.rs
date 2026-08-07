@@ -141,12 +141,7 @@ fn exec_command(arguments: &[String]) -> Result<(), String> {
     let request = exec_request(&mut values, request_args, &captures)?;
     let injected = exec_injected_modules(&mut values, &main, settings, request)?;
     let entry = engine
-        .load_synthetic_entry_with_modules(
-            module_path,
-            EXEC_ENTRY_SOURCE,
-            BTreeMap::new(),
-            injected,
-        )
+        .load_entry_with_modules(module_path, "entry/exec.forma", BTreeMap::new(), injected)
         .map_err(|error| exec_entry_error(&main, error.to_string()))?;
     let exports = engine.execute(&entry).map_err(|error| error.to_string())?;
     let Value::Dict(exports) = exports else {
@@ -180,54 +175,6 @@ fn exec_entry_error(main: &LoadedModule, detail: String) -> String {
         main.sources.render(&diagnostic)
     )
 }
-
-const EXEC_ENTRY_SOURCE: &str = r#"
-import "@main" as main;
-import "std/codec" as codec;
-import "std/json" as json;
-import "std/rt-types/exec.forma" {
-    ExecFn,
-    ExecSettings,
-    ExecRequest,
-    ExecEnvironment,
-    Install,
-};
-import "std/rt.native.forma" as rt;
-import "std/opts.priv.forma" as opts;
-
-@struct type ExecOpts = {
-    cwd: Option(String),
-    bin: String,
-    args: Array(String),
-    env: ExecEnvironment,
-};
-
-let checked: ExecFn = main.exec;
-let settings: ExecSettings = rt.settings;
-let request: ExecRequest = {
-    args: rt.args,
-    env: rt.env,
-    cwd: rt.cwd,
-};
-let option_actions = opts.actions;
-let output = checked(settings, request);
-
-let install = match codec.encode(Array(Install), output.install) {
-    'Ok(value) => json.stringify(value),
-    'Err(error) => reraise!(error),
-};
-let exec_opts = match codec.encode(ExecOpts, {
-    cwd: output.cwd,
-    bin: output.bin,
-    args: output.args,
-    env: output.env,
-}) {
-    'Ok(value) => json.stringify(value),
-    'Err(error) => reraise!(error),
-};
-
-export { install, exec_opts };
-"#;
 
 fn expect_string_export<'a>(exports: &'a forma_core::Dict, name: &str) -> Result<&'a str, String> {
     match exports.get(name) {
@@ -284,8 +231,8 @@ fn exec_injected_modules(
         Value::Array(actions.into()).to_forma_literal()?
     );
     Ok(BTreeMap::from([
-        ("std/opts.priv.forma".into(), option_source),
-        ("std/rt.native.forma".into(), runtime_source),
+        ("entry/opts.priv.forma".into(), option_source),
+        ("entry/rt.priv.forma".into(), runtime_source),
     ]))
 }
 

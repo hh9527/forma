@@ -1,0 +1,45 @@
+import "@main" as main;
+import "std/codec" as codec;
+import "std/json" as json;
+import "std/rt-types/exec.forma" {
+    ExecFn,
+    ExecSettings,
+    ExecRequest,
+    ExecEnvironment,
+    Install,
+};
+import "entry/rt.priv.forma" as rt;
+import "entry/opts.priv.forma" as opts;
+
+@struct type ExecOpts = {
+    cwd: Option(String),
+    bin: String,
+    args: Array(String),
+    env: ExecEnvironment,
+};
+
+let checked: ExecFn = main.exec;
+let settings: ExecSettings = rt.settings;
+let request: ExecRequest = {
+    args: rt.args,
+    env: rt.env,
+    cwd: rt.cwd,
+};
+let option_actions = opts.actions;
+let output = checked(settings, request);
+
+let install = match codec.encode(Array(Install), output.install) {
+    'Ok(value) => json.stringify(value),
+    'Err(error) => reraise!(error),
+};
+let exec_opts = match codec.encode(ExecOpts, {
+    cwd: output.cwd,
+    bin: output.bin,
+    args: output.args,
+    env: output.env,
+}) {
+    'Ok(value) => json.stringify(value),
+    'Err(error) => reraise!(error),
+};
+
+export { install, exec_opts };

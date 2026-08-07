@@ -4,7 +4,7 @@ use crate::compiler::{
     compile_program_analyzed_in, compile_program_with_promoted_types, function_contract_arity,
     type_link_key,
 };
-use crate::core::{PRELUDE_MODULE, module_specs};
+use crate::core::{PRELUDE_MODULE, entry_source, module_specs};
 use crate::heap::{Heap, PersistentValue, publish_root, publish_value};
 use crate::json::{Provenance, SourcedValue, parse_json_registered};
 use crate::module_id::{
@@ -31,10 +31,6 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-
-fn option_requires_main(key: &str) -> bool {
-    key.starts_with("crate.") || key.starts_with("exec.")
-}
 
 struct StaticDataParse {
     value: Option<SourcedValue>,
@@ -851,30 +847,25 @@ impl Engine {
         )
     }
 
-    pub fn load_synthetic_entry(
+    pub fn load_entry(
         &self,
         main_path: impl AsRef<Path>,
-        entry_source: &str,
+        entry_module: &str,
         external_bindings: BTreeMap<String, Value>,
     ) -> Result<LoadedModule, ModuleError> {
-        self.load_synthetic_entry_with_modules(
-            main_path,
-            entry_source,
-            external_bindings,
-            BTreeMap::new(),
-        )
+        self.load_entry_with_modules(main_path, entry_module, external_bindings, BTreeMap::new())
     }
 
-    pub fn load_synthetic_entry_with_modules(
+    pub fn load_entry_with_modules(
         &self,
         main_path: impl AsRef<Path>,
-        entry_source: &str,
+        entry_module: &str,
         external_bindings: BTreeMap<String, Value>,
         injected_modules: BTreeMap<String, String>,
     ) -> Result<LoadedModule, ModuleError> {
-        load_synthetic_entry_with_native_modules(
+        load_entry_with_native_modules(
             main_path,
-            entry_source,
+            entry_module,
             external_bindings,
             injected_modules,
             self.config.module_quota,
@@ -1087,9 +1078,7 @@ impl RecoverableWorkspaceBuilder<'_> {
             let invalid_scoped_options = parsed
                 .options
                 .iter()
-                .filter(|option| {
-                    module_id != ModuleId::Main && option_requires_main(option.key.value.as_str())
-                })
+                .filter(|_| module_id != ModuleId::Main)
                 .cloned()
                 .collect::<Vec<_>>();
             let program = parsed.program.clone();
@@ -1782,19 +1771,22 @@ fn load_module_with_native_modules(
     loader.load_root(root_module, external_bindings)
 }
 
-fn load_synthetic_entry_with_native_modules(
+fn load_entry_with_native_modules(
     main_path: impl AsRef<Path>,
-    entry_source: &str,
+    entry_module: &str,
     external_bindings: BTreeMap<String, Value>,
     injected_modules: BTreeMap<String, String>,
     module_quota: Quota,
     debug_sink: Arc<dyn DebugSink>,
     native_modules: &[RegisteredNativeModule],
 ) -> Result<LoadedModule, ModuleError> {
+    let source = entry_source(entry_module)
+        .ok_or_else(|| ModuleError::new(format!("unknown Host entry module {entry_module:?}")))?;
+    let entry_id = ModuleId::builtin(entry_module);
     let resolver = ModuleResolver::for_root(main_path.as_ref())
         .map_err(|error| ModuleError::new(error.to_string()))?
         .with_builtins(builtin_list(native_modules))
-        .with_entry_modules(injected_modules.keys().cloned());
+        .with_entry_context(entry_id.clone(), injected_modules.keys().cloned());
     let main_module = resolver
         .resolve_root(main_path.as_ref())
         .map_err(|error| ModuleError::new(error.to_string()))?;
@@ -1821,7 +1813,8 @@ fn load_synthetic_entry_with_native_modules(
     loader.install_injected_modules(main_path.as_ref(), injected_modules)?;
     loader.load_entry(
         main_path.as_ref().to_owned(),
-        entry_source,
+        entry_id,
+        source,
         external_bindings,
     )
 }
@@ -1896,17 +1889,18 @@ impl ModuleLoader {
     fn load_entry(
         &mut self,
         main_path: PathBuf,
+        module_id: ModuleId,
         entry_source: &str,
         external_bindings: BTreeMap<String, Value>,
     ) -> Result<LoadedModule, ModuleError> {
-        let module_id = ModuleId::Entry;
         self.enter(&module_id)?;
         let mut account = QuotaAccount::new(self.module_quota);
+        let source_name = module_id.to_string();
         let result = self.compile_xl(
             &module_id,
             ModuleAuthority::RuntimeSystem,
             FormaModuleSource::Synthetic {
-                name: "@entry",
+                name: &source_name,
                 context_path: &main_path,
                 source: entry_source,
             },
@@ -2136,13 +2130,11 @@ impl ModuleLoader {
         };
         let source_id = self.sources.add(source_name.clone(), source);
         let parsed = parse_registered(&self.sources, source_id);
-        if let Some(option) = parsed.options.iter().find(|option| {
-            *module_id != ModuleId::Main && option_requires_main(option.key.value.as_str())
-        }) {
-            return Err(ModuleError::new(format!(
-                "{source_name}: option {:?} is only allowed in @main",
-                option.key.value
-            )));
+        if let Some(option) = parsed.options.iter().find(|_| *module_id != ModuleId::Main) {
+            return Err(ModuleError::new(self.sources.render(&Diagnostic::error(
+                format!("option {:?} is only allowed in @main", option.key.value),
+                option.location,
+            ))));
         }
         let program = parsed.program.ok_or_else(|| {
             ModuleError::new(
@@ -7367,98 +7359,17 @@ unchanged", "|"),
     }
 
     #[test]
-    fn synthetic_entry_imports_main_without_leaking_its_bindings() {
-        let directory = fixture_dir();
-        let main = directory.join("main.forma");
-        fs::write(&main, "export let value = 40;").unwrap();
-
-        let engine = recovery_engine();
-        let entry = engine
-            .load_synthetic_entry(
-                &main,
-                "import \"@main\" { value }; export let output = value + injected;",
-                BTreeMap::from([("injected".into(), Value::Int(2))]),
-            )
-            .unwrap();
-        assert!(entry.dependencies.contains(&main));
-        assert_eq!(
-            named_output(engine.execute(&entry).unwrap()).to_string(),
-            "42"
-        );
-
-        let error = engine
-            .load_synthetic_entry(
-                &main,
-                "import \"@main\" { value }; export let output = missing;",
-                BTreeMap::new(),
-            )
-            .unwrap_err();
-        assert!(error.message().contains("@entry"), "{error}");
-        fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn synthetic_entry_modules_are_exact_private_and_ordered() {
+    fn unknown_host_entry_selection_fails_before_loading() {
         let directory = fixture_dir();
         let main = directory.join("main.forma");
         fs::write(&main, "export let value = 1;").unwrap();
-        let mut value_vm = Vm::new();
-        let environment = value_vm
-            .make_dict(vec![("TARGET".into(), Value::string("x86_64-linux-gnu"))])
-            .unwrap();
-        let runtime_source = format!(
-            "export let args = [\"-c\", \"main.c\"];\n\
-             export let cwd = \"/work\";\n\
-             export let env = {};",
-            environment.to_forma_literal().unwrap()
-        );
-        let injected = BTreeMap::from([
-            (
-                "std/opts.priv.forma".into(),
-                r#"export let actions = [
-                    {key: "exec.capture-envs", value: ["TARGET"]},
-                    {key: "exec.capture-envs", value: ["CCACHE_DIR"]},
-                ];"#
-                .into(),
-            ),
-            ("std/rt.native.forma".into(), runtime_source),
-        ]);
-        let engine = recovery_engine();
-        let entry = engine
-            .load_synthetic_entry_with_modules(
-                &main,
-                r#"import "std/rt.native.forma" as rt;
-                   import "std/opts.priv.forma" as opts;
-                   export let output = (rt.args, rt.cwd, rt.env, opts.actions);"#,
-                BTreeMap::new(),
-                injected.clone(),
-            )
-            .unwrap();
-        let output = named_output(engine.execute(&entry).unwrap()).to_string();
-        assert!(output.contains("[\"-c\", \"main.c\"]"), "{output}");
-        assert!(
-            output.find("TARGET").unwrap() < output.rfind("CCACHE_DIR").unwrap(),
-            "{output}"
-        );
-
-        fs::write(
-            &main,
-            r#"import "std/rt.native.forma" as rt; export { rt as output };"#,
-        )
-        .unwrap();
-        let denied = engine
-            .load_synthetic_entry_with_modules(
-                &main,
-                r#"import "@main" as main; export { main as output };"#,
-                BTreeMap::new(),
-                injected,
-            )
+        let error = recovery_engine()
+            .load_entry(&main, "entry/missing.forma", BTreeMap::new())
             .unwrap_err();
-        assert!(denied.message().contains("private module"), "{denied}");
-        let unsafe_environment = value_vm
-            .make_dict(vec![("NOT-AN-IDENTIFIER".into(), Value::string("x"))])
-            .unwrap();
-        assert!(unsafe_environment.to_forma_literal().is_err());
+        assert!(
+            error.message().contains("unknown Host entry module"),
+            "{error}"
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -8150,6 +8061,15 @@ unchanged", "|"),
         )
         .unwrap();
         let error = engine.load_module(&main, BTreeMap::new()).unwrap_err();
+        assert!(error.message().contains("only allowed in @main"));
+
+        fs::write(
+            app.join("src/helper.forma"),
+            "option \"module.documentation\" {category: \"tooling\"}; export let value = 1;",
+        )
+        .unwrap();
+        let error = engine.load_module(&main, BTreeMap::new()).unwrap_err();
+        assert!(error.message().contains("helper.forma:1:1"), "{error}");
         assert!(error.message().contains("only allowed in @main"));
         fs::remove_dir_all(directory).unwrap();
     }
