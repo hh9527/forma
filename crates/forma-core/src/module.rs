@@ -30,7 +30,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 struct StaticDataParse {
     value: Option<SourcedValue>,
@@ -170,7 +170,7 @@ fn parse_static_data_registered(
     })
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ModuleError {
     message: String,
 }
@@ -211,6 +211,89 @@ pub struct LoadedModule {
 pub struct LoadedOptionAction {
     pub key: String,
     pub value: Value,
+}
+
+#[derive(Clone)]
+pub struct PendingModule {
+    inner: Arc<PendingModuleInner>,
+}
+
+struct PendingModuleInner {
+    path: PathBuf,
+    options: Vec<LoadedOptionAction>,
+    config: EngineConfig,
+    debug_sink: Arc<dyn DebugSink>,
+    native_modules: Arc<[RegisteredNativeModule]>,
+    state: Mutex<PendingModuleState>,
+}
+
+enum PendingModuleState {
+    Pending,
+    Initializing,
+    Ready(InstantiatedModule),
+    Failed(ModuleError),
+}
+
+#[derive(Clone, Debug)]
+pub struct InstantiatedModule {
+    module: Arc<LoadedModule>,
+}
+
+impl PendingModule {
+    pub fn path(&self) -> &Path {
+        &self.inner.path
+    }
+
+    pub fn option_actions(&self) -> &[LoadedOptionAction] {
+        &self.inner.options
+    }
+
+    pub fn initialize(&self) -> Result<InstantiatedModule, ModuleError> {
+        {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .expect("pending module state poisoned");
+            match &*state {
+                PendingModuleState::Pending => *state = PendingModuleState::Initializing,
+                PendingModuleState::Initializing => {
+                    return Err(ModuleError::new(
+                        "module initialization is already in progress",
+                    ));
+                }
+                PendingModuleState::Ready(module) => return Ok(module.clone()),
+                PendingModuleState::Failed(error) => return Err(error.clone()),
+            }
+        }
+        let result = load_module_with_native_modules(
+            &self.inner.path,
+            BTreeMap::new(),
+            self.inner.config.module_quota,
+            Arc::clone(&self.inner.debug_sink),
+            &self.inner.native_modules,
+            ModuleSourcePolicy::ExplicitExports,
+        )
+        .map(|module| InstantiatedModule {
+            module: Arc::new(module),
+        });
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("pending module state poisoned");
+        *state = match &result {
+            Ok(module) => PendingModuleState::Ready(module.clone()),
+            Err(error) => PendingModuleState::Failed(error.clone()),
+        };
+        result
+    }
+}
+
+impl InstantiatedModule {
+    pub fn module(&self) -> &LoadedModule {
+        &self.module
+    }
 }
 
 struct CompiledFormaModule {
@@ -845,6 +928,60 @@ impl Engine {
             &self.native_modules,
             ModuleSourcePolicy::ExplicitExports,
         )
+    }
+
+    pub fn prepare_module(&self, path: impl AsRef<Path>) -> Result<PendingModule, ModuleError> {
+        let resolver = ModuleResolver::for_root(path.as_ref())
+            .map_err(|error| ModuleError::new(error.to_string()))?;
+        let root = resolver
+            .resolve_root(path.as_ref())
+            .map_err(|error| ModuleError::new(error.to_string()))?;
+        if root.format != ModuleFormat::Forma {
+            return Err(ModuleError::new("main module must have a .forma extension"));
+        }
+        let physical = root
+            .path()
+            .ok_or_else(|| ModuleError::new("main module has no physical path"))?;
+        let mut sources = SourceDatabase::default();
+        let source_id = sources.add(physical.display().to_string(), read(physical)?);
+        let parsed = parse_registered(&sources, source_id);
+        if parsed.program.is_none() {
+            return Err(ModuleError::new(
+                parsed
+                    .diagnostics
+                    .iter()
+                    .map(|diagnostic| sources.render(diagnostic))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ));
+        }
+        let mut values = Vm::new();
+        let options = parsed
+            .options
+            .iter()
+            .map(|option| {
+                immediate_value(&option.value, &mut values)
+                    .map(|value| LoadedOptionAction {
+                        key: option.key.value.clone(),
+                        value,
+                    })
+                    .map_err(|error| {
+                        ModuleError::new(
+                            sources.render(&Diagnostic::error(error.to_string(), option.location)),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PendingModule {
+            inner: Arc::new(PendingModuleInner {
+                path: physical.to_owned(),
+                options,
+                config: self.config,
+                debug_sink: Arc::clone(&self.debug_sink),
+                native_modules: Arc::clone(&self.native_modules),
+                state: Mutex::new(PendingModuleState::Pending),
+            }),
+        })
     }
 
     pub fn load_entry(
@@ -7369,6 +7506,46 @@ unchanged", "|"),
         assert!(
             error.message().contains("unknown Host entry module"),
             "{error}"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn pending_modules_defer_imports_and_cache_initialization_outcomes() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        fs::write(
+            &main,
+            r#"option "test.action" 1;
+               option "test.action" 2;
+               import "./missing.forma" as missing;
+               export { missing as output };"#,
+        )
+        .unwrap();
+        let engine = recovery_engine();
+        let pending = engine.prepare_module(&main).unwrap();
+        assert_eq!(pending.path(), main);
+        assert_eq!(
+            pending
+                .option_actions()
+                .iter()
+                .map(|action| action.value.to_string())
+                .collect::<Vec<_>>(),
+            ["1", "2"]
+        );
+        let first = pending.initialize().unwrap_err().to_string();
+        let second = pending.initialize().unwrap_err().to_string();
+        assert_eq!(first, second);
+        assert!(first.contains("missing.forma"), "{first}");
+
+        fs::write(&main, "export let output = 42;").unwrap();
+        let pending = engine.prepare_module(&main).unwrap();
+        let first = pending.initialize().unwrap();
+        let second = pending.initialize().unwrap();
+        assert!(std::ptr::eq(first.module(), second.module()));
+        assert_eq!(
+            named_output(engine.execute(first.module()).unwrap()).to_string(),
+            "42"
         );
         fs::remove_dir_all(directory).unwrap();
     }
