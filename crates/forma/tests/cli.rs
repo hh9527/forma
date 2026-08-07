@@ -538,12 +538,9 @@ fn exec_dry_run_rejects_invalid_cli_entry_and_result() {
         assert!(!output.status.success());
         assert!(output.stdout.is_empty());
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("exported exec does not satisfy the forma exec entry contract"),
-            "{stderr}"
-        );
+        assert!(stderr.contains("module export at"), "{stderr}");
         assert!(stderr.contains(source_name), "{stderr}");
-        assert!(stderr.contains("entry contract detail"), "{stderr}");
+        assert!(stderr.contains("is not assignable to Fn("), "{stderr}");
         assert!(stderr.contains("entry/exec.forma"), "{stderr}");
     };
     let value = directory.join("value.forma");

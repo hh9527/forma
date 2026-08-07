@@ -319,14 +319,18 @@ impl SourceDatabase {
         let Some(label) = diagnostic.labels.iter().find(|label| label.primary) else {
             return diagnostic.message.clone();
         };
-        let file = self.get(label.location.source);
+        let Some(file) = self.files.get(label.location.source.index() as usize) else {
+            return diagnostic.message.clone();
+        };
         let position = file.position(label.location.start);
         let mut rendered = format!(
             "{}:{}:{}: {}",
             file.name, position.line, position.column, diagnostic.message
         );
         for secondary in diagnostic.labels.iter().filter(|label| !label.primary) {
-            let file = self.get(secondary.location.source);
+            let Some(file) = self.files.get(secondary.location.source.index() as usize) else {
+                continue;
+            };
             let position = file.position(secondary.location.start);
             rendered.push_str(&format!(
                 "\n  {}:{}:{}: {}",

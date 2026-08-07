@@ -220,6 +220,7 @@ pub struct PendingModule {
 
 struct PendingModuleInner {
     path: PathBuf,
+    arguments: Arc<[String]>,
     options: Vec<LoadedOptionAction>,
     config: EngineConfig,
     debug_sink: Arc<dyn DebugSink>,
@@ -237,6 +238,7 @@ enum PendingModuleState {
 #[derive(Clone, Debug)]
 pub struct InstantiatedModule {
     module: Arc<LoadedModule>,
+    exports: Value,
 }
 
 impl PendingModule {
@@ -246,6 +248,17 @@ impl PendingModule {
 
     pub fn option_actions(&self) -> &[LoadedOptionAction] {
         &self.inner.options
+    }
+
+    pub fn arguments(&self) -> &[String] {
+        &self.inner.arguments
+    }
+
+    pub fn entry_argument(&self) -> Value {
+        Value::Opaque(crate::OpaqueValue::new_identity(
+            crate::entry_runtime::handle_type(),
+            self.clone(),
+        ))
     }
 
     pub fn initialize(&self) -> Result<InstantiatedModule, ModuleError> {
@@ -274,8 +287,17 @@ impl PendingModule {
             &self.inner.native_modules,
             ModuleSourcePolicy::ExplicitExports,
         )
-        .map(|module| InstantiatedModule {
-            module: Arc::new(module),
+        .and_then(|module| {
+            let exports = module
+                .execute_with_quota_and_debug_sink(
+                    self.inner.config.session_quota,
+                    Arc::clone(&self.inner.debug_sink),
+                )
+                .map_err(|error| ModuleError::new(error.to_string()))?;
+            Ok(InstantiatedModule {
+                module: Arc::new(module),
+                exports,
+            })
         });
         let mut state = self
             .inner
@@ -293,6 +315,31 @@ impl PendingModule {
 impl InstantiatedModule {
     pub fn module(&self) -> &LoadedModule {
         &self.module
+    }
+
+    pub fn export(&self, name: &str) -> Option<(&Value, &crate::TypeScheme)> {
+        let Value::Dict(exports) = &self.exports else {
+            return None;
+        };
+        exports
+            .get(name)
+            .zip(self.module.analysis.module_interface.exports.get(name))
+    }
+
+    pub(crate) fn export_origin(&self, name: &str) -> String {
+        let definition = self
+            .module
+            .analysis
+            .hir
+            .definitions()
+            .iter()
+            .find(|definition| definition.top_level && definition.name == name);
+        let Some(definition) = definition else {
+            return self.module.path.display().to_string();
+        };
+        let file = self.module.sources.get(definition.location.source);
+        let position = file.position(definition.location.start);
+        format!("{}:{}:{}", file.name, position.line, position.column)
     }
 }
 
@@ -931,6 +978,14 @@ impl Engine {
     }
 
     pub fn prepare_module(&self, path: impl AsRef<Path>) -> Result<PendingModule, ModuleError> {
+        self.prepare_module_with_arguments(path, Vec::new())
+    }
+
+    pub fn prepare_module_with_arguments(
+        &self,
+        path: impl AsRef<Path>,
+        arguments: Vec<String>,
+    ) -> Result<PendingModule, ModuleError> {
         let resolver = ModuleResolver::for_root(path.as_ref())
             .map_err(|error| ModuleError::new(error.to_string()))?;
         let root = resolver
@@ -961,9 +1016,22 @@ impl Engine {
             .iter()
             .map(|option| {
                 immediate_value(&option.value, &mut values)
-                    .map(|value| LoadedOptionAction {
-                        key: option.key.value.clone(),
-                        value,
+                    .and_then(|value| {
+                        if option.key.value == "exec.capture-envs"
+                            && !matches!(
+                                &value,
+                                Value::Array(names)
+                                    if names.iter().all(|name| matches!(name, Value::String(_)))
+                            )
+                        {
+                            return Err(crate::ResolveModuleError::Manifest(
+                                "option \"exec.capture-envs\" must contain an Array(String)".into(),
+                            ));
+                        }
+                        Ok(LoadedOptionAction {
+                            key: option.key.value.clone(),
+                            value,
+                        })
                     })
                     .map_err(|error| {
                         ModuleError::new(
@@ -975,6 +1043,7 @@ impl Engine {
         Ok(PendingModule {
             inner: Arc::new(PendingModuleInner {
                 path: physical.to_owned(),
+                arguments: arguments.into(),
                 options,
                 config: self.config,
                 debug_sink: Arc::clone(&self.debug_sink),

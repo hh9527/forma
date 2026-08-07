@@ -4,6 +4,7 @@ pub mod compiler;
 mod core;
 pub mod document;
 mod elaboration;
+mod entry_runtime;
 mod evaluation;
 mod fmt;
 mod heap;

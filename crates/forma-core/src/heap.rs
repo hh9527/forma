@@ -199,6 +199,8 @@ pub(crate) enum Object {
         identity: Arc<()>,
         descriptor: RichValue,
         value: RichValue,
+        scheme: Option<crate::TypeScheme>,
+        origin: Option<Arc<str>>,
     },
     UpLink {
         value: Option<RichValue>,
@@ -629,6 +631,8 @@ impl Heap {
                     identity: Arc::clone(dyn_value.identity()),
                     descriptor,
                     value,
+                    scheme: dyn_value.scheme().cloned(),
+                    origin: dyn_value.origin().map(Arc::from),
                 }))
             }
         }))
@@ -798,6 +802,7 @@ impl<'a> HeapView<'a> {
             identity,
             descriptor,
             value,
+            ..
         } = self.object(handle)?
         else {
             return Err(HeapError("handle is not a Dyn"));
@@ -1236,6 +1241,8 @@ impl<'a> HeapView<'a> {
                     identity,
                     descriptor,
                     value,
+                    scheme,
+                    origin,
                 } = self.enter_object(handle, visiting)?
                 else {
                     return Err(HeapError("Dyn handle refers to another object kind"));
@@ -1243,10 +1250,12 @@ impl<'a> HeapView<'a> {
                 let descriptor = self.export_value_with(descriptor.value, visiting)?;
                 let value = self.export_value_with(value.value, visiting)?;
                 visiting.remove(&handle);
-                Value::Dyn(Arc::new(DynValue::from_parts_with_identity(
+                Value::Dyn(Arc::new(DynValue::from_parts_with_metadata(
                     Arc::clone(identity),
                     descriptor,
                     value,
+                    scheme.clone(),
+                    origin.clone(),
                 )))
             }
             RuntimeValue::UpLink(handle) => {
@@ -1520,10 +1529,14 @@ impl PendingCopy {
                 identity,
                 descriptor,
                 value,
+                scheme,
+                origin,
             } => Object::Dyn {
                 identity: Arc::clone(identity),
                 descriptor: self.copy_value(target, source, *descriptor)?,
                 value: self.copy_value(target, source, *value)?,
+                scheme: scheme.clone(),
+                origin: origin.clone(),
             },
             Object::UpLink { value } => Object::UpLink {
                 value: Some(self.copy_value(

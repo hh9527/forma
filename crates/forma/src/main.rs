@@ -1,13 +1,13 @@
 use forma_core::{
-    DebugEvent, DebugSink, DefinitionKind, Diagnostic, Engine, EngineConfig, LoadedModule,
-    Location, Quota, TextRange, Value, Vm, WorkspaceSnapshot, WorkspaceTypeId, parse_json,
+    DebugEvent, DebugSink, DefinitionKind, Engine, EngineConfig, LoadedModule, Location, Quota,
+    TextRange, Value, WorkspaceSnapshot, WorkspaceTypeId, parse_json,
 };
 use std::collections::BTreeMap;
 use std::env;
 use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 const EVALUATION_FUEL: usize = 1_000_000;
@@ -132,48 +132,28 @@ fn exec_command(arguments: &[String]) -> Result<(), String> {
         }
     };
     let engine = engine();
-    let main = engine
-        .load_module(module_path, BTreeMap::new())
+    let pending = engine
+        .prepare_module_with_arguments(module_path, request_args.to_vec())
         .map_err(|error| error.to_string())?;
-    let mut values = Vm::new();
-    let settings = exec_settings(&mut values)?;
-    let captures = exec_environment_captures(&main)?;
-    let request = exec_request(&mut values, request_args, &captures)?;
-    let injected = exec_injected_modules(&mut values, &main, settings, request)?;
+    let argument = pending.entry_argument();
     let entry = engine
-        .load_entry_with_modules(module_path, "entry/exec.forma", BTreeMap::new(), injected)
-        .map_err(|error| exec_entry_error(&main, error.to_string()))?;
+        .load_entry(module_path, "entry/exec.forma", BTreeMap::new())
+        .map_err(|error| format!("cannot load exec entry: {error}"))?;
     let exports = engine.execute(&entry).map_err(|error| error.to_string())?;
-    let Value::Dict(exports) = exports else {
-        return Err("exec entry must export a record".into());
+    let entry_function = select_host_entry(&entry, exports, "exec", "entry")?;
+    let result = engine
+        .invoke(&entry, &entry_function, &[argument])
+        .map_err(|error| format!("exec entry failed: {error}"))?;
+    let Value::Dict(result) = result else {
+        return Err("exec entry result must be a record".into());
     };
-    if exports.shape().fields() != ["exec_opts", "install"] {
-        return Err("exec entry must export exactly exec_opts and install".into());
+    if result.shape().fields() != ["exec_opts", "install"] {
+        return Err("exec entry result must contain exactly exec_opts and install".into());
     }
-    let install = expect_string_export(&exports, "install")?;
-    let exec_opts = expect_string_export(&exports, "exec_opts")?;
+    let install = expect_string_export(&result, "install")?;
+    let exec_opts = expect_string_export(&result, "exec_opts")?;
     println!(r#"{{"install":{install},"exec_opts":{exec_opts}}}"#);
     Ok(())
-}
-
-fn exec_entry_error(main: &LoadedModule, detail: String) -> String {
-    let Some(definition) = main
-        .analysis
-        .hir
-        .definitions()
-        .iter()
-        .find(|definition| definition.top_level && definition.name == "exec")
-    else {
-        return detail;
-    };
-    let diagnostic = Diagnostic::error(
-        "exported exec does not satisfy the forma exec entry contract",
-        definition.location,
-    );
-    format!(
-        "{}\nentry contract detail:\n{detail}",
-        main.sources.render(&diagnostic)
-    )
 }
 
 fn expect_string_export<'a>(exports: &'a forma_core::Dict, name: &str) -> Result<&'a str, String> {
@@ -185,55 +165,6 @@ fn expect_string_export<'a>(exports: &'a forma_core::Dict, name: &str) -> Result
         )),
         None => Err(format!("exec entry omitted export {name:?}")),
     }
-}
-
-fn exec_injected_modules(
-    vm: &mut Vm,
-    main: &LoadedModule,
-    settings: Value,
-    request: Value,
-) -> Result<BTreeMap<String, String>, String> {
-    let Value::Dict(request) = request else {
-        return Err("internal ExecRequest snapshot is not a Dict".into());
-    };
-    let runtime_source = format!(
-        "import \"std/rt-types/exec.forma\" {{ ExecSettings }};\n\
-         export let settings: ExecSettings = {};\n\
-         export let args: Array(String) = {};\n\
-         export let env: Dict(String) = {};\n\
-         export let cwd: String = {};\n",
-        settings.to_forma_literal()?,
-        request
-            .get("args")
-            .expect("ExecRequest args")
-            .to_forma_literal()?,
-        request
-            .get("env")
-            .expect("ExecRequest env")
-            .to_forma_literal()?,
-        request
-            .get("cwd")
-            .expect("ExecRequest cwd")
-            .to_forma_literal()?,
-    );
-    let actions = main
-        .option_actions()
-        .iter()
-        .map(|action| {
-            vm.make_dict(vec![
-                ("key".into(), Value::string(action.key.clone())),
-                ("value".into(), action.value.clone()),
-            ])
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    let option_source = format!(
-        "export let actions: Array(Any) = {};\n",
-        Value::Array(actions.into()).to_forma_literal()?
-    );
-    Ok(BTreeMap::from([
-        ("entry/opts.priv.forma".into(), option_source),
-        ("entry/rt.priv.forma".into(), runtime_source),
-    ]))
 }
 
 fn build_command(arguments: &[String]) -> Result<(), String> {
@@ -366,85 +297,6 @@ fn canonical_build_json(value: &Value) -> Result<String, String> {
     }
     output.push_str("]}");
     Ok(output)
-}
-
-fn exec_settings(vm: &mut Vm) -> Result<Value, String> {
-    let cache = cache_root().join("forma").join("exec");
-    let platform = vm.make_dict(vec![
-        ("arch".into(), Value::string(env::consts::ARCH)),
-        ("os".into(), Value::string(env::consts::OS)),
-    ])?;
-    vm.make_dict(vec![
-        (
-            "download_prefix".into(),
-            Value::string(path_string(&cache.join("downloads"))?),
-        ),
-        (
-            "install_prefix".into(),
-            Value::string(path_string(&cache.join("installs"))?),
-        ),
-        ("platform".into(), platform),
-    ])
-}
-
-fn exec_environment_captures(module: &LoadedModule) -> Result<Vec<String>, String> {
-    let mut seen = std::collections::BTreeSet::new();
-    let mut captures = Vec::new();
-    for value in module.options("exec.capture-envs") {
-        let Value::Array(names) = value else {
-            return Err("option \"exec.capture-envs\" must contain an Array(String)".into());
-        };
-        for name in names.iter() {
-            let Value::String(name) = name else {
-                return Err("option \"exec.capture-envs\" must contain an Array(String)".into());
-            };
-            if seen.insert(name.to_string()) {
-                captures.push(name.to_string());
-            }
-        }
-    }
-    Ok(captures)
-}
-
-fn exec_request(vm: &mut Vm, arguments: &[String], captures: &[String]) -> Result<Value, String> {
-    let mut environment = Vec::new();
-    for name in captures {
-        let Some(value) = env::var_os(name) else {
-            continue;
-        };
-        let value = value
-            .into_string()
-            .map_err(|_| format!("exec environment variable {name:?} is not UTF-8"))?;
-        environment.push((name.clone(), Value::string(value)));
-    }
-    let environment = vm.make_dict(environment)?;
-    vm.make_dict(vec![
-        (
-            "args".into(),
-            Value::Array(arguments.iter().cloned().map(Value::string).collect()),
-        ),
-        (
-            "cwd".into(),
-            Value::string(path_string(
-                &env::current_dir().map_err(|error| error.to_string())?,
-            )?),
-        ),
-        ("env".into(), environment),
-    ])
-}
-
-fn cache_root() -> PathBuf {
-    env::var_os("FORMA_CACHE_HOME")
-        .or_else(|| env::var_os("XDG_CACHE_HOME"))
-        .map(PathBuf::from)
-        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".cache")))
-        .unwrap_or_else(env::temp_dir)
-}
-
-fn path_string(path: &Path) -> Result<String, String> {
-    path.to_str()
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| format!("path is not UTF-8: {}", path.display()))
 }
 
 fn check_command(arguments: &[String]) -> Result<(), String> {

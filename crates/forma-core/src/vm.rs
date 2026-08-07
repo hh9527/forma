@@ -521,6 +521,51 @@ impl<'vm, 'stack> CallContext<'vm, 'stack> {
         self.set(destination, RuntimeValue::Opaque(handle).into())
     }
 
+    pub fn set_identity_opaque<T>(
+        &mut self,
+        destination: RegisterId,
+        native_type: crate::NativeType,
+        payload: T,
+    ) -> Result<(), NativeError>
+    where
+        T: std::any::Any + Send + Sync,
+    {
+        self.charge_sequence(1)?;
+        let value = crate::OpaqueValue::new_identity(native_type, payload);
+        let handle = self.current.allocate(Object::Opaque(value));
+        self.set(destination, RuntimeValue::Opaque(handle).into())
+    }
+
+    pub fn set_value(
+        &mut self,
+        destination: RegisterId,
+        value: &crate::Value,
+    ) -> Result<(), NativeError> {
+        let bytes = usize::try_from(legacy_value_bytes(value)?)
+            .map_err(|_| NativeError::allocation_limit("native value is too large"))?;
+        self.charge_allocation(bytes)?;
+        let value = self
+            .current
+            .import_value(self.background, value)
+            .map_err(|error| NativeError::new(error.to_string()))?;
+        self.set(destination, value)
+    }
+
+    pub fn export_value(&self, source: RegisterId) -> Result<crate::Value, NativeError> {
+        let value = self
+            .stack
+            .get(self.base + source.0 as usize)
+            .and_then(Option::as_ref)
+            .copied()
+            .ok_or_else(|| NativeError::new("register is not initialized"))?;
+        HeapView {
+            current: self.current,
+            background: self.background,
+        }
+        .export_value(value)
+        .map_err(|error| NativeError::new(error.to_string()))
+    }
+
     pub fn copy(&mut self, destination: RegisterId, source: RegisterId) -> Result<(), NativeError> {
         let value = self.owned(source)?;
         self.set(destination, value)
@@ -4918,6 +4963,8 @@ fn run_core_dyn(
                 identity: Arc::new(()),
                 descriptor: arguments[0],
                 value: arguments[1],
+                scheme: None,
+                origin: None,
             }))),
             return_target,
         });
@@ -5410,6 +5457,8 @@ fn finish_dyn_observation(
                         identity: Arc::new(()),
                         descriptor,
                         value,
+                        scheme: None,
+                        origin: None,
                     })))
                 }
                 DynObservation::Children(children) => {
@@ -5420,6 +5469,8 @@ fn finish_dyn_observation(
                                 identity: Arc::new(()),
                                 descriptor,
                                 value,
+                                scheme: None,
+                                origin: None,
                             })))
                         })
                         .collect();
@@ -5441,6 +5492,8 @@ fn finish_dyn_observation(
                                     identity: Arc::new(()),
                                     descriptor,
                                     value,
+                                    scheme: None,
+                                    origin: None,
                                 },
                             )));
                             RichValue::new(
@@ -5468,6 +5521,8 @@ fn finish_dyn_observation(
                             identity: Arc::new(()),
                             descriptor,
                             value,
+                            scheme: None,
+                            origin: None,
                         })));
                     RichValue::new(
                         RuntimeValue::Tagged(current.allocate(Object::Tagged {

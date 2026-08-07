@@ -330,6 +330,9 @@ impl ModuleResolver {
         if !target.starts_with(['.', '@'])
             && let Some(_registration_id) = self.builtins.get(target)
         {
+            if target.starts_with("entry/") && !privileged {
+                return Err(ResolveModuleError::InvalidImport(target.into()));
+            }
             return Ok(ResolvedModule {
                 id: ModuleId::builtin(target),
                 format: ModuleFormat::Forma,

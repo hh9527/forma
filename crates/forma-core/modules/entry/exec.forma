@@ -1,4 +1,5 @@
-import "@main" as main;
+import "entry/rt.native.forma" *;
+import "std/array" as array;
 import "std/codec" as codec;
 import "std/json" as json;
 import "std/rt-types/exec.forma" {
@@ -6,40 +7,55 @@ import "std/rt-types/exec.forma" {
     ExecSettings,
     ExecRequest,
     ExecEnvironment,
+    ExecEnv,
     Install,
 };
-import "entry/rt.priv.forma" as rt;
-import "entry/opts.priv.forma" as opts;
 
-@struct type ExecOpts = {
-    cwd: Option(String),
-    bin: String,
-    args: Array(String),
-    env: ExecEnvironment,
+def unwrap: for(A) Fn(Result(A, BlameError)) -> A = fn(result) {
+    match result {
+        'Ok(value) => value,
+        'Err(error) => reraise!(error),
+    }
 };
 
-let checked: ExecFn = main.exec;
-let settings: ExecSettings = rt.settings;
-let request: ExecRequest = {
-    args: rt.args,
-    env: rt.env,
-    cwd: rt.cwd,
-};
-let option_actions = opts.actions;
-let output = checked(settings, request);
-
-let install = match codec.encode(Array(Install), output.install) {
-    'Ok(value) => json.stringify(value),
-    'Err(error) => reraise!(error),
-};
-let exec_opts = match codec.encode(ExecOpts, {
-    cwd: output.cwd,
-    bin: output.bin,
-    args: output.args,
-    env: output.env,
-}) {
-    'Ok(value) => json.stringify(value),
-    'Err(error) => reraise!(error),
+def capture_names = fn(options) {
+    array.flat_map(options, fn(action) {
+        if action.key == "exec.capture-envs" {
+            unwrap(option_names(action.value))
+        } else {
+            []
+        }
+    })
 };
 
-export { install, exec_opts };
+def capture_env = fn(handle, options) {
+    capture_vars(handle, capture_names(options))
+};
+
+export def entry = fn(handle) {
+    let options = module_options(handle);
+    let settings: ExecSettings = unwrap(validate(ExecSettings, {
+        platform: platform(handle),
+        download_prefix: download_prefix(handle),
+        install_prefix: install_prefix(handle),
+    }));
+    let request: ExecRequest = {
+        args: args(handle),
+        env: capture_env(handle, options),
+        cwd: cwd(handle),
+    };
+    let initialized = unwrap(initialize_module(handle));
+    let raw_exec = unwrap(module_export(initialized, "exec"));
+    let exec = unwrap(check_type(ExecFn, raw_exec));
+    let output = exec(settings, request);
+    let encoded = unwrap(codec.encode(ExecEnv, output));
+    {
+        install: json.stringify(encoded.install),
+        exec_opts: json.stringify({
+            cwd: encoded.cwd,
+            bin: encoded.bin,
+            args: encoded.args,
+            env: encoded.env,
+        }),
+    }
+};

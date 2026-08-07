@@ -149,6 +149,17 @@ impl OpaqueValue {
         }
     }
 
+    pub fn new_identity<T>(native_type: NativeType, payload: T) -> Self
+    where
+        T: Any + Send + Sync,
+    {
+        Self {
+            native_type,
+            payload: Arc::new(payload),
+            equal: |left, right| std::ptr::eq(left, right),
+        }
+    }
+
     pub fn native_type(&self) -> &NativeType {
         &self.native_type
     }
@@ -987,18 +998,39 @@ pub struct DynValue {
     identity: Arc<()>,
     descriptor: Box<Value>,
     value: Box<Value>,
+    scheme: Option<crate::TypeScheme>,
+    origin: Option<Arc<str>>,
 }
 
 impl DynValue {
-    pub(crate) fn from_parts_with_identity(
+    pub(crate) fn from_module_export(
+        descriptor: Value,
+        value: Value,
+        scheme: crate::TypeScheme,
+        origin: impl Into<Arc<str>>,
+    ) -> Self {
+        Self {
+            identity: Arc::new(()),
+            descriptor: Box::new(descriptor),
+            value: Box::new(value),
+            scheme: Some(scheme),
+            origin: Some(origin.into()),
+        }
+    }
+
+    pub(crate) fn from_parts_with_metadata(
         identity: Arc<()>,
         descriptor: Value,
         value: Value,
+        scheme: Option<crate::TypeScheme>,
+        origin: Option<Arc<str>>,
     ) -> Self {
         Self {
             identity,
             descriptor: Box::new(descriptor),
             value: Box::new(value),
+            scheme,
+            origin,
         }
     }
 
@@ -1012,6 +1044,14 @@ impl DynValue {
 
     pub(crate) fn value(&self) -> &Value {
         &self.value
+    }
+
+    pub(crate) fn scheme(&self) -> Option<&crate::TypeScheme> {
+        self.scheme.as_ref()
+    }
+
+    pub(crate) fn origin(&self) -> Option<&str> {
+        self.origin.as_deref()
     }
 }
 
