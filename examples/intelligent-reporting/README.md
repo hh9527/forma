@@ -29,6 +29,8 @@ Telora 代码将合法意图逐步 lowering 为 SQLite SQL。
 - RFC 0186：全部四个子阶段已经完成。
 - RFC 0192：已完成递归类型元数据的跨模块发布；SQL 表达式已改为真正递归的
   `Expr`，同时保留有效 lowering 与四条独立诊断。
+- RFC 0193：新的多指标报表伞 RFC 已接受；RFC 0194 已完成 measure semantic
+  model，显式记录业务值类型、自然 grain 与 aggregation behavior。
 
 ## 文件
 

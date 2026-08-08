@@ -21,6 +21,15 @@ import "./execution.telora" { OutputMode, ExecutionPlan };
     UnitsSold: 'None,
 };
 
+@enum type SemanticValueType = {
+    MoneyCents: 'None,
+    Count: 'None,
+};
+
+@enum type Aggregation = {
+    Additive: 'None,
+};
+
 @enum type Dimension = {
     OrderMonth: 'None,
     CustomerRegion: 'None,
@@ -89,6 +98,9 @@ type DimensionLowerer = Fn(Measure) -> Option(GroupRequirement);
 
 @struct type MeasureCapability = {
     id: Measure,
+    value_type: SemanticValueType,
+    natural_grain: Entity,
+    aggregation: Aggregation,
     lower: MeasureLowerer,
 };
 
@@ -217,6 +229,9 @@ def refund_by_order: SelectBody = {
 
 def net_revenue: MeasureCapability = {
     id: 'NetRevenue,
+    value_type: 'MoneyCents,
+    natural_grain: 'Order,
+    aggregation: 'Additive,
     lower: fn() {
         {
             measure: 'NetRevenue,
@@ -247,6 +262,9 @@ def net_revenue: MeasureCapability = {
 
 def units_sold: MeasureCapability = {
     id: 'UnitsSold,
+    value_type: 'Count,
+    natural_grain: 'OrderItem,
+    aggregation: 'Additive,
     lower: fn() {
         {
             measure: 'UnitsSold,
@@ -477,6 +495,8 @@ export def compile: Fn(ReportIntent) -> Option(ExecutionPlan) = fn(intent) {
 
 export {
     Measure,
+    SemanticValueType,
+    Aggregation,
     Dimension,
     ReportIntent,
     MeasureCapability,
