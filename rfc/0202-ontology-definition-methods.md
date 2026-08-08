@@ -1,6 +1,6 @@
 # RFC 0202: Reusable ontology-definition methods
 
-- Status: Accepted
+- Status: Implemented
 - Depends on: RFC 0051, RFC 0055, RFC 0192, RFC 0199
 
 ## Summary
@@ -189,3 +189,63 @@ Stop and return to discussion when:
 An honest outcome may be a small metadata-construction library plus an
 analytics planner and two independent models. That is preferable to claiming a
 reusable ontology language that exists only through erased data.
+
+## Comparative implementation result
+
+All four children are implemented. The ten-table B2B model and twelve-table
+B2C model use one ordinary `ontology-method` package while retaining distinct
+closed Entity, Measure, Dimension, Filter, capability, relation, and plan
+types. Neither imports the other, and the shared package contains no business
+identity, table name, physical expression, or metric formula.
+
+The reused surface is materially domain-oriented:
+
+- TypeMetadata functions generate concrete capability and requirement record
+  types from each model's own types;
+- higher-order capability lookup connects requested identities to typed
+  lowerers and reports missing definitions;
+- independent lowering and completeness prevent partial plans from being
+  published while retaining best-effort diagnostics;
+- generic relation closure and connecting-edge selection operate on each
+  model's closed Entity and Relation types; and
+- the original requested identity flows into lowerers so output provenance
+  remains attached to the intent rather than the capability catalog.
+
+B2B preserves its established SQL, four independent invalid diagnostics,
+restriction provenance, and Host wire plan. B2C produces a typed read-only plan
+through geography and acquisition-attribution paths, while one invalid intent
+reports both a model-owned fan-out violation and a shared missing-capability
+error.
+
+## What did not become shared
+
+Metric formulas, grain policies, physical mappings, concrete relation catalogs,
+filter semantics, intermediate plan shapes, and final plan assembly remain
+model-owned. This is intentional: they carry business meaning rather than
+mechanical repetition. A future extraction needs another concrete repeated
+invariant, not merely similar field names.
+
+The shared API changed once during B2B integration. `lower_requested` initially
+passed only Capability and Input; this caused output requirements to inherit
+the model catalog's `id` provenance. Passing the original requested Id restored
+intent provenance. The generated Capability constructor was aligned to the
+same `Fn(Id, Input) -> Option(Output)` protocol before B2C used it. B2C required
+no further semantic API change.
+
+## Honest remaining boundaries
+
+- Executable user metadata constructors work, but their generated family
+  cannot yet be named precisely inside another generic `TypeOf(F(A))` scheme.
+  Concrete instantiation plus typed projections is safe and somewhat verbose.
+- Workspace module-result presentation widens quantified exports to `Any` even
+  while strict checking and definition slots retain the generic contract.
+- Relation closure remains an explicit six-step bounded policy.
+- The examples prove reusable authored libraries and diagnostics, not yet Code
+  Agent repair rates over a generated intent corpus.
+- Two analytics models establish a credible industry method, not a universal
+  ontology framework or applicability to every domain.
+
+The central hypothesis is therefore supported within a clear boundary: Telora's
+“types are metadata” model and ordinary higher-order functions can define a
+reusable, strongly checked ontology construction and lowering method without a
+trait system, higher-kinded types, or ontology-specific runtime machinery.
