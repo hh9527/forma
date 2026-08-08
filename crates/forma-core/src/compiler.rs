@@ -2577,6 +2577,57 @@ let decorators = {
     }
 
     #[test]
+    fn diagnostic_convenience_intrinsics_compose_blame_report_and_raise() {
+        let function = compile_source(
+            "test",
+            "let warning: BlameError = emit_warn!(\"deprecated\", \"old\", 42); warning.message",
+        )
+        .unwrap();
+        let mut account = crate::QuotaAccount::new(crate::Quota::with_fuel(100_000));
+        let value = Vm::new()
+            .execute_with_account(&function, &[], &mut account)
+            .unwrap();
+        assert_eq!(value.to_string(), "\"deprecated\"");
+        assert_eq!(account.diagnostics().len(), 1);
+        assert_eq!(
+            account.diagnostics()[0].severity,
+            crate::source::Severity::Warning
+        );
+        assert_eq!(account.diagnostics()[0].labels.len(), 3);
+
+        let error = run("let ignored = emit_error!(\"invalid\", 42); 7").unwrap_err();
+        let ExecutionError::Runtime(error) = error else {
+            panic!("expected a reported diagnostic")
+        };
+        assert_eq!(error.kind, RuntimeErrorKind::ReportedDiagnostic);
+        assert_eq!(error.message, "invalid");
+
+        let error = run("fail!(\"stopped\", 42)").unwrap_err();
+        let ExecutionError::Runtime(error) = error else {
+            panic!("expected raised blame")
+        };
+        assert_eq!(error.kind, RuntimeErrorKind::RaisedBlame);
+        assert_eq!(error.message, "stopped");
+    }
+
+    #[test]
+    fn diagnostic_convenience_intrinsics_require_string_messages() {
+        for source in [
+            "emit_info!(1)",
+            "emit_warn!(1)",
+            "emit_error!(1)",
+            "fail!(1)",
+        ] {
+            let error = compile_source("test", source).unwrap_err();
+            assert!(
+                error.message.contains("Int") && error.message.contains("String"),
+                "{source}: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
     fn if_let_selects_and_scopes_structural_patterns() {
         let some = run(
             "let value: Option(Int) = 'Some(3); if let 'Some(item) = value { item + 1 } else { 0 }",

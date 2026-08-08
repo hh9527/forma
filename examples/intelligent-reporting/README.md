@@ -23,7 +23,9 @@ Forma 代码将合法意图逐步 lowering 为 SQLite SQL。
 - RFC 0180：全部五个子阶段已经完成。
 - RFC 0186：新的诊断伞 RFC 已接受；RFC 0187 已完成 message-first variadic
   `blame!` 与 `raise!`；RFC 0188 已完成普通 `report` BIF、Info/Warn/Error
-  事件及 Error 成功边界。下一步加入组合宏与 best-effort sibling 调度。
+  事件及 Error 成功边界；RFC 0189 已完成 `emit_info!`、`emit_warn!`、
+  `emit_error!` 与 `fail!` 便利形式。它支持普通控制流内继续诊断，但没有虚构
+  通用的数组元素级恢复；下一步由 RFC 0190 用本实验验证实际边界。
 
 ## 文件
 

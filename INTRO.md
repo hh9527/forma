@@ -79,7 +79,7 @@ The shared module first validates external data into domain types:
 def validated_source: Fn(Any) -> ToolchainSource = fn(raw) {
     match validate(ToolchainSource, raw) {
         'Ok(source) => source,
-        'Err(error) => reraise!(error),
+        'Err(error) => raise!(error),
     }
 };
 ```
@@ -96,15 +96,15 @@ def install_dest = fn(settings, package, ty, strip) {
 def checked_compiler_args = fn(request, sysroot_dest) {
     let arguments = match argv.reject_option(request.args, "--sysroot") {
         'Ok(arguments) => arguments,
-        'Err(error) => reraise!(error),
+        'Err(error) => raise!(error),
     };
     let arguments = match argv.reject_option(arguments, "-ffile-prefix-map") {
         'Ok(arguments) => arguments,
-        'Err(error) => reraise!(error),
+        'Err(error) => raise!(error),
     };
     let arguments = match argv.reject_option(arguments, "-fdebug-prefix-map") {
         'Ok(arguments) => arguments,
-        'Err(error) => reraise!(error),
+        'Err(error) => raise!(error),
     };
     argv.prepend([
         `--sysroot=\{sysroot_dest}`,
@@ -261,7 +261,7 @@ source.json:12:9: expected String
   toolchain.forma:16:28: requirement declared here
 ```
 
-`reraise!` preserves this structure instead of replacing it with a new string.
+`raise!` preserves this structure instead of replacing it with a new string.
 The GCC fixture verifies that malformed toolchain data retains both JSON and
 wrapper rule locations, while missing `TARGET` and conflicting arguments emit
 no partial dry-run output.

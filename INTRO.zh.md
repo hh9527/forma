@@ -69,7 +69,7 @@ export def exec: ExecFn = command("gcc", source);
 def validated_source: Fn(Any) -> ToolchainSource = fn(raw) {
     match validate(ToolchainSource, raw) {
         'Ok(source) => source,
-        'Err(error) => reraise!(error),
+        'Err(error) => raise!(error),
     }
 };
 ```
@@ -85,15 +85,15 @@ def install_dest = fn(settings, package, ty, strip) {
 def checked_compiler_args = fn(request, sysroot_dest) {
     let arguments = match argv.reject_option(request.args, "--sysroot") {
         'Ok(arguments) => arguments,
-        'Err(error) => reraise!(error),
+        'Err(error) => raise!(error),
     };
     let arguments = match argv.reject_option(arguments, "-ffile-prefix-map") {
         'Ok(arguments) => arguments,
-        'Err(error) => reraise!(error),
+        'Err(error) => raise!(error),
     };
     let arguments = match argv.reject_option(arguments, "-fdebug-prefix-map") {
         'Ok(arguments) => arguments,
-        'Err(error) => reraise!(error),
+        'Err(error) => raise!(error),
     };
     argv.prepend([
         `--sysroot=\{sysroot_dest}`,
@@ -223,7 +223,7 @@ source.json:12:9: expected String
   toolchain.forma:16:28: requirement declared here
 ```
 
-`reraise!` 不会把这种错误压成新字符串。GCC fixture 还验证了错误工具链数据
+`raise!` 不会把这种错误压成新字符串。GCC fixture 还验证了错误工具链数据
 同时保留 JSON 与 wrapper 规则位置，缺失 `TARGET` 和冲突参数也不会产生部分
 dry-run 输出。
 

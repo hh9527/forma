@@ -1432,7 +1432,10 @@ impl<'a> Lowerer<'a> {
                     .next()
                     .ok_or_else(|| self.error(node, "contextual intrinsic has no name"))?;
                 let name_text = self.text(name);
-                if matches!(name_text.as_ref(), "blame" | "panic" | "raise") {
+                if matches!(
+                    name_text.as_ref(),
+                    "blame" | "panic" | "raise" | "emit_info" | "emit_warn" | "emit_error" | "fail"
+                ) {
                     let bang = self.first_token(node, Token::Bang)?;
                     let arguments = self
                         .children(node)
@@ -1444,6 +1447,11 @@ impl<'a> Lowerer<'a> {
                         .collect::<Result<Vec<_>, _>>()?;
                     if name_text == "blame" {
                         self.lower_blame(arguments, node)
+                    } else if matches!(
+                        name_text.as_ref(),
+                        "emit_info" | "emit_warn" | "emit_error" | "fail"
+                    ) {
+                        self.lower_diagnostic_convenience(&name_text, arguments, node)
                     } else {
                         if arguments.len() != 1 {
                             return Err(self.error(
@@ -1505,6 +1513,46 @@ impl<'a> Lowerer<'a> {
             })
             .collect();
         Ok(located(ExprKind::Dict(fields), location))
+    }
+
+    fn lower_diagnostic_convenience(
+        &self,
+        name: &str,
+        arguments: Vec<Expr>,
+        node: NodeRef,
+    ) -> Result<Expr, Diagnostic> {
+        if arguments.is_empty() {
+            return Err(self.error(
+                node,
+                format!("{name}! expects a message followed by zero or more subjects"),
+            ));
+        }
+        let location = self.location(node);
+        let blame = self.lower_blame(arguments, node)?;
+        if name == "fail" {
+            return Ok(located(
+                ExprKind::Raise {
+                    error: Box::new(blame),
+                },
+                location,
+            ));
+        }
+        let severity = match name {
+            "emit_info" => "Info",
+            "emit_warn" => "Warn",
+            "emit_error" => "Error",
+            _ => unreachable!("diagnostic convenience name was checked"),
+        };
+        Ok(located(
+            ExprKind::Call {
+                callee: Box::new(located(
+                    ExprKind::Variable(located("report".into(), location)),
+                    location,
+                )),
+                arguments: vec![located(ExprKind::Atom(severity.into()), location), blame],
+            },
+            location,
+        ))
     }
 
     fn lower_interpreter(
@@ -3123,6 +3171,14 @@ export { private as visible, identity as map };"#,
             (
                 "blame!()",
                 "blame! expects a message followed by zero or more subjects",
+            ),
+            (
+                "emit_warn!()",
+                "emit_warn! expects a message followed by zero or more subjects",
+            ),
+            (
+                "fail!()",
+                "fail! expects a message followed by zero or more subjects",
             ),
             ("file!()", "file! is reserved but not implemented"),
             ("line!()", "line! is reserved but not implemented"),
