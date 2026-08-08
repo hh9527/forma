@@ -1,5 +1,6 @@
 import "std/array" as array;
 import "domain-method/method.telora" as method;
+import "analytics-method/analytics.telora" as analytics;
 import "./sql.telora" {
     Function,
     BinaryOp,
@@ -581,15 +582,11 @@ def lower_sql: Fn(RelationalPlan) -> SqlPlan = fn(relational) {
 };
 
 def compile_render: Fn(RenderIntent, Array(ResultField)) -> Option(RenderPlan) = fn(intent, schema) {
-    let checks: Array(Bool) = array.map(intent.fields, fn(name) {
-        if array.any(schema, fn(field) { field.name == name }) {
-            'True
-        } else {
-            let ignored = emit_error!(`render field \{name} is absent from the result schema`, name);
-            'False
-        }
+    let missing = analytics.missing_names(intent.fields, schema, fn(field) { field.name });
+    let errors = array.map(missing, fn(name) {
+        emit_error!(`render field \{name} is absent from the result schema`, name)
     });
-    if array.all(checks, fn(valid) { valid }) {
+    if array.length(errors) == 0 {
         'Some({mode: intent.mode, fields: intent.fields})
     } else {
         'None

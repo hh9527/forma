@@ -1,4 +1,5 @@
 import "std/array" as array;
+import "analytics-method/analytics.telora" as analytics;
 
 @enum type Entity = {
     Region: 'None,
@@ -47,40 +48,21 @@ def fanout_catalog: Array(Relation) = [
 ];
 
 def contains: Fn(Array(Entity), Entity) -> Bool = fn(values, expected) {
-    array.any(values, fn(value) { value == expected })
+    analytics.contains(values, expected)
 };
 
-def backward_once: Fn(Array(Entity)) -> Array(Entity) = fn(needed) {
-    array.fold(catalog, needed, fn(next, relation) {
-        if contains(next, relation.to) { array.push(next, relation.from) } else { next }
-    })
-};
-
-def forward_with: Fn(Array(Relation), Array(Entity)) -> Array(Entity) = fn(relations, reachable) {
-    array.fold(relations, reachable, fn(next, relation) {
-        if contains(next, relation.from) { array.push(next, relation.to) } else { next }
-    })
-};
-
-# The bounded ontology has paths no longer than six edges. Repeated expansion
-# computes a deterministic fixed point without adding recursion to the model.
-def close_backward: Fn(Array(Entity)) -> Array(Entity) = fn(values) {
-    backward_once(backward_once(backward_once(backward_once(backward_once(backward_once(values))))))
-};
-
-def close_forward: Fn(Array(Entity)) -> Array(Entity) = fn(values) {
-    let all = array.concat([catalog, fanout_catalog]);
-    forward_with(all, forward_with(all, forward_with(all, forward_with(all, forward_with(all, forward_with(all, values))))))
-};
+def relation_from: Fn(Relation) -> Entity = fn(relation) { relation.from };
+def relation_to: Fn(Relation) -> Entity = fn(relation) { relation.to };
 
 def plan: Fn(Entity, Array(Entity)) -> PathPlan = fn(base, targets) {
-    let needed = close_backward(targets);
-    let safe_reachable = forward_with(catalog, forward_with(catalog, forward_with(catalog, forward_with(catalog, forward_with(catalog, forward_with(catalog, [base]))))));
-    let all_reachable = close_forward([base]);
+    let needed = analytics.close_six(catalog, targets, relation_to, relation_from);
+    let safe_reachable = analytics.close_six(catalog, [base], relation_from, relation_to);
+    let all = array.concat([catalog, fanout_catalog]);
+    let all_reachable = analytics.close_six(all, [base], relation_from, relation_to);
     {
-        relations: array.filter(catalog, fn(relation) {
-            contains(safe_reachable, relation.from) && contains(needed, relation.to)
-        }),
+        relations: analytics.select_connecting_edges(
+            catalog, safe_reachable, needed, relation_from, relation_to,
+        ),
         fanout: array.filter(targets, fn(target) {
             contains(safe_reachable, target) == 'False && contains(all_reachable, target)
         }),
