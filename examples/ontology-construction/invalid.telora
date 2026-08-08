@@ -7,5 +7,5 @@ type MeasureCapability = ontology.Capability(Measure, Entity, String);
 
 export let output: MeasureCapability = {
     id: 'Revenue,
-    lower: fn(entity) { 'Some(entity) },
+    lower: fn(measure, entity) { 'Some(entity) },
 };

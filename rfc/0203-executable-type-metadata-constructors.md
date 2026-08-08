@@ -19,10 +19,10 @@ def Capability:
     for(Id, Input, Output)
     Fn(TypeOf(Id), TypeOf(Input), TypeOf(Output)) -> Type =
     fn(Id, Input, Output) {
-    struct('None, {
-        id: Id,
-        lower: Fn(Input) -> Option(Output),
-    })
+        struct('None, {
+            id: Id,
+            lower: Fn(Id, Input) -> Option(Output),
+        })
     };
 ```
 

@@ -25,7 +25,7 @@ def Capability:
     fn(Id, Input, Output) {
     struct('None, {
         id: Id,
-        lower: Fn(Input) -> Option(Output),
+        lower: Fn(Id, Input) -> Option(Output),
     })
     };
 

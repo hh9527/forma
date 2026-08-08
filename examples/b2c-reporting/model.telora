@@ -1,0 +1,242 @@
+import "std/array" as array;
+import "ontology-method/types.telora" as types;
+import "ontology-method/ontology.telora" as ontology;
+
+@enum type Entity = {
+    Consumer: 'None,
+    Household: 'None,
+    Address: 'None,
+    Region: 'None,
+    Session: 'None,
+    Cart: 'None,
+    CartItem: 'None,
+    Order: 'None,
+    OrderItem: 'None,
+    Product: 'None,
+    Category: 'None,
+    Campaign: 'None,
+};
+
+@enum type Measure = {
+    PurchaseRevenue: 'None,
+    SessionConversions: 'None,
+};
+
+@enum type Dimension = {
+    PurchaseMonth: 'None,
+    ConsumerRegion: 'None,
+    AcquisitionCampaign: 'None,
+    ProductCategory: 'None,
+    LoyaltyTier: 'None,
+};
+
+@enum type Alignment = { Natural: 'None };
+
+@enum type Cardinality = {
+    ManyToOne: 'None,
+    OneToMany: 'None,
+};
+
+@struct type Relation = {
+    from: Entity,
+    to: Entity,
+    table: String,
+    on: String,
+    cardinality: Cardinality,
+};
+
+@struct type MeasurePlan = {
+    source: Measure,
+    base_entity: Entity,
+    required_entities: Array(Entity),
+    expression: String,
+};
+
+@struct type DimensionPlan = {
+    source: Dimension,
+    required_entity: Entity,
+    expression: String,
+};
+
+@struct type PathPlan = {
+    joins: Array(Relation),
+    fanout: Array(Entity),
+    missing: Array(Entity),
+};
+
+@struct type ExecutionPlan = {
+    revision: String,
+    base_entity: Entity,
+    measures: Array(MeasurePlan),
+    dimensions: Array(DimensionPlan),
+    joins: Array(Relation),
+    read_only: Bool,
+};
+
+type MeasureCapability = types.Capability(Measure, Alignment, MeasurePlan);
+type DimensionCapability = types.Capability(Dimension, Array(Measure), DimensionPlan);
+
+def purchase_revenue: MeasureCapability = {
+    id: 'PurchaseRevenue,
+    lower: fn(requested, alignment) {
+        'Some({
+            source: requested,
+            base_entity: 'Order,
+            required_entities: ['Consumer],
+            expression: "SUM(orders.total_cents)",
+        })
+    },
+};
+
+def session_conversions: MeasureCapability = {
+    id: 'SessionConversions,
+    lower: fn(requested, alignment) {
+        'Some({
+            source: requested,
+            base_entity: 'Session,
+            required_entities: ['Consumer],
+            expression: "SUM(CASE WHEN orders.id IS NULL THEN 0 ELSE 1 END)",
+        })
+    },
+};
+
+def measure_capabilities: Array(MeasureCapability) = [purchase_revenue, session_conversions];
+
+def dimension:
+    Fn(Dimension, Entity, String) -> DimensionCapability =
+    fn(id, required_entity, expression) {
+        {
+            id,
+            lower: fn(requested, measures) {
+                'Some({source: requested, required_entity, expression})
+            },
+        }
+    };
+
+def dimension_capabilities: Array(DimensionCapability) = [
+    dimension('PurchaseMonth, 'Order, "substr(orders.ordered_at, 1, 7)"),
+    dimension('ConsumerRegion, 'Region, "regions.name"),
+    dimension('AcquisitionCampaign, 'Campaign, "campaigns.name"),
+    dimension('ProductCategory, 'Product, "categories.name"),
+];
+
+def safe_relations: Array(Relation) = [
+    {from: 'Order, to: 'Consumer, table: "consumers", on: "consumers.id = orders.consumer_id", cardinality: 'ManyToOne},
+    {from: 'Consumer, to: 'Household, table: "households", on: "households.id = consumers.household_id", cardinality: 'ManyToOne},
+    {from: 'Household, to: 'Address, table: "addresses", on: "addresses.id = households.address_id", cardinality: 'ManyToOne},
+    {from: 'Address, to: 'Region, table: "regions", on: "regions.id = addresses.region_id", cardinality: 'ManyToOne},
+    {from: 'Order, to: 'Session, table: "sessions", on: "sessions.id = orders.session_id", cardinality: 'ManyToOne},
+    {from: 'Session, to: 'Campaign, table: "campaigns", on: "campaigns.id = sessions.campaign_id", cardinality: 'ManyToOne},
+    {from: 'CartItem, to: 'Cart, table: "carts", on: "carts.id = cart_items.cart_id", cardinality: 'ManyToOne},
+    {from: 'Cart, to: 'Consumer, table: "consumers", on: "consumers.id = carts.consumer_id", cardinality: 'ManyToOne},
+    {from: 'CartItem, to: 'Product, table: "products", on: "products.id = cart_items.product_id", cardinality: 'ManyToOne},
+    {from: 'OrderItem, to: 'Order, table: "orders", on: "orders.id = order_items.order_id", cardinality: 'ManyToOne},
+    {from: 'OrderItem, to: 'Product, table: "products", on: "products.id = order_items.product_id", cardinality: 'ManyToOne},
+    {from: 'Product, to: 'Category, table: "categories", on: "categories.id = products.category_id", cardinality: 'ManyToOne},
+];
+
+def fanout_relations: Array(Relation) = [
+    {from: 'Order, to: 'OrderItem, table: "order_items", on: "order_items.order_id = orders.id", cardinality: 'OneToMany},
+];
+
+def relation_from: Fn(Relation) -> Entity = fn(relation) { relation.from };
+def relation_to: Fn(Relation) -> Entity = fn(relation) { relation.to };
+
+def plan_paths: Fn(Entity, Array(Entity)) -> PathPlan = fn(base, targets) {
+    let needed = ontology.close_six(safe_relations, targets, relation_to, relation_from);
+    let safe_reachable = ontology.close_six(safe_relations, [base], relation_from, relation_to);
+    let all = array.concat([safe_relations, fanout_relations]);
+    let all_reachable = ontology.close_six(all, [base], relation_from, relation_to);
+    {
+        joins: ontology.select_connecting_edges(
+            safe_relations,
+            safe_reachable,
+            needed,
+            relation_from,
+            relation_to,
+        ),
+        fanout: array.filter(targets, fn(target) {
+            ontology.contains(safe_reachable, target) == 'False
+                && ontology.contains(all_reachable, target)
+        }),
+        missing: array.filter(targets, fn(target) {
+            ontology.contains(all_reachable, target) == 'False
+        }),
+    }
+};
+
+def verify_paths: Fn(PathPlan, Array(DimensionPlan)) -> Bool = fn(paths, dimensions) {
+    let fanout_errors = array.flat_map(paths.fanout, fn(target) {
+        array.map(
+            array.filter(dimensions, fn(item) { item.required_entity == target }),
+            fn(item) {
+                emit_error!(
+                    `dimension \{item.source} crosses an unapproved one-to-many edge`,
+                    item.source,
+                )
+            },
+        )
+    });
+    let missing_errors = array.flat_map(paths.missing, fn(target) {
+        array.map(
+            array.filter(dimensions, fn(item) { item.required_entity == target }),
+            fn(item) { emit_error!(`no B2C relation reaches \{target}`, item.source) },
+        )
+    });
+    array.length(fanout_errors) == 0 && array.length(missing_errors) == 0
+};
+
+export def compile:
+    Fn(Array(Measure), Array(Dimension)) -> Option(ExecutionPlan) =
+    fn(requested_measures, requested_dimensions) {
+        let measure_results: Array(Option(MeasurePlan)) = ontology.lower_requested(
+            requested_measures,
+            measure_capabilities,
+            fn(capability) { capability.id },
+            fn(capability, requested, alignment) { capability.lower(requested, alignment) },
+            'Natural,
+        );
+        let measures = ontology.completed(measure_results);
+        let dimension_results: Array(Option(DimensionPlan)) = ontology.lower_requested(
+            requested_dimensions,
+            dimension_capabilities,
+            fn(capability) { capability.id },
+            fn(capability, requested, selected) { capability.lower(requested, selected) },
+            requested_measures,
+        );
+        let dimensions = ontology.completed(dimension_results);
+        match array.find(measures, fn(ignored) { 'True }) {
+            'None => {
+                let ignored = emit_error!("a B2C report requires a supported measure", requested_measures);
+                'None
+            },
+            'Some(first) => {
+                let same_grain = array.all(measures, fn(item) {
+                    item.base_entity == first.base_entity
+                });
+                let required = array.concat([
+                    array.flat_map(measures, fn(item) { item.required_entities }),
+                    array.map(dimensions, fn(item) { item.required_entity }),
+                ]);
+                let paths = plan_paths(first.base_entity, required);
+                let paths_valid = verify_paths(paths, dimensions);
+                if ontology.all_complete(measure_results)
+                    && ontology.all_complete(dimension_results)
+                    && same_grain
+                    && paths_valid {
+                    'Some({
+                        revision: "b2c-model-v1",
+                        base_entity: first.base_entity,
+                        measures,
+                        dimensions,
+                        joins: paths.joins,
+                        read_only: 'True,
+                    })
+                } else {
+                    'None
+                }
+            },
+        }
+    };
+
+export { Entity, Measure, Dimension, ExecutionPlan };

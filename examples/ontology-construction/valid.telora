@@ -18,7 +18,7 @@ type MeasureCapability = ontology.Capability(Measure, Entity, MeasureRequirement
 
 let capability: MeasureCapability = {
     id: 'Revenue,
-    lower: fn(entity) {
+    lower: fn(measure, entity) {
         'Some({key: 'Revenue, output: [entity]})
     },
 };
@@ -27,7 +27,7 @@ let lowered = method.lower_requested(
     ['Revenue],
     [capability],
     fn(item) { item.id },
-    fn(item, id, input) { item.lower(input) },
+    fn(item, id, input) { item.lower(id, input) },
     'Order,
 );
 

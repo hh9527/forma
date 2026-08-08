@@ -42,7 +42,8 @@ Telora 代码将合法意图逐步 lowering 为 SQLite SQL。
 - RFC 0202：ontology 定义方法复用实验已启动；RFC 0203 证明普通函数可以生成
   跨模块严格检查的 capability 类型，RFC 0204 抽取 typed capability、关系和
   restriction 方法，RFC 0205 已将本目录明确拆为共享 ontology 方法与具体 B2B
-  模型，既有 SQL、诊断和 wire plan 保持不变。
+  模型，既有 SQL、诊断和 wire plan 保持不变；RFC 0206 已由独立十二表 B2C
+  模型验证同一方法层，RFC 0202 全部完成。
 
 ## 文件
 

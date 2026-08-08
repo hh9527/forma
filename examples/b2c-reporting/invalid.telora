@@ -1,0 +1,6 @@
+import "./model.telora" { compile };
+
+export let output = compile(
+    ['PurchaseRevenue],
+    ['ProductCategory, 'LoyaltyTier],
+);

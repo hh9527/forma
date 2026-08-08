@@ -9248,4 +9248,36 @@ export let output: String = error.message;"#,
         assert!(names.iter().any(|name| name.ends_with("missing.telora")));
         assert!(names.iter().any(|name| name.ends_with("ontology.telora")));
     }
+
+    #[test]
+    fn b2c_model_reuses_ontology_methods_with_independent_diagnostics() {
+        let examples =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/b2c-reporting");
+        let valid = load_module(examples.join("valid.telora"), BTreeMap::new(), 300_000).unwrap();
+        let output = valid.execute(300_000).unwrap().to_string();
+        assert!(output.contains("b2c-model-v1"), "{output}");
+        assert!(output.contains("campaigns"), "{output}");
+        assert!(output.contains("regions"), "{output}");
+
+        let invalid = recovery_engine()
+            .recover_workspace(examples.join("invalid.telora"))
+            .unwrap();
+        let messages = invalid
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            messages.iter().any(
+                |message| message.contains("no ontology capability is defined for LoyaltyTier")
+            ),
+            "{messages:#?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("crosses an unapproved one-to-many edge")),
+            "{messages:#?}"
+        );
+    }
 }
