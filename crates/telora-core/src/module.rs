@@ -9226,5 +9226,26 @@ export let output: String = error.message;"#,
             .to_string();
         assert!(invalid.contains("field lower"), "{invalid}");
         assert!(invalid.contains("Some(String)"), "{invalid}");
+
+        let missing = recovery_engine()
+            .recover_workspace(examples.join("missing.telora"))
+            .unwrap();
+        let diagnostic = missing
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("no ontology capability is defined for Units")
+            })
+            .expect("missing capability diagnostic");
+        assert!(diagnostic.labels.len() >= 2, "{diagnostic:#?}");
+        let names = diagnostic
+            .labels
+            .iter()
+            .map(|label| missing.sources().get(label.location.source).name.as_ref())
+            .collect::<Vec<_>>();
+        assert!(names.iter().any(|name| name.ends_with("missing.telora")));
+        assert!(names.iter().any(|name| name.ends_with("ontology.telora")));
     }
 }

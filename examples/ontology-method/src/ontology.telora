@@ -1,0 +1,126 @@
+import "std/array" as array;
+
+def contains: for(A) Fn(Array(A), A) -> Bool = fn(values, expected) {
+    array.any(values, fn(value) { value == expected })
+};
+
+def find_capability:
+    for(Id, Capability)
+    Fn(Array(Capability), Id, Fn(Capability) -> Id) -> Option(Capability) =
+    fn(capabilities, requested, id_of) {
+        array.find(capabilities, fn(capability) {
+            id_of(capability) == requested
+        })
+    };
+
+# Resolve and run every requested capability independently. Missing
+# capabilities are domain errors, while lowerers retain the model's own
+# Option-based completion policy.
+def lower_requested:
+    for(Id, Capability, Input, Output)
+    Fn(
+        Array(Id),
+        Array(Capability),
+        Fn(Capability) -> Id,
+        Fn(Capability) -> Fn(Input) -> Option(Output),
+        Input,
+    ) -> Array(Option(Output)) =
+    fn(requested, capabilities, id_of, lower_of, input) {
+        array.map(requested, fn(id) {
+            match find_capability(capabilities, id, id_of) {
+                'Some(capability) => lower_of(capability)(input),
+                'None => {
+                    let ignored = emit_error!(`no ontology capability is defined for \{id}`, id);
+                    'None
+                },
+            }
+        })
+    };
+
+def completed:
+    for(A) Fn(Array(Option(A))) -> Array(A) =
+    fn(results) {
+        array.flat_map(results, fn(result) {
+            match result {
+                'Some(value) => [value],
+                'None => [],
+            }
+        })
+    };
+
+def all_complete:
+    for(A) Fn(Array(Option(A))) -> Bool =
+    fn(results) {
+        array.length(completed(results)) == array.length(results)
+    };
+
+def expand_once:
+    for(Node, Edge)
+    Fn(Array(Edge), Array(Node), Fn(Edge) -> Node, Fn(Edge) -> Node)
+        -> Array(Node) =
+    fn(edges, reachable, from, to) {
+        array.fold(edges, reachable, fn(next, edge) {
+            if contains(next, from(edge)) {
+                array.push(next, to(edge))
+            } else {
+                next
+            }
+        })
+    };
+
+# The reusable method makes bounded closure explicit. Models with a larger
+# graph must select or provide another policy instead of assuming completeness.
+def close_six:
+    for(Node, Edge)
+    Fn(Array(Edge), Array(Node), Fn(Edge) -> Node, Fn(Edge) -> Node)
+        -> Array(Node) =
+    fn(edges, seeds, from, to) {
+        let once = expand_once(edges, seeds, from, to);
+        let twice = expand_once(edges, once, from, to);
+        let three = expand_once(edges, twice, from, to);
+        let four = expand_once(edges, three, from, to);
+        let five = expand_once(edges, four, from, to);
+        expand_once(edges, five, from, to)
+    };
+
+def select_connecting_edges:
+    for(Node, Edge)
+    Fn(
+        Array(Edge),
+        Array(Node),
+        Array(Node),
+        Fn(Edge) -> Node,
+        Fn(Edge) -> Node,
+    ) -> Array(Edge) =
+    fn(edges, reachable, needed, from, to) {
+        array.filter(edges, fn(edge) {
+            contains(reachable, from(edge)) && contains(needed, to(edge))
+        })
+    };
+
+def verify_allowed:
+    for(Node, Requirement)
+    Fn(Array(Requirement), Array(Node), Fn(Requirement) -> Node) -> Bool =
+    fn(requirements, allowed, required_node) {
+        let failures = array.flat_map(requirements, fn(requirement) {
+            let required = required_node(requirement);
+            if contains(allowed, required) {
+                []
+            } else {
+                [emit_error!(`ontology requirement needs unauthorized entity \{required}`, requirement, allowed)]
+            }
+        });
+        array.length(failures) == 0
+    };
+
+export {
+    contains,
+    find_capability,
+    lower_requested,
+    completed,
+    all_complete,
+    expand_once,
+    close_six,
+    select_connecting_edges,
+    verify_allowed,
+};
