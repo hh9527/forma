@@ -723,7 +723,7 @@ pub enum RuntimeErrorKind {
     MissingField,
     NoPatternMatched,
     Panic,
-    ReraisedBlame,
+    RaisedBlame,
     StackLimitExceeded,
     TypeMismatch,
     UninitializedDefinition,
@@ -765,7 +765,7 @@ impl RuntimeError {
             | RuntimeErrorKind::MissingField
             | RuntimeErrorKind::NoPatternMatched
             | RuntimeErrorKind::Panic
-            | RuntimeErrorKind::ReraisedBlame
+            | RuntimeErrorKind::RaisedBlame
             | RuntimeErrorKind::TypeMismatch
             | RuntimeErrorKind::UninitializedDefinition
             | RuntimeErrorKind::DuplicateDefinition => FailureClass::Recoverable,
@@ -2179,7 +2179,7 @@ impl Vm {
                         };
                         return Err(error(RuntimeErrorKind::Panic, text, function, pc));
                     }
-                    Opcode::Reraise {
+                    Opcode::Raise {
                         error: error_register,
                     } => {
                         let structured = *read_register(&registers, *error_register, function, pc)?;
@@ -2244,8 +2244,7 @@ impl Vm {
                                 "String", &message, &view, function, pc,
                             ));
                         };
-                        let mut runtime =
-                            error(RuntimeErrorKind::ReraisedBlame, text, function, pc);
+                        let mut runtime = error(RuntimeErrorKind::RaisedBlame, text, function, pc);
                         runtime.set_locations(data.loc(), rule.loc());
                         return Err(runtime);
                     }

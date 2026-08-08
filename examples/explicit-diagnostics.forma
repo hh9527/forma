@@ -18,7 +18,7 @@ def require_text:
     Fn(String, String, Diagnostics) -> Diagnostics =
     fn(value, message, diagnostics) {
         if value == "" {
-            arrays.push(diagnostics, blame!(value, message))
+            arrays.push(diagnostics, blame!(message, value))
         } else {
             diagnostics
         }
@@ -35,7 +35,7 @@ def check_package:
         let diagnostics = if package.version < 1 {
             arrays.push(
                 diagnostics,
-                blame!(package.version, "package version must be positive"),
+                blame!("package version must be positive", package.version),
             )
         } else {
             diagnostics

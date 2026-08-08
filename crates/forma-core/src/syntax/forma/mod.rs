@@ -217,7 +217,7 @@ option "module.documentation" {stability: "experimental"};"#;
 
     #[test]
     fn cst_preserves_blame_intrinsics_losslessly() {
-        let source = "blame!(data, \"bad\")";
+        let source = "blame!(\"bad\", data)";
         let mut sources = crate::source::SourceDatabase::default();
         let id = sources.add("blame.forma", source);
         let parsed = parse(id, source);

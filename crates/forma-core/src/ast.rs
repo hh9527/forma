@@ -95,7 +95,7 @@ pub enum ExprKind {
     Panic {
         message: Box<Expr>,
     },
-    Reraise {
+    Raise {
         error: Box<Expr>,
     },
     Binary {

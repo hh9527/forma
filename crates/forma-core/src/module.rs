@@ -2950,7 +2950,7 @@ fn expression_has_import(expression: &Expr) -> bool {
         }
         ExprKind::Return { value } => expression_has_import(value),
         ExprKind::Panic { message } => expression_has_import(message),
-        ExprKind::Reraise { error } => expression_has_import(error),
+        ExprKind::Raise { error } => expression_has_import(error),
         ExprKind::Binary { left, right, .. } => {
             expression_has_import(left) || expression_has_import(right)
         }
@@ -5125,7 +5125,7 @@ unchanged", "|"),
                         let values = arrays.push(data, APPENDED);
                         arrays.map(values, fn(value) {
                             if value == TARGET {
-                                result.unwrap('Err(blame!(value, "selected value")))
+                                result.unwrap('Err(blame!("selected value", value)))
                             } else { value }
                         })"#;
 
@@ -7900,7 +7900,7 @@ unchanged", "|"),
             &main,
             r#"import "std/result" as result;
                import "./data.json" as data;
-               let output = result.unwrap('Err(blame!(data.name, "invalid name")));
+               let output = result.unwrap('Err(blame!("invalid name", data.name)));
                export { output };"#,
         )
         .unwrap();
@@ -8704,7 +8704,7 @@ import "std/dyn" as dyn;
 type ProbeResult = Result(Int, BlameError);
 def inspect_i: Fn(Dyn) -> ProbeResult = fn(value) {
     match dyn.field(value, "age") {
-        'Ok(age) => 'Err(blame!(age, "age rejected")),
+        'Ok(age) => 'Err(blame!("age rejected", age)),
         'Err(error) => 'Err(error),
     }
 };
@@ -8728,7 +8728,7 @@ result.unwrap(failure)"#;
         let rule = error.rule_location().expect("blame rule location");
         assert_eq!(
             module.sources.get(rule.source).slice(rule).as_deref(),
-            Some("blame!(age, \"age rejected\")")
+            Some("blame!(\"age rejected\", age)")
         );
         let rendered = error.to_string();
         assert!(rendered.contains("user.json:1:8"), "{rendered}");

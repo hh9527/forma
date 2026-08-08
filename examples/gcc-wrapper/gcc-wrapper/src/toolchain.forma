@@ -26,7 +26,7 @@ def require: for(A) Fn(Dict(A), String, String) -> A = fn(values, key, message) 
 def validated_source: Fn(Any) -> ToolchainSource = fn(raw) {
     match validate(ToolchainSource, raw) {
         'Ok(source) => source,
-        'Err(error) => reraise!(error),
+        'Err(error) => raise!(error),
     }
 };
 
@@ -49,15 +49,15 @@ def unpack = fn(settings, package, dest, ty, strip) {
 def checked_compiler_args = fn(request, sysroot_dest) {
     let arguments = match argv.reject_option(request.args, "--sysroot") {
         'Ok(arguments) => arguments,
-        'Err(error) => reraise!(error),
+        'Err(error) => raise!(error),
     };
     let arguments = match argv.reject_option(arguments, "-ffile-prefix-map") {
         'Ok(arguments) => arguments,
-        'Err(error) => reraise!(error),
+        'Err(error) => raise!(error),
     };
     let arguments = match argv.reject_option(arguments, "-fdebug-prefix-map") {
         'Ok(arguments) => arguments,
-        'Err(error) => reraise!(error),
+        'Err(error) => raise!(error),
     };
     argv.prepend([
         `--sysroot=\{sysroot_dest}`,

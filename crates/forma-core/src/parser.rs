@@ -1432,7 +1432,7 @@ impl<'a> Lowerer<'a> {
                     .next()
                     .ok_or_else(|| self.error(node, "contextual intrinsic has no name"))?;
                 let name_text = self.text(name);
-                if matches!(name_text.as_ref(), "blame" | "panic" | "reraise") {
+                if matches!(name_text.as_ref(), "blame" | "panic" | "raise") {
                     let bang = self.first_token(node, Token::Bang)?;
                     let arguments = self
                         .children(node)
@@ -1458,7 +1458,7 @@ impl<'a> Lowerer<'a> {
                         let kind = if name_text == "panic" {
                             ExprKind::Panic { message: argument }
                         } else {
-                            ExprKind::Reraise { error: argument }
+                            ExprKind::Raise { error: argument }
                         };
                         Ok(located(kind, self.location(node)))
                     }
@@ -1476,19 +1476,20 @@ impl<'a> Lowerer<'a> {
     }
 
     fn lower_blame(&self, arguments: Vec<Expr>, node: NodeRef) -> Result<Expr, Diagnostic> {
-        if arguments.len() != 2 {
+        if arguments.is_empty() {
             return Err(self.error(
                 node,
-                format!(
-                    "blame! expects exactly two arguments, found {}",
-                    arguments.len()
-                ),
+                "blame! expects a message followed by zero or more subjects",
             ));
         }
         let location = self.location(node);
         let mut arguments = arguments.into_iter();
-        let data = arguments.next().expect("blame arity was checked");
-        let message = arguments.next().expect("blame arity was checked");
+        let message = arguments.next().expect("blame message was checked");
+        let subjects = arguments.collect::<Vec<_>>();
+        let data = match subjects.len() {
+            1 => subjects.into_iter().next().expect("one blame subject"),
+            _ => located(ExprKind::Tuple(subjects), location),
+        };
         let rule = located(ExprKind::String("blame!".into()), location);
         let fields = [("data", data), ("message", message), ("rule", rule)]
             .into_iter()
@@ -3119,7 +3120,10 @@ export { private as visible, identity as map };"#,
                 "interpreter(...) has been replaced by interpreter!(...)",
             ),
             ("unknown!(1)", "unknown contextual intrinsic unknown!"),
-            ("blame!(1)", "blame! expects exactly two arguments, found 1"),
+            (
+                "blame!()",
+                "blame! expects a message followed by zero or more subjects",
+            ),
             ("file!()", "file! is reserved but not implemented"),
             ("line!()", "line! is reserved but not implemented"),
             (
@@ -3142,7 +3146,7 @@ export { private as visible, identity as map };"#,
 
     #[test]
     fn lowers_blame_to_the_canonical_sourced_record() {
-        let program = parse("blame.forma", "blame!(data, message)").unwrap();
+        let program = parse("blame.forma", "blame!(message, data)").unwrap();
         let ExprKind::Dict(fields) = &program.value.body.value.result.value else {
             panic!("expected blame record")
         };

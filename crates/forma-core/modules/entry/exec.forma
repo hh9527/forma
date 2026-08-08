@@ -14,7 +14,7 @@ import "std/rt-types/exec.forma" {
 def unwrap: for(A) Fn(Result(A, BlameError)) -> A = fn(result) {
     match result {
         'Ok(value) => value,
-        'Err(error) => reraise!(error),
+        'Err(error) => raise!(error),
     }
 };
 

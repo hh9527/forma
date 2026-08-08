@@ -17,7 +17,7 @@ type HashControl = FoldControl(HashResult, HashResult);
 type Field = Tuple([String, Dyn]);
 
 def blame: Fn(Dyn, String) -> HashResult = fn(value, message) {
-    'Err(blame!(value, message))
+    'Err(blame!(message, value))
 };
 
 def logical_kind: Fn(Type) -> TypeDescKind = fn(ty) {

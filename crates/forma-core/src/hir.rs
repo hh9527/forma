@@ -474,7 +474,7 @@ impl Resolver {
                 self.index_expr(message, scopes);
                 None
             }
-            ExprKind::Reraise { error } => {
+            ExprKind::Raise { error } => {
                 self.index_expr(error, scopes);
                 None
             }
@@ -737,7 +737,7 @@ mod tests {
     fn blame_hir_indexes_arguments_but_not_the_intrinsic_name() {
         let program = parse(
             "hir.forma",
-            "let data = 1; let message = \"bad\"; blame!(data, message)",
+            "let data = 1; let message = \"bad\"; blame!(message, data)",
         )
         .unwrap();
         let hir = HirProgram::resolve(&program, std::iter::empty());

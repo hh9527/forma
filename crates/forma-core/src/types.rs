@@ -2825,7 +2825,7 @@ fn collect_nested_annotation_types(
             debug_sink,
             annotations,
         )?,
-        ExprKind::Reraise { error } => collect_nested_annotation_types(
+        ExprKind::Raise { error } => collect_nested_annotation_types(
             source_name,
             error,
             bindings,
@@ -5504,7 +5504,7 @@ impl<'a> GenericInference<'a> {
                 self.infer(message, environment, Some(&TypeDescriptor::String))?;
                 TypeDescriptor::Never
             }
-            ExprKind::Reraise { error } => {
+            ExprKind::Raise { error } => {
                 self.infer(error, environment, Some(&blame_error_descriptor()))?;
                 TypeDescriptor::Never
             }
@@ -6562,7 +6562,7 @@ fn expression_references_names(
         } => expression_references_names(operand, names, bound),
         ExprKind::Return { value } => expression_references_names(value, names, bound),
         ExprKind::Panic { message } => expression_references_names(message, names, bound),
-        ExprKind::Reraise { error } => expression_references_names(error, names, bound),
+        ExprKind::Raise { error } => expression_references_names(error, names, bound),
         ExprKind::Binary { left, right, .. } => {
             expression_references_names(left, names, bound)
                 || expression_references_names(right, names, bound)
@@ -6927,7 +6927,7 @@ fn infer_expr_with(
             infer_expr_with(message, environment, record);
             TypeDescriptor::Never
         }
-        ExprKind::Reraise { error } => {
+        ExprKind::Raise { error } => {
             infer_expr_with(error, environment, record);
             TypeDescriptor::Never
         }
@@ -7106,7 +7106,7 @@ fn check_interpolations(
         }
         ExprKind::Return { value } => check_interpolations(value, environment, sources)?,
         ExprKind::Panic { message } => check_interpolations(message, environment, sources)?,
-        ExprKind::Reraise { error } => check_interpolations(error, environment, sources)?,
+        ExprKind::Raise { error } => check_interpolations(error, environment, sources)?,
         ExprKind::Binary { left, right, .. } => {
             check_interpolations(left, environment, sources)?;
             check_interpolations(right, environment, sources)?;
@@ -9922,7 +9922,7 @@ mod tests {
     fn blame_requires_a_string_message_in_its_canonical_shape() {
         let analysis = analyze_source(
             "blame.forma",
-            "let error: BlameError = blame!(1, \"bad\"); error",
+            "let error: BlameError = blame!(\"bad\", 1); error",
         )
         .unwrap();
         assert_eq!(
@@ -9930,7 +9930,7 @@ mod tests {
             "{data: Any, message: String, rule: Any}"
         );
 
-        let error = analyze_source("blame.forma", "let error: BlameError = blame!(1, 2); error")
+        let error = analyze_source("blame.forma", "let error: BlameError = blame!(2, 1); error")
             .unwrap_err();
         assert!(
             error.message.contains("Int") && error.message.contains("String"),

@@ -120,7 +120,7 @@ def complete_requirement: Fn(Dimension, Projection, SqlScalar, Entity) -> Requir
 def rejected_requirement: Fn(Dimension, String) -> RequirementCompilation = fn(value, message) {
     {
         requirement: 'None,
-        diagnostics: [blame!(value, message)],
+        diagnostics: [blame!(message, value)],
     }
 };
 
@@ -333,7 +333,7 @@ def measure_diagnostics: Fn(ReportIntent) -> Array(BlameError) = fn(intent) {
     if array.length(intent.measures) == 1 {
         []
     } else {
-        [blame!(intent.measures, "the initial compiler requires exactly one measure")]
+        [blame!("the initial compiler requires exactly one measure", intent.measures)]
     }
 };
 
@@ -383,7 +383,7 @@ def order_diagnostics: Fn(ReportIntent) -> Array(BlameError) = fn(intent) {
         if array.any(intent.dimensions, fn(dimension) { dimension == ordered }) {
             []
         } else {
-            [blame!(ordered, "an ordered dimension must also be selected")]
+            [blame!("an ordered dimension must also be selected", ordered)]
         }
     })
 };
@@ -411,14 +411,14 @@ def relationship_diagnostics: Fn(PathPlan, Array(GroupRequirement)) -> Array(Bla
             array.map(
                 array.filter(requirements, fn(requirement) { requirement.required_entity == target }),
                 fn(requirement) {
-                    blame!(requirement.dimension, `reaching \{target} expands the measure grain; define pre-aggregation or an allocation policy`)
+                    blame!(`reaching \{target} expands the measure grain; define pre-aggregation or an allocation policy`, requirement.dimension)
                 },
             )
         }),
         array.flat_map(paths.missing, fn(target) {
             array.map(
                 array.filter(requirements, fn(requirement) { requirement.required_entity == target }),
-                fn(requirement) { blame!(requirement.dimension, `no verified relationship path reaches \{target}`) },
+                fn(requirement) { blame!(`no verified relationship path reaches \{target}`, requirement.dimension) },
             )
         }),
     ])

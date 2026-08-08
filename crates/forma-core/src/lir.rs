@@ -161,7 +161,7 @@ pub enum Operation {
     Panic {
         message: RegisterId,
     },
-    Reraise {
+    Raise {
         error: RegisterId,
     },
 }
@@ -469,7 +469,7 @@ fn lower_operation(
         Operation::Panic { message } => Instruction::Panic {
             message: register(message)?,
         },
-        Operation::Reraise { error } => Instruction::Reraise {
+        Operation::Raise { error } => Instruction::Raise {
             error: register(error)?,
         },
     })

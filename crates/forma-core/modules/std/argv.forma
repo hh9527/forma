@@ -14,7 +14,7 @@ def reject_option:
     fn(arguments, option) {
         match array.find(arguments, fn(argument) { matches_option(argument, option) }) {
             'None => 'Ok(arguments),
-            'Some(argument) => 'Err(blame!(argument, `conflicting argument: \{option}`)),
+            'Some(argument) => 'Err(blame!(`conflicting argument: \{option}`, argument)),
         }
     };
 

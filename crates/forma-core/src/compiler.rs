@@ -906,9 +906,9 @@ impl<'a> Compiler<'a> {
                 self.emit(Operation::Panic { message }, expression.location);
                 Ok(message)
             }
-            ExprKind::Reraise { error } => {
+            ExprKind::Raise { error } => {
                 let error = self.compile_expr(error)?;
-                self.emit(Operation::Reraise { error }, expression.location);
+                self.emit(Operation::Raise { error }, expression.location);
                 Ok(error)
             }
             ExprKind::Binary {
@@ -1734,7 +1734,7 @@ fn free_expr(expression: &Expr, bound: &HashSet<String>, free: &mut BTreeSet<Str
         }
         ExprKind::Return { value } => free_expr(value, bound, free),
         ExprKind::Panic { message } => free_expr(message, bound, free),
-        ExprKind::Reraise { error } => free_expr(error, bound, free),
+        ExprKind::Raise { error } => free_expr(error, bound, free),
         ExprKind::Binary { left, right, .. } => {
             free_expr(left, bound, free);
             free_expr(right, bound, free);
@@ -1881,7 +1881,7 @@ pub(crate) fn collect_runtime_names(expression: &Expr, names: &mut HashSet<Strin
         }
         ExprKind::Return { value } => collect_runtime_names(value, names),
         ExprKind::Panic { message } => collect_runtime_names(message, names),
-        ExprKind::Reraise { error } => collect_runtime_names(error, names),
+        ExprKind::Raise { error } => collect_runtime_names(error, names),
         ExprKind::Binary { left, right, .. } => {
             collect_runtime_names(left, names);
             collect_runtime_names(right, names);
@@ -2515,15 +2515,14 @@ let decorators = {
     }
 
     #[test]
-    fn reraise_preserves_structured_blame_locations() {
-        let error = run(
-            "let fail = fn() {\n  let data = 1;\n  reraise!(blame!(data, \"bad\"))\n};\nfail()",
-        )
-        .unwrap_err();
+    fn raise_preserves_structured_blame_locations() {
+        let error =
+            run("let fail = fn() {\n  let data = 1;\n  raise!(blame!(\"bad\", data))\n};\nfail()")
+                .unwrap_err();
         let ExecutionError::Runtime(error) = error else {
-            panic!("expected reraised blame")
+            panic!("expected raised blame")
         };
-        assert_eq!(error.kind, RuntimeErrorKind::ReraisedBlame);
+        assert_eq!(error.kind, RuntimeErrorKind::RaisedBlame);
         assert_eq!(error.message, "bad");
         assert!(error.data_location().is_some());
         assert!(error.rule_location().is_some());
@@ -2532,16 +2531,29 @@ let decorators = {
     }
 
     #[test]
-    fn reraise_requires_one_blame_error() {
-        let wrong_type = compile_source("test", "reraise!(1)").unwrap_err();
+    fn raise_requires_one_blame_error() {
+        let wrong_type = compile_source("test", "raise!(1)").unwrap_err();
         assert!(
             wrong_type.message.contains("Int") && wrong_type.message.contains("message"),
             "{}",
             wrong_type.message
         );
 
-        let wrong_arity = compile_source("test", "reraise!()").unwrap_err();
+        let wrong_arity = compile_source("test", "raise!()").unwrap_err();
         assert!(wrong_arity.message.contains("exactly one argument"));
+    }
+
+    #[test]
+    fn blame_accepts_heterogeneous_variadic_subjects() {
+        let error = run(
+            "let error: BlameError = blame!(\"different subjects\", 1, \"two\", 'Three); raise!(error)",
+        )
+        .unwrap_err();
+        let ExecutionError::Runtime(error) = error else {
+            panic!("expected raised blame")
+        };
+        assert_eq!(error.kind, RuntimeErrorKind::RaisedBlame);
+        assert_eq!(error.message, "different subjects");
     }
 
     #[test]
