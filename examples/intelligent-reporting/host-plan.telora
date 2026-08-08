@@ -3,6 +3,7 @@ import "./execution.telora" { ExecutionPlan, encode_plan };
 
 let compilation = compile({
     measures: ['NetRevenue],
+    alignment: 'Natural,
     dimensions: ['OrderMonth, 'CustomerRegion],
     filters: ['CustomerRegion("East")],
     order_by: ['OrderMonth],

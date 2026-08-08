@@ -2,6 +2,7 @@ import "./ontology.telora" { compile };
 
 let compilation = compile({
     measures: ['NetRevenue],
+    alignment: 'Natural,
     dimensions: ['OrderMonth, 'CustomerRegion],
     filters: [],
     order_by: ['OrderMonth, 'CustomerRegion],

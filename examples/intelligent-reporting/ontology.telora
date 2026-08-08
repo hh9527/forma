@@ -30,6 +30,11 @@ import "./execution.telora" { OutputMode, ExecutionPlan };
     Additive: 'None,
 };
 
+@enum type Alignment = {
+    Natural: 'None,
+    PreAggregate: Entity,
+};
+
 @enum type Dimension = {
     OrderMonth: 'None,
     CustomerRegion: 'None,
@@ -41,6 +46,7 @@ import "./execution.telora" { OutputMode, ExecutionPlan };
 
 @struct type ReportIntent = {
     measures: Array(Measure),
+    alignment: Alignment,
     dimensions: Array(Dimension),
     filters: Array(Filter),
     order_by: Array(Dimension),
@@ -51,14 +57,14 @@ import "./execution.telora" { OutputMode, ExecutionPlan };
 @enum type Filter = { CustomerRegion: String };
 
 @struct type QueryPlan = {
-    measure: Measure,
+    measures: Array(Measure),
     base_entity: Entity,
     required_entities: Array(Entity),
     common_tables: Array(CommonTable),
     from: Source,
     joins: Array(Join),
     filters: Array(Expr),
-    measure_projection: Projection,
+    measure_projections: Array(Projection),
 };
 
 @struct type GroupRequirement = {
@@ -93,8 +99,8 @@ import "./execution.telora" { OutputMode, ExecutionPlan };
     render: OutputMode,
 };
 
-type MeasureLowerer = Fn() -> QueryPlan;
-type DimensionLowerer = Fn(Measure) -> Option(GroupRequirement);
+type MeasureLowerer = Fn(Alignment) -> Option(QueryPlan);
+type DimensionLowerer = Fn(Array(Measure)) -> Option(GroupRequirement);
 
 @struct type MeasureCapability = {
     id: Measure,
@@ -123,7 +129,7 @@ def rejected_requirement: Fn(Dimension, String) -> Option(GroupRequirement) = fn
 def universal_dimension: Fn(Dimension, Projection, Expr, Entity) -> DimensionCapability = fn(id, projected, group_expression, required_entity) {
     {
         id,
-        lower: fn(measure) {
+        lower: fn(measures) {
             complete_requirement(id, projected, group_expression, required_entity)
         },
     }
@@ -134,13 +140,13 @@ def universal_dimension: Fn(Dimension, Projection, Expr, Entity) -> DimensionCap
 def measure_dimension: Fn(Dimension, Measure, Projection, Expr, Entity) -> DimensionCapability = fn(id, required_measure, projected, group_expression, required_entity) {
     {
         id,
-        lower: fn(actual_measure) {
-            if actual_measure == required_measure {
+        lower: fn(actual_measures) {
+            if array.all(actual_measures, fn(actual_measure) { actual_measure == required_measure }) {
                 complete_requirement(id, projected, group_expression, required_entity)
             } else {
                 rejected_requirement(
                     id,
-                    `dimension \{id} is not compatible with measure \{actual_measure} at its current grain`,
+                    `dimension \{id} is not compatible with every selected measure \{actual_measures} at its current grain`,
                 )
             }
         },
@@ -150,7 +156,7 @@ def measure_dimension: Fn(Dimension, Measure, Projection, Expr, Entity) -> Dimen
 def unsupported_dimension: Fn(Dimension, String) -> DimensionCapability = fn(id, reason) {
     {
         id,
-        lower: fn(measure) {
+        lower: fn(measures) {
             rejected_requirement(id, `dimension \{id} is not available: \{reason}`)
         },
     }
@@ -232,10 +238,21 @@ def net_revenue: MeasureCapability = {
     value_type: 'MoneyCents,
     natural_grain: 'Order,
     aggregation: 'Additive,
-    lower: fn() {
-        {
-            measure: 'NetRevenue,
-            base_entity: 'Order,
+    lower: fn(alignment) {
+        let aligned = match alignment {
+            'Natural => 'Some('Order),
+            'PreAggregate(target) => if target == 'Order {
+                'Some('Order)
+            } else {
+                let ignored = emit_error!(`NetRevenue cannot align from Order to \{target}`, alignment);
+                'None
+            },
+        };
+        match aligned {
+        'None => 'None,
+        'Some(base_entity) => 'Some({
+            measures: ['NetRevenue],
+            base_entity,
             required_entities: [],
             common_tables: [
                 {name: "payment_by_order", query: payment_by_order},
@@ -247,7 +264,7 @@ def net_revenue: MeasureCapability = {
                 join('Left, source("refund_by_order", "f"), equals(column("f", "order_id"), column("o", "id"))),
             ],
             filters: [equals(column("o", "status"), 'Int(2))],
-            measure_projection: aggregate_projection(
+            measure_projections: [aggregate_projection(
                 'Sum,
                 binary(
                     call('Coalesce, [column("p", "captured_cents"), 'Int(0)]),
@@ -255,7 +272,8 @@ def net_revenue: MeasureCapability = {
                     call('Coalesce, [column("f", "refunded_cents"), 'Int(0)]),
                 ),
                 "net_revenue_cents",
-            ),
+            )],
+        }),
         }
     },
 };
@@ -265,16 +283,55 @@ def units_sold: MeasureCapability = {
     value_type: 'Count,
     natural_grain: 'OrderItem,
     aggregation: 'Additive,
-    lower: fn() {
-        {
-            measure: 'UnitsSold,
+    lower: fn(alignment) {
+        match alignment {
+        'Natural => 'Some({
+            measures: ['UnitsSold],
             base_entity: 'OrderItem,
             required_entities: ['Order],
             common_tables: [],
             from: source("order_items", "oi"),
             joins: [],
             filters: [binary(column("o", "status"), 'NotEqual, 'Int(3))],
-            measure_projection: aggregate_projection('Sum, column("oi", "quantity"), "units_sold"),
+            measure_projections: [aggregate_projection('Sum, column("oi", "quantity"), "units_sold")],
+        }),
+        'PreAggregate(target) => if target == 'Order {
+            'Some({
+                measures: ['UnitsSold],
+                base_entity: 'Order,
+                required_entities: [],
+                common_tables: [{
+                    name: "units_by_order",
+                    query: {
+                        projections: [
+                            projection(column("oi", "order_id"), "order_id"),
+                            aggregate_projection('Sum, column("oi", "quantity"), "units_sold"),
+                        ],
+                        from: source("order_items", "oi"),
+                        joins: [],
+                        filters: [],
+                        limit: 'None,
+                        group_by: [column("oi", "order_id")],
+                        order_by: [],
+                    },
+                }],
+                from: source("orders", "o"),
+                joins: [join(
+                    'Left,
+                    source("units_by_order", "u"),
+                    equals(column("u", "order_id"), column("o", "id")),
+                )],
+                filters: [binary(column("o", "status"), 'NotEqual, 'Int(3))],
+                measure_projections: [aggregate_projection(
+                    'Sum,
+                    call('Coalesce, [column("u", "units_sold"), 'Int(0)]),
+                    "units_sold",
+                )],
+            })
+        } else {
+            let ignored = emit_error!(`UnitsSold supports pre-aggregation from OrderItem to Order, not \{target}`, alignment);
+            'None
+        },
         }
     },
 };
@@ -326,20 +383,62 @@ def dimension_capability: Fn(Dimension) -> DimensionCapability = fn(dimension) {
     }
 };
 
-def selected_measure: Fn(ReportIntent) -> Option(Measure) = fn(intent) {
-    if array.length(intent.measures) == 1 {
-        array.find(intent.measures, fn(ignored) { 'True })
-    } else {
-        let ignored = emit_error!("the initial compiler requires exactly one measure", intent.measures);
+def selected_measures: Fn(ReportIntent) -> Option(Array(Measure)) = fn(intent) {
+    if array.length(intent.measures) == 0 {
+        let ignored = emit_error!("a report requires at least one measure", intent.measures);
         'None
+    } else {
+        'Some(intent.measures)
     }
 };
 
-def compile_requirements: Fn(Measure, Array(Dimension)) -> Array(Option(GroupRequirement)) = fn(measure, dimensions) {
+def compile_requirements: Fn(Array(Measure), Array(Dimension)) -> Array(Option(GroupRequirement)) = fn(measures, dimensions) {
     array.map(dimensions, fn(dimension) {
         let capability = dimension_capability(dimension);
-        capability.lower(measure)
+        capability.lower(measures)
     })
+};
+
+def compile_measure_fragments: Fn(Array(Measure), Alignment) -> Array(Option(QueryPlan)) = fn(measures, alignment) {
+    array.map(measures, fn(measure) {
+        measure_capability(measure).lower(alignment)
+    })
+};
+
+def successful_query_plans: Fn(Array(Option(QueryPlan))) -> Array(QueryPlan) = fn(compilations) {
+    array.flat_map(compilations, fn(compilation) {
+        match compilation { 'Some(plan) => [plan], 'None => [] }
+    })
+};
+
+def combine_query_plans: Fn(Array(QueryPlan), Alignment) -> Option(QueryPlan) = fn(plans, alignment) {
+    match array.find(plans, fn(ignored) { 'True }) {
+    'None => 'None,
+    'Some(first) => if array.all(plans, fn(plan) { plan.base_entity == first.base_entity && plan.from == first.from }) {
+        let measures: Array(Measure) = array.flat_map(plans, fn(plan) { plan.measures });
+        let required_entities: Array(Entity) = array.flat_map(plans, fn(plan) { plan.required_entities });
+        let common_tables: Array(CommonTable) = array.flat_map(plans, fn(plan) { plan.common_tables });
+        let joins: Array(Join) = array.flat_map(plans, fn(plan) { plan.joins });
+        let filters: Array(Expr) = array.flat_map(plans, fn(plan) { plan.filters });
+        let measure_projections: Array(Projection) = array.flat_map(plans, fn(plan) { plan.measure_projections });
+        'Some({
+            measures,
+            base_entity: first.base_entity,
+            required_entities,
+            common_tables,
+            from: first.from,
+            joins,
+            filters,
+            measure_projections,
+        })
+    } else {
+        let ignored = emit_error!(
+            `selected measures remain at incompatible grains; use 'PreAggregate('Order) instead of \{alignment}`,
+            array.map(plans, fn(plan) { plan.base_entity }),
+        );
+        'None
+    },
+    }
 };
 
 def successful_requirements: Fn(Array(Option(GroupRequirement))) -> Array(GroupRequirement) = fn(compilations) {
@@ -442,10 +541,10 @@ def lower_sql: Fn(RelationalPlan) -> SqlPlan = fn(relational) {
         query: {
             common_tables: query_plan.common_tables,
             body: {
-                projections: array.push(
+                projections: array.concat([
                     array.map(requirements, fn(requirement) { requirement.projection }),
-                    query_plan.measure_projection,
-                ),
+                    query_plan.measure_projections,
+                ]),
                 from: query_plan.from,
                 joins: array.concat([query_plan.joins, array.map(relational.paths.relations, relation_join)]),
                 filters: array.concat([
@@ -466,19 +565,23 @@ def lower_sql: Fn(RelationalPlan) -> SqlPlan = fn(relational) {
 
 export def compile: Fn(ReportIntent) -> Option(ExecutionPlan) = fn(intent) {
     let order_valid = verify_order(intent);
-    match selected_measure(intent) {
+    match selected_measures(intent) {
         'None => 'None,
-        'Some(measure) => {
-            let capability = measure_capability(measure);
-            let query_plan = capability.lower();
-            let requirement_compilations = compile_requirements(measure, intent.dimensions);
+        'Some(measures) => {
+            let fragment_compilations = compile_measure_fragments(measures, intent.alignment);
+            let fragments = successful_query_plans(fragment_compilations);
+            let fragments_complete = array.length(fragments) == array.length(measures);
+            let requirement_compilations = compile_requirements(measures, intent.dimensions);
             let requirements = successful_requirements(requirement_compilations);
             let requirements_complete = array.length(requirements) == array.length(intent.dimensions);
             let filter_requirements = compile_filters(intent.filters);
+            match combine_query_plans(fragments, intent.alignment) {
+            'None => 'None,
+            'Some(query_plan) => {
             let semantic = lower_semantics(intent, query_plan, requirements, filter_requirements);
             let relational = lower_relationships(semantic);
             let relationships_valid = verify_relationships(relational.paths, requirements);
-            if requirements_complete && relationships_valid && order_valid {
+            if fragments_complete && requirements_complete && relationships_valid && order_valid {
                 'Some({
                 version: 1,
                 dialect: 'Sqlite,
@@ -489,6 +592,8 @@ export def compile: Fn(ReportIntent) -> Option(ExecutionPlan) = fn(intent) {
             } else {
                 'None
             }
+            },
+            }
         }
     }
 };
@@ -497,6 +602,7 @@ export {
     Measure,
     SemanticValueType,
     Aggregation,
+    Alignment,
     Dimension,
     ReportIntent,
     MeasureCapability,

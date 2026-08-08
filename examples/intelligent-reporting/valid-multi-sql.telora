@@ -1,0 +1,16 @@
+import "./ontology.telora" { compile };
+
+let compilation = compile({
+    measures: ['NetRevenue, 'UnitsSold],
+    alignment: 'PreAggregate('Order),
+    dimensions: ['OrderMonth],
+    filters: [],
+    order_by: ['OrderMonth],
+    limit: 'None,
+    render: 'Table,
+});
+
+export let output = match compilation {
+    'Some(plan) => plan.statement,
+    'None => panic!("expected the aligned multi-measure report to lower to SQL"),
+};

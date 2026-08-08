@@ -9088,7 +9088,7 @@ export let output: String = error.message;"#,
         assert!(
             messages
                 .iter()
-                .any(|message| message.contains("requires exactly one measure"))
+                .any(|message| message.contains("incompatible grains"))
         );
         assert!(
             messages

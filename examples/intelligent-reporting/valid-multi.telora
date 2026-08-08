@@ -2,10 +2,10 @@ import "./ontology.telora" { compile };
 
 export let output = compile({
     measures: ['NetRevenue, 'UnitsSold],
-    alignment: 'Natural,
+    alignment: 'PreAggregate('Order),
     dimensions: ['OrderMonth],
     filters: [],
-    order_by: ['CustomerRegion],
-    limit: 'Some(20),
+    order_by: ['OrderMonth],
+    limit: 'None,
     render: 'Table,
 });

@@ -31,6 +31,8 @@ Telora 代码将合法意图逐步 lowering 为 SQLite SQL。
   `Expr`，同时保留有效 lowering 与四条独立诊断。
 - RFC 0193：新的多指标报表伞 RFC 已接受；RFC 0194 已完成 measure semantic
   model，显式记录业务值类型、自然 grain 与 aggregation behavior。
+- RFC 0195：已完成显式 grain alignment；`NetRevenue + UnitsSold` 只有在意图
+  请求 `PreAggregate(Order)` 时才组合，`Natural` 不会隐式猜测策略。
 
 ## 文件
 
@@ -42,6 +44,9 @@ Telora 代码将合法意图逐步 lowering 为 SQLite SQL。
 - `ontology.telora`：领域校验和 lowering；
 - `valid.telora`：按月份、客户区域统计净收入；
 - `valid-units.telora`：按月份、品类、SKU 统计销量；
+- `valid-multi.telora`：显式将销量预聚合到 Order grain 后，与净收入共同输出；
+- `valid-multi-sql.telora`：导出多指标 SQL，供 SQLite 结果回归；
+- `invalid-alignment.telora`：证明不同自然 grain 不会被隐式组合；
 - `invalid.telora`：一次暴露四个独立领域错误；
 - `invalid-measures.telora`：拒绝多 measure 意图，不用任意 fallback 猜测依赖它的
   dimension 诊断；
