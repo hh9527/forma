@@ -497,6 +497,7 @@ fn gcc_wrapper_fixture_builds_reusable_deterministic_plans() {
     fs::create_dir_all(malformed_root.join("gcc-toolchain-define/src")).unwrap();
     fs::create_dir_all(malformed_root.join("gcc-wrapper/src")).unwrap();
     fs::create_dir_all(directory.join("domain-method/src")).unwrap();
+    fs::create_dir_all(directory.join("toolchain-method/src")).unwrap();
     fs::write(
         malformed_root.join("app/bin-src/gcc.telora"),
         include_str!("../../../examples/gcc-wrapper/app/bin-src/gcc.telora"),
@@ -510,6 +511,11 @@ fn gcc_wrapper_fixture_builds_reusable_deterministic_plans() {
     fs::write(
         directory.join("domain-method/src/method.telora"),
         include_str!("../../../examples/domain-method/src/method.telora"),
+    )
+    .unwrap();
+    fs::write(
+        directory.join("toolchain-method/src/toolchain.telora"),
+        include_str!("../../../examples/toolchain-method/src/toolchain.telora"),
     )
     .unwrap();
     fs::write(

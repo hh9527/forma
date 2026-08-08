@@ -3,22 +3,14 @@ import "std/dict" as dict;
 import "std/hash" as hash;
 import "std/rt-types/exec.telora" as exec_types;
 import "domain-method/method.telora" as method;
+import "toolchain-method/toolchain.telora" as toolchain;
 
-@struct type Package = {
-    name: String,
-    src: String,
-    digest: String,
-};
+type Package = toolchain.Package;
+type ExecFn = exec_types.ExecFn;
 
 @struct type ToolchainSource = {
     compilers: Dict(Package),
     sysroots: Dict(Package),
-};
-
-type ExecFn = exec_types.ExecFn;
-
-def require: for(A) Fn(Dict(A), String, String) -> A = fn(values, key, message) {
-    method.or_else(dict.get(values, key), fn() { panic!(message) })
 };
 
 def validated_source: Fn(Any) -> ToolchainSource = fn(raw) {
@@ -26,22 +18,6 @@ def validated_source: Fn(Any) -> ToolchainSource = fn(raw) {
         'Ok(source) => source,
         'Err(error) => raise!(error),
     }
-};
-
-def install_dest = fn(settings, package, ty, strip) {
-    let identity = `unpack-v1\n\{package.name}\n\{package.src}\n\{package.digest}\n\{ty}\n\{strip}`;
-    `\{settings.install_prefix}/\{hash.sha256(identity)}`
-};
-
-def unpack = fn(settings, package, dest, ty, strip) {
-    'Unpack({
-        dest,
-        file: `\{settings.download_prefix}/\{hash.sha256(package.src)}`,
-        ty,
-        src: package.src,
-        strip,
-        digest: 'Some(package.digest),
-    })
 };
 
 def checked_compiler_args = fn(request, sysroot_dest) {
@@ -68,11 +44,12 @@ export def command: Fn(String, Any) -> ExecFn = fn(tool, raw) {
     let source = validated_source(raw);
     fn(settings, request) {
         let host = `\{settings.platform.os}-\{settings.platform.arch}`;
-        let compiler = require(source.compilers, host, `unsupported GCC host: \{host}`);
+        let compiler = toolchain.require_package(source.compilers, host, `unsupported GCC host: \{host}`);
         let unpack_ty = 'TarGzip;
         let strip = 1;
-        let compiler_dest = install_dest(settings, compiler, unpack_ty, strip);
-        let compiler_install = unpack(settings, compiler, compiler_dest, unpack_ty, strip);
+        let compiler_prepared = toolchain.prepare_archive(settings, compiler, unpack_ty, strip);
+        let compiler_dest = compiler_prepared.dest;
+        let compiler_install = compiler_prepared.install;
         match tool {
             "ar" => {
                 install: [compiler_install],
@@ -82,11 +59,12 @@ export def command: Fn(String, Any) -> ExecFn = fn(tool, raw) {
                 env: {clear: 'False, update: {}},
             },
             "gcc" => {
-                let target: String = require(request.env, "TARGET", "TARGET is required");
-                let sysroot = require(source.sysroots, target, "unsupported GCC target");
-                let sysroot_dest = install_dest(settings, sysroot, unpack_ty, strip);
+                let target: String = method.or_else(dict.get(request.env, "TARGET"), fn() { panic!("TARGET is required") });
+                let sysroot = toolchain.require_package(source.sysroots, target, "unsupported GCC target");
+                let sysroot_prepared = toolchain.prepare_archive(settings, sysroot, unpack_ty, strip);
+                let sysroot_dest = sysroot_prepared.dest;
                 {
-                    install: [compiler_install, unpack(settings, sysroot, sysroot_dest, unpack_ty, strip)],
+                    install: [compiler_install, sysroot_prepared.install],
                     cwd: 'Some(request.cwd),
                     bin: `\{compiler_dest}/bin/gcc`,
                     args: checked_compiler_args(request, sysroot_dest),
@@ -94,11 +72,12 @@ export def command: Fn(String, Any) -> ExecFn = fn(tool, raw) {
                 }
             },
             "g++" => {
-                let target: String = require(request.env, "TARGET", "TARGET is required");
-                let sysroot = require(source.sysroots, target, "unsupported GCC target");
-                let sysroot_dest = install_dest(settings, sysroot, unpack_ty, strip);
+                let target: String = method.or_else(dict.get(request.env, "TARGET"), fn() { panic!("TARGET is required") });
+                let sysroot = toolchain.require_package(source.sysroots, target, "unsupported GCC target");
+                let sysroot_prepared = toolchain.prepare_archive(settings, sysroot, unpack_ty, strip);
+                let sysroot_dest = sysroot_prepared.dest;
                 {
-                    install: [compiler_install, unpack(settings, sysroot, sysroot_dest, unpack_ty, strip)],
+                    install: [compiler_install, sysroot_prepared.install],
                     cwd: 'Some(request.cwd),
                     bin: `\{compiler_dest}/bin/g++`,
                     args: checked_compiler_args(request, sysroot_dest),

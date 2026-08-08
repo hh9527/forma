@@ -1,0 +1,44 @@
+import "std/dict" as dict;
+import "std/hash" as hash;
+import "std/rt-types/exec.telora" as exec_types;
+import "domain-method/method.telora" as method;
+
+type ExecSettings = exec_types.ExecSettings;
+type UnpackType = exec_types.UnpackType;
+type Install = exec_types.Install;
+
+@struct type Package = {
+    name: String,
+    src: String,
+    digest: String,
+};
+
+@struct type PreparedPackage = {
+    dest: String,
+    install: Install,
+};
+
+def require_package: Fn(Dict(Package), String, String) -> Package = fn(packages, key, message) {
+    method.or_else(dict.get(packages, key), fn() { panic!(message) })
+};
+
+def prepare_archive:
+    Fn(ExecSettings, Package, UnpackType, Int)
+        -> PreparedPackage =
+    fn(settings, package, ty, strip) {
+        let identity = `unpack-v1\n\{package.name}\n\{package.src}\n\{package.digest}\n\{ty}\n\{strip}`;
+        let dest = `\{settings.install_prefix}/\{hash.sha256(identity)}`;
+        {
+            dest,
+            install: 'Unpack({
+                dest,
+                file: `\{settings.download_prefix}/\{hash.sha256(package.src)}`,
+                ty,
+                src: package.src,
+                strip,
+                digest: 'Some(package.digest),
+            }),
+        }
+    };
+
+export { Package, PreparedPackage, require_package, prepare_archive };
