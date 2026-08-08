@@ -2,6 +2,7 @@ import "std/argv" as argv;
 import "std/dict" as dict;
 import "std/hash" as hash;
 import "std/rt-types/exec.telora" as exec_types;
+import "domain-method/method.telora" as method;
 
 @struct type Package = {
     name: String,
@@ -17,10 +18,7 @@ import "std/rt-types/exec.telora" as exec_types;
 type ExecFn = exec_types.ExecFn;
 
 def require: for(A) Fn(Dict(A), String, String) -> A = fn(values, key, message) {
-    match dict.get(values, key) {
-        'Some(value) => value,
-        'None => panic!(message),
-    }
+    method.or_else(dict.get(values, key), fn() { panic!(message) })
 };
 
 def validated_source: Fn(Any) -> ToolchainSource = fn(raw) {

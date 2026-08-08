@@ -1,4 +1,5 @@
 import "std/array" as array;
+import "domain-method/method.telora" as method;
 import "./sql.telora" {
     Function,
     BinaryOp,
@@ -409,22 +410,20 @@ def selected_measures: Fn(ReportIntent) -> Option(Array(Measure)) = fn(intent) {
 };
 
 def compile_requirements: Fn(Array(Measure), Array(Dimension)) -> Array(Option(GroupRequirement)) = fn(measures, dimensions) {
-    array.map(dimensions, fn(dimension) {
+    method.lower_independent(dimensions, fn(dimension) {
         let capability = dimension_capability(dimension);
         capability.lower(measures)
     })
 };
 
 def compile_measure_fragments: Fn(Array(Measure), Alignment) -> Array(Option(QueryPlan)) = fn(measures, alignment) {
-    array.map(measures, fn(measure) {
+    method.lower_independent(measures, fn(measure) {
         measure_capability(measure).lower(alignment)
     })
 };
 
 def successful_query_plans: Fn(Array(Option(QueryPlan))) -> Array(QueryPlan) = fn(compilations) {
-    array.flat_map(compilations, fn(compilation) {
-        match compilation { 'Some(plan) => [plan], 'None => [] }
-    })
+    method.completed(compilations)
 };
 
 def combine_query_plans: Fn(Array(QueryPlan), Alignment) -> Option(QueryPlan) = fn(plans, alignment) {
@@ -460,12 +459,7 @@ def combine_query_plans: Fn(Array(QueryPlan), Alignment) -> Option(QueryPlan) = 
 };
 
 def successful_requirements: Fn(Array(Option(GroupRequirement))) -> Array(GroupRequirement) = fn(compilations) {
-    array.flat_map(compilations, fn(compilation) {
-        match compilation {
-            'Some(requirement) => [requirement],
-            'None => [],
-        }
-    })
+    method.completed(compilations)
 };
 
 def compile_filters: Fn(Array(Filter)) -> Array(FilterRequirement) = fn(filters) {

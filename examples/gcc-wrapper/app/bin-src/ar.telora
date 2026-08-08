@@ -2,6 +2,7 @@
 
 option "crate.dependency" {name: "gcc-toolchain-define", source: 'Path({path: "../gcc-toolchain-define"})};
 option "crate.dependency" {name: "gcc-wrapper", source: 'Path({path: "../gcc-wrapper"})};
+option "crate.dependency" {name: "domain-method", source: 'Path({path: "../../domain-method"})};
 
 import "std/rt-types/exec.telora" { ExecFn };
 import "gcc-toolchain-define/source.json" as source;

@@ -5,6 +5,10 @@ option "crate.dependency" {
     source: 'Path({path: "../gcc-toolchain-define"}),
 };
 option "crate.dependency" {
+    name: "domain-method",
+    source: 'Path({path: "../../domain-method"}),
+};
+option "crate.dependency" {
     name: "gcc-wrapper",
     source: 'Path({path: "../gcc-wrapper"}),
 };
