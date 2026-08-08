@@ -1,4 +1,4 @@
-# Forma 领域意图编译器
+# Telora 领域意图编译器
 
 - Stage: Discussion
 - Scope: high-level plans, domain libraries, verified lowering, diagnostics
@@ -6,22 +6,22 @@
 
 ## 问题
 
-Forma 能否同时作为高阶意图的可编程表达载体，以及构造领域意图编译器的
+Telora 能否同时作为高阶意图的可编程表达载体，以及构造领域意图编译器的
 语言？
 
-目标不是让 Forma 程序直接获得现实世界权限。Code Agent 编写 Forma，表达
-靠近业务意图的高阶计划；预先发布的 Forma 领域库承载领域知识，在校验这份
+目标不是让 Telora 程序直接获得现实世界权限。Code Agent 编写 Telora，表达
+靠近业务意图的高阶计划；预先发布的 Telora 领域库承载领域知识，在校验这份
 计划的同时完成 lowering；成功结果成为 Host 可授权执行的低阶计划，失败结果
 成为 Code Agent 可以直接修复的编译诊断。
 
 ```text
-Code Agent 编写 Forma
+Code Agent 编写 Telora
         |
         v
 高阶计划 / 领域意图
         |
         v
-版本化 Forma 领域库
+版本化 Telora 领域库
     verification + lowering
         |
         +-- diagnostics -> Code Agent 修复
@@ -52,7 +52,7 @@ Host 授权并干预真实世界
     从领域库如何定义处理语义来看
 ```
 
-Forma 通过类型、普通数据和纯 transform 定义领域概念、normalization、
+Telora 通过类型、普通数据和纯 transform 定义领域概念、normalization、
 verification、lowering、linking 与 plan construction。具体程序使用这些能力
 表达意图。Host 只提供显式事实并解释最终计划，不维护另一份业务规则。
 
@@ -71,7 +71,7 @@ verification、lowering、linking 与 plan construction。具体程序使用这�
 
 理想的编译路径由普通函数组成：
 
-```forma
+```telora
 export def compile:
     Fn(Context, Intent) -> Compilation(Plan) =
     fn(context, intent) {
@@ -110,9 +110,9 @@ A -> Compilation(A)
 
 ## 类型与数据不是竞争路线
 
-稳定、局部并能排除一整类无意义组合的关系，应优先使用 Forma 类型表达：
+稳定、局部并能排除一整类无意义组合的关系，应优先使用 Telora 类型表达：
 
-```forma
+```telora
 eq: for(A) Fn(Expr(A), Expr(A)) -> Predicate;
 ```
 
@@ -134,7 +134,7 @@ data-level descriptor 支持开放本体和领域化反馈。
 - 会随租户、权限、版本或目标环境改变；
 - 强行类型化会引入依赖类型、trait/assoc type 或复杂名义体系。
 
-理想路线不是把所有领域知识推入 Forma 内核，而是让小而可靠的静态基础支撑
+理想路线不是把所有领域知识推入 Telora 内核，而是让小而可靠的静态基础支撑
 可执行的领域模型。
 
 ## 编译结果不能只有 fail-fast Result
@@ -246,7 +246,7 @@ system。需要的能力很窄：一次意图编译期间收集辅助诊断，�
 
 ## Plan 的保证边界
 
-一旦得到 Plan，Forma 应保证：
+一旦得到 Plan，Telora 应保证：
 
 - 结构符合 Host protocol；
 - 引用全部 resolve；
@@ -255,7 +255,7 @@ system。需要的能力很窄：一次意图编译期间收集辅助诊断，�
 - 多个输出（例如 SQL、result schema、render template）保持一致；
 - 在相同库版本和显式 Context 下结果确定。
 
-Forma 不能保证网络、数据库或外部服务在执行时不失败。更准确的承诺是：Host
+Telora 不能保证网络、数据库或外部服务在执行时不失败。更准确的承诺是：Host
 执行时只需处理真实世界失败，不应再发现本可由领域 compiler 识别的结构或业务
 错误。会变化的外部状态可以用 context revision 和显式 assumptions 固定，执行
 前失效则重新编译。
@@ -265,7 +265,7 @@ Forma 不能保证网络、数据库或外部服务在执行时不失败。更�
 理想边界是：
 
 ```text
-Forma 领域库
+Telora 领域库
     领域概念、ontology、verification、lowering、linking、plan validation
 
 Host
@@ -273,11 +273,11 @@ Host
 ```
 
 如果规则依赖 catalog、权限或平台，Host 将这些事实作为显式 Context 提供；
-规则判断仍由 Forma 库完成。Host 不应再维护一份平行的业务 checker。
+规则判断仍由 Telora 库完成。Host 不应再维护一份平行的业务 checker。
 
 ## 简单性是功能要求
 
-Forma 面向“表达意图、编译意图、依据诊断修复意图”的 loop，因此表达能力和
+Telora 面向“表达意图、编译意图、依据诊断修复意图”的 loop，因此表达能力和
 诊断能力同等重要。语法和内核概念的简单化不是语言审美，而是为了：
 
 - 降低 Code Agent 生成与修改意图的错误率；
@@ -301,19 +301,19 @@ Forma 面向“表达意图、编译意图、依据诊断修复意图”的 loop
 4. 无领域诊断且无资源中止时必定产生完整 Plan；
 5. Plan 不含未 resolve 引用或隐式领域决策；
 6. lowering 的语义保持由测试和领域不变量验证；
-7. verification/lowering 规则只在 Forma 库中实现一次；
+7. verification/lowering 规则只在 Telora 库中实现一次；
 8. 规则代码主要由类型、数据和普通 transform 构成；
 9. 领域拒绝与资源中止严格区分；
 10. feedback 足以让 Code Agent 一轮修复多个独立根因。
 
 ## 非目标
 
-- 让 Forma 程序直接拥有现实世界效果；
+- 让 Telora 程序直接拥有现实世界效果；
 - 为每个领域向 VM 加入专用概念；
 - 声称发现任意递归程序中数学意义上的全部错误；
 - 保证外部世界永不发生运行时失败；
 - 把 AI、常驻服务或某一种 Agent 协议写入语言语义。
 
 常驻服务、LSP 和增量缓存可以改善工程体验，但最小模型只是 Code Agent 编写
-Forma、运行 compiler、读取 diagnostics、修改代码，直到得到 Host 可执行计划。
+Telora、运行 compiler、读取 diagnostics、修改代码，直到得到 Host 可执行计划。
 

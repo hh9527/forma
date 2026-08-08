@@ -7,28 +7,28 @@
 
 ## 问题
 
-能否用 Forma 领域库表达数据表之间的关系、业务语义、指标口径、grain、权限、
+能否用 Telora 领域库表达数据表之间的关系、业务语义、指标口径、grain、权限、
 钻取本体和 rendering 规则，使 Code Agent 能在限定领域内组合任意报表意图？
 
-成功时，Forma 将高阶报表意图校验并 lowering 为一个原子的执行计划：
+成功时，Telora 将高阶报表意图校验并 lowering 为一个原子的执行计划：
 
 ```text
 SQL + Parameters + ResultSchema + RenderTemplate
 ```
 
-失败时，Forma 一次返回尽可能完整、靠近根因的领域 feedback，使 Code Agent
+失败时，Telora 一次返回尽可能完整、靠近根因的领域 feedback，使 Code Agent
 修改报表代码而不是猜测数据库错误。
 
 ```text
-预先发布的 analytics Forma 库
+预先发布的 analytics Telora 库
     数据语义 + 本体 + verification + lowering
                     +
-Code Agent 生成的 report.forma
+Code Agent 生成的 report.telora
                     +
 Host 提供的 catalog/权限/方言 Context
                     |
                     v
-              Forma 编译
+              Telora 编译
                     |
           +---------+---------+
           |                   |
@@ -49,7 +49,7 @@ Host 提供的 catalog/权限/方言 Context
 - SQL result 与图表字段一致；
 - 失败能得到领域解释，而不只是数据库错误。
 
-把规则放进 prompt 不能形成权威、版本化、可测试的模型。analytics Forma 库
+把规则放进 prompt 不能形成权威、版本化、可测试的模型。analytics Telora 库
 把这些知识变成普通软件资产。Code Agent 仍有比固定模板更大的组合空间，但
 组合空间由领域语义决定，而不是由数据库权限决定。
 
@@ -83,7 +83,7 @@ employees.id         EmployeeId
 - `OrderCount` 不能与 `EmployeeCount` 计算增长率；
 - `ConversionRate` 通常不能直接求和。
 
-Forma 计算的是查询计划，不是真实业务行。因此这些语义身份不必全部成为 Forma
+Telora 计算的是查询计划，不是真实业务行。因此这些语义身份不必全部成为 Telora
 内核中的名义类型。它们可以按适合程度表达为静态类型、类型元数据或 ontology
 中的规范化数据。
 
@@ -91,7 +91,7 @@ Forma 计算的是查询计划，不是真实业务行。因此这些语义身�
 
 已知且稳定的字段可以提供静态 facade：
 
-```forma
+```telora
 eq: for(A) Fn(Expr(A), Expr(A)) -> Predicate;
 
 organization.id: Expr(OrgId);
@@ -101,7 +101,7 @@ employee.id: Expr(EmployeeId);
 
 这样错误 join 可以在局部静态拒绝。动态引用和异质 registry 则使用数据：
 
-```forma
+```telora
 @struct type SemanticTypeDesc = {
     key: String,
     storage: StorageType,
@@ -118,7 +118,7 @@ employee.id: Expr(EmployeeId);
 
 AI 通常引用稳定 key：
 
-```forma
+```telora
 measure("net_revenue")
 dimension("customer_region")
 field("organizations.kind")
@@ -150,7 +150,7 @@ storage 或 capability。最终 SQL lowering 才把 `OrgKind` 等语义擦除为
 策略；drill edge 可以携带 lowering 函数，结合 Context 插入 join、重写聚合、
 应用权限并更新结果 schema。
 
-Forma 不需要实现完整 RDF/OWL 或开放世界推理。这里的本体是 operational / 
+Telora 不需要实现完整 RDF/OWL 或开放世界推理。这里的本体是 operational /
 executable ontology：它服务于编译具体意图，而不是推导任意新事实。
 
 ## 指标与 grain
@@ -204,7 +204,7 @@ authorization scope
 
 概念上的规则可以是：
 
-```forma
+```telora
 @struct type DrillRule = {
     from: LevelRef,
     to: LevelRef,
@@ -223,9 +223,9 @@ authorization scope
 > 按月和地区展示过去一年已支付订单的净收入，并与去年同期比较，用折线图
 > 展示。
 
-Code Agent 可以生成靠近意图的 Forma：
+Code Agent 可以生成靠近意图的 Telora：
 
-```forma
+```telora
 import "company/analytics" as analytics;
 
 export let report = analytics.report({
@@ -264,7 +264,7 @@ resolve domain references
 
 成功结果不应只是一段 SQL：
 
-```forma
+```telora
 @struct type ReportExecutionPlan = {
     query: SqlQuery,
     parameters: Array(QueryParameter),
@@ -313,10 +313,10 @@ cannot compare OrgKind with EmployeeKind
 
 both use SQL INT storage, but represent different business domains
 
-  analytics/organization.forma:
+  analytics/organization.telora:
     organizations.kind declared as OrgKind
 
-  analytics/employee.forma:
+  analytics/employee.telora:
     employees.kind declared as EmployeeKind
 ```
 
@@ -336,11 +336,11 @@ Host 可以提供：
 - query/resource budget；
 - 可用数据 snapshot。
 
-Forma 库决定这些事实对领域意图意味着什么。Forma 不连接数据库，也不执行
+Telora 库决定这些事实对领域意图意味着什么。Telora 不连接数据库，也不执行
 SQL。Host 消费成功的 `ReportExecutionPlan`，处理数据库不可用、snapshot 过期
 等真实世界失败。
 
-## 对 Forma 的检验
+## 对 Telora 的检验
 
 这个思想实验可以验证：
 
@@ -361,21 +361,21 @@ SQL。Host 消费成功的 `ReportExecutionPlan`，处理数据库不可用、sn
 - 不因 ontology capability 立即引入 trait/assoc type；
 - 不因多诊断立即引入通用 algebraic effect；
 - 不因 SQL/render 输出立即引入模板或 AST 语法魔法；
-- 不把 relation path search 放进 Forma 类型检查器。
+- 不把 relation path search 放进 Telora 类型检查器。
 
 先验证现有类型、类型元数据、普通数据、transform、best-effort analysis、
 provenance 和窄 accumulation 是否足以构造这套领域 compiler。
 
 ## 成功标准
 
-智能报表案例成功，不是因为 Forma 能拼出 SQL 字符串，而是因为：
+智能报表案例成功，不是因为 Telora 能拼出 SQL 字符串，而是因为：
 
 - Code Agent 能用领域词汇表达超出固定模板的组合；
 - 领域外组合在 SQL 生成前被拒绝；
 - 一轮反馈覆盖多个独立根因；
 - 反馈能指出意图、规则和修复候选；
 - 成功计划无需 Host 猜测业务含义；
-- 领域知识只存在于版本化 Forma 库中；
+- 领域知识只存在于版本化 Telora 库中；
 - 新指标、关系和 drill 主要增加普通库代码，而不是内核特例。
 
 它将三个观察角度统一在一个现实案例中：
@@ -388,6 +388,5 @@ provenance 和窄 accumulation 是否足以构造这套领域 compiler。
     analytics 库表达可执行本体与业务语义
 
 意图编译器
-    Forma lowering 为 SQL + ResultSchema + RenderTemplate
+    Telora lowering 为 SQL + ResultSchema + RenderTemplate
 ```
-

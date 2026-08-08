@@ -100,7 +100,7 @@ requirements can be linked into one query.
 
 ## Compiler vocabulary and capabilities
 
-`Measure` and `Dimension` are Forma enums. This makes the Code Agent-facing
+`Measure` and `Dimension` are Telora enums. This makes the Code Agent-facing
 vocabulary closed and statically checked: misspelled or invented concepts do
 not enter the semantic compiler as arbitrary strings.
 

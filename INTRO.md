@@ -1,4 +1,4 @@
-# From Programmable Configuration to Trustworthy Plans: An Introduction to Forma
+# From Programmable Configuration to Trustworthy Plans: An Introduction to Telora
 
 Configuration rarely remains "just a data tree." Once a system needs reuse,
 external data, platform selection, validation, and command generation, it is
@@ -8,15 +8,15 @@ a scripting language. It is:
 > How can data representation, validation, transformation, and application
 > meaning share one checkable and diagnosable model?
 
-Forma is a language experiment around that question. It provides a closed,
+Telora is a language experiment around that question. It provides a closed,
 pure, deterministic, resource-bounded world for data computation, then uses a
 small number of explicit host entries to project results into real
-applications. A Forma program may construct a process plan, build rule,
+applications. A Telora program may construct a process plan, build rule,
 deployment object, or agent plan, but it does not itself download files, start
 processes, or gain ambient access to the environment or network.
 
 This introduction begins with a concrete application and then explains why
-Forma chooses this boundary.
+Telora chooses this boundary.
 
 ## A GCC Wrapper Beyond Dotslash
 
@@ -30,14 +30,14 @@ binary:
   `-ffile-prefix-map`, and `-fdebug-prefix-map` itself;
 - download files and installation directories follow a complete deterministic
   policy rather than being guessed by an external runner;
-- failures identify bad JSON data or the Forma rule that rejected it; and
+- failures identify bad JSON data or the Telora rule that rejected it; and
 - the complete execution plan is visible before any download or process start.
 
 The repository contains an end-to-end example whose `gcc` entry is a thin
 assembly module:
 
-```forma
-#!/usr/bin/env -S forma exec --dry-run --
+```telora
+#!/usr/bin/env -S telora exec --dry-run --
 
 option "crate.dependency" {
     name: "gcc-toolchain-define",
@@ -49,22 +49,22 @@ option "crate.dependency" {
 };
 option "exec.capture-envs" ["TARGET"];
 
-import "std/rt-types/exec.forma" { ExecFn };
+import "std/rt-types/exec.telora" { ExecFn };
 import "gcc-toolchain-define/source.json" as source;
-import "gcc-wrapper/toolchain.forma" { command };
+import "gcc-wrapper/toolchain.telora" { command };
 
 export def exec: ExecFn = command("gcc", source);
 ```
 
 There is no GCC-specific syntax here. Dependencies are static options, the
-toolchain description is a JSON module, the wrapper is an ordinary Forma
+toolchain description is a JSON module, the wrapper is an ordinary Telora
 module, and `ExecFn` is an ordinary type published by the host protocol.
 `exec.capture-envs` does not inherit the whole environment; it allows the exec
 entry to capture only `TARGET` and pass it to main as explicit request data.
 
 The shared module first validates external data into domain types:
 
-```forma
+```telora
 @struct type Package = {
     name: String,
     src: String,
@@ -87,7 +87,7 @@ def validated_source: Fn(Any) -> ToolchainSource = fn(raw) {
 Ordinary functions then select packages, derive hash-addressed paths, and
 rewrite arguments:
 
-```forma
+```telora
 def install_dest = fn(settings, package, ty, strip) {
     let identity = `unpack-v1\n\{package.name}\n\{package.src}\n\{package.digest}\n\{ty}\n\{strip}`;
     `\{settings.install_prefix}/\{hash.sha256(identity)}`
@@ -124,8 +124,8 @@ The example can be run today:
 
 ```sh
 TARGET=aarch64-linux-gnu \
-  cargo run -p forma -- exec --dry-run \
-  examples/gcc-wrapper/app/bin-src/gcc.forma -- \
+  cargo run -p telora -- exec --dry-run \
+  examples/gcc-wrapper/app/bin-src/gcc.telora -- \
   -c /workspace/hello.c -o /workspace/hello.o
 ```
 
@@ -136,7 +136,7 @@ authorization.
 
 ## Why Existing Approaches Do Not Fully Occupy This Space
 
-Forma does not claim that other approaches "cannot program." The difference
+Telora does not claim that other approaches "cannot program." The difference
 is what each approach makes fundamental and how many models must jointly
 explain a result as the application grows.
 
@@ -156,9 +156,9 @@ Errors tend to describe the current JSON value or filter rather than one
 relationship spanning source data, rejecting rule, generation step, and host
 contract.
 
-Forma keeps direct data transformation while placing static data, types,
+Telora keeps direct data transformation while placing static data, types,
 functions, modules, provenance, and final protocols in one semantic model.
-JSON, TOML, and YAML are modules in Forma rather than opaque blobs stripped of
+JSON, TOML, and YAML are modules in Telora rather than opaque blobs stripped of
 locations.
 
 ### General-purpose languages
@@ -169,15 +169,15 @@ deliberately retaining dynamic escape hatches. A configuration framework built
 on them must still define what may be observed, how dependencies are fixed,
 how resources and caching are bounded, and what dry-run means.
 
-Proof-oriented languages can establish properties much stronger than Forma's,
+Proof-oriented languages can establish properties much stronger than Telora's,
 at the cost of bringing configuration into termination and proof engineering.
-Forma does not seek general theorem proving. It permits recursion and gives the
+Telora does not seek general theorem proving. It permits recursion and gives the
 host a finite boundary through deterministic fuel, stack, call-depth, and
 allocation quotas.
 
 Scheme offers another important reference: "code is data" enables remarkable
 language-building power, but static analysis must then understand code created
-by expansion or execution. Forma adopts a narrower idea:
+by expansion or execution. Telora adopts a narrower idea:
 
 > Types are data, but code is not arbitrarily generated executable data.
 
@@ -187,14 +187,14 @@ evaluation.
 
 ### Programmable configuration DSLs
 
-CUE, KCL, and Nickel are closest to Forma's problem domain. They demonstrate
+CUE, KCL, and Nickel are closest to Telora's problem domain. They demonstrate
 that constraints, merging, contracts, and programmable configuration deserve
-purpose-built models. Forma's distinction is not a larger syntax checklist;
+purpose-built models. Telora's distinction is not a larger syntax checklist;
 it attempts to reduce domain policy to ordinary data and ordinary functions.
 
 Unification, contract application, and field merging are valuable DSL
 semantics. Each specialized rule also brings its own composition and failure
-model for users and tools to understand. Forma explores whether "types as
+model for users and tools to understand. Telora explores whether "types as
 metadata + functions + a few controlled bridges" can support parsing, codecs,
 schemas, display, and Eq/Hash without turning each into another language
 mechanism.
@@ -203,7 +203,7 @@ This is a different allocation of complexity, not a universal replacement
 claim. It must be tested by cross-module, cross-source applications such as the
 GCC wrapper rather than isolated syntax examples.
 
-## Forma's Core Model
+## Telora's Core Model
 
 ### Closed, pure, and bounded
 
@@ -220,10 +220,10 @@ auditable.
 
 ### Types are ordinary programmable metadata
 
-A Forma type declaration produces canonical immutable data. A type constructor
+A Telora type declaration produces canonical immutable data. A type constructor
 can be an ordinary pure function:
 
-```forma
+```telora
 def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) {
     Option(Item)
 };
@@ -236,11 +236,11 @@ can therefore drive static checking, runtime validation, codecs, schemas,
 string parsing/display, and documentation tools instead of being copied into a
 schema for every layer.
 
-Ordinary Forma code can also interpret erased `TypeDesc` values. When such an
+Ordinary Telora code can also interpret erased `TypeDesc` values. When such an
 interpreter needs a statically typed calling surface, `interpreter!` provides a
 narrow bridge:
 
-```forma
+```telora
 def my_show: for(A) Fn(TypeOf(A)) -> Fn(A) -> Result(String, BlameError)
     = interpreter!(show_dyn);
 ```
@@ -252,13 +252,13 @@ capabilities without gaining arbitrary code generation.
 
 ### Provenance and blame travel through dataflow
 
-When Forma reads JSON, TOML, or YAML, it retains field-level provenance rather
+When Telora reads JSON, TOML, or YAML, it retains field-level provenance rather
 than only a final value. Locations travel through imports, validation, and
 transformation; rules have origins as well. A failure can therefore report:
 
 ```text
 source.json:12:9: expected String
-  toolchain.forma:16:28: requirement declared here
+  toolchain.telora:16:28: requirement declared here
 ```
 
 `raise!` preserves this structure instead of replacing it with a new string.
@@ -294,7 +294,7 @@ then projects it authoritatively with `TypeOf(A)`. A bad `exec` signature is
 rejected before invocation with both the main definition and entry protocol
 check in the diagnostic.
 
-Most of `forma exec` is consequently a replaceable Forma entry rather than
+Most of `telora exec` is consequently a replaceable Telora entry rather than
 GCC or process schemas scattered through the CLI and VM. Future installer and
 process APIs can remain entry-only while main stays an ordinary pure module.
 
@@ -323,16 +323,16 @@ Changing the input and output protocol projects the same model elsewhere:
 - **data migration and generation:** consume JSON/TOML/YAML and emit typed
   structured data or stable text.
 
-Forma does not yet ship complete frameworks for these domains, production
+Telora does not yet ship complete frameworks for these domains, production
 package acquisition, real exec/install effects, or long-term compatibility
 guarantees. What it has demonstrated is their shared vertical foundation:
 data inputs, programmable type metadata, ordinary functional abstraction,
 source-aware diagnostics, bounded evaluation, module reuse, and a controlled
 host entry.
 
-## What Forma Is Trying to Prove
+## What Telora Is Trying to Prove
 
-Forma is not trying to be a smaller Python or to replace every configuration
+Telora is not trying to be a smaller Python or to replace every configuration
 DSL with another specialized constraint semantics. It tests a more specific
 claim:
 
@@ -342,7 +342,7 @@ claim:
 
 The experiment fails if every application domain requires new VM instructions,
 language-level effects, or compiler exceptions. It remains promising if new
-domains primarily add ordinary Forma libraries, typed protocols, and narrow
+domains primarily add ordinary Telora libraries, typed protocols, and narrow
 host adapters while the core semantics stay small and coherent.
 
 ## Read and Run More
@@ -357,7 +357,7 @@ host adapters while the core semantics stay small and coherent.
 cargo test --workspace
 
 TARGET=aarch64-linux-gnu \
-  cargo run -p forma -- exec --dry-run \
-  examples/gcc-wrapper/app/bin-src/gcc.forma -- \
+  cargo run -p telora -- exec --dry-run \
+  examples/gcc-wrapper/app/bin-src/gcc.telora -- \
   -c hello.c -o hello.o
 ```

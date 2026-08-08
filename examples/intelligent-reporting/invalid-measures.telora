@@ -1,0 +1,10 @@
+import "./ontology.telora" { compile };
+
+export let output = compile({
+    measures: ['NetRevenue, 'UnitsSold],
+    dimensions: ['OrderMonth],
+    filters: [],
+    order_by: ['CustomerRegion],
+    limit: 'Some(20),
+    render: 'Table,
+});

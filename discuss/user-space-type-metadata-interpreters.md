@@ -7,7 +7,7 @@
 
 ## Objective
 
-Forma should let ordinary Forma code interpret canonical TypeMetadata with the
+Telora should let ordinary Telora code interpret canonical TypeMetadata with the
 same public logical reach as a native interpreter. Native code may retain heap,
 cache, and execution optimizations, but it should not be the only place where
 users can define nested type-directed semantics.
@@ -15,7 +15,7 @@ users can define nested type-directed semantics.
 The target is not dynamic code generation:
 
 ```text
-TypeOf(A) -> generated Forma code specialized for A
+TypeOf(A) -> generated Telora code specialized for A
 ```
 
 It is user-space data interpretation behind a typed outer boundary:
@@ -25,15 +25,15 @@ TypeOf(A) + erased interpreter + values of A
     -> deterministic interpreted result
 ```
 
-Equality is the first vertical slice because its result type is fixed, Forma
+Equality is the first vertical slice because its result type is fixed, Telora
 already has authoritative native behavior for conformance, and it exercises
 the logical data shapes without requiring dynamic construction of an `A`.
 
 ## Proposed form
 
-The erased interpreter is an ordinary recursive Forma function:
+The erased interpreter is an ordinary recursive Telora function:
 
-```forma
+```telora
 def my_eq_i:
     Fn(Dyn, Dyn) -> Result(Bool, BlameError) =
     fn(left, right) {
@@ -45,7 +45,7 @@ def my_eq_i:
 A contextual `interpreter` expression lifts it into a statically typed
 factory:
 
-```forma
+```telora
 def eq_fn:
     for(A) Fn(TypeOf(A)) ->
         Fn(A, A) -> Result(Bool, BlameError) =
@@ -56,7 +56,7 @@ def eq_fn:
 does not imply runtime lookup or ordinary Function application.
 
 This separated form is preferred to an inline interpreter body. The erased
-function can use ordinary Forma recursion, can be tested directly, and does
+function can use ordinary Telora recursion, can be tested directly, and does
 not need a special recursive capability supplied by the runtime.
 
 ## Contextual typing and erasure
@@ -92,7 +92,7 @@ Fn(Dyn, Dyn) -> Result(Bool, BlameError)
 
 Conceptually, the compiler lowers it to an ordinary adapter:
 
-```forma
+```telora
 fn(type_witness) {
     fn(left, right) {
         my_eq_i(
@@ -115,7 +115,7 @@ after diagnostics and inference are stable.
 
 The first version supports interpreters whose result does not contain `A`:
 
-```forma
+```telora
 for(A) Fn(TypeOf(A)) -> Fn(A, A) -> Bool
 for(A) Fn(TypeOf(A)) -> Fn(A) -> String
 for(A) Fn(TypeOf(A)) -> Fn(A) -> Result(Array(Change), BlameError)
@@ -123,7 +123,7 @@ for(A) Fn(TypeOf(A)) -> Fn(A) -> Result(Array(Change), BlameError)
 
 It deliberately defers type-preserving outputs:
 
-```forma
+```telora
 for(A) Fn(TypeOf(A)) -> Fn(A) -> A
 for(A) Fn(TypeOf(A)) -> Fn(A) -> Option(A)
 for(A) Fn(TypeOf(A)) -> Fn(Any) -> Result(A, BlameError)
@@ -177,7 +177,7 @@ A reference identifier is graph-local, not a global type identity. The public
 API may expose an opaque `TypeRef`, or keep identity hidden and expose only
 safe inspection and resolution:
 
-```forma
+```telora
 type_desc.kind: Fn(TypeDesc) -> TypeDescKind;
 type_desc.ref_id: Fn(TypeDesc) -> Result(TypeRef, BlameError);
 type_desc.resolve: Fn(TypeDesc) -> Result(TypeDesc, BlameError);
@@ -203,7 +203,7 @@ should be designed separately from this data-interpreter mechanism.
 
 ## Value recursion, not type-plan recursion
 
-Forma currently has recursive types and recursive functions, but no cyclic
+Telora currently has recursive types and recursive functions, but no cyclic
 runtime values. A value of a recursive type is therefore a finite tree. An
 interpreter descends through a child value and its corresponding child
 descriptor together:
@@ -215,7 +215,7 @@ my_eq_i(desc, left, right)
 ```
 
 The value becomes structurally smaller even when `child_desc` resolves through
-`$ref` to an earlier type node. Ordinary Forma recursion is sufficient. The
+`$ref` to an earlier type node. Ordinary Telora recursion is sufficient. The
 first version needs no framework-owned open-recursion dispatcher, visited-pair
 set, recursive capability plan, or memoized field/variant capability factory.
 
@@ -243,7 +243,7 @@ Dyn = exists A. {
 ```
 
 This is a semantic model, not a user-constructible Struct. Only trusted
-lowering and native observer code can create a `Dyn`; ordinary Forma code
+lowering and native observer code can create a `Dyn`; ordinary Telora code
 cannot forge the relationship between its descriptor and value. The VM may
 store an ordinary erased Value internally, but bare `Any` does not appear at
 the interpreter boundary.
@@ -255,7 +255,7 @@ separate type-system decision.
 
 The minimal read-only API is:
 
-```forma
+```telora
 dyn.desc: Fn(Dyn) -> TypeDesc;
 dyn.kind: Fn(Dyn) -> ValueKind;
 dyn.field: Fn(Dyn, String) -> Result(Dyn, BlameError);
@@ -275,7 +275,7 @@ generations, registers, raw handles, shapes, or metadata up-links.
 
 At a statically known leaf, user code narrows `Dyn` through checked helpers:
 
-```forma
+```telora
 dyn.check_int: Fn(Dyn) -> Option(Int);
 dyn.check_string: Fn(Dyn) -> Option(String);
 dyn.check_bool: Fn(Dyn) -> Option(Bool);
@@ -290,7 +290,7 @@ or an unrecoverable VM type error.
 
 A later generic projection is possible:
 
-```forma
+```telora
 dyn.check: for(A) Fn(TypeOf(A), Dyn) -> Option(A);
 dyn.expect: for(A) Fn(TypeOf(A), Dyn) -> Result(A, BlameError);
 ```
@@ -299,7 +299,7 @@ It is not required by the first equality slice. It needs canonical descriptor
 comparison and a trusted recovery of `A`, so concrete primitive projections
 should establish the boundary first.
 
-An unchecked `static_cast` is not a normal Forma capability. The compiler may
+An unchecked `static_cast` is not a normal Telora capability. The compiler may
 use an equivalent trusted operation while packing a statically checked `A`,
 and native projections may use it only after validating the descriptor.
 
@@ -332,7 +332,7 @@ policy rejected by attributes
 ```
 
 They return `BlameError`. Paths can initially be constructed by the ordinary
-Forma interpreter as it recurses; they do not require a hidden dispatcher.
+Telora interpreter as it recurses; they do not require a hidden dispatcher.
 
 Execution failures remain VM/query failures:
 
@@ -348,9 +348,9 @@ trusted native bug
 Ordinary recursive execution already uses shared resource and cancellation
 machinery. A cancelled or stale query publishes no partial typed capability.
 
-## Native and Forma parity
+## Native and Telora parity
 
-Native and Forma implementations need semantic parity, not implementation
+Native and Telora implementations need semantic parity, not implementation
 parity. User code must be able to observe every public data node and value
 shape needed by the operation. Native code may retain:
 
@@ -380,7 +380,7 @@ can be added as a library abstraction without changing typed lifting.
 - normalized attribute wrappers and attribute access helpers;
 - arbitrary Dict key/value/pair enumeration and Dict construction;
 - generic Array traversal combinators;
-- ordinary recursive Forma definitions with explicit contracts;
+- ordinary recursive Telora definitions with explicit contracts;
 - typed higher-order adapters when the type argument is explicit;
 - shared fuel, allocation, call-depth, cancellation, and publication machinery;
 - structural native equality as a conformance reference; and
@@ -413,10 +413,10 @@ be demonstrated independently.
 
 ## Equality validation slice
 
-The first experiment should compare a Forma reference interpreter with native
+The first experiment should compare a Telora reference interpreter with native
 structural equality for the supported public data domain:
 
-| Case | Native | Forma |
+| Case | Native | Telora |
 | --- | --- | --- |
 | scalar | same result | same result |
 | Array/Dict | same result | same result |
@@ -444,7 +444,7 @@ Before a numbered RFC series:
 5. implement opaque `Dyn`, concrete checked projections, and minimal read-only
    structural observers;
 6. lower one annotated `interpreter(my_eq_i)` to an ordinary adapter;
-7. implement finite recursive equality in ordinary Forma code;
+7. implement finite recursive equality in ordinary Telora code;
 8. compare it with native equality on the supported data domain; and
 9. only then extract an umbrella RFC and independently executable child RFCs.
 
@@ -454,11 +454,11 @@ whether the lifting and observer boundaries are genuinely reusable.
 
 ## Success boundary
 
-The experiment succeeds when ordinary Forma code can:
+The experiment succeeds when ordinary Telora code can:
 
 - receive an opaque, recursively observable `TypeDesc`;
 - observe matching finite runtime values through safe `Dyn` APIs;
-- recurse as an ordinary Forma function;
+- recurse as an ordinary Telora function;
 - use checked leaf projection;
 - define equality for every supported public data shape; and
 - expose it as `Fn(A, A) -> Result(Bool, BlameError)` through one trusted,

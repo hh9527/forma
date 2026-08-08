@@ -1,0 +1,15 @@
+import "./ontology.telora" { compile };
+
+let compilation = compile({
+    measures: ['NetRevenue],
+    dimensions: ['OrderMonth, 'CustomerRegion],
+    filters: [],
+    order_by: ['OrderMonth, 'CustomerRegion],
+    limit: 'Some(10),
+    render: 'Table,
+});
+
+export let output = match compilation {
+    'Some(plan) => plan.statement,
+    'None => panic!("expected the valid report to lower to SQL"),
+};

@@ -1,15 +1,19 @@
-# Forma Language Vision
+# Telora Language Vision
 
 ## The Question
 
-Forma is an experimental language built around one question:
+Telora is an experimental language built around one question:
 
 > In a closed and pure world, what is the smallest language that can support
 > programmable data transformation and validation, deterministic execution
 > with a finite termination boundary, and first-class diagnostics and
 > feedback?
 
-The question is not primarily about type theory. Forma uses ideas from
+Its name expands recursively as **TELORA Enables Lowering Objectives to
+Reliable Artifacts**. Telora occupies the verified boundary between an agent's
+objective and the artifacts a host may authorize in the real world.
+
+The question is not primarily about type theory. Telora uses ideas from
 programming-language research where they help answer it, but those ideas are
 tools rather than the objective. The objective is a small, coherent data
 programming environment that remains understandable when transformation logic
@@ -23,14 +27,14 @@ fuel and a host API allowlist limits damage, but does not explain where a bad
 value or rule came from, preserve useful facts through incomplete programs, or
 give tools an authoritative semantic model.
 
-Forma explores the space between those choices.
+Telora explores the space between those choices.
 
 ## The Four Requirements
 
 ### Programmable transformation and validation
 
 Validation, normalization, migration, decoding, encoding, schema generation,
-and plan construction are all transformations of ordinary data. Forma should
+and plan construction are all transformations of ordinary data. Telora should
 provide enough general computation to express them with functions, immutable
 values, recursion, pattern matching, and modules.
 
@@ -51,11 +55,11 @@ data; libraries supply domain meaning.
 
 ### A closed and pure world
 
-A Forma execution operates on an enumerable world:
+A Telora execution operates on an enumerable world:
 
 - module paths are statically known;
 - dependencies are fixed before execution;
-- Forma, JSON, YAML, and TOML modules participate in the same immutable graph;
+- Telora, JSON, YAML, and TOML modules participate in the same immutable graph;
 - runtime `eval` and arbitrary dynamic imports are outside the model; and
 - genuine runtime inputs enter only through explicit host-provided values.
 
@@ -70,7 +74,7 @@ execution are bounded and identifiable.
 
 ### Deterministic, finitely bounded execution
 
-Forma permits ordinary recursion. It does not require every program to be
+Telora permits ordinary recursion. It does not require every program to be
 strongly normalizing. Instead, every hosted execution has explicit limits for
 evaluation fuel, stack use, call depth, and allocation. Within those limits an
 execution deterministically produces a value or a structured failure.
@@ -101,7 +105,7 @@ of the relationship:
 
 ```text
 config.yaml:12:16: expected Int
-  model.forma:8:15: requirement declared here
+  model.telora:8:15: requirement declared here
 ```
 
 JSON, YAML, and TOML files in the module graph are not opaque external blobs.
@@ -125,11 +129,11 @@ Types are a means to make transformation and feedback programmable without
 splitting the system into separate schema, validation, codec, documentation,
 and editor models.
 
-A type declaration produces canonical immutable Forma data. That metadata can
+A type declaration produces canonical immutable Telora data. That metadata can
 be passed to functions, transformed, printed, interpreted, and retained at
 runtime when used as a value:
 
-```forma
+```telora
 def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) {
     Option(Item)
 };
@@ -137,7 +141,7 @@ def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) {
 type MaybeInt = Maybe(Int);
 ```
 
-`Maybe` is an ordinary pure function evaluated by the toolchain-hosted Forma
+`Maybe` is an ordinary pure function evaluated by the toolchain-hosted Telora
 VM. The type checker interprets its result; it does not reimplement `Maybe` in
 a hidden type-level evaluator.
 
@@ -162,7 +166,7 @@ analysis. Greater type-system generality is not an objective by itself.
 
 ## One Evaluator Across Two Stages
 
-Forma has a tool stage and a program stage, but both use the same value model,
+Telora has a tool stage and a program stage, but both use the same value model,
 function behavior, bytecode VM, quotas, and evaluation semantics.
 
 - The tool stage evaluates closed metadata computations for checking, editor
@@ -201,7 +205,7 @@ metadata and ordinary libraries provide richer interpretations.
 
 ## The Host Boundary
 
-Forma has no authority over the external world. It does not need a general
+Telora has no authority over the external world. It does not need a general
 effect system or a universal action ABI. A host opens a small, explicit window
 by supplying ordinary input values and selecting a named export whose value
 has external meaning:
@@ -209,7 +213,7 @@ has external meaning:
 ```text
 external world
     -> host freezes explicit input
-    -> closed Forma computation
+    -> closed Telora computation
     -> explicit named module exports
     -> host selects a protocol entry
     -> host validates, authorizes, and interprets it
@@ -218,29 +222,29 @@ external world
 
 The VM does not know that a value describes a process, file, deployment, or
 approval. Different hosts define different input and output protocols using
-ordinary Forma types. Possessing a value of a plan type does not itself grant
+ordinary Telora types. Possessing a value of a plan type does not itself grant
 the capability to perform that plan.
 
 Modules have no default result. This includes `@main`: its only special status
 is that it is selected by the host and cannot be imported. Host modes choose
 their own named protocol entry, such as `output`, `exec`, or `build`.
 
-The standard `forma run`, `forma exec`, and `forma build` commands are concrete
+The standard `telora run`, `telora exec`, and `telora build` commands are concrete
 host adapters, not the beginning of a language-level effect system. Domain
 semantics such as execution ordering, retries, transactions, permissions, and
 real-world observation remain permanently owned by the host.
 
 ## Agentic Systems
 
-Agentic software increases the value of Forma's constraints. Generated code is
+Agentic software increases the value of Telora's constraints. Generated code is
 cheap; trustworthy feedback and controlled external meaning are not.
 
-Forma can serve as a source-aware, typed IR for plans. An agent may generate or
-modify a pure Forma program, while the host receives a complete value that can
+Telora can serve as a source-aware, typed IR for plans. An agent may generate or
+modify a pure Telora program, while the host receives a complete value that can
 be checked, compared, reviewed, signed, or rejected before any effect occurs.
 The plan vocabulary remains host-defined ordinary data.
 
-Forma can also define the pure transition of a host-driven loop:
+Telora can also define the pure transition of a host-driven loop:
 
 ```text
 Context x State x Observation
@@ -248,9 +252,9 @@ Context x State x Observation
 ```
 
 The host owns time, persistence, observation, effects, retries, approvals, and
-the total loop budget. Forma computes one deterministic, finitely bounded step.
+the total loop budget. Telora computes one deterministic, finitely bounded step.
 Diagnostics and provenance make the loop repairable and auditable: failures can
-point to generated Forma, a JSON/YAML/TOML source value, and the rule that
+point to generated Telora, a JSON/YAML/TOML source value, and the rule that
 rejected it rather than collapsing into an unstructured tool error.
 
 These are opportunities enabled by the core model, not Agent-specific language
@@ -262,7 +266,7 @@ Every proposed feature should answer three questions:
 
 1. Is it necessary to express programmable data transformation or validation,
    or to provide authoritative diagnostics and feedback for that programming?
-2. Can it instead be ordinary Forma code, metadata interpreted by a library,
+2. Can it instead be ordinary Telora code, metadata interpreted by a library,
    or behavior owned by a host?
 3. Does it preserve the closed world, purity, deterministic observation, and
    finite execution boundary?
@@ -276,9 +280,9 @@ in a more general type system.
 
 The experiment succeeds when:
 
-1. non-trivial transformation and validation policies can be ordinary Forma
+1. non-trivial transformation and validation policies can be ordinary Telora
    functions rather than language-specific rules;
-2. static data and Forma source share one closed, source-aware module graph;
+2. static data and Telora source share one closed, source-aware module graph;
 3. type metadata can be computed and interpreted without a hidden second
    evaluator;
 4. strict checking, runtime validation, CLI queries, and LSP feedback agree on
@@ -289,10 +293,10 @@ The experiment succeeds when:
    certainty;
 7. hosts can define useful input and output windows without adding domain
    semantics or effects to the language; and
-8. new application domains primarily add Forma libraries and host adapters,
+8. new application domains primarily add Telora libraries and host adapters,
    not VM instructions or language constructs.
 
 The project needs redesign if rich policies repeatedly require compiler
 special cases, if metadata functions must be duplicated in a hidden type
 language, if diagnostics lose the origin of transformed data or rules, or if a
-new host domain requires Forma itself to acquire external authority.
+new host domain requires Telora itself to acquire external authority.

@@ -2,7 +2,7 @@
 
 这个目录是“意图编译器”讨论的第一个可执行切片。它描述一个包含十张表的
 B2B 商业领域，接受接近业务语义的报表意图，校验组合是否合法，并用普通
-Forma 代码将合法意图逐步 lowering 为 SQLite SQL。
+Telora 代码将合法意图逐步 lowering 为 SQLite SQL。
 
 建议先阅读 [DOMAIN.md](DOMAIN.md)，其中定义了物理模型、语义身份、关系、
 度量 grain 和第一批合法组合。
@@ -32,26 +32,26 @@ Forma 代码将合法意图逐步 lowering 为 SQLite SQL。
 
 - `schema.sql`：十张 SQLite 表及确定性测试数据；
 - `DOMAIN.md`：文字形式的本体和业务规则；
-- `sql.forma`：最小 SQL AST 与 SQLite renderer；
-- `relations.forma`：关系 catalog、可达性分析和 join 路径规划；
-- `execution.forma`：Host-facing typed plan 与显式 wire encoding；
-- `ontology.forma`：领域校验和 lowering；
-- `valid.forma`：按月份、客户区域统计净收入；
-- `valid-units.forma`：按月份、品类、SKU 统计销量；
-- `invalid.forma`：一次暴露四个独立领域错误；
-- `invalid-measures.forma`：拒绝多 measure 意图，不用任意 fallback 猜测依赖它的
+- `sql.telora`：最小 SQL AST 与 SQLite renderer；
+- `relations.telora`：关系 catalog、可达性分析和 join 路径规划；
+- `execution.telora`：Host-facing typed plan 与显式 wire encoding；
+- `ontology.telora`：领域校验和 lowering；
+- `valid.telora`：按月份、客户区域统计净收入；
+- `valid-units.telora`：按月份、品类、SKU 统计销量；
+- `invalid.telora`：一次暴露四个独立领域错误；
+- `invalid-measures.telora`：拒绝多 measure 意图，不用任意 fallback 猜测依赖它的
   dimension 诊断；
-- `valid-sql.forma`：导出生成的 SQL，供 SQLite 执行；
-- `host-plan.forma`：模拟 Host shape 核对并输出 JSON plan；
+- `valid-sql.telora`：导出生成的 SQL，供 SQLite 执行；
+- `host-plan.telora`：模拟 Host shape 核对并输出 JSON plan；
 - `net-revenue.sql`：手写参考查询。
 
 ## 运行
 
 ```sh
-cargo run -p forma -- check examples/intelligent-reporting/valid.forma
-cargo run -p forma -- run examples/intelligent-reporting/valid.forma
-cargo run -p forma -- run examples/intelligent-reporting/valid-units.forma
-cargo run -p forma -- run examples/intelligent-reporting/invalid.forma
+cargo run -p telora -- check examples/intelligent-reporting/valid.telora
+cargo run -p telora -- run examples/intelligent-reporting/valid.telora
+cargo run -p telora -- run examples/intelligent-reporting/valid-units.telora
+cargo run -p telora -- run examples/intelligent-reporting/invalid.telora
 ```
 
 生成的 SQL 已直接送入 SQLite。净收入结果为：
@@ -71,7 +71,7 @@ cargo run -p forma -- run examples/intelligent-reporting/invalid.forma
 
 ## 当前证明了什么
 
-- Forma 库可以承载一个小型、可执行的领域本体和业务规则；
+- Telora 库可以承载一个小型、可执行的领域本体和业务规则；
 - 面向 Code Agent 的意图只包含 measure 和 dimension，不暴露表、join、CTE、
   支付/退款语义或 SQL 语法；
 - measure 和 dimension 是静态检查的 enum，而不是开放字符串；
@@ -89,7 +89,7 @@ cargo run -p forma -- run examples/intelligent-reporting/invalid.forma
   不可达，诊断仍指向原始 dimension；
 - filter 本身也声明所需 entity，因此会参与同一关系规划；排序只能引用已经
   选择的 dimension，limit 与 render mode 保留在 typed plan 中；
-- semantic、relational、SQL 三个中间计划都是普通 Forma 值和显式函数边界；
+- semantic、relational、SQL 三个中间计划都是普通 Telora 值和显式函数边界；
 - 成功编译只发布无权限的 `Option(ExecutionPlan)`；Host 可以静态核对 shape，
   再接收显式版本化 JSON。失败 lowering 得到 `None`，任意 Error 事件同时阻止
   evaluation 被发布为成功；
@@ -97,7 +97,7 @@ cargo run -p forma -- run examples/intelligent-reporting/invalid.forma
 
 ## RFC 0181 的边界发现
 
-最自然的 SQL AST 是递归的，但当前 Forma 的递归类型元数据不能跨 legacy
+最自然的 SQL AST 是递归的，但当前 Telora 的递归类型元数据不能跨 legacy
 module value boundary 发布，会报告：
 
 ```text

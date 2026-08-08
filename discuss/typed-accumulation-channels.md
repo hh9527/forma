@@ -5,12 +5,12 @@
 
 ## Question
 
-Should a Forma call be able to produce a normal result while also emitting
+Should a Telora call be able to produce a normal result while also emitting
 typed auxiliary values that the caller may explicitly capture?
 
 The motivating shape is:
 
-```forma
+```telora
 let result = check(input);
 
 let (result, diagnoses) = check(input; Diagnose);
@@ -38,14 +38,14 @@ that should not control the computation producing it:
 Returning all of this explicitly makes every intermediate function unpack,
 merge, and repack arrays it does not otherwise use:
 
-```forma
+```telora
 {
     value: checked,
     diagnoses: diagnoses,
 }
 ```
 
-A mutable global collection avoids that plumbing but violates Forma's closed,
+A mutable global collection avoids that plumbing but violates Telora's closed,
 deterministic computation model. Typed accumulation channels attempt to retain
 the useful part of an auxiliary output effect without introducing readable
 ambient state.
@@ -78,7 +78,7 @@ selected by the caller. Channel selectors are not arguments visible to `F`.
 
 An illustrative declaration and emission syntax is:
 
-```forma
+```telora
 @accumulator type Diagnose = {
     message: String,
     path: String,
@@ -108,17 +108,17 @@ The current candidate has the following behavior.
 
 An ordinary call does not discard accumulated values:
 
-```forma
+```telora
 let value = check(input);
 ```
 
 Values emitted by `check` and its transitive calls continue into the nearest
-enclosing capture boundary, or into the root execution result if no Forma call
+enclosing capture boundary, or into the root execution result if no Telora call
 captures them.
 
 ### Capturing calls intercept selected channels
 
-```forma
+```telora
 let (value, diagnoses) = check(input; Diagnose);
 ```
 
@@ -131,7 +131,7 @@ propagate outward.
 If an inner call captures a channel, those sealed values do not also propagate
 to an outer capture of the same channel:
 
-```forma
+```telora
 def outer = fn(input) {
     let (value, inner_diagnoses) = inner(input; Diagnose);
     accumulate Diagnose({ message: "outer", path: "" });
@@ -149,7 +149,7 @@ inner call.
 
 In:
 
-```forma
+```telora
 foo(make_input(); Diagnose)
 ```
 
@@ -210,7 +210,7 @@ query's primary memo and collected transitively through a dependency graph.
 That is useful prior art, especially for diagnostics, replacement on
 re-execution, and reuse of unchanged work.
 
-The proposed Forma model deliberately gives the capture decision to each call
+The proposed Telora model deliberately gives the capture decision to each call
 site. It does not require a function to be declared as a query, does not define
 collection by a memoized query key, and does not make global memoization part
 of ordinary function semantics. Its initial collection boundary is the dynamic
@@ -229,13 +229,13 @@ shapes while remaining independently capturable.
 
 Two candidate models are:
 
-```forma
+```telora
 @accumulator type Diagnose = { message: String };
 ```
 
 or separate payload and channel declarations:
 
-```forma
+```telora
 @struct type Diagnostic = { message: String };
 accumulator Diagnose: Diagnostic;
 ```
@@ -264,7 +264,7 @@ or the permanent contract.
 
 The positional candidate is concise:
 
-```forma
+```telora
 let (value, diagnoses, traces) = work(input; Diagnose, Trace);
 ```
 
@@ -277,7 +277,7 @@ require generated structural types.
 
 A callback invoked within the selected call is inside its dynamic extent:
 
-```forma
+```telora
 map(values, fn(value) {
     accumulate Diagnose(...);
     transform(value)
@@ -290,7 +290,7 @@ the callback writes to the nearest active boundary for that channel.
 
 ## Determinism and resource behavior
 
-Within sequential Forma evaluation, captured values should retain emission
+Within sequential Telora evaluation, captured values should retain emission
 order. Duplicate values are meaningful and are not removed automatically.
 
 Future parallel evaluation must not order values by thread completion time.
@@ -313,7 +313,7 @@ forces unrelated intermediate layers to transport auxiliary output.
 
 ### Pass an explicit collector
 
-```forma
+```telora
 check(input, collector)
 ```
 
@@ -323,8 +323,8 @@ collector.
 
 ### Root-only accumulation
 
-Only the embedding host could read accumulated values after the entire Forma
-execution. This is simpler, but Forma libraries could not establish abstraction
+Only the embedding host could read accumulated values after the entire Telora
+execution. This is simpler, but Telora libraries could not establish abstraction
 boundaries or transform diagnostics produced by a lower-level call.
 
 ### Query-key accumulation

@@ -1,13 +1,13 @@
-# 如何介绍 Forma
+# 如何介绍 Telora
 
 - Stage: Discussion
-- Scope: Forma introduction narrative, evidence, and application examples
+- Scope: Telora introduction narrative, evidence, and application examples
 - Primary example: `discuss/gcc-wrapper.md`
 
 ## 目的
 
-这份讨论稿记录 Forma 介绍文档的写作路线。目标不是把 README 扩写成特性
-清单，而是让第一次接触 Forma 的读者理解：它解决什么问题、为什么没有直接
+这份讨论稿记录 Telora 介绍文档的写作路线。目标不是把 README 扩写成特性
+清单，而是让第一次接触 Telora 的读者理解：它解决什么问题、为什么没有直接
 选择已有配置格式或通用语言，以及它如何把封闭的数据计算投射到真实应用。
 
 介绍应当从问题域出发，用一个足够具体的应用贯穿设计理念。语言特性只有在
@@ -69,7 +69,7 @@ prior art 应当客观描述理念差异，不以语法细节制造优劣。
 
 因此 JSON + jq 可以很好地回答“怎样得到另一个 JSON”，但当目标上升为“怎样
 从锁定依赖和 Host 输入得到一个类型化、可诊断、可授权的应用计划”时，系统
-边界会重新分散。Forma 希望保留 jq 式数据转换的直接性，同时把类型、模块、
+边界会重新分散。Telora 希望保留 jq 式数据转换的直接性，同时把类型、模块、
 provenance/blame、有界求值和结果协议放进同一个程序模型。
 
 #### GPL 通用语言类
@@ -100,16 +100,16 @@ Coq、Agda、Idris 等证明导向语言位于另一端。依赖类型、全函�
 Agda 与 Idris 的执行和可信边界并不完全相同，介绍只需把它们作为证明导向
 路线的代表，不应声称任意程序性质都能自动证明。
 
-这些 GPL 路线各自覆盖了 Forma 所需能力的超集或更强理论基础，但也把问题带
-到更大的运行时、效果系统或证明工程中。Forma 不追求通用计算或通用定理证明；
+这些 GPL 路线各自覆盖了 Telora 所需能力的超集或更强理论基础，但也把问题带
+到更大的运行时、效果系统或证明工程中。Telora 不追求通用计算或通用定理证明；
 它选择一个更窄的封闭数据计算世界，以较低使用成本提供足够的类型、诊断和
 Host 边界保证。
 
 #### DSL 领域语言类
 
 CUE、KCL 和 Nickel 直接面对可编程配置、约束、合并和验证问题，比由数据格式
-和外围脚本组成的方案更接近 Forma 的生态位。它们已经证明配置计算值得拥有
-独立语言模型，也各自选择了不同的约束、类型、契约和求值语义。Forma 与它们
+和外围脚本组成的方案更接近 Telora 的生态位。它们已经证明配置计算值得拥有
+独立语言模型，也各自选择了不同的约束、类型、契约和求值语义。Telora 与它们
 的差异不应表述为“支持更多语法”，而应落在设计重心：普通不可变函数、显式
 模块、类型对象与用户态 interpreter、结构化 provenance/blame，以及把最终值
 交给不同 Host adapter 的统一边界。
@@ -119,7 +119,7 @@ CUE、KCL 和 Nickel 直接面对可编程配置、约束、合并和验证问�
 用这些核心语义换取了各自领域内非常直接的表达。代价是每增加一类能力，用户
 和工具都可能需要理解另一套专用组合、错误传播和来源规则。
 
-Forma 的核心判断是：类型不应只在检查器内部存在，它同时是程序可以传递和
+Telora 的核心判断是：类型不应只在检查器内部存在，它同时是程序可以传递和
 观察的元数据值。一个 `TypeOf(A)` 把运行时类型描述与静态的 `A` 联系起来，
 因此同一份类型定义可以贯穿：
 
@@ -137,43 +137,43 @@ parse、codec、display 或用户态 interpreter 不需要各自发明一套隐�
 元数据，最终产生普通的类型化函数和值。用户仍然沿着模块 import、函数调用和
 数据流理解程序，而不是学习多层编译期魔法。
 
-这也是 Forma 对 DSL 竞争力的主张：更统一、容易解释的模型不意味着牺牲抽象
+这也是 Telora 对 DSL 竞争力的主张：更统一、容易解释的模型不意味着牺牲抽象
 能力。类型导向的能力可以作为普通函数传递，策略可以在模块间复用，同一个
 领域类型可以连接输入、约束、转换和输出；provenance/blame 又能解释数据来自
-哪里、哪条规则拒绝了它。Forma 希望在抽象能力、可复用度和可解释性上不弱于
+哪里、哪条规则拒绝了它。Telora 希望在抽象能力、可复用度和可解释性上不弱于
 专用配置 DSL，同时保持较少的特殊概念。GCC wrapper 将作为这项主张的实际
 验收，而不是只用小型语法示例证明它。
 
-Forma 在这里继承了部分 Scheme 基因，但选择了更窄的反射边界：不是“代码也
+Telora 在这里继承了部分 Scheme 基因，但选择了更窄的反射边界：不是“代码也
 是数据”，而是“类型也是数据”。程序可以检查类型描述，并用普通递归函数解释
-它；程序不能 quote、改写再执行任意 Forma 代码。需要把擦除的元数据解释器
+它；程序不能 quote、改写再执行任意 Telora 代码。需要把擦除的元数据解释器
 恢复为静态类型化能力时，使用受控的 contextual intrinsic：
 
-```forma
+```telora
 def my_show: for(A) Fn(TypeOf(A)) -> Fn(A) -> Result(String, BlameError)
     = interpreter!(show_dyn);
 ```
 
 `interpreter!` 看起来像宏，但不开放宏系统、代码生成或运行时 `eval`。它只在
 一个可检查的高阶签名与一个显式的 Dyn/TypeDesc 解释器之间建立系统验证的
-桥梁。解释算法仍由普通 Forma 代码定义，调用者得到的仍是普通类型化函数。
+桥梁。解释算法仍由普通 Telora 代码定义，调用者得到的仍是普通类型化函数。
 
 这个限制大幅缩小了静态推理问题：编译器不需要证明任意生成代码的绑定与
 类型，只需验证有限的 adapter 契约；模块依赖和可执行函数集合在求值前仍然
-确定。Forma 因而尽量保留类型检查、可分析性、有界求值和来源解释，同时保有
+确定。Telora 因而尽量保留类型检查、可分析性、有界求值和来源解释，同时保有
 编写通用数据 interpreter 的能力。
 
 这里的“通用”主要与配置 DSL 的专用机制对照：同一个“类型也是数据 + 普通
 函数 + `interpreter!`”模型，应当能够实现可复用的 parse、codec、validate、
 display、Eq/Hash 等类型导向能力，而不必为每一项能力增加新的语言内建派生或
-约束系统。它不表示 Forma 拥有 Scheme 式任意语言扩展或 Coq 式通用定理证明。
-Forma 是否真正不弱于其他 DSL，需要由跨模块复用、嵌套类型、来源诊断和 GCC
+约束系统。它不表示 Telora 拥有 Scheme 式任意语言扩展或 Coq 式通用定理证明。
+Telora 是否真正不弱于其他 DSL，需要由跨模块复用、嵌套类型、来源诊断和 GCC
 wrapper 这类应用级案例持续验证。
 
-介绍不需要声称 Forma 全面替代这些项目。更准确的说法是：Forma 探索从数据
+介绍不需要声称 Telora 全面替代这些项目。更准确的说法是：Telora 探索从数据
 表达、验证和转换出发，生成可审查应用计划的另一种组合方式。
 
-### 3. Forma 的回应
+### 3. Telora 的回应
 
 核心理念可以概括为：
 
@@ -186,7 +186,7 @@ wrapper 这类应用级案例持续验证。
 - Host 只通过轻量连接点提供输入，并消费完整、类型化的结果计划。
 
 这里的“纯”不是拒绝真实应用，而是把效果推迟到计划已经计算、检查和展示
-之后。Forma 程序描述确定内容，Host 决定是否下载、写文件或启动进程。
+之后。Telora 程序描述确定内容，Host 决定是否下载、写文件或启动进程。
 
 ## 贯穿案例：GCC wrapper
 
@@ -201,8 +201,8 @@ wrapper 这类应用级案例持续验证。
 
 最终入口应当短到能够直接说明架构：
 
-```forma
-#!/usr/bin/env -S forma exec --dry-run --
+```telora
+#!/usr/bin/env -S telora exec --dry-run --
 
 option "crate.dependency" {
     name: "gcc-toolchain-define",
@@ -214,25 +214,25 @@ option "crate.dependency" {
 option "crate.dependency" {
     name: "gcc-wrapper",
     source: 'GithubRepo({
-        repo: "hh9527/gcc-wrapper.forma",
+        repo: "hh9527/gcc-wrapper.telora",
         rev: "0123456789abcdef",
     }),
 };
 
-import "std/rt-types/exec.forma" { ExecFn };
+import "std/rt-types/exec.telora" { ExecFn };
 import "gcc-toolchain-define/source.json" as source;
-import "gcc-wrapper/toolchain.forma" { wrap_gcc };
+import "gcc-wrapper/toolchain.telora" { wrap_gcc };
 
 export def exec: ExecFn = wrap_gcc(source);
 ```
 
 这段代码同时呈现三类输入：
 
-- `std/rt-types/exec.forma` 是公开的 Host 边界协议；
+- `std/rt-types/exec.telora` 是公开的 Host 边界协议；
 - `source.json` 是锁定依赖提供的原始外部数据；
-- `wrap_gcc` 是普通 Forma 模块提供的纯验证与转换函数。
+- `wrap_gcc` 是普通 Telora 模块提供的纯验证与转换函数。
 
-`ExecFn` 本身不授予效果权限。用户选择 `forma exec`，Host 才会注入请求、读取
+`ExecFn` 本身不授予效果权限。用户选择 `telora exec`，Host 才会注入请求、读取
 `exec` 导出、校验 `ExecEnv` 并执行或展示计划。协议是普通数据类型，效果由
 运行模式决定。
 
@@ -249,7 +249,7 @@ source.json
 ```
 
 错误的工具链数据应指向 `source.json`；错误的转换规则应指向 wrapper 模块；
-不符合执行协议的结果由 Host adapter 拒绝。这个例子把 Forma 的数据输入、
+不符合执行协议的结果由 Host adapter 拒绝。这个例子把 Telora 的数据输入、
 类型化、转换、诊断和应用投射放进了同一条路径。
 
 ## 从案例投射到其他领域
@@ -261,13 +261,13 @@ GCC wrapper 不是一个孤立 demo。替换输入和最终协议以后，同一
 - agentic plan IR：把模型产生的意图转换成 Host 可授权的确定计划；
 - 数据转换工具：读取 JSON/TOML/YAML，验证后输出结构化或格式化文本。
 
-介绍应强调这些场景共享的边界，而不是暗示 Forma 已经内置每个领域的框架。
+介绍应强调这些场景共享的边界，而不是暗示 Telora 已经内置每个领域的框架。
 
 ## 当前证据与诚实边界
 
 思想实验既是写作素材，也是实现探针。目前已经能够表达多个安装动作、平台
 选择、hash 安装位置、字符串插值、数组组合和 typed `ExecEnv`，单文件
-`forma exec --dry-run` 也已有可执行证据。
+`telora exec --dry-run` 也已有可执行证据。
 
 但完整案例尚未成立：RFC 0158 已验证跨模块高阶闭包和缩减的 `ExecFn` 形状，
 顶层静态 `option`、GitHub dependency provider、稳定的 runtime protocol 模块、
@@ -288,7 +288,7 @@ Dict 安全读取和成熟 argv rewrite API 仍需推进。
 2. 用 GCC wrapper 贯穿全文，而不是堆叠互不相关的小例子。
 3. 比较 prior art 时描述边界和理念差，不争论无关紧要的表面语法。
 4. 代码优先展示普通数据、普通函数和显式模块，不制造专用 DSL 的错觉。
-5. 把 closed world 与 Host connection point 同时讲清，避免把 Forma 描述成只能
+5. 把 closed world 与 Host connection point 同时讲清，避免把 Telora 描述成只能
    计算静态常量的语言。
 6. README.md 与 README.zh.md 保持相同事实、结构和承诺；英文版基于稳定后的
    中文叙事更新。

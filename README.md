@@ -1,24 +1,30 @@
-# Forma
+# Telora
 
-> Forma was formerly known as XL. Its design history is recorded in
-> [rfc/](rfc/).
+> **TELORA Enables Lowering Objectives to Reliable Artifacts.**
+>
+> Telora was formerly known as Forma and was originally called XL. Its design
+> history is recorded in [rfc/](rfc/).
 
-**Forma is an experimental language for programmable data transformation and
+**Telora is an experimental language for programmable data transformation and
 validation in a closed, pure, deterministic, and source-aware world.**
+
+It is designed as a verified intent language between agents and the real
+world: programs express objectives, libraries validate and lower them, and
+hosts decide whether the resulting artifacts may affect external systems.
 
 It asks:
 
 > What is the smallest language that can provide general data computation,
 > finite execution boundaries, and first-class diagnostics and feedback?
 
-Forma sits between static configuration and general-purpose scripting. Static
+Telora sits between static configuration and general-purpose scripting. Static
 formats are inspectable but limited; scripting languages are programmable but
 often open, effectful, difficult to reproduce, and weak at explaining the
 origin of transformed data. A sandbox with fuel and an API allowlist can bound
 a script, but it does not by itself provide an authoritative semantic model,
 cross-data provenance, recoverable analysis, or precise editor feedback.
 
-Forma treats those requirements as one design problem.
+Telora treats those requirements as one design problem.
 
 ## The Core Model
 
@@ -28,7 +34,7 @@ Configuration, validation, normalization, migration, codecs, schema
 generation, and plan construction are not language features. They are ordinary
 pure functions over immutable values.
 
-Forma supplies functions, closures, recursion, pattern matching, modules, and a
+Telora supplies functions, closures, recursion, pattern matching, modules, and a
 small runtime data model. Domain policies such as merge, defaults, precedence,
 and encoding live in libraries where they can be inspected, replaced, and
 composed.
@@ -36,10 +42,10 @@ composed.
 ### A closed and bounded world
 
 Module paths are statically known, dependencies are fixed, runtime `eval` is
-absent, and genuine runtime input enters through explicit host values. Forma,
+absent, and genuine runtime input enters through explicit host values. Telora,
 JSON, YAML, and TOML files participate in the same immutable module graph.
 
-Forma permits recursion, but every execution has independent fuel, stack, call
+Telora permits recursion, but every execution has independent fuel, stack, call
 depth, and allocation quotas. An execution deterministically produces a value
 or a structured resource failure within its configured boundary. Failed work
 is discarded atomically rather than partially published into the persistent
@@ -53,14 +59,14 @@ the rule that rejected it:
 
 ```text
 user.yaml:4:8: expected Int
-  User.forma:3:10: requirement declared here
+  User.telora:3:10: requirement declared here
 ```
 
 JSON, YAML, and TOML files in the workspace are first-class source modules, not
 opaque external blobs. They retain syntax diagnostics and field-level
 provenance and participate in dependency and workspace analysis.
 
-Incomplete Forma source still provides useful navigation, types, and
+Incomplete Telora source still provides useful navigation, types, and
 diagnostics. Semantic facts distinguish known values from explicit `Any`,
 unknown information, conflicts, dependency blocking, and tool-stage
 incomputability. Completion does not invent structure to appear helpful.
@@ -70,9 +76,9 @@ after execution works.
 
 ### Types are programmable metadata
 
-A type declaration evaluates to canonical ordinary Forma data:
+A type declaration evaluates to canonical ordinary Telora data:
 
-```forma
+```telora
 def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) {
     Option(Item)
 };
@@ -91,29 +97,29 @@ metadata witness and the values it describes; the narrow `Dyn` and
 `interpreter!(...)` boundary supports heterogeneous interpretation without an
 unchecked cast.
 
-Types are central to Forma, but they serve the larger goal: programmable data
+Types are central to Telora, but they serve the larger goal: programmable data
 rules with authoritative, source-aware feedback.
 
 ## The Host Owns Effects
 
-Forma has no authority over the external world. A host supplies explicit
+Telora has no authority over the external world. A host supplies explicit
 ordinary inputs and decides whether an ordinary output has external meaning:
 
 ```text
 external world
     -> host input snapshot
-    -> closed Forma computation
+    -> closed Telora computation
     -> output value
     -> host validation and authorization
     -> external world
 ```
 
-There is no universal Forma action ABI. A process launcher, build system,
+There is no universal Telora action ABI. A process launcher, build system,
 Kubernetes controller, or agent runtime defines its own types and interprets
 only the values it recognizes. Permissions, IO, retries, transactions, clocks,
 and observation remain host concerns.
 
-`forma run`, `forma exec`, and `forma build` are concrete host adapters, not a
+`telora run`, `telora exec`, and `telora build` are concrete host adapters, not a
 language-level effect system. Today the exec and build adapters validate and
 print canonical plans without performing their described effects.
 
@@ -124,7 +130,7 @@ print canonical plans without performing their described effects.
 Decorators are functions, attributes are data, and codecs are metadata
 interpreters:
 
-```forma
+```telora
 import "std/json" as json;
 
 @json.rename_all('CamelCase)
@@ -144,7 +150,7 @@ Types can also declare textual parsing rules. `Regex` is a public standard
 library native type; its expression is compiled during type construction, when
 named captures are checked against the complete field set:
 
-```forma
+```telora
 import "std/regex" as re;
 import "std/string" as string;
 
@@ -162,7 +168,7 @@ without regex owning their conversions.
 The reverse direction uses a separate `Display` capability for stable,
 user-facing text:
 
-```forma
+```telora
 import "std/fmt" as fmt;
 
 @fmt.display_by("{host}:{port}")
@@ -180,7 +186,7 @@ decorated structs compose without reparsing templates at runtime. Diagnostic
 Types can explicitly make that text representation their structured-codec
 container form:
 
-```forma
+```telora
 @string.decode_by_parse
 @string.encode_by_display
 @fmt.display_by("{host}:{port}")
@@ -200,7 +206,7 @@ A module has no default result. It explicitly exports named values, and the
 host selects an entry for its mode. An executable entry is an ordinary
 function:
 
-```forma
+```telora
 export def exec: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request) {
     let plan = make_exec(settings, request);
     {
@@ -212,14 +218,14 @@ export def exec: Fn(ExecSettings, ExecRequest) -> ExecEnv = fn(settings, request
 
 The host supplies the platform, download and install prefixes, captured input
 environment, arguments, and working directory. Capture only determines what
-Forma may observe; it does not implicitly forward variables to the target
-process. Forma explicitly returns a `{ clear, update }` environment policy and
+Telora may observe; it does not implicitly forward variables to the target
+process. Telora explicitly returns a `{ clear, update }` environment policy and
 computes both the download file and installation directory for each action.
 The host derives no cache address, expands no templates, and reinterprets no
 policy.
 
-`forma run` reads the named export `output`; `forma exec` invokes `exec`; and
-`forma build` invokes `build`. A build entry can be written as
+`telora run` reads the named export `output`; `telora exec` invokes `exec`; and
+`telora build` invokes `build`. A build entry can be written as
 `export def build: Fn() -> build.OutputPlan = ...;`. The adapter
 validates normalized relative paths, rejects duplicate targets, and emits
 canonical JSON. Text generation uses ordinary strings and functions rather
@@ -227,7 +233,7 @@ than a second template language.
 
 ### Static data as source
 
-JSON, TOML, and YAML modules enter the same immutable graph as Forma code. TOML
+JSON, TOML, and YAML modules enter the same immutable graph as Telora code. TOML
 temporal categories retain distinct tagged representations. YAML follows the
 1.2 Core Schema conservatively: legacy implicit booleans and timestamps remain
 Strings, mapping keys must be Strings, and custom tags and merge keys are
@@ -238,27 +244,27 @@ library policy.
 
 An unannotated closure-valued `let` can infer a rank-1 scheme:
 
-```forma
+```telora
 let identity = fn(value) { value };
 (identity(1), identity("text")) # (Int, String)
 ```
 
 Inference is intentionally bounded. Aliases instantiate once, recursive groups
 remain monomorphic without an explicit contract, and numeric constraints are
-not erased into unconstrained parameters. Forma prefers an explicit unknown or
+not erased into unconstrained parameters. Telora prefers an explicit unknown or
 diagnostic over unstable inferred precision.
 
 ## Agentic Systems
 
-Machine-generated programs make Forma's constraints more valuable. Generation
+Machine-generated programs make Telora's constraints more valuable. Generation
 is cheap; trustworthy feedback and controlled external meaning are not.
 
-Forma can act as a typed, source-aware IR for plans. An agent generates or
-modifies a pure program; Forma returns a complete plan value that a host can
+Telora can act as a typed, source-aware IR for plans. An agent generates or
+modifies a pure program; Telora returns a complete plan value that a host can
 validate, compare, review, sign, or reject before any effect occurs. The plan's
 action vocabulary remains ordinary host-defined data.
 
-Forma can also define one pure step of a host-driven loop:
+Telora can also define one pure step of a host-driven loop:
 
 ```text
 Context x State x Observation
@@ -266,39 +272,39 @@ Context x State x Observation
 ```
 
 The host owns observation, persistence, time, effects, retries, approvals, and
-the overall loop budget. Forma computes one deterministic, finitely bounded
-transition. Its diagnostics can point back to generated Forma, a JSON/YAML/TOML
+the overall loop budget. Telora computes one deterministic, finitely bounded
+transition. Its diagnostics can point back to generated Telora, a JSON/YAML/TOML
 source value, and the rule that rejected it, creating a precise repair and
 audit loop.
 
-These uses require no Agent-specific syntax and grant Forma no additional
+These uses require no Agent-specific syntax and grant Telora no additional
 authority.
 
 ## Design Tradeoffs
 
-- **Compared with CUE:** Forma does not make unification the foundational
+- **Compared with CUE:** Telora does not make unification the foundational
   semantics of constraints and composition. Policies are explicit functions
   over data.
 - **Compared with Dhall:** both value pure, reproducible computation. Dhall
-  guarantees normalization; Forma permits recursion and supplies deterministic
+  guarantees normalization; Telora permits recursion and supplies deterministic
   fuel and resource boundaries.
-- **Compared with Starlark:** both support controlled hosted computation. Forma
+- **Compared with Starlark:** both support controlled hosted computation. Telora
   additionally makes programmable type metadata, source provenance, partial
   semantic facts, and editor feedback part of the core experiment.
 - **Compared with Nickel:** Nickel makes contracts, merging, and priorities
-  central configuration mechanisms. Forma keeps such policies in replaceable
+  central configuration mechanisms. Telora keeps such policies in replaceable
   libraries.
-- **Compared with a sandboxed scripting language:** Forma is not only bounded.
+- **Compared with a sandboxed scripting language:** Telora is not only bounded.
   It unifies static data, transformation code, rules, runtime validation, and
   tooling in one source-aware semantic model.
 
-Forma does not eliminate complexity. It tries to place domain complexity in
+Telora does not eliminate complexity. It tries to place domain complexity in
 ordinary libraries and data while keeping the trusted language semantics small
 and consistent.
 
 ## Current Boundaries
 
-Forma is experimental. It has no language-level effects, ambient IO, dynamic
+Telora is experimental. It has no language-level effects, ambient IO, dynamic
 imports, general package acquisition, traits, or type narrowing. Hosts may
 provide narrow adapters, but effects are not a deferred part of the language.
 
@@ -316,10 +322,10 @@ typed Agent plans, and host-driven Agent loops.
 ## Try It
 
 ```sh
-cargo run -p forma -- check examples/mvp/main.forma
-cargo run -p forma -- run examples/mvp/external.forma --input examples/mvp/request.json
-cargo run -p forma -- show examples/mvp/main.forma
-cargo run -p forma -- lsp
+cargo run -p telora -- check examples/mvp/main.telora
+cargo run -p telora -- run examples/mvp/external.telora --input examples/mvp/request.json
+cargo run -p telora -- show examples/mvp/main.telora
+cargo run -p telora -- lsp
 ```
 
 ## Documentation

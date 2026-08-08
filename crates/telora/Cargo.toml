@@ -1,0 +1,18 @@
+[package]
+name = "telora"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "telora"
+path = "src/main.rs"
+
+[dependencies]
+async-lsp = { version = "0.2.4", default-features = false, features = ["stdio", "tokio"] }
+telora-core = { path = "../telora-core" }
+futures = "0.3"
+serde = "1"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "sync"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+tower-service = "0.3"

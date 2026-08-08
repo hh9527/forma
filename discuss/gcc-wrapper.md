@@ -27,26 +27,26 @@ ExecSettings x ExecRequest x ToolName
     -> ExecEnv
 ```
 
-Forma 负责右侧值的确定计算，Host 负责下载、校验、解包和启动进程。
+Telora 负责右侧值的确定计算，Host 负责下载、校验、解包和启动进程。
 
 ## 目标目录
 
 研发阶段可以先使用多个入口文件，共享一个普通模块：
 
 ```text
-forma-deps.json
-src/toolchain.forma
-bin-src/gcc.forma
-bin-src/g++.forma
-bin-src/ar.forma
+telora-deps.json
+src/toolchain.telora
+bin-src/gcc.telora
+bin-src/g++.telora
+bin-src/ar.telora
 ```
 
 不需要额外设计“把整个依赖闭包物理合并为一个文件”的发布能力。顶层入口只要
 能携带静态依赖选项，就可以保持很薄；依赖仍然是具有稳定身份的普通模块。
 当前实现尚不支持下面的完整形态，但它可以作为这条路线的最终验收代码：
 
-```forma
-#!/usr/bin/env -S forma exec --dry-run --
+```telora
+#!/usr/bin/env -S telora exec --dry-run --
 
 option "crate.dependency" {
     name: "gcc-toolchain-define",
@@ -58,28 +58,28 @@ option "crate.dependency" {
 };
 option "exec.capture-envs" ["TARGET"];
 
-import "std/rt-types/exec.forma" { ExecFn };
+import "std/rt-types/exec.telora" { ExecFn };
 import "gcc-toolchain-define/source.json" as source;
-import "gcc-wrapper/toolchain.forma" { wrap_gcc };
+import "gcc-wrapper/toolchain.telora" { wrap_gcc };
 
 export def exec: ExecFn = wrap_gcc(source);
 ```
 
 这里的 `option "crate.dependency"` 是 Host/resolver 消费的静态模块选项，不是运行
-期求值产生的依赖，也不把下载能力交给 Forma 程序。它只包含立即数，锁定仓库
+期求值产生的依赖，也不把下载能力交给 Telora 程序。它只包含立即数，锁定仓库
 和 revision；resolver 获取并注册模块以后，后面的 import 仍然服从普通的确定
-解析规则。`std/rt-types/exec.forma` 不属于这张远程依赖表：它是普通的内置
-runtime protocol 类型模块。import 只取得协议；用户选择 `forma exec` 时，Host
+解析规则。`std/rt-types/exec.telora` 不属于这张远程依赖表：它是普通的内置
+runtime protocol 类型模块。import 只取得协议；用户选择 `telora exec` 时，Host
 才赋予 `ExecFn` 导出以执行意义。
 
 这段入口也把职责切得很清楚：
 
 - `gcc-toolchain-define` 提供纯数据 `source`，描述 GCC 与 sysroot 的来源；
 - `gcc-wrapper/toolchain` 提供可复用的参数改写与计划生成函数；
-- `std/rt-types/exec.forma.ExecFn` 定义 `forma exec` Host 接受的稳定入口协议；
+- `std/rt-types/exec.telora.ExecFn` 定义 `telora exec` Host 接受的稳定入口协议；
 - 顶层文件只装配依赖并导出 `exec`，没有隐式模板替换或构建 DSL。
 
-当前对应能力分别是 `crate.dependency` option、`forma-deps.json` 中的 path dependency，以及
+当前对应能力分别是 `crate.dependency` option、`telora-deps.json` 中的 path dependency，以及
 显式的 `Fn(ExecSettings, ExecRequest) -> ExecEnv`。尚待推进的是静态 `option`
 表面语法、Path dependency、runtime protocol 类型模块和 `ExecFn`
 类型名。
@@ -89,17 +89,17 @@ resolver 与发布体验的路线。
 ## 共享工具链模块
 
 下面的代码使用当前的 import/export 语法、普通类型、函数、模式匹配和
-`std/rt-types/exec.forma` 数据协议。URL 和 digest 是示例值，不代表真实发行地址。RFC 0158
+`std/rt-types/exec.telora` 数据协议。URL 和 digest 是示例值，不代表真实发行地址。RFC 0158
 已经用缩减的 `Fn(String) -> ExecFn` 形状验证跨模块闭包、模块 helper、混合
 捕获和互递归；完整示例仍应在最终端到端 fixture 中单独验收。
 
-```forma
-# src/toolchain.forma
+```telora
+# src/toolchain.telora
 
 import "std/array" as arrays;
 import "std/argv" as argv;
 import "std/dict" as dicts;
-import "std/rt-types/exec.forma" as exec_types;
+import "std/rt-types/exec.telora" as exec_types;
 import "std/hash" as hash;
 
 type ExecSettings = exec_types.ExecSettings;
@@ -234,7 +234,7 @@ export def command:
 
 - `compiler_package` 只依赖 Host platform；`sysroot_package` 只依赖 TARGET。两种选择逻辑彼此独立。
 - 安装位置由 package 的稳定身份计算，而不是临时目录或下载时序决定。
-- source map 在 Forma 中根据显式 `cwd` 计算，Host 不再补做字符串替换。
+- source map 在 Telora 中根据显式 `cwd` 计算，Host 不再补做字符串替换。
 - `ar` 复用 GCC 包，但不下载 sysroot，也不注入编译参数。
 - `command(tool)` 返回符合 Host 协议的普通函数；共享逻辑不需要 VM 或 CLI 知道“工具链”这个领域概念。
 
@@ -242,34 +242,34 @@ export def command:
 
 使用当前 workspace 布局时，三个命令入口只负责选择共享模块导出的工具函数：
 
-```forma
-# bin-src/gcc.forma
-#!/usr/bin/env -S forma exec --dry-run
+```telora
+# bin-src/gcc.telora
+#!/usr/bin/env -S telora exec --dry-run
 
-import "@src/toolchain.forma" as toolchain;
+import "@src/toolchain.telora" as toolchain;
 
 export let exec = toolchain.command("gcc");
 ```
 
-```forma
-# bin-src/g++.forma
-#!/usr/bin/env -S forma exec --dry-run
+```telora
+# bin-src/g++.telora
+#!/usr/bin/env -S telora exec --dry-run
 
-import "@src/toolchain.forma" as toolchain;
+import "@src/toolchain.telora" as toolchain;
 
 export let exec = toolchain.command("g++");
 ```
 
-```forma
-# bin-src/ar.forma
-#!/usr/bin/env -S forma exec --dry-run
+```telora
+# bin-src/ar.telora
+#!/usr/bin/env -S telora exec --dry-run
 
-import "@src/toolchain.forma" as toolchain;
+import "@src/toolchain.telora" as toolchain;
 
 export let exec = toolchain.command("ar");
 ```
 
-`@src/toolchain.forma` 是当前工作 crate 内的绝对模块请求；它取代了早期设计稿
+`@src/toolchain.telora` 是当前工作 crate 内的绝对模块请求；它取代了早期设计稿
 中的 `crate:...` 写法。`bin-src` 中的入口不是可检索的 `@src` 模块。
 
 目标中的复用单位是普通模块和函数。顶层静态依赖选项足以描述发布单元，不
@@ -284,7 +284,7 @@ export let exec = toolchain.command("ar");
 
 ```sh
 TARGET=aarch64-linux-gnu \
-  forma exec --dry-run bin-src/gcc.forma -- \
+  telora exec --dry-run bin-src/gcc.telora -- \
   -c /workspace/src/hello.c -o /workspace/out/hello.o
 ```
 
@@ -295,7 +295,7 @@ TARGET=aarch64-linux-gnu \
   "install": [
     {
       "Unpack": {
-        "dest": "/cache/forma/exec/installs/7c...",
+        "dest": "/cache/telora/exec/installs/7c...",
         "ty": "TarGzip",
         "src": "https://toolchains.example/gcc-14.2.0-linux-x86_64.tar.gz",
         "strip": 1,
@@ -306,7 +306,7 @@ TARGET=aarch64-linux-gnu \
     },
     {
       "Unpack": {
-        "dest": "/cache/forma/exec/installs/a2...",
+        "dest": "/cache/telora/exec/installs/a2...",
         "ty": "TarGzip",
         "src": "https://toolchains.example/sysroot-aarch64-linux-gnu-v1.tar.gz",
         "strip": 1,
@@ -317,9 +317,9 @@ TARGET=aarch64-linux-gnu \
     }
   ],
   "cwd": { "Some": "/workspace" },
-  "bin": "/cache/forma/exec/installs/7c.../bin/gcc",
+  "bin": "/cache/telora/exec/installs/7c.../bin/gcc",
   "args": [
-    "--sysroot=/cache/forma/exec/installs/a2...",
+    "--sysroot=/cache/telora/exec/installs/a2...",
     "-ffile-prefix-map=/workspace=.",
     "-fdebug-prefix-map=/workspace=.",
     "-c",
@@ -329,7 +329,7 @@ TARGET=aarch64-linux-gnu \
   ],
   "env": {
     "TARGET": "aarch64-linux-gnu",
-    "GCC_EXEC_PREFIX": "/cache/forma/exec/installs/7c.../lib/gcc/"
+    "GCC_EXEC_PREFIX": "/cache/telora/exec/installs/7c.../lib/gcc/"
   }
 }
 ```
@@ -343,17 +343,17 @@ TARGET=aarch64-linux-gnu \
 如果输入为：
 
 ```sh
-TARGET=arm64-linux forma exec --dry-run bin-src/gcc.forma -- -c hello.c
+TARGET=arm64-linux telora exec --dry-run bin-src/gcc.telora -- -c hello.c
 ```
 
 最小可接受结果是错误落在 `sysroot_package` 的拒绝分支。更理想的诊断应当同时保留 Host 输入与规则位置：
 
 ```text
 host input TARGET: unsupported GCC target "arm64-linux"
-  src/toolchain.forma: target set declared here
+  src/toolchain.telora: target set declared here
 ```
 
-当前 Forma 已经能保留普通源码规则位置，也具备外部输入与 blame 的基础模型；Host 环境字段的精细来源呈现仍需要专门验收。
+当前 Telora 已经能保留普通源码规则位置，也具备外部输入与 blame 的基础模型；Host 环境字段的精细来源呈现仍需要专门验收。
 
 ### 缺失 TARGET
 
@@ -369,7 +369,7 @@ TARGET is required by the gcc wrapper
 
 即使应用代码错误地返回：
 
-```forma
+```telora
 {
     install: [],
     cwd: 'Some(42),
@@ -379,7 +379,7 @@ TARGET is required by the gcc wrapper
 }
 ```
 
-Host adapter 仍应拒绝它，因为 `cwd` 不符合 `ExecEnv`。这形成两层边界：Forma 类型检查负责应用内部契约，Host 在赋予外部意义前再次验证协议值。
+Host adapter 仍应拒绝它，因为 `cwd` 不符合 `ExecEnv`。这形成两层边界：Telora 类型检查负责应用内部契约，Host 在赋予外部意义前再次验证协议值。
 
 ## 今天已经可以表达的部分
 
@@ -395,11 +395,11 @@ Host adapter 仍应拒绝它，因为 `cwd` 不符合 `ExecEnv`。这形成两�
 | 确定性 source/debug map | 表达已具备 | `cwd` 是显式输入，最终参数是具体 String |
 | gcc/g++/ar 共享实现 | 基础已验证 | RFC 0158 覆盖 namespace import、高阶闭包、模块 helper 与 ExecFn 形状 |
 | 最终计划类型约束 | 已具备 | `Fn(ExecSettings, ExecRequest) -> ExecEnv` |
-| Host 边界再次校验 | 已具备 | `forma exec --dry-run` 校验并输出 canonical JSON |
+| Host 边界再次校验 | 已具备 | `telora exec --dry-run` 校验并输出 canonical JSON |
 | 有界纯求值 | 已具备 | fuel、栈、调用深度和分配配额 |
-| 规则位置诊断 | 已具备 | runtime/type diagnostics 保留 Forma 来源 |
+| 规则位置诊断 | 已具备 | runtime/type diagnostics 保留 Telora 来源 |
 
-这说明核心应用逻辑距离当前 Forma 并不远。多资源计划、平台选择和参数改写
+这说明核心应用逻辑距离当前 Telora 并不远。多资源计划、平台选择和参数改写
 已经能够由普通应用代码表达；完整远程依赖入口的 dry-run 尚未成立，仍不能
 用局部回归代替端到端能力证据。
 
@@ -410,7 +410,7 @@ Host adapter 仍应拒绝它，因为 `cwd` 不符合 `ExecEnv`。这形成两�
 当前代码可以通过：
 
 ```sh
-forma check bin-src/gcc.forma
+telora check bin-src/gcc.telora
 ```
 
 早期临时审计曾在调用 `toolchain.command("gcc")` 时观察到
@@ -426,13 +426,13 @@ wrapper 若再次失败，必须保留并缩减具体 fixture，再按实际根�
 
 当前示例使用：
 
-```forma
+```telora
 let target = request.env.TARGET;
 ```
 
 更合适的应用接口应当是类型保持的组合子：
 
-```forma
+```telora
 dict.get(request.env, "TARGET") # Option(String)
 ```
 
@@ -455,7 +455,7 @@ dict.get(request.env, "TARGET") # Option(String)
 - 确保 source-prefix-map 不被后续参数覆盖；
 - 对 `gcc`、`g++`、`ar` 和 linker 参数采用不同政策。
 
-这些首先应当是 Forma 标准库或应用库中的 argv parser/rewriter，而不是语言语法。现有 `array.fold_control`、模式匹配和不可变数组已经提供了算法基础，缺少的是成熟的组合 API。
+这些首先应当是 Telora 标准库或应用库中的 argv parser/rewriter，而不是语言语法。现有 `array.fold_control`、模式匹配和不可变数组已经提供了算法基础，缺少的是成熟的组合 API。
 
 ### 5. 包描述的名义与校验能力
 
@@ -467,28 +467,28 @@ dict.get(request.env, "TARGET") # Option(String)
 - package identity 是否覆盖所有影响安装结果的 action；
 - 相同 `dest` 是否描述相同安装动作。
 
-Parse、Display、codec 和 validator 已经提供构建这些领域类型的路径，但 `std/rt-types/exec.forma` 还没有把它们产品化为更强的 package 类型。
+Parse、Display、codec 和 validator 已经提供构建这些领域类型的路径，但 `std/rt-types/exec.telora` 还没有把它们产品化为更强的 package 类型。
 
 ### 6. 静态依赖入口
 
 不需要额外的源码打包机制。需要补齐的是让顶层入口直接表达开发阶段由
-`forma-deps.json` 承担的依赖约束：
+`telora-deps.json` 承担的依赖约束：
 
 - `option "crate.dependency"` 只能包含 Host 可静态读取的立即数；
 - 当前阶段使用 `Path` 固定依赖图；远程发布以后再由 pinned provider 补上；
 - resolver 取得依赖 crate root 后，再执行普通 import 解析；
 - 依赖名与包内路径需要确定、无歧义的映射；
-- `std/rt-types/exec.forma` 只描述协议，只有 `forma exec` Host 解释 `ExecFn`
+- `std/rt-types/exec.telora` 只描述协议，只有 `telora exec` Host 解释 `ExecFn`
   导出；
 - 同一 wrapper 模块可以被 gcc/g++/ar 三个薄入口复用。
 
 这些是 resolver 和 Host dependency boundary 的工作，不应改变 wrapper 的纯函数
-主体。`forma exec URL`、源码物理合并和独立 packager 都不是这个思想实验的
+主体。`telora exec URL`、源码物理合并和独立 packager 都不是这个思想实验的
 前置条件。
 
 ### 7. 真正的效果执行
 
-当前 `forma exec --dry-run` 只验证并打印计划。真实 Host 还需要实现：
+当前 `telora exec --dry-run` 只验证并打印计划。真实 Host 还需要实现：
 
 - 按 URL 与 digest 获取内容；
 - 原子解包和安装；
@@ -497,18 +497,18 @@ Parse、Display、codec 和 validator 已经提供构建这些领域类型的路
 - 权限、超时、代理和离线政策；
 - 最终进程替换或子进程管理。
 
-这些明确不属于 Forma 语言能力。本思想实验评估的是：在不计算外部工具的情况下，Forma 能否产生足够完整、确定且可诊断的效果计划。
+这些明确不属于 Telora 语言能力。本思想实验评估的是：在不计算外部工具的情况下，Telora 能否产生足够完整、确定且可诊断的效果计划。
 
 ### 8. Host 输入的来源诊断
 
-Forma 已经能追踪静态文件和规则来源，但 wrapper 还需要验证环境变量、用户 argv 与规则位置之间的双向诊断。特别是 command line rewrite 之后，错误应能区分：
+Telora 已经能追踪静态文件和规则来源，但 wrapper 还需要验证环境变量、用户 argv 与规则位置之间的双向诊断。特别是 command line rewrite 之后，错误应能区分：
 
 - 用户原始参数；
 - wrapper 注入的参数；
 - 选择这些参数的规则；
 - Host 最终拒绝计划的位置。
 
-这与 Forma 的 provenance/blame 方向一致，但需要针对 ExecRequest 和计划适配器补充端到端验收。
+这与 Telora 的 provenance/blame 方向一致，但需要针对 ExecRequest 和计划适配器补充端到端验收。
 
 ## 距离判断
 
@@ -531,11 +531,11 @@ Forma 已经能追踪静态文件和规则来源，但 wrapper 还需要验证�
 2. Host 输入与改写结果的精细 provenance；
 3. 顶层静态依赖选项与真实 exec adapter；远程 dependency provider 留给发布阶段。
 
-这对 Forma 是一个有价值的信号：不需要为了 GCC wrapper 引入 effect system、trait、可变状态或专用构建语法。更合理的推进方式是保持应用主体不变，逐步补齐标准库和 Host 协议。
+这对 Telora 是一个有价值的信号：不需要为了 GCC wrapper 引入 effect system、trait、可变状态或专用构建语法。更合理的推进方式是保持应用主体不变，逐步补齐标准库和 Host 协议。
 
-## 对 Forma 介绍文档的价值
+## 对 Telora 介绍文档的价值
 
-这个例子可以成为 Forma intro 的主线，因为它把抽象理念投射到了一个具体需求：
+这个例子可以成为 Telora intro 的主线，因为它把抽象理念投射到了一个具体需求：
 
 ```text
 静态包数据
@@ -553,4 +553,4 @@ Forma 已经能追踪静态文件和规则来源，但 wrapper 还需要验证�
 - Helm chart 把最终计划换成经过 schema 与来源校验的 Kubernetes 数据；
 - Agentic Plan IR 把 wrapper 输入换成 Agent 生成的意图，Host 仍然只执行经过验证的完整计划。
 
-它们共享的不是某项语法，而是 Forma 的核心边界：在封闭、纯粹、有界且来源可追踪的世界中完成所有确定计算，只把具体、可验证的计划交给外部世界。
+它们共享的不是某项语法，而是 Telora 的核心边界：在封闭、纯粹、有界且来源可追踪的世界中完成所有确定计算，只把具体、可验证的计划交给外部世界。

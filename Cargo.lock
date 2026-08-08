@@ -104,32 +104,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "forma"
-version = "0.1.0"
-dependencies = [
- "async-lsp",
- "forma-core",
- "futures",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
- "tower-service",
-]
-
-[[package]]
-name = "forma-core"
-version = "0.1.0"
-dependencies = [
- "codespan-reporting",
- "crop",
- "lelwel",
- "logos",
- "regex",
- "regex-syntax",
-]
-
-[[package]]
 name = "futures"
 version = "0.3.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -623,6 +597,32 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "telora"
+version = "0.1.0"
+dependencies = [
+ "async-lsp",
+ "futures",
+ "serde",
+ "serde_json",
+ "telora-core",
+ "tokio",
+ "tokio-util",
+ "tower-service",
+]
+
+[[package]]
+name = "telora-core"
+version = "0.1.0"
+dependencies = [
+ "codespan-reporting",
+ "crop",
+ "lelwel",
+ "logos",
+ "regex",
+ "regex-syntax",
 ]
 
 [[package]]

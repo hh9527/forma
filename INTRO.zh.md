@@ -1,4 +1,4 @@
-# 从可编程配置到可信计划：Forma 简介
+# 从可编程配置到可信计划：Telora 简介
 
 配置很少会永远停留在“写下一棵数据树”。当系统开始复用配置、读取外部数据、
 根据平台作选择、验证约束并生成命令时，它已经在执行一个程序。真正的问题不再
@@ -6,12 +6,12 @@
 
 > 怎样让数据的表达、验证、转换和最终用途处于同一个可检查、可诊断的模型中？
 
-Forma 是对这个问题的一次语言实验。它提供一个封闭、纯粹、确定且有资源边界
-的数据计算世界，再通过少量显式的 Host 入口把结果投射到真实应用。Forma
+Telora 是对这个问题的一次语言实验。它提供一个封闭、纯粹、确定且有资源边界
+的数据计算世界，再通过少量显式的 Host 入口把结果投射到真实应用。Telora
 程序可以构造进程计划、build rule、部署对象或 Agent plan，但它本身不下载
 文件、不启动进程，也不获得环境和网络的隐式权限。
 
-这篇介绍先从一个真实需求出发，再解释 Forma 为什么选择这样的边界。
+这篇介绍先从一个真实需求出发，再解释 Telora 为什么选择这样的边界。
 
 ## 一个比 dotslash 更完整的 GCC wrapper
 
@@ -22,13 +22,13 @@ Forma 是对这个问题的一次语言实验。它提供一个封闭、纯粹�
 - wrapper 要拒绝调用者提供的冲突参数，并自动加入 `--sysroot`、
   `-ffile-prefix-map` 和 `-fdebug-prefix-map`；
 - 下载文件和安装目录必须由完整策略确定计算，而不是由外部执行器猜测；
-- 错误应指向有问题的 JSON 数据或 Forma 规则；
+- 错误应指向有问题的 JSON 数据或 Telora 规则；
 - 在下载或启动进程之前，应当能看到完整的执行计划。
 
-Forma 仓库中的端到端示例，其 `gcc` 入口就是一个很薄的装配模块：
+Telora 仓库中的端到端示例，其 `gcc` 入口就是一个很薄的装配模块：
 
-```forma
-#!/usr/bin/env -S forma exec --dry-run --
+```telora
+#!/usr/bin/env -S telora exec --dry-run --
 
 option "crate.dependency" {
     name: "gcc-toolchain-define",
@@ -40,21 +40,21 @@ option "crate.dependency" {
 };
 option "exec.capture-envs" ["TARGET"];
 
-import "std/rt-types/exec.forma" { ExecFn };
+import "std/rt-types/exec.telora" { ExecFn };
 import "gcc-toolchain-define/source.json" as source;
-import "gcc-wrapper/toolchain.forma" { command };
+import "gcc-wrapper/toolchain.telora" { command };
 
 export def exec: ExecFn = command("gcc", source);
 ```
 
 这里没有 GCC 专用语法：依赖是静态 option，工具链描述是 JSON 模块，wrapper
-是普通 Forma 模块，`ExecFn` 是 Host 公布的普通类型。`exec.capture-envs` 也
+是普通 Telora 模块，`ExecFn` 是 Host 公布的普通类型。`exec.capture-envs` 也
 不是“继承整个环境”；它只允许 exec entry 捕获 `TARGET` 并把值作为显式请求
 数据交给 main。
 
 共享模块先把外部数据验证为领域类型：
 
-```forma
+```telora
 @struct type Package = {
     name: String,
     src: String,
@@ -76,7 +76,7 @@ def validated_source: Fn(Any) -> ToolchainSource = fn(raw) {
 
 随后，普通函数选择包、计算 hash 地址并改写参数：
 
-```forma
+```telora
 def install_dest = fn(settings, package, ty, strip) {
     let identity = `unpack-v1\n\{package.name}\n\{package.src}\n\{package.digest}\n\{ty}\n\{strip}`;
     `\{settings.install_prefix}/\{hash.sha256(identity)}`
@@ -111,8 +111,8 @@ def checked_compiler_args = fn(request, sysroot_dest) {
 
 ```sh
 TARGET=aarch64-linux-gnu \
-  cargo run -p forma -- exec --dry-run \
-  examples/gcc-wrapper/app/bin-src/gcc.forma -- \
+  cargo run -p telora -- exec --dry-run \
+  examples/gcc-wrapper/app/bin-src/gcc.telora -- \
   -c /workspace/hello.c -o /workspace/hello.o
 ```
 
@@ -121,7 +121,7 @@ TARGET=aarch64-linux-gnu \
 
 ## 为什么现有方案没有完全覆盖这个位置
 
-Forma 并不声称其他方案“不能编程”。差异在于哪一部分被当作核心，以及当程序
+Telora 并不声称其他方案“不能编程”。差异在于哪一部分被当作核心，以及当程序
 规模增长时，需要由多少套模型共同解释结果。
 
 ### 数据格式、schema 与数据工具
@@ -136,8 +136,8 @@ jq/jaq` 则获得了强大的查询、过滤和组合能力；对于一次性转
 依赖和执行环境在脚本中，最终协议又在 Host 代码中。错误也容易只指向当前
 JSON 或 filter，难以统一解释原始数据、拒绝规则、生成步骤和 Host 契约。
 
-Forma 保留“直接转换数据”的体验，但让静态数据、类型、函数、模块、来源和
-最终协议进入同一个语义模型。JSON、TOML 和 YAML 在 Forma 中也是模块，不是
+Telora 保留“直接转换数据”的体验，但让静态数据、类型、函数、模块、来源和
+最终协议进入同一个语义模型。JSON、TOML 和 YAML 在 Telora 中也是模块，不是
 失去位置的不透明 blob。
 
 ### 通用语言
@@ -147,12 +147,12 @@ Python 和 JavaScript 提供开放的动态计算和成熟生态，几乎可以�
 动态边界。用它们写配置框架时，框架仍需重新定义允许观察什么、如何固定依赖、
 怎样限制资源、如何缓存，以及 dry-run 究竟意味着什么。
 
-证明导向语言可以提供远强于 Forma 的性质，但代价是把配置问题带进终止性和
-证明工程。Forma 不追求通用定理证明；它允许递归，以确定的 fuel、栈、调用
+证明导向语言可以提供远强于 Telora 的性质，但代价是把配置问题带进终止性和
+证明工程。Telora 不追求通用定理证明；它允许递归，以确定的 fuel、栈、调用
 深度和分配配额给 Host 一个有限执行边界。
 
 Scheme 提供了另一个重要参照：“代码也是数据”带来极大的语言塑造能力，也让
-静态分析必须理解展开或运行后产生的代码。Forma 继承的是更窄的想法：
+静态分析必须理解展开或运行后产生的代码。Telora 继承的是更窄的想法：
 
 > 类型也是数据，但代码不是任意可生成、可执行的数据。
 
@@ -161,19 +161,19 @@ Scheme 提供了另一个重要参照：“代码也是数据”带来极大的�
 
 ### 可编程配置 DSL
 
-CUE、KCL 和 Nickel 最接近 Forma 的问题域。它们已经证明约束、合并、契约和
-可编程配置值得拥有专门模型。Forma 的区别不是多几个语法特性，而是尽量把
+CUE、KCL 和 Nickel 最接近 Telora 的问题域。它们已经证明约束、合并、契约和
+可编程配置值得拥有专门模型。Telora 的区别不是多几个语法特性，而是尽量把
 领域政策还原成普通数据与普通函数。
 
 约束合一、契约应用或字段合并是有价值的 DSL 核心语义；与此同时，每一类
-专用规则都需要用户和工具理解它自己的组合及错误传播。Forma 尝试用“类型是
+专用规则都需要用户和工具理解它自己的组合及错误传播。Telora 尝试用“类型是
 元数据 + 函数 + 少量受控桥梁”覆盖 parse、codec、schema、display、Eq/Hash
 等能力，使它们不必各自成为新的语言机制。
 
-这是不同的复杂度配置，不是全面替代宣言。Forma 的主张必须由 GCC wrapper
+这是不同的复杂度配置，不是全面替代宣言。Telora 的主张必须由 GCC wrapper
 这样的跨模块、跨数据源案例来检验，而不是由孤立的语法片段证明。
 
-## Forma 的核心模型
+## Telora 的核心模型
 
 ### 封闭、纯粹且有界
 
@@ -187,9 +187,9 @@ CUE、KCL 和 Nickel 最接近 Forma 的问题域。它们已经证明约束、�
 
 ### 类型是普通、可编程的元数据
 
-Forma 类型声明产生规范化的不可变数据。类型构造器可以是普通纯函数：
+Telora 类型声明产生规范化的不可变数据。类型构造器可以是普通纯函数：
 
-```forma
+```telora
 def Maybe: for(A) Fn(TypeOf(A)) -> TypeOf(Option(A)) = fn(Item) {
     Option(Item)
 };
@@ -201,26 +201,26 @@ type MaybeInt = Maybe(Int);
 贯穿静态检查、运行时验证、codec、schema、字符串 parse/display 和文档工具，
 而不是在每一层复制一份 schema。
 
-普通 Forma 代码还可以解释擦除后的 `TypeDesc`。当一个解释器需要重新获得
+普通 Telora 代码还可以解释擦除后的 `TypeDesc`。当一个解释器需要重新获得
 静态类型化调用面时，`interpreter!` 提供受限桥梁：
 
-```forma
+```telora
 def my_show: for(A) Fn(TypeOf(A)) -> Fn(A) -> Result(String, BlameError)
     = interpreter!(show_dyn);
 ```
 
 它不是宏系统或 `eval`：解释算法仍是普通函数，系统只验证擦除参数与声明签名
-之间的固定协议。Forma 因而不需要允许用户生成任意代码，仍可以让用户实现
+之间的固定协议。Telora 因而不需要允许用户生成任意代码，仍可以让用户实现
 通用的类型导向能力。
 
 ### 来源和 blame 穿过数据流
 
-读取 JSON、TOML 或 YAML 时，Forma 不只保留最终值，还保留字段级来源。位置
+读取 JSON、TOML 或 YAML 时，Telora 不只保留最终值，还保留字段级来源。位置
 随值经过 import、验证和转换；规则本身也有来源。错误因此可以同时报告：
 
 ```text
 source.json:12:9: expected String
-  toolchain.forma:16:28: requirement declared here
+  toolchain.telora:16:28: requirement declared here
 ```
 
 `raise!` 不会把这种错误压成新字符串。GCC fixture 还验证了错误工具链数据
@@ -233,7 +233,7 @@ dry-run 输出。
 
 ### 开放世界与封闭世界之间只有轻量连接点
 
-Forma 不需要让 main 获得 IO，也不需要为此引入通用 effect system。Host 先
+Telora 不需要让 main 获得 IO，也不需要为此引入通用 effect system。Host 先
 选择一个受信任的 entry；entry 可以读取受控运行时信息、检查 options，并在
 必要时注入带类型见证的虚拟模块。随后它显式初始化 main：
 
@@ -252,7 +252,7 @@ main 不能直接 import entry runtime。注入模块属于单次调用，初始
 的 `Dyn`，再用 `TypeOf(A)` 做权威投影。错误的 `exec` 签名会在调用前被拒绝，
 并同时指出 main 定义与 entry 的协议检查点。
 
-这使 `forma exec` 的特殊性主要存在于可替换的 Forma entry 中，而不是散落在
+这使 `telora exec` 的特殊性主要存在于可替换的 Telora entry 中，而不是散落在
 CLI 和 VM 里的 GCC/进程 schema。未来真正的 installer 和 process API 可以只
 开放给 entry；main 仍然是普通的纯模块。
 
@@ -278,20 +278,20 @@ GCC wrapper 的数据链可以概括为：
 - **数据迁移与生成**：读取 JSON/TOML/YAML，经类型化转换后输出结构化数据或
   稳定文本。
 
-Forma 尚未内置这些领域的完整框架，也没有生产级包获取、真实 exec/install
+Telora 尚未内置这些领域的完整框架，也没有生产级包获取、真实 exec/install
 效果或长期兼容性承诺。它已经验证的是共同的纵向基础：数据输入、可编程类型
 元数据、普通函数抽象、来源诊断、有界求值、模块复用，以及受控 Host entry。
 
-## Forma 想证明什么
+## Telora 想证明什么
 
-Forma 的目标不是成为更小的 Python，也不是以另一套专用约束语义取代所有配置
+Telora 的目标不是成为更小的 Python，也不是以另一套专用约束语义取代所有配置
 DSL。它想验证一个更具体的判断：
 
 > 以“类型也是数据”为中心，可以用更少、更统一、也更容易解释的机制表达数据、
 > 约束和转换，同时保留足够的抽象能力、可复用性、诊断质量与真实应用空间。
 
 如果每增加一个应用领域都需要新的 VM 指令、语言级 effect 或编译器特例，这个
-实验就失败了。如果新的领域主要增加普通 Forma 库、类型化协议和狭窄 Host
+实验就失败了。如果新的领域主要增加普通 Telora 库、类型化协议和狭窄 Host
 adapter，而核心语义仍保持小而一致，那么这条路线就值得继续。
 
 ## 继续阅读和运行
@@ -305,7 +305,7 @@ adapter，而核心语义仍保持小而一致，那么这条路线就值得继�
 cargo test --workspace
 
 TARGET=aarch64-linux-gnu \
-  cargo run -p forma -- exec --dry-run \
-  examples/gcc-wrapper/app/bin-src/gcc.forma -- \
+  cargo run -p telora -- exec --dry-run \
+  examples/gcc-wrapper/app/bin-src/gcc.telora -- \
   -c hello.c -o hello.o
 ```
