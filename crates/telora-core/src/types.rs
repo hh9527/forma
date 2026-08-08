@@ -40,6 +40,7 @@ impl TypeId {
 pub enum TypeNode {
     Pending,
     Ref(TypeId),
+    Bound(TypeParameterId),
     Any,
     Never,
     Type,
@@ -109,7 +110,8 @@ impl TypeGraph {
 
     fn intern_descriptor(&mut self, descriptor: &TypeDescriptor) -> TypeId {
         let node = match descriptor {
-            TypeDescriptor::Bound(_) | TypeDescriptor::Inference(_) => {
+            TypeDescriptor::Bound(parameter) => TypeNode::Bound(*parameter),
+            TypeDescriptor::Inference(_) => {
                 unreachable!("solver descriptors must be explicitly erased before interning")
             }
             TypeDescriptor::Any => TypeNode::Any,
@@ -252,6 +254,15 @@ impl TypeGraph {
                 .ok_or_else(|| format!("{path} has invalid fields for {kind}"))
         };
         Ok(match kind {
+            "Bound" => {
+                require(&["kind", "parameter"])?;
+                let parameter = value
+                    .dict_get("parameter")
+                    .and_then(ValueRef::as_int)
+                    .and_then(|parameter| u32::try_from(parameter).ok())
+                    .ok_or_else(|| format!("{path}.parameter must be a non-negative Int"))?;
+                TypeNode::Bound(TypeParameterId(parameter))
+            }
             "Any" => {
                 require(&["kind"])?;
                 TypeNode::Any
@@ -441,6 +452,7 @@ impl TypeGraph {
         let shown = match self.node(id) {
             TypeNode::Pending => "<pending>".into(),
             TypeNode::Ref(target) => self.display_with(*target, active),
+            TypeNode::Bound(parameter) => format!("T{}", parameter.0),
             TypeNode::Any => "Any".into(),
             TypeNode::Never => "Never".into(),
             TypeNode::Type => "Type".into(),
@@ -519,6 +531,7 @@ impl TypeGraph {
         match (self.node(actual), self.node(expected)) {
             (TypeNode::Ref(actual), _) => self.assignable_with(*actual, expected, visited),
             (_, TypeNode::Ref(expected)) => self.assignable_with(actual, *expected, visited),
+            (TypeNode::Bound(actual), TypeNode::Bound(expected)) => actual == expected,
             (TypeNode::Never, _) => true,
             (TypeNode::Any, _) | (_, TypeNode::Any) => true,
             (TypeNode::TypeOf(_), TypeNode::Type) => true,
@@ -589,6 +602,12 @@ impl TypeGraph {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TypeParameterId(u32);
+
+impl TypeParameterId {
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct InferenceVariableId(u32);
@@ -3487,7 +3506,7 @@ fn native_array_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeErro
     let item = context.argument(0)?;
     let value = context.value(item)?;
     if !value.is_hidden_up_link() {
-        decode_native_type(value)?;
+        validate_native_type(value)?;
     }
     write_native_type_record(context, "Array", &[("item", item)])
 }
@@ -3496,7 +3515,7 @@ fn native_dict_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeError
     let item = context.argument(0)?;
     let value = context.value(item)?;
     if !value.is_hidden_up_link() {
-        decode_native_type(value)?;
+        validate_native_type(value)?;
     }
     write_native_type_record(context, "Dict", &[("item", item)])
 }
@@ -3505,7 +3524,7 @@ fn native_type_of_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeEr
     let instance = context.argument(0)?;
     let value = context.value(instance)?;
     if !value.is_hidden_up_link() {
-        decode_native_type(value)?;
+        validate_native_type(value)?;
     }
     write_native_type_record(context, "TypeOf", &[("instance", instance)])
 }
@@ -3518,7 +3537,7 @@ fn native_tagged_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeErr
     let payload = context.argument(1)?;
     let value = context.value(payload)?;
     if !value.is_hidden_up_link() {
-        decode_native_type(value)?;
+        validate_native_type(value)?;
     }
     write_native_type_record(context, "Tagged", &[("tag", tag), ("payload", payload)])
 }
@@ -3531,7 +3550,7 @@ fn native_tuple_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeErro
     for index in 0..value.sequence_len().expect("Array has a length") {
         let item = value.sequence_get(index).expect("valid Array index");
         if !item.is_hidden_up_link() {
-            decode_native_type(item)?;
+            validate_native_type(item)?;
         }
     }
     write_native_type_record(context, "Tuple", &[("items", context.argument(0)?)])
@@ -3547,13 +3566,13 @@ fn native_function_type(context: &mut CallContext<'_, '_>) -> Result<(), NativeE
             .sequence_get(index)
             .expect("valid Array index");
         if !parameter.is_hidden_up_link() {
-            decode_native_type(parameter)?;
+            validate_native_type(parameter)?;
         }
     }
     let result = context.argument(1)?;
     let result_value = context.value(result)?;
     if !result_value.is_hidden_up_link() {
-        decode_native_type(result_value)?;
+        validate_native_type(result_value)?;
     }
     write_native_type_record(
         context,
@@ -3609,6 +3628,13 @@ pub(crate) fn native_validate(context: &mut CallContext<'_, '_>) -> Result<(), N
 
 pub(crate) fn decode_native_type(value: ValueRef<'_>) -> Result<TypeDescriptor, NativeError> {
     decode_type_ref(value, "Type").map_err(NativeError::new)
+}
+
+fn validate_native_type(value: ValueRef<'_>) -> Result<(), NativeError> {
+    TypeGraph::default()
+        .decode_persistent(value, "Type", &mut HashMap::new())
+        .map(|_| ())
+        .map_err(NativeError::new)
 }
 
 fn decode_type_ref(value: ValueRef<'_>, path: &str) -> Result<TypeDescriptor, String> {

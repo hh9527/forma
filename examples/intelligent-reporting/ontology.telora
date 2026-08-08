@@ -2,10 +2,7 @@ import "std/array" as array;
 import "./sql.telora" {
     Function,
     BinaryOp,
-    SqlAtom,
-    SqlTerm,
-    SqlScalar,
-    SqlSelectExpr,
+    Expr,
     Projection,
     Source,
     JoinKind,
@@ -51,20 +48,20 @@ import "./execution.telora" { OutputMode, ExecutionPlan };
     common_tables: Array(CommonTable),
     from: Source,
     joins: Array(Join),
-    filters: Array(SqlScalar),
+    filters: Array(Expr),
     measure_projection: Projection,
 };
 
 @struct type GroupRequirement = {
     dimension: Dimension,
     projection: Projection,
-    group_expression: SqlScalar,
+    group_expression: Expr,
     required_entity: Entity,
 };
 
 @struct type FilterRequirement = {
     source: Filter,
-    expression: SqlScalar,
+    expression: Expr,
     required_entity: Entity,
 };
 
@@ -100,7 +97,7 @@ type DimensionLowerer = Fn(Measure) -> Option(GroupRequirement);
     lower: DimensionLowerer,
 };
 
-def complete_requirement: Fn(Dimension, Projection, SqlScalar, Entity) -> Option(GroupRequirement) = fn(dimension, projected, group_expression, required_entity) {
+def complete_requirement: Fn(Dimension, Projection, Expr, Entity) -> Option(GroupRequirement) = fn(dimension, projected, group_expression, required_entity) {
     'Some({dimension, projection: projected, group_expression, required_entity})
 };
 
@@ -111,7 +108,7 @@ def rejected_requirement: Fn(Dimension, String) -> Option(GroupRequirement) = fn
 
 # A higher-order compiler factory: construct a dimension capability whose
 # lowering is valid for every current measure.
-def universal_dimension: Fn(Dimension, Projection, SqlScalar, Entity) -> DimensionCapability = fn(id, projected, group_expression, required_entity) {
+def universal_dimension: Fn(Dimension, Projection, Expr, Entity) -> DimensionCapability = fn(id, projected, group_expression, required_entity) {
     {
         id,
         lower: fn(measure) {
@@ -122,7 +119,7 @@ def universal_dimension: Fn(Dimension, Projection, SqlScalar, Entity) -> Dimensi
 
 # A second compiler factory: construct a capability restricted to one measure.
 # The same function both verifies the semantic edge and lowers it.
-def measure_dimension: Fn(Dimension, Measure, Projection, SqlScalar, Entity) -> DimensionCapability = fn(id, required_measure, projected, group_expression, required_entity) {
+def measure_dimension: Fn(Dimension, Measure, Projection, Expr, Entity) -> DimensionCapability = fn(id, required_measure, projected, group_expression, required_entity) {
     {
         id,
         lower: fn(actual_measure) {
@@ -147,32 +144,29 @@ def unsupported_dimension: Fn(Dimension, String) -> DimensionCapability = fn(id,
     }
 };
 
-def column: Fn(String, String) -> SqlAtom = fn(relation, name) {
+def column: Fn(String, String) -> Expr = fn(relation, name) {
     'Column({relation, name})
 };
 
-def call: Fn(Function, Array(SqlAtom)) -> SqlTerm = fn(function, args) {
+def call: Fn(Function, Array(Expr)) -> Expr = fn(function, args) {
     'Call({function, args})
 };
 
-def binary: Fn(SqlTerm, BinaryOp, SqlTerm) -> SqlScalar = fn(left, op, right) {
+def binary: Fn(Expr, BinaryOp, Expr) -> Expr = fn(left, op, right) {
     'Binary({left, op, right})
 };
 
-def term: Fn(SqlAtom) -> SqlTerm = fn(value) { 'Atom(value) };
-def scalar: Fn(SqlTerm) -> SqlScalar = fn(value) { 'Term(value) };
-
-def projection: Fn(SqlScalar, String) -> Projection = fn(expr, alias) {
-    {expr: 'Scalar(expr), alias: 'Some(alias)}
+def projection: Fn(Expr, String) -> Projection = fn(expr, alias) {
+    {expr, alias: 'Some(alias)}
 };
 
-def aggregate_projection: Fn(Function, SqlScalar, String) -> Projection = fn(function, value, alias) {
+def aggregate_projection: Fn(Function, Expr, String) -> Projection = fn(function, value, alias) {
     {expr: 'Aggregate({function, value}), alias: 'Some(alias)}
 };
 
 def source: Fn(String, String) -> Source = fn(name, alias) { {name, alias} };
 
-def join: Fn(JoinKind, Source, SqlScalar) -> Join = fn(kind, joined_source, on) {
+def join: Fn(JoinKind, Source, Expr) -> Join = fn(kind, joined_source, on) {
     {kind, source: joined_source, on}
 };
 
@@ -187,27 +181,27 @@ def relation_join: Fn(Relation) -> Join = fn(relation) {
     )
 };
 
-def equals: Fn(SqlAtom, SqlAtom) -> SqlScalar = fn(left, right) {
-    binary(term(left), 'Equal, term(right))
+def equals: Fn(Expr, Expr) -> Expr = fn(left, right) {
+    binary(left, 'Equal, right)
 };
 
 def payment_by_order: SelectBody = {
     projections: [
-        projection(scalar(term(column("payments", "order_id"))), "order_id"),
-        aggregate_projection('Sum, scalar(term(column("payments", "amount_cents"))), "captured_cents"),
+        projection(column("payments", "order_id"), "order_id"),
+        aggregate_projection('Sum, column("payments", "amount_cents"), "captured_cents"),
     ],
     from: source("payments", "payments"),
     joins: [],
     filters: [equals(column("payments", "status"), 'Int(2))],
     limit: 'None,
-    group_by: [scalar(term(column("payments", "order_id")))],
+    group_by: [column("payments", "order_id")],
     order_by: [],
 };
 
 def refund_by_order: SelectBody = {
     projections: [
-        projection(scalar(term(column("payments", "order_id"))), "order_id"),
-        aggregate_projection('Sum, scalar(term(column("refunds", "amount_cents"))), "refunded_cents"),
+        projection(column("payments", "order_id"), "order_id"),
+        aggregate_projection('Sum, column("refunds", "amount_cents"), "refunded_cents"),
     ],
     from: source("refunds", "refunds"),
     joins: [join(
@@ -217,7 +211,7 @@ def refund_by_order: SelectBody = {
     )],
     filters: [equals(column("refunds", "status"), 'Int(2))],
     limit: 'None,
-    group_by: [scalar(term(column("payments", "order_id")))],
+    group_by: [column("payments", "order_id")],
     order_by: [],
 };
 
@@ -261,8 +255,8 @@ def units_sold: MeasureCapability = {
             common_tables: [],
             from: source("order_items", "oi"),
             joins: [],
-            filters: [binary(term(column("o", "status")), 'NotEqual, term('Int(3)))],
-            measure_projection: aggregate_projection('Sum, scalar(term(column("oi", "quantity"))), "units_sold"),
+            filters: [binary(column("o", "status"), 'NotEqual, 'Int(3))],
+            measure_projection: aggregate_projection('Sum, column("oi", "quantity"), "units_sold"),
         }
     },
 };
@@ -278,27 +272,27 @@ def dimension_capability: Fn(Dimension) -> DimensionCapability = fn(dimension) {
     match dimension {
         'OrderMonth => universal_dimension(
             dimension,
-            projection(scalar(call('Substr, [column("o", "ordered_at"), 'Int(1), 'Int(7)])), "order_month"),
-            scalar(call('Substr, [column("o", "ordered_at"), 'Int(1), 'Int(7)])),
+            projection(call('Substr, [column("o", "ordered_at"), 'Int(1), 'Int(7)]), "order_month"),
+            call('Substr, [column("o", "ordered_at"), 'Int(1), 'Int(7)]),
             'Order,
         ),
         'CustomerRegion => universal_dimension(
             dimension,
-            projection(scalar(term(column("r", "name"))), "customer_region"),
-            scalar(term(column("r", "name"))),
+            projection(column("r", "name"), "customer_region"),
+            column("r", "name"),
             'Region,
         ),
         'OrganizationKind => measure_dimension(
             dimension,
             'NetRevenue,
-            projection(scalar(term(column("org", "kind"))), "organization_kind"),
-            scalar(term(column("org", "kind"))),
+            projection(column("org", "kind"), "organization_kind"),
+            column("org", "kind"),
             'Organization,
         ),
         'ProductCategory => universal_dimension(
             dimension,
-            projection(scalar(term(column("cat", "name"))), "product_category"),
-            scalar(term(column("cat", "name"))),
+            projection(column("cat", "name"), "product_category"),
+            column("cat", "name"),
             'Category,
         ),
         'EmployeeKind => unsupported_dimension(
@@ -307,8 +301,8 @@ def dimension_capability: Fn(Dimension) -> DimensionCapability = fn(dimension) {
         ),
         'ProductSku => universal_dimension(
             dimension,
-            projection(scalar(term(column("product", "sku"))), "product_sku"),
-            scalar(term(column("product", "sku"))),
+            projection(column("product", "sku"), "product_sku"),
+            column("product", "sku"),
             'Product,
         ),
     }
@@ -363,7 +357,7 @@ def verify_order: Fn(ReportIntent) -> Bool = fn(intent) {
     array.all(checks, fn(valid) { valid })
 };
 
-def ordered_expressions: Fn(Array(Dimension), Array(GroupRequirement)) -> Array(SqlScalar) = fn(ordered, requirements) {
+def ordered_expressions: Fn(Array(Dimension), Array(GroupRequirement)) -> Array(Expr) = fn(ordered, requirements) {
     array.flat_map(ordered, fn(dimension) {
         array.map(
             array.filter(requirements, fn(requirement) { requirement.dimension == dimension }),

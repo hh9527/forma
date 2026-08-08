@@ -241,6 +241,7 @@ struct CompletionContext {
 pub enum WorkspaceTypeNode {
     Pending,
     Ref(WorkspaceTypeId),
+    Bound(u32),
     Any,
     Never,
     Type,
@@ -329,6 +330,7 @@ impl WorkspaceTypeGraph {
         let shown = match &self.nodes[id.index()] {
             WorkspaceTypeNode::Pending => "<pending>".into(),
             WorkspaceTypeNode::Ref(target) => self.display_with(*target, active),
+            WorkspaceTypeNode::Bound(parameter) => format!("T{parameter}"),
             WorkspaceTypeNode::Any => "Any".into(),
             WorkspaceTypeNode::Never => "Never".into(),
             WorkspaceTypeNode::Type => "Type".into(),
@@ -1314,6 +1316,7 @@ fn merge_type_node(
     let node = match source.node(id) {
         TypeNode::Pending => WorkspaceTypeNode::Pending,
         TypeNode::Ref(child) => WorkspaceTypeNode::Ref(map(*child, target, mapped)),
+        TypeNode::Bound(parameter) => WorkspaceTypeNode::Bound(parameter.index()),
         TypeNode::Any => WorkspaceTypeNode::Any,
         TypeNode::Never => WorkspaceTypeNode::Never,
         TypeNode::Type => WorkspaceTypeNode::Type,

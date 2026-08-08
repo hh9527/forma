@@ -16,46 +16,32 @@ import "std/string" as string;
 
 @struct type Column = { relation: String, name: String };
 
-@enum type SqlAtom = {
+@struct type Call = { function: Function, args: Array(Expr) };
+@struct type Binary = { left: Expr, op: BinaryOp, right: Expr };
+@struct type Aggregate = { function: Function, value: Expr };
+
+@enum type Expr = {
     Column: Column,
     Int: Int,
     Text: String,
-};
-
-@struct type Call = { function: Function, args: Array(SqlAtom) };
-
-@enum type SqlTerm = {
-    Atom: SqlAtom,
     Call: Call,
-};
-
-@struct type Binary = { left: SqlTerm, op: BinaryOp, right: SqlTerm };
-
-@enum type SqlScalar = {
-    Term: SqlTerm,
     Binary: Binary,
-};
-
-@struct type Aggregate = { function: Function, value: SqlScalar };
-
-@enum type SqlSelectExpr = {
-    Scalar: SqlScalar,
     Aggregate: Aggregate,
 };
 
-@struct type Projection = { expr: SqlSelectExpr, alias: Option(String) };
+@struct type Projection = { expr: Expr, alias: Option(String) };
 @struct type Source = { name: String, alias: String };
 
 @enum type JoinKind = { Inner: 'None, Left: 'None };
-@struct type Join = { kind: JoinKind, source: Source, on: SqlScalar };
-@struct type Order = { expr: SqlScalar };
+@struct type Join = { kind: JoinKind, source: Source, on: Expr };
+@struct type Order = { expr: Expr };
 
 @struct type SelectBody = {
     projections: Array(Projection),
     from: Source,
     joins: Array(Join),
-    filters: Array(SqlScalar),
-    group_by: Array(SqlScalar),
+    filters: Array(Expr),
+    group_by: Array(Expr),
     order_by: Array(Order),
     limit: Option(Int),
 };
@@ -79,38 +65,19 @@ def render_binary_op: Fn(BinaryOp) -> String = fn(value) {
     match value { 'Equal => "=", 'NotEqual => "!=", 'GreaterEqual => ">=", 'Subtract => "-" }
 };
 
-def render_atom: Fn(SqlAtom) -> String = fn(value) {
+def render_expr: Fn(Expr) -> String = fn(value) {
     match value {
         'Column(column) => `\{quote_identifier(column.relation)}.\{quote_identifier(column.name)}`,
         'Int(number) => `\{number}`,
         'Text(text) => quote_text(text),
-    }
-};
-
-def render_call: Fn(Call) -> String = fn(value) {
-    `\{render_function(value.function)}(\{string.join(array.map(value.args, render_atom), ", ")})`
-};
-
-def render_term: Fn(SqlTerm) -> String = fn(value) {
-    match value { 'Atom(atom) => render_atom(atom), 'Call(call) => render_call(call) }
-};
-
-def render_scalar: Fn(SqlScalar) -> String = fn(value) {
-    match value {
-        'Term(term) => render_term(term),
-        'Binary(binary) => `(\{render_term(binary.left)} \{render_binary_op(binary.op)} \{render_term(binary.right)})`,
-    }
-};
-
-def render_select_expr: Fn(SqlSelectExpr) -> String = fn(value) {
-    match value {
-        'Scalar(scalar) => render_scalar(scalar),
-        'Aggregate(aggregate) => `\{render_function(aggregate.function)}(\{render_scalar(aggregate.value)})`,
+        'Call(call) => `\{render_function(call.function)}(\{string.join(array.map(call.args, render_expr), ", ")})`,
+        'Binary(binary) => `(\{render_expr(binary.left)} \{render_binary_op(binary.op)} \{render_expr(binary.right)})`,
+        'Aggregate(aggregate) => `\{render_function(aggregate.function)}(\{render_expr(aggregate.value)})`,
     }
 };
 
 def render_projection: Fn(Projection) -> String = fn(value) {
-    let rendered = render_select_expr(value.expr);
+    let rendered = render_expr(value.expr);
     match value.alias {
         'Some(alias) => `\{rendered} AS \{quote_identifier(alias)}`,
         'None => rendered,
@@ -123,7 +90,7 @@ def render_source: Fn(Source) -> String = fn(value) {
 
 def render_join: Fn(Join) -> String = fn(value) {
     let keyword = match value.kind { 'Inner => "JOIN", 'Left => "LEFT JOIN" };
-    `\{keyword} \{render_source(value.source)} ON \{render_scalar(value.on)}`
+    `\{keyword} \{render_source(value.source)} ON \{render_expr(value.on)}`
 };
 
 def render_body: Fn(SelectBody) -> String = fn(value) {
@@ -132,13 +99,13 @@ def render_body: Fn(SelectBody) -> String = fn(value) {
         `\n\{string.join(array.map(value.joins, render_join), "\n")}`
     };
     let filters = if array.length(value.filters) == 0 { "" } else {
-        `\nWHERE \{string.join(array.map(value.filters, render_scalar), " AND ")}`
+        `\nWHERE \{string.join(array.map(value.filters, render_expr), " AND ")}`
     };
     let groups = if array.length(value.group_by) == 0 { "" } else {
-        `\nGROUP BY \{string.join(array.map(value.group_by, render_scalar), ", ")}`
+        `\nGROUP BY \{string.join(array.map(value.group_by, render_expr), ", ")}`
     };
     let orders = if array.length(value.order_by) == 0 { "" } else {
-        `\nORDER BY \{string.join(array.map(value.order_by, fn(item) { render_scalar(item.expr) }), ", ")}`
+        `\nORDER BY \{string.join(array.map(value.order_by, fn(item) { render_expr(item.expr) }), ", ")}`
     };
     let limit = match value.limit { 'Some(count) => `\nLIMIT \{count}`, 'None => "" };
     `SELECT \{projections}\nFROM \{render_source(value.from)}\{joins}\{filters}\{groups}\{orders}\{limit}`
@@ -155,6 +122,6 @@ def render_select: Fn(Select) -> String = fn(value) {
 };
 
 export {
-    Function, BinaryOp, SqlAtom, SqlTerm, SqlScalar, SqlSelectExpr, Projection, Source,
+    Function, BinaryOp, Expr, Projection, Source,
     JoinKind, Join, Order, SelectBody, CommonTable, Select, render_select,
 };

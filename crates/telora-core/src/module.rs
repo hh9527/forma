@@ -809,6 +809,44 @@ fn select_import_value(
     ))
 }
 
+fn project_module_value(
+    root: PersistentValue,
+    interface: &ModuleInterface,
+    heap: &Heap,
+) -> Result<Value, ModuleError> {
+    let mut vm = Vm::new();
+    let recursive_projection = TypeDescriptor::Any.to_value(&mut vm);
+    let mut fields = Vec::with_capacity(interface.exports.len());
+    for (name, scheme) in &interface.exports {
+        let field_root = root
+            .dict_get(heap, name)
+            .map_err(|error| ModuleError::new(error.to_string()))?
+            .ok_or_else(|| ModuleError::new(format!("module has no root for export {name:?}")))?;
+        let value = match heap
+            .persistent_contains_up_link(field_root)
+            .map_err(|error| ModuleError::new(error.to_string()))?
+        {
+            true => match &scheme.body {
+                TypeDescriptor::TypeOf(_) => recursive_projection.clone(),
+                _ => match heap
+                    .export_persistent_projecting_up_links(field_root, &recursive_projection)
+                {
+                    Ok(value) => value,
+                    Err(error) if error.is_legacy_cycle() => Value::none(),
+                    Err(error) => return Err(ModuleError::new(error.to_string())),
+                },
+            },
+            false => match heap.export_persistent(field_root) {
+                Ok(value) => value,
+                Err(error) => return Err(ModuleError::new(error.to_string())),
+            },
+        };
+        fields.push((name.clone(), value));
+    }
+    vm.make_dict(fields)
+        .map_err(|error| ModuleError::new(error.to_string()))
+}
+
 impl fmt::Debug for ModuleRuntime {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1847,9 +1885,21 @@ impl RecoverableWorkspaceBuilder<'_> {
             .with_debug_sink(Arc::clone(&self.engine.debug_sink))
             .execute_in_work(&main.heap, &external_roots, &function, &[], &mut account)
             .map_err(RecoveryEvaluationError::Runtime)?;
-        let value = arena
-            .export(&main.heap)
+        let root = arena
+            .publish(&mut main.heap)
             .map_err(|_| RecoveryEvaluationError::Module)?;
+        let value = if main
+            .heap
+            .persistent_contains_up_link(root)
+            .map_err(|_| RecoveryEvaluationError::Module)?
+        {
+            project_module_value(root, &analysis.module_interface, &main.heap)
+                .map_err(|_| RecoveryEvaluationError::Module)?
+        } else {
+            main.heap
+                .export_persistent(root)
+                .map_err(|_| RecoveryEvaluationError::Module)?
+        };
         #[cfg(test)]
         if source.name.as_ref().ends_with("main.telora") && !account.diagnostics().is_empty() {
             eprintln!("emitted diagnostics: {:?}", account.diagnostics());
@@ -2435,14 +2485,50 @@ impl ModuleLoader {
                             .map_err(|error| {
                                 ModuleError::new(error.with_sources(&self.sources).to_string())
                             })?;
-                        let (value, opaque) = match arena.export(&self.main.heap) {
-                            Ok(value) => (value, false),
-                            Err(error) if error.is_legacy_cycle() => (Value::none(), true),
-                            Err(error) => return Err(ModuleError::new(error.to_string())),
-                        };
                         let root = arena
                             .publish(&mut self.main.heap)
                             .map_err(|error| ModuleError::new(error.to_string()))?;
+                        let mut interface = analysis.module_interface.clone();
+                        for (name, scheme) in &mut interface.exports {
+                            let field_root = root
+                                .dict_get(&self.main.heap, name)
+                                .map_err(|error| ModuleError::new(error.to_string()))?
+                                .ok_or_else(|| {
+                                    ModuleError::new(format!(
+                                        "module has no root for export {name:?}"
+                                    ))
+                                })?;
+                            if matches!(scheme.body, TypeDescriptor::TypeOf(_))
+                                && self
+                                    .main
+                                    .heap
+                                    .persistent_contains_up_link(field_root)
+                                    .map_err(|error| ModuleError::new(error.to_string()))?
+                            {
+                                scheme.body = TypeDescriptor::TypeOf(Box::new(TypeDescriptor::Any));
+                            }
+                        }
+                        let contains_up_link = self
+                            .main
+                            .heap
+                            .persistent_contains_up_link(root)
+                            .map_err(|error| ModuleError::new(error.to_string()))?;
+                        let (value, opaque) = if contains_up_link && analysis.explicit_exports {
+                            (
+                                project_module_value(root, &interface, &self.main.heap)?,
+                                false,
+                            )
+                        } else if contains_up_link {
+                            (Value::none(), true)
+                        } else {
+                            (
+                                self.main
+                                    .heap
+                                    .export_persistent(root)
+                                    .map_err(|error| ModuleError::new(error.to_string()))?,
+                                false,
+                            )
+                        };
                         Ok((
                             SourcedValue {
                                 value,
@@ -2450,7 +2536,7 @@ impl ModuleLoader {
                             },
                             root,
                             opaque,
-                            analysis.module_interface,
+                            interface,
                         ))
                     })
                 }
@@ -6971,6 +7057,81 @@ unchanged", "|"),
                 .message
                 .contains("internal up-link")
         );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn recursive_type_metadata_keeps_typed_module_import_surfaces() {
+        let directory = fixture_dir();
+        fs::write(
+            directory.join("expr.telora"),
+            r#"@struct type Binary = {left: Expr, right: Expr};
+               @enum type Expr = {Lit: Int, Add: Binary};
+               def lit: Fn(Int) -> Expr = fn(value) { 'Lit(value) };
+               def add: Fn(Expr, Expr) -> Expr = fn(left, right) {
+                   'Add({left, right})
+               };
+               def depth: Fn(Expr) -> Int = fn(expr) {
+                   match expr {
+                       'Lit(_) => 1,
+                       'Add({left, right}) => 1 + depth(left) + depth(right),
+                   }
+               };
+               export {Binary, Expr, lit, add, depth};"#,
+        )
+        .unwrap();
+
+        fs::write(
+            directory.join("whole.telora"),
+            r#"import "./expr.telora" as expr;
+               import "std/array" as array;
+               import "std/type-desc" as desc;
+               def has_ref = fn(ty, fuel) {
+                   if fuel < 1 {
+                       'False
+                   } else {
+                       if desc.kind(ty) == 'Ref {
+                           'True
+                       } else {
+                           array.any(desc.children(ty), fn(child) {
+                               has_ref(child, fuel - 1)
+                           })
+                       }
+                   }
+               };
+               let value: expr.Expr = expr.add(
+                   expr.lit(1),
+                   expr.add(expr.lit(2), expr.lit(3)),
+               );
+               export let output = (expr.depth(value), has_ref(expr.Expr, 8));"#,
+        )
+        .unwrap();
+        let whole = load_module(directory.join("whole.telora"), BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            whole.execute(100_000).unwrap().to_string(),
+            "{output: (5, 'True)}"
+        );
+
+        for (name, import) in [
+            (
+                "selective.telora",
+                r#"import "./expr.telora" {Expr, lit, add, depth};"#,
+            ),
+            ("open.telora", r#"import "./expr.telora" *;"#),
+        ] {
+            fs::write(
+                directory.join(name),
+                format!(
+                    r#"{import}
+                       let value: Expr = add(lit(1), lit(2));
+                       export let output = depth(value);"#
+                ),
+            )
+            .unwrap();
+            let module = load_module(directory.join(name), BTreeMap::new(), 100_000).unwrap();
+            assert_eq!(module.execute(100_000).unwrap().to_string(), "{output: 3}");
+        }
+
         fs::remove_dir_all(directory).unwrap();
     }
 

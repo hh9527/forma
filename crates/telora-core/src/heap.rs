@@ -309,6 +309,101 @@ impl Heap {
         handle
     }
 
+    pub(crate) fn export_persistent(&self, value: PersistentValue) -> Result<Value, HeapError> {
+        HeapView {
+            current: self,
+            background: None,
+        }
+        .export_value(value.runtime())
+    }
+
+    pub(crate) fn export_persistent_projecting_up_links(
+        &self,
+        value: PersistentValue,
+        projection: &Value,
+    ) -> Result<Value, HeapError> {
+        HeapView {
+            current: self,
+            background: None,
+        }
+        .export_value_projecting_up_links(value.runtime(), projection)
+    }
+
+    pub(crate) fn persistent_contains_up_link(
+        &self,
+        value: PersistentValue,
+    ) -> Result<bool, HeapError> {
+        let mut pending = vec![value.runtime().value];
+        let mut visited = HashSet::new();
+        while let Some(value) = pending.pop() {
+            let handle = match value {
+                RuntimeValue::UpLink(_) => return Ok(true),
+                RuntimeValue::String(handle)
+                | RuntimeValue::Bytes(handle)
+                | RuntimeValue::NativeType(handle)
+                | RuntimeValue::Opaque(handle)
+                | RuntimeValue::Array(handle)
+                | RuntimeValue::Tuple(handle)
+                | RuntimeValue::Tagged(handle)
+                | RuntimeValue::Dict(handle)
+                | RuntimeValue::Func(handle)
+                | RuntimeValue::Dyn(handle) => handle,
+                RuntimeValue::Int(_)
+                | RuntimeValue::Float(_)
+                | RuntimeValue::BuiltinAtom(_)
+                | RuntimeValue::Atom(_)
+                | RuntimeValue::ShortString(_) => continue,
+            };
+            if !visited.insert(handle) {
+                continue;
+            }
+            match self.object(handle)? {
+                Object::Array(values) | Object::Tuple(values) => {
+                    pending.extend(values.iter().map(|value| value.value));
+                }
+                Object::Tagged { tag, payload } => {
+                    pending.push(tag.value);
+                    pending.push(payload.value);
+                }
+                Object::Dict { values, .. } => {
+                    pending.extend(values.iter().map(|value| value.value));
+                }
+                Object::Closure {
+                    prototype,
+                    upvalues,
+                    ..
+                } => {
+                    pending.extend(upvalues.iter().map(|value| value.value));
+                    if let RuntimePrototype::Bytecode(handle) = prototype {
+                        pending.push(RuntimeValue::Func(*handle));
+                    }
+                }
+                Object::Dyn {
+                    descriptor, value, ..
+                } => {
+                    pending.push(descriptor.value);
+                    pending.push(value.value);
+                }
+                Object::ByteCodeProto {
+                    values, prototypes, ..
+                } => {
+                    pending.extend(values.iter().map(|value| value.value));
+                    pending.extend(prototypes.iter().filter_map(|prototype| match prototype {
+                        RuntimePrototype::Bytecode(handle) => Some(RuntimeValue::Func(*handle)),
+                        RuntimePrototype::Native(_) => None,
+                    }));
+                }
+                Object::Reserved => return Err(HeapError("heap object is uninitialized")),
+                Object::UpLink { .. } => return Ok(true),
+                Object::String(_)
+                | Object::Bytes(_)
+                | Object::NativeType(_)
+                | Object::Opaque(_) => {}
+            }
+        }
+        Ok(false)
+    }
+
     pub(crate) fn reserve(&mut self) -> Handle {
         self.allocate(Object::Reserved)
     }
@@ -1110,13 +1205,22 @@ impl<'a> HeapView<'a> {
     }
 
     pub(crate) fn export_value(&self, value: RichValue) -> Result<Value, HeapError> {
-        self.export_value_with(value.value, &mut HashSet::new())
+        self.export_value_with(value.value, &mut HashSet::new(), None)
+    }
+
+    fn export_value_projecting_up_links(
+        &self,
+        value: RichValue,
+        projection: &Value,
+    ) -> Result<Value, HeapError> {
+        self.export_value_with(value.value, &mut HashSet::new(), Some(projection))
     }
 
     fn export_value_with(
         &self,
         value: RuntimeValue,
         visiting: &mut HashSet<Handle>,
+        up_link_projection: Option<&Value>,
     ) -> Result<Value, HeapError> {
         Ok(match value {
             RuntimeValue::Int(value) => Value::Int(value),
@@ -1166,7 +1270,7 @@ impl<'a> HeapView<'a> {
                 };
                 let values = values
                     .iter()
-                    .map(|value| self.export_value_with(value.value, visiting))
+                    .map(|value| self.export_value_with(value.value, visiting, up_link_projection))
                     .collect::<Result<Vec<_>, _>>()?;
                 visiting.remove(&handle);
                 if tuple {
@@ -1179,11 +1283,12 @@ impl<'a> HeapView<'a> {
                 let Object::Tagged { tag, payload } = self.enter_object(handle, visiting)? else {
                     return Err(HeapError("Tagged handle refers to another object kind"));
                 };
-                let tag = match self.export_value_with(tag.value, visiting)? {
+                let tag = match self.export_value_with(tag.value, visiting, up_link_projection)? {
                     Value::Atom(tag) => tag,
                     _ => return Err(HeapError("Tagged tag is not an Atom")),
                 };
-                let payload = self.export_value_with(payload.value, visiting)?;
+                let payload =
+                    self.export_value_with(payload.value, visiting, up_link_projection)?;
                 visiting.remove(&handle);
                 Value::tagged(tag, payload)
             }
@@ -1198,7 +1303,7 @@ impl<'a> HeapView<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 let values = values
                     .iter()
-                    .map(|value| self.export_value_with(value.value, visiting))
+                    .map(|value| self.export_value_with(value.value, visiting, up_link_projection))
                     .collect::<Result<Vec<_>, _>>()?;
                 visiting.remove(&handle);
                 let owner = self.heap(shape.storage)?;
@@ -1224,10 +1329,10 @@ impl<'a> HeapView<'a> {
                 else {
                     return Err(HeapError("Func handle refers to another object kind"));
                 };
-                let prototype = self.export_prototype(prototype, visiting)?;
+                let prototype = self.export_prototype(prototype, visiting, up_link_projection)?;
                 let upvalues = upvalues
                     .iter()
-                    .map(|value| self.export_value_with(value.value, visiting))
+                    .map(|value| self.export_value_with(value.value, visiting, up_link_projection))
                     .collect::<Result<Vec<_>, _>>()?;
                 visiting.remove(&handle);
                 Value::Func(Arc::new(Closure::from_parts_with_identity(
@@ -1247,8 +1352,9 @@ impl<'a> HeapView<'a> {
                 else {
                     return Err(HeapError("Dyn handle refers to another object kind"));
                 };
-                let descriptor = self.export_value_with(descriptor.value, visiting)?;
-                let value = self.export_value_with(value.value, visiting)?;
+                let descriptor =
+                    self.export_value_with(descriptor.value, visiting, up_link_projection)?;
+                let value = self.export_value_with(value.value, visiting, up_link_projection)?;
                 visiting.remove(&handle);
                 Value::Dyn(Arc::new(DynValue::from_parts_with_metadata(
                     Arc::clone(identity),
@@ -1259,19 +1365,61 @@ impl<'a> HeapView<'a> {
                 )))
             }
             RuntimeValue::UpLink(handle) => {
+                let linked = self
+                    .up_link(handle)?
+                    .ok_or(HeapError("up-link is uninitialized"))?;
+                if let Some(projection) = up_link_projection
+                    && self.is_type_metadata_root(linked.value)?
+                {
+                    return Ok(projection.clone());
+                }
                 if !visiting.insert(handle) {
                     return Err(HeapError(
                         "cyclic heap values cannot cross the legacy Value boundary",
                     ));
                 }
-                let value = self
-                    .up_link(handle)?
-                    .ok_or(HeapError("up-link is uninitialized"))?;
-                let value = self.export_value_with(value.value, visiting)?;
+                let value = self.export_value_with(linked.value, visiting, up_link_projection)?;
                 visiting.remove(&handle);
                 value
             }
         })
+    }
+
+    fn is_type_metadata_root(&self, value: RuntimeValue) -> Result<bool, HeapError> {
+        let RuntimeValue::Dict(handle) = value else {
+            return Ok(false);
+        };
+        let Some(kind) = self.dict_get_text(handle, "kind")? else {
+            return Ok(false);
+        };
+        let kind = match kind.value {
+            RuntimeValue::BuiltinAtom(atom) => atom.name(),
+            RuntimeValue::Atom(id) => self.text(id)?,
+            _ => return Ok(false),
+        };
+        Ok(matches!(
+            kind,
+            "Any"
+                | "Never"
+                | "Type"
+                | "Dyn"
+                | "TypeOf"
+                | "Int"
+                | "Float"
+                | "String"
+                | "Bytes"
+                | "Atom"
+                | "Array"
+                | "Dict"
+                | "Tagged"
+                | "Tuple"
+                | "Struct"
+                | "Enum"
+                | "Union"
+                | "Function"
+                | "WithAttributes"
+                | "Bound"
+        ))
     }
 
     fn enter_object<'view>(
@@ -1291,6 +1439,7 @@ impl<'a> HeapView<'a> {
         &self,
         prototype: &RuntimePrototype,
         visiting: &mut HashSet<Handle>,
+        up_link_projection: Option<&Value>,
     ) -> Result<Prototype, HeapError> {
         Ok(match prototype {
             RuntimePrototype::Native(function) => Prototype::Native(*function),
@@ -1306,7 +1455,7 @@ impl<'a> HeapView<'a> {
                 };
                 let values = values
                     .iter()
-                    .map(|value| self.export_value_with(value.value, visiting))
+                    .map(|value| self.export_value_with(value.value, visiting, up_link_projection))
                     .collect::<Result<Vec<_>, _>>()?;
                 let text = text
                     .iter()
@@ -1314,14 +1463,14 @@ impl<'a> HeapView<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
                 let prototypes = prototypes
                     .iter()
-                    .map(
-                        |prototype| match self.export_prototype(prototype, visiting)? {
+                    .map(|prototype| {
+                        match self.export_prototype(prototype, visiting, up_link_projection)? {
                             Prototype::Bytecode(function) => Ok(function),
                             Prototype::Native(_) => Err(HeapError(
                                 "native prototype cannot occupy a bytecode link slot",
                             )),
-                        },
-                    )
+                        }
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 visiting.remove(handle);
                 Prototype::Bytecode(Arc::new(BytecodeFunction::from_linked_parts(

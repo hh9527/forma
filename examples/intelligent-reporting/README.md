@@ -27,6 +27,8 @@ Telora 代码将合法意图逐步 lowering 为 SQLite SQL。
   `emit_error!` 与 `fail!` 便利形式；RFC 0190 已完成领域库迁移，删除显式诊断
   数组，并证明普通 `Option`、数组组合子与 Host 事件足以覆盖当前本体实验；
 - RFC 0186：全部四个子阶段已经完成。
+- RFC 0192：已完成递归类型元数据的跨模块发布；SQL 表达式已改为真正递归的
+  `Expr`，同时保留有效 lowering 与四条独立诊断。
 
 ## 文件
 
@@ -90,6 +92,8 @@ cargo run -p telora -- run examples/intelligent-reporting/invalid.telora
 - filter 本身也声明所需 entity，因此会参与同一关系规划；排序只能引用已经
   选择的 dimension，limit 与 render mode 保留在 typed plan 中；
 - semantic、relational、SQL 三个中间计划都是普通 Telora 值和显式函数边界；
+- SQL AST 使用递归 `Expr` 表达调用、二元运算和聚合；跨模块运行时保留真实
+  UpLink 图，用户态反射可通过 `'Ref` 与 `type_desc.resolve` 有限遍历；
 - 成功编译只发布无权限的 `Option(ExecutionPlan)`；Host 可以静态核对 shape，
   再接收显式版本化 JSON。失败 lowering 得到 `None`，任意 Error 事件同时阻止
   evaluation 被发布为成功；
@@ -220,25 +224,17 @@ Host 不应在执行阶段才发现本可由领域 compiler 识别的结构或�
 具体输入。推进的目标不是让智能报表示例绕过这些问题，而是判断哪些缺口具有
 跨领域价值，并用独立 RFC 将它们补入 Telora。
 
-## RFC 0181 的边界发现
+## RFC 0181 发现、RFC 0192 解决的边界
 
-最自然的 SQL AST 是递归的，但当前 Telora 的递归类型元数据不能跨 legacy
-module value boundary 发布，会报告：
+RFC 0181 最初发现：最自然的 SQL AST 是递归的，但递归类型元数据无法穿过
+legacy module value boundary。实验当时使用 `SqlAtom -> SqlTerm -> SqlScalar ->
+SqlSelectExpr` 的有界层级作为诚实 fallback，没有把它描述成通用表达式树。
 
-```text
-cyclic heap values cannot cross the legacy Value boundary
-```
-
-本实验没有退回字符串，而是采用可跨模块的非递归分层 AST：
-
-```text
-SqlAtom -> SqlTerm -> SqlScalar -> SqlSelectExpr
-SelectBody -> Select（仅顶层包含 CTE）
-```
-
-它覆盖当前需要的列、常量、调用、二元表达式、聚合、CTE、join、filter、
-group 和 order。任意深度表达式及嵌套 CTE 暂不支持；未来修复递归元数据发布
-边界后，可以替换表示而不改变领域 capability 的职责。
+RFC 0192 将既有 UpLink 模型延伸到了模块边界。当前 `sql.telora` 使用真正递归
+的 `Expr`，调用、二元运算和聚合可以任意有限嵌套；普通 AST 值仍是有限、无环
+的数据。program stage 使用权威 persistent graph，tool stage 只将递归 back-edge
+有限投影为 `Any`。因此本实验已经证明递归元数据、构造器、renderer 与诊断规则
+可以跨模块协作，但没有声称 legacy 静态 scheme 已获得完整递归 back-edge 精度。
 
 ## 尚未解决
 
@@ -254,7 +250,6 @@ policy。后续阶段还需要：
 - 授权和 catalog 的显式 Context；
 - provenance 穿过所有中间计划；
 - CLI 失败输出完整呈现 Host 已收集的多条诊断；
-- 递归 SQL AST 跨 legacy module value boundary。
 
 诊断伞 RFC 还记录了一个不实现的远期扩展：由调用者显式使用
 `call_with_diagnostics!(compiler(intent))`，在单个调用边界把子诊断重新数据化。
