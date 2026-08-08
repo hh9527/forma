@@ -9211,4 +9211,20 @@ export let output: String = error.message;"#,
             );
         }
     }
+
+    #[test]
+    fn executable_type_metadata_constructors_cross_module_boundaries() {
+        let examples =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/ontology-construction");
+        let valid = load_module(examples.join("valid.telora"), BTreeMap::new(), 100_000).unwrap();
+        let output = valid.execute(100_000).unwrap().to_string();
+        assert!(output.contains("Revenue"), "{output}");
+        assert!(output.contains("Order"), "{output}");
+
+        let invalid = load_module(examples.join("invalid.telora"), BTreeMap::new(), 100_000)
+            .unwrap_err()
+            .to_string();
+        assert!(invalid.contains("field lower"), "{invalid}");
+        assert!(invalid.contains("Some(String)"), "{invalid}");
+    }
 }

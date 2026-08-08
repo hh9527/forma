@@ -1,0 +1,32 @@
+# Precise composition over built-in type families remains ordinary Telora.
+def Maybe:
+    for(T) Fn(TypeOf(T)) -> TypeOf(Option(T)) =
+    fn(inner) { Option(inner) };
+
+def Many:
+    for(T) Fn(TypeOf(T)) -> TypeOf(Array(T)) =
+    fn(inner) { Array(inner) };
+
+# User-defined metadata functions can construct concrete model types. Their
+# generic result currently widens to Type; the consuming type declaration
+# evaluates the function and retains the complete represented structure.
+def Requirement:
+    for(Key, Output) Fn(TypeOf(Key), TypeOf(Output)) -> Type =
+    fn(Key, Output) {
+    struct('None, {
+        key: Key,
+        output: Output,
+    })
+    };
+
+def Capability:
+    for(Id, Input, Output)
+    Fn(TypeOf(Id), TypeOf(Input), TypeOf(Output)) -> Type =
+    fn(Id, Input, Output) {
+    struct('None, {
+        id: Id,
+        lower: Fn(Input) -> Option(Output),
+    })
+    };
+
+export { Maybe, Many, Requirement, Capability };

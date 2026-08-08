@@ -1,0 +1,27 @@
+import "ontology-method/types.telora" as ontology;
+
+@enum type Entity = {
+    Order: 'None,
+    Customer: 'None,
+};
+
+@enum type Measure = {
+    Revenue: 'None,
+};
+
+type OptionalEntity = ontology.Maybe(Entity);
+type Requirements = ontology.Many(Entity);
+type MeasureRequirement = ontology.Requirement(Measure, Requirements);
+type MeasureCapability = ontology.Capability(Measure, Entity, MeasureRequirement);
+
+let capability: MeasureCapability = {
+    id: 'Revenue,
+    lower: fn(entity) {
+        'Some({key: 'Revenue, output: [entity]})
+    },
+};
+
+export let output: MeasureRequirement = match capability.lower('Order) {
+    'Some(requirement) => requirement,
+    'None => {key: 'Revenue, output: []},
+};

@@ -1,0 +1,11 @@
+import "ontology-method/types.telora" as ontology;
+
+@enum type Entity = { Order: 'None };
+@enum type Measure = { Revenue: 'None };
+
+type MeasureCapability = ontology.Capability(Measure, Entity, String);
+
+export let output: MeasureCapability = {
+    id: 'Revenue,
+    lower: fn(entity) { 'Some(entity) },
+};
