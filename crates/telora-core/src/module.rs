@@ -1766,7 +1766,13 @@ impl RecoverableWorkspaceBuilder<'_> {
                             if error.failure_class()
                                 == crate::evaluation::FailureClass::Recoverable =>
                         {
-                            runtime_diagnostics.extend(emitted);
+                            if emitted.is_empty() {
+                                if let Some(diagnostic) = error.diagnostic() {
+                                    runtime_diagnostics.push(diagnostic);
+                                }
+                            } else {
+                                runtime_diagnostics.extend(emitted);
+                            }
                             self.evaluate_independent_bindings(
                                 source_id,
                                 program,
