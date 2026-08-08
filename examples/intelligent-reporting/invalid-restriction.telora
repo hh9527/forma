@@ -1,12 +1,12 @@
 import "./ontology.telora" { compile };
-import "./restriction.json" as restriction;
+import "./restricted.json" as restriction;
 
 export let output = compile(restriction, {
     measures: ['NetRevenue],
     alignment: 'Natural,
     dimensions: ['OrderMonth, 'CustomerRegion],
     filters: ['CustomerRegion("East")],
-    order_by: ['OrderMonth, 'CustomerRegion],
-    limit: 'Some(10),
+    order_by: ['OrderMonth],
+    limit: 'None,
     render: {mode: 'Table, fields: ["order_month", "customer_region", "net_revenue_cents"]},
 });

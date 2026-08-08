@@ -35,6 +35,10 @@ Telora 代码将合法意图逐步 lowering 为 SQLite SQL。
   请求 `PreAggregate(Order)` 时才组合，`Natural` 不会隐式猜测策略。
 - RFC 0196：已完成原子执行计划；SQL placeholder、typed parameters、result
   schema 与经过核对的 render fields 由同一 lowering 链生成；RFC 0193 已完成。
+- RFC 0197：可复用领域编译方法伞 RFC 已完成。RFC 0198 抽取最小跨行业组合子，
+  RFC 0199 抽取 analytics 行业方法，RFC 0200 用 GCC wrapper 验证 toolchain 行业
+  方法，RFC 0201 证明普通外部 restriction 数据可以参与 lowering，并保留跨来源
+  诊断。共享层保持很小，没有伪装成通用 ontology framework。
 
 ## 文件
 
@@ -44,6 +48,8 @@ Telora 代码将合法意图逐步 lowering 为 SQLite SQL。
 - `relations.telora`：关系 catalog、可达性分析和 join 路径规划；
 - `execution.telora`：Host-facing typed plan 与显式 wire encoding；
 - `ontology.telora`：领域校验和 lowering；
+- `restriction.json`：允许全部报表 entity 的普通外部 restriction；
+- `restricted.json`：只允许 Order entity，用于跨来源诊断回归；
 - `valid.telora`：按月份、客户区域统计净收入；
 - `valid-units.telora`：按月份、品类、SKU 统计销量；
 - `valid-multi.telora`：显式将销量预聚合到 Order grain 后，与净收入共同输出；
@@ -52,6 +58,8 @@ Telora 代码将合法意图逐步 lowering 为 SQLite SQL。
 - `invalid.telora`：一次暴露四个独立领域错误；
 - `invalid-measures.telora`：拒绝多 measure 意图，不用任意 fallback 猜测依赖它的
   dimension 诊断；
+- `invalid-restriction.telora`：同时拒绝未授权的 dimension 与 filter，并将诊断
+  连接到意图、JSON restriction 和规则代码；
 - `valid-sql.telora`：导出生成的 SQL，供 SQLite 执行；
 - `host-plan.telora`：模拟 Host shape 核对并输出 JSON plan；
 - `net-revenue.sql`：手写参考查询。
@@ -109,6 +117,10 @@ cargo run -p telora -- run examples/intelligent-reporting/invalid.telora
   再接收显式版本化 JSON。失败 lowering 得到 `None`，任意 Error 事件同时阻止
   evaluation 被发布为成功；
 - 失败结果不发布 SQL，成功结果可以直接被 SQLite 执行。
+- restriction 只是普通 JSON 输入；领域库负责解码和解释，成功计划显式记录其
+  revision，Host 只负责执行前检查该 revision 是否仍然新鲜；
+- recovery 与正式执行现在共享 persistent module roots，因此闭包、递归元数据和
+  外部数据 provenance 不再经过会破坏 UpLink 的 legacy `Value` 往返。
 
 ## 上位验收框架
 
@@ -223,7 +235,7 @@ Host 不应在执行阶段才发现本可由领域 compiler 识别的结构或�
 | 单 measure、多 dimension | 已证明 | 已证明 | 已证明 | SQL 与基础 wire plan 已证明 |
 | 非法 fan-out | 已证明 | 正确拒绝 | 已证明基础根因诊断 | 不发布计划 |
 | 多 grain + 显式对齐策略 | Order 预聚合已证明 | NetRevenue + UnitsSold 已证明 | 缺失策略可修复 | 无 fan-out SQL 已证明 |
-| Context 与授权约束 | 尚未证明 | 尚未证明 | 尚未证明 | 尚未证明 |
+| 外部 restriction 与授权约束 | 基础 allow-list 已证明 | 授权内意图已证明 | 意图、JSON、规则三处来源已证明 | plan 记录 revision；新鲜度仍由 Host 核对 |
 | SQL + parameters + result schema + render | 基础规则已证明 | 基础意图已证明 | 缺失 render field 可修复 | 基础原子计划已证明 |
 
 后续 RFC 不应只陈述新增了哪些 planner 功能，还应说明它对这四项分别增加了

@@ -16,6 +16,7 @@ import "std/array" as array;
 
 @struct type ExecutionPlan = {
     version: Int,
+    restriction_revision: String,
     dialect: SqlDialect,
     statement: String,
     parameters: Array(QueryParameter),
@@ -46,6 +47,7 @@ def encode_plan: Fn(ExecutionPlan) -> String = fn(plan) {
     let output = match plan.render.mode { 'Table => "table", 'Json => "json" };
     json.stringify({
         version: plan.version,
+        restriction_revision: plan.restriction_revision,
         dialect,
         statement: plan.statement,
         parameters: array.map(plan.parameters, encode_parameter),

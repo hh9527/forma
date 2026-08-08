@@ -55,6 +55,7 @@ struct RecoveryOpenImportCandidate {
     value: Value,
     scheme: crate::types::TypeScheme,
     sourced: Option<SourcedValue>,
+    root: PersistentValue,
 }
 
 fn recovery_open_import_exports(
@@ -62,6 +63,8 @@ fn recovery_open_import_exports(
     value: &Value,
     interface: &ModuleInterface,
     sourced: Option<&SourcedValue>,
+    root: PersistentValue,
+    heap: &Heap,
 ) -> Result<Vec<(String, RecoveryOpenImportCandidate)>, ModuleError> {
     let Value::Dict(exports) = value else {
         return Err(ModuleError::new(format!(
@@ -77,6 +80,12 @@ fn recovery_open_import_exports(
                     "module {provider} has no value for export {name:?}"
                 ))
             })?;
+            let field_root = root
+                .dict_get(heap, name)
+                .map_err(|error| ModuleError::new(error.to_string()))?
+                .ok_or_else(|| {
+                    ModuleError::new(format!("module {provider} has no root for export {name:?}"))
+                })?;
             Ok((
                 name.clone(),
                 RecoveryOpenImportCandidate {
@@ -84,6 +93,7 @@ fn recovery_open_import_exports(
                     value,
                     scheme: scheme.clone(),
                     sourced: sourced.cloned(),
+                    root: field_root,
                 },
             ))
         })
@@ -1258,7 +1268,7 @@ impl Engine {
             &self.native_modules,
         )?
         .into_iter()
-        .map(|(name, (value, _, interface))| (name.to_owned(), (value, interface)))
+        .map(|(name, (value, root, interface))| (name.to_owned(), (value, root, interface)))
         .collect();
         let mut builder = RecoverableWorkspaceBuilder {
             engine: self,
@@ -1266,10 +1276,12 @@ impl Engine {
             overlays: &BTreeMap::new(),
             query: None,
             sources,
+            main,
             core_modules,
             inputs: BTreeMap::new(),
             values: HashMap::new(),
             sourced_values: HashMap::new(),
+            roots: HashMap::new(),
             interfaces: HashMap::new(),
             visiting: Vec::new(),
             cycle_members: HashSet::new(),
@@ -1313,7 +1325,7 @@ impl Engine {
             &self.native_modules,
         )?
         .into_iter()
-        .map(|(name, (value, _, interface))| (name.to_owned(), (value, interface)))
+        .map(|(name, (value, root, interface))| (name.to_owned(), (value, root, interface)))
         .collect();
         let mut builder = RecoverableWorkspaceBuilder {
             engine: self,
@@ -1321,10 +1333,12 @@ impl Engine {
             overlays,
             query: Some(context),
             sources,
+            main,
             core_modules,
             inputs: BTreeMap::new(),
             values: HashMap::new(),
             sourced_values: HashMap::new(),
+            roots: HashMap::new(),
             interfaces: HashMap::new(),
             visiting: Vec::new(),
             cycle_members: HashSet::new(),
@@ -1348,10 +1362,12 @@ struct RecoverableWorkspaceBuilder<'a> {
     overlays: &'a BTreeMap<PathBuf, crate::document::DocumentText>,
     query: Option<&'a crate::query::QueryContext>,
     sources: SourceDatabase,
-    core_modules: HashMap<String, (Value, ModuleInterface)>,
+    main: MainWorld,
+    core_modules: HashMap<String, (Value, PersistentValue, ModuleInterface)>,
     inputs: BTreeMap<String, SemanticModuleInput>,
     values: HashMap<ModuleId, Value>,
     sourced_values: HashMap<ModuleId, SourcedValue>,
+    roots: HashMap<ModuleId, PersistentValue>,
     interfaces: HashMap<ModuleId, ModuleInterface>,
     visiting: Vec<ModuleId>,
     cycle_members: HashSet<ModuleId>,
@@ -1439,6 +1455,7 @@ impl RecoverableWorkspaceBuilder<'_> {
             self.visiting.push(module_id.clone());
             let mut semantic_imports = Vec::new();
             let mut external_values = BTreeMap::new();
+            let mut external_roots = HashMap::new();
             let mut external_sourced_values = BTreeMap::new();
             let mut external_interfaces = BTreeMap::new();
             let mut unavailable_imports = HashSet::new();
@@ -1500,13 +1517,15 @@ impl RecoverableWorkspaceBuilder<'_> {
                         location,
                         target: target_module.id.clone(),
                     });
-                    if let Some((value, interface)) = self.core_modules.get(&target) {
+                    if let Some((value, root, interface)) = self.core_modules.get(&target) {
                         if open {
                             match recovery_open_import_exports(
                                 &target_module.id,
                                 value,
                                 interface,
                                 None,
+                                *root,
+                                &self.main.heap,
                             ) {
                                 Ok(exports) => {
                                     for (name, candidate) in exports {
@@ -1526,6 +1545,14 @@ impl RecoverableWorkspaceBuilder<'_> {
                             &name,
                         ) {
                             Ok((value, interface)) => {
+                                let root = if let Some(imported_name) = imported_name.as_ref() {
+                                    root.dict_get(&self.main.heap, &imported_name.value)
+                                        .expect("built-in module root is valid")
+                                        .expect("selected built-in export has a root")
+                                } else {
+                                    *root
+                                };
+                                external_roots.insert(name.clone(), root);
                                 external_values.insert(name.clone(), value);
                                 external_interfaces.insert(name, interface);
                             }
@@ -1571,6 +1598,11 @@ impl RecoverableWorkspaceBuilder<'_> {
                             &value,
                             &interface,
                             sourced,
+                            *self
+                                .roots
+                                .get(&target_module.id)
+                                .expect("loaded module has a root"),
+                            &self.main.heap,
                         ) {
                             Ok(exports) => {
                                 for (name, candidate) in exports {
@@ -1593,6 +1625,16 @@ impl RecoverableWorkspaceBuilder<'_> {
                         .unwrap_or_default();
                     match select_import_value(value, interface, imported_name.as_deref(), &name) {
                         Ok((value, interface)) => {
+                            if let Some(root) = self.roots.get(&target_module.id).copied() {
+                                let root = if let Some(imported_name) = imported_name.as_ref() {
+                                    root.dict_get(&self.main.heap, &imported_name.value)
+                                        .expect("loaded module root is valid")
+                                        .expect("selected module export has a root")
+                                } else {
+                                    root
+                                };
+                                external_roots.insert(name.clone(), root);
+                            }
                             external_interfaces.insert(name.clone(), interface);
                             external_values.insert(name, value);
                         }
@@ -1620,11 +1662,17 @@ impl RecoverableWorkspaceBuilder<'_> {
                 }
             }
             if module_id.to_string() != PRELUDE_MODULE
-                && let Some((value, interface)) = self.core_modules.get(PRELUDE_MODULE)
+                && let Some((value, root, interface)) = self.core_modules.get(PRELUDE_MODULE)
             {
                 let provider = ModuleId::Builtin(PRELUDE_MODULE.into());
-                if let Ok(exports) = recovery_open_import_exports(&provider, value, interface, None)
-                {
+                if let Ok(exports) = recovery_open_import_exports(
+                    &provider,
+                    value,
+                    interface,
+                    None,
+                    *root,
+                    &self.main.heap,
+                ) {
                     for (name, candidate) in exports {
                         open_candidates.entry(name).or_default().push(candidate);
                     }
@@ -1666,6 +1714,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                 if let Some(sourced) = candidate.sourced {
                     external_sourced_values.insert(name.clone(), sourced);
                 }
+                external_roots.insert(name.clone(), candidate.root);
                 external_interfaces.insert(
                     name.clone(),
                     ModuleInterface {
@@ -1706,20 +1755,18 @@ impl RecoverableWorkspaceBuilder<'_> {
                         source_id,
                         program,
                         &external_values,
-                        &external_sourced_values,
+                        &external_roots,
                         &external_interfaces,
                     ) {
-                        Ok((analysis, value, emitted)) => {
+                        Ok((analysis, value, root, emitted)) => {
                             runtime_diagnostics.extend(emitted);
-                            Some((analysis, value))
+                            Some((analysis, value, root))
                         }
-                        Err(RecoveryEvaluationError::Runtime(error))
+                        Err(RecoveryEvaluationError::Runtime(error, emitted))
                             if error.failure_class()
                                 == crate::evaluation::FailureClass::Recoverable =>
                         {
-                            if let Some(diagnostic) = error.diagnostic() {
-                                runtime_diagnostics.push(diagnostic);
-                            }
+                            runtime_diagnostics.extend(emitted);
                             self.evaluate_independent_bindings(
                                 source_id,
                                 program,
@@ -1728,14 +1775,12 @@ impl RecoverableWorkspaceBuilder<'_> {
                             );
                             None
                         }
-                        Err(
-                            RecoveryEvaluationError::Runtime(_) | RecoveryEvaluationError::Module,
-                        ) => None,
+                        Err(_) => None,
                     }
                 })
             };
             diagnostics.extend(runtime_diagnostics);
-            let strict_value = strict.as_ref().map(|(_, value)| value);
+            let strict_value = strict.as_ref().map(|(_, value, _)| value);
             let state = if missing_exports {
                 WorkspaceModuleState::Unavailable
             } else if strict_value.is_some() {
@@ -1755,14 +1800,14 @@ impl RecoverableWorkspaceBuilder<'_> {
                     kind: WorkspaceModuleKind::Telora,
                     source: Some(source_id),
                     program,
-                    analysis: strict.as_ref().map(|(analysis, _)| analysis.clone()),
+                    analysis: strict.as_ref().map(|(analysis, _, _)| analysis.clone()),
                     partial: Some(partial),
                     state,
                     imports: semantic_imports,
                     diagnostics,
                 },
             );
-            if let Some((_, value)) = strict {
+            if let Some((_, value, root)) = strict {
                 let interface = self.inputs[&key]
                     .analysis
                     .as_ref()
@@ -1770,6 +1815,7 @@ impl RecoverableWorkspaceBuilder<'_> {
                     .module_interface
                     .clone();
                 self.interfaces.insert(module_id.clone(), interface);
+                self.roots.insert(module_id.clone(), root);
                 self.values.insert(module_id, value.clone());
                 Some(value)
             } else {
@@ -1834,19 +1880,27 @@ impl RecoverableWorkspaceBuilder<'_> {
             self.values.insert(module_id.clone(), value.clone());
         }
         if let Some(sourced) = sourced {
+            let mut local = Heap::work();
+            let local_root = local
+                .import_sourced_value(Some(&self.main.heap), &sourced)
+                .expect("parsed sourced value imports into a work heap");
+            let root = publish_root(&mut self.main.heap, &local, local_root)
+                .expect("parsed sourced value publishes into the main heap");
+            self.roots.insert(module_id.clone(), root);
             self.sourced_values.insert(module_id, sourced);
         }
         value
     }
 
     fn analyze_and_evaluate(
-        &self,
+        &mut self,
         source_id: crate::SourceId,
         program: &Program,
         external_values: &BTreeMap<String, Value>,
-        external_sourced_values: &BTreeMap<String, SourcedValue>,
+        external_roots: &HashMap<String, PersistentValue>,
         external_interfaces: &BTreeMap<String, ModuleInterface>,
-    ) -> Result<(crate::Analysis, Value, Vec<Diagnostic>), RecoveryEvaluationError> {
+    ) -> Result<(crate::Analysis, Value, PersistentValue, Vec<Diagnostic>), RecoveryEvaluationError>
+    {
         let mut account = QuotaAccount::new(self.engine.config.module_quota);
         if let Some(query) = self.query {
             account = account.with_query(query.clone());
@@ -1866,45 +1920,41 @@ impl RecoverableWorkspaceBuilder<'_> {
         .map_err(|_| RecoveryEvaluationError::Module)?;
         let function = compile_program_analyzed_in(source, program, &analysis)
             .map_err(|_| RecoveryEvaluationError::Module)?;
-        let mut main = MainWorld::building();
-        let mut external_roots = HashMap::new();
-        for (name, value) in external_values {
-            let root = if let Some(sourced) = external_sourced_values.get(name) {
-                let mut local = Heap::work();
-                let root = local
-                    .import_sourced_value(Some(&main.heap), sourced)
-                    .map_err(|_| RecoveryEvaluationError::Module)?;
-                publish_root(&mut main.heap, &local, root)
-                    .map_err(|_| RecoveryEvaluationError::Module)?
-            } else {
-                publish_value(&mut main.heap, value).map_err(|_| RecoveryEvaluationError::Module)?
-            };
-            external_roots.insert(name.clone(), root);
-        }
-        let arena = Vm::new()
+        let arena = match Vm::new()
             .with_debug_sink(Arc::clone(&self.engine.debug_sink))
-            .execute_in_work(&main.heap, &external_roots, &function, &[], &mut account)
-            .map_err(RecoveryEvaluationError::Runtime)?;
+            .execute_in_work(
+                &self.main.heap,
+                external_roots,
+                &function,
+                &[],
+                &mut account,
+            ) {
+            Ok(arena) => arena,
+            Err(error) => {
+                return Err(RecoveryEvaluationError::Runtime(
+                    error,
+                    account.take_diagnostics(),
+                ));
+            }
+        };
         let root = arena
-            .publish(&mut main.heap)
+            .publish(&mut self.main.heap)
             .map_err(|_| RecoveryEvaluationError::Module)?;
-        let value = if main
+        let value = if self
+            .main
             .heap
             .persistent_contains_up_link(root)
             .map_err(|_| RecoveryEvaluationError::Module)?
         {
-            project_module_value(root, &analysis.module_interface, &main.heap)
+            project_module_value(root, &analysis.module_interface, &self.main.heap)
                 .map_err(|_| RecoveryEvaluationError::Module)?
         } else {
-            main.heap
+            self.main
+                .heap
                 .export_persistent(root)
                 .map_err(|_| RecoveryEvaluationError::Module)?
         };
-        #[cfg(test)]
-        if source.name.as_ref().ends_with("main.telora") && !account.diagnostics().is_empty() {
-            eprintln!("emitted diagnostics: {:?}", account.diagnostics());
-        }
-        Ok((analysis, value, account.take_diagnostics()))
+        Ok((analysis, value, root, account.take_diagnostics()))
     }
 
     fn evaluate_independent_bindings(
@@ -2018,7 +2068,7 @@ fn same_runtime_diagnostic(left: &Diagnostic, right: &Diagnostic) -> bool {
 
 enum RecoveryEvaluationError {
     Module,
-    Runtime(crate::RuntimeError),
+    Runtime(crate::RuntimeError, Vec<Diagnostic>),
 }
 
 fn block_on_recovery<F: std::future::Future>(future: F) -> F::Output {
@@ -9112,5 +9162,47 @@ export let output: String = error.message;"#,
         assert!(encoded.contains("result_schema"), "{encoded}");
         assert!(encoded.contains("money_cents"), "{encoded}");
         assert!(encoded.contains("render"), "{encoded}");
+        assert!(encoded.contains("analytics-policy-v1"), "{encoded}");
+
+        let restricted = recovery_engine()
+            .recover_workspace(examples.join("invalid-restriction.telora"))
+            .unwrap();
+        let unauthorized = restricted
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.message.contains("unauthorized entity"))
+            .collect::<Vec<_>>();
+        assert_eq!(unauthorized.len(), 2, "{unauthorized:#?}");
+        for diagnostic in unauthorized {
+            let source_names = diagnostic
+                .labels
+                .iter()
+                .map(|label| {
+                    restricted
+                        .sources()
+                        .get(label.location.source)
+                        .name
+                        .as_ref()
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                source_names
+                    .iter()
+                    .any(|name| name.ends_with("invalid-restriction.telora")),
+                "{source_names:#?}"
+            );
+            assert!(
+                source_names
+                    .iter()
+                    .any(|name| name.ends_with("restricted.json")),
+                "{source_names:#?}"
+            );
+            assert!(
+                source_names
+                    .iter()
+                    .any(|name| name.ends_with("ontology.telora")),
+                "{source_names:#?}"
+            );
+        }
     }
 }

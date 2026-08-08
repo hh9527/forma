@@ -1,7 +1,8 @@
 import "./ontology.telora" { compile };
 import "./execution.telora" { ExecutionPlan, encode_plan };
+import "./restriction.json" as restriction;
 
-let compilation = compile({
+let compilation = compile(restriction, {
     measures: ['NetRevenue],
     alignment: 'Natural,
     dimensions: ['OrderMonth, 'CustomerRegion],

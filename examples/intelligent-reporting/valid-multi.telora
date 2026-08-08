@@ -1,6 +1,7 @@
 import "./ontology.telora" { compile };
+import "./restriction.json" as restriction;
 
-export let output = compile({
+export let output = compile(restriction, {
     measures: ['NetRevenue, 'UnitsSold],
     alignment: 'PreAggregate('Order),
     dimensions: ['OrderMonth],

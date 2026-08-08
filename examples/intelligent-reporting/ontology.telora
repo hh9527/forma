@@ -1,4 +1,5 @@
 import "std/array" as array;
+import "std/codec" as codec;
 import "domain-method/method.telora" as method;
 import "analytics-method/analytics.telora" as analytics;
 import "./sql.telora" {
@@ -59,6 +60,11 @@ import "./execution.telora" {
 };
 
 @struct type RenderIntent = { mode: OutputMode, fields: Array(String) };
+
+@struct type Restriction = {
+    revision: String,
+    allowed_entities: Array(Entity),
+};
 
 @enum type Filter = { CustomerRegion: String };
 
@@ -525,6 +531,45 @@ def verify_relationships: Fn(PathPlan, Array(GroupRequirement)) -> Bool = fn(pat
     array.length(failures) == 0
 };
 
+def decode_restriction: Fn(Any) -> Restriction = fn(raw) {
+    match codec.decode(Restriction, raw) {
+        'Ok(restriction) => restriction,
+        'Err(error) => raise!(error),
+    }
+};
+
+def verify_restriction:
+    Fn(Restriction, Array(GroupRequirement), Array(FilterRequirement)) -> Bool =
+    fn(restriction, requirements, filters) {
+        let dimension_errors = array.flat_map(requirements, fn(requirement) {
+            if array.any(restriction.allowed_entities, fn(entity) {
+                entity == requirement.required_entity
+            }) {
+                []
+            } else {
+                [emit_error!(
+                    `dimension \{requirement.dimension} requires unauthorized entity \{requirement.required_entity}`,
+                    requirement.dimension,
+                    restriction.allowed_entities,
+                )]
+            }
+        });
+        let filter_errors = array.flat_map(filters, fn(filter) {
+            if array.any(restriction.allowed_entities, fn(entity) {
+                entity == filter.required_entity
+            }) {
+                []
+            } else {
+                [emit_error!(
+                    `filter requires unauthorized entity \{filter.required_entity}`,
+                    filter.source,
+                    restriction.allowed_entities,
+                )]
+            }
+        });
+        array.length(dimension_errors) == 0 && array.length(filter_errors) == 0
+    };
+
 def lower_semantics: Fn(ReportIntent, QueryPlan, Array(GroupRequirement), Array(FilterRequirement)) -> SemanticPlan = fn(intent, query_plan, requirements, filter_requirements) {
     {
         query_plan,
@@ -593,7 +638,8 @@ def compile_render: Fn(RenderIntent, Array(ResultField)) -> Option(RenderPlan) =
     }
 };
 
-export def compile: Fn(ReportIntent) -> Option(ExecutionPlan) = fn(intent) {
+export def compile: Fn(Any, ReportIntent) -> Option(ExecutionPlan) = fn(raw_restriction, intent) {
+    let restriction = decode_restriction(raw_restriction);
     let order_valid = verify_order(intent);
     match selected_measures(intent) {
         'None => 'None,
@@ -611,12 +657,14 @@ export def compile: Fn(ReportIntent) -> Option(ExecutionPlan) = fn(intent) {
             let semantic = lower_semantics(intent, query_plan, requirements, filter_requirements);
             let relational = lower_relationships(semantic);
             let relationships_valid = verify_relationships(relational.paths, requirements);
+            let restriction_valid = verify_restriction(restriction, requirements, filter_requirements);
             let sql_plan = lower_sql(relational);
             match compile_render(intent.render, sql_plan.result_schema) {
             'None => 'None,
-            'Some(render) => if fragments_complete && requirements_complete && relationships_valid && order_valid {
+            'Some(render) => if fragments_complete && requirements_complete && relationships_valid && restriction_valid && order_valid {
                 'Some({
                 version: 1,
+                restriction_revision: restriction.revision,
                 dialect: 'Sqlite,
                 statement: render_select(sql_plan.query),
                 parameters: sql_plan.parameters,
@@ -639,6 +687,7 @@ export {
     SemanticValueType,
     Aggregation,
     Alignment,
+    Restriction,
     Dimension,
     ReportIntent,
     MeasureCapability,
