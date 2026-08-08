@@ -140,6 +140,7 @@ pub struct WithOrigin<T> {
 pub enum Severity {
     Error,
     Warning,
+    Info,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -158,9 +159,9 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    pub fn error(message: impl Into<String>, location: Location) -> Self {
+    pub fn new(severity: Severity, message: impl Into<String>, location: Location) -> Self {
         Self {
-            severity: Severity::Error,
+            severity,
             message: message.into(),
             labels: vec![Label {
                 location,
@@ -169,6 +170,10 @@ impl Diagnostic {
             }],
             notes: Vec::new(),
         }
+    }
+
+    pub fn error(message: impl Into<String>, location: Location) -> Self {
+        Self::new(Severity::Error, message, location)
     }
 
     pub fn with_secondary(mut self, message: impl Into<String>, location: Location) -> Self {

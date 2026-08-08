@@ -1,0 +1,9 @@
+let warning = report(
+    'Warn,
+    blame!("configuration key is deprecated", "old-key", 42),
+);
+
+export let output = {
+    let same_error: BlameError = warning;
+    same_error.message
+};

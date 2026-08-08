@@ -22,7 +22,8 @@ Forma 代码将合法意图逐步 lowering 为 SQLite SQL。
   带版本、方言、只读声明和输出模式的稳定 JSON；
 - RFC 0180：全部五个子阶段已经完成。
 - RFC 0186：新的诊断伞 RFC 已接受；RFC 0187 已完成 message-first variadic
-  `blame!` 与 `raise!`，下一步实现带 severity 的普通 `report` BIF。
+  `blame!` 与 `raise!`；RFC 0188 已完成普通 `report` BIF、Info/Warn/Error
+  事件及 Error 成功边界。下一步加入组合宏与 best-effort sibling 调度。
 
 ## 文件
 

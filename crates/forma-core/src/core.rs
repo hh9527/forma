@@ -1,7 +1,7 @@
 use crate::value::{
     CoreArrayFunction, CoreAttributesFunction, CoreCodecFunction, CoreDebugFunction,
-    CoreDictFunction, CoreDynFunction, CoreEqFunction, CoreHashFunction, CoreJsonFunction,
-    CoreModelFunction, CorePathFunction, CoreResultFunction, CoreStringFunction,
+    CoreDiagnosticFunction, CoreDictFunction, CoreDynFunction, CoreEqFunction, CoreHashFunction,
+    CoreJsonFunction, CoreModelFunction, CorePathFunction, CoreResultFunction, CoreStringFunction,
     CoreTypeDescFunction, NativeFunction,
 };
 
@@ -465,6 +465,10 @@ pub(crate) fn module_specs() -> Vec<CoreModuleSpec> {
             name: PRELUDE_MODULE,
             source: include_str!("../modules/core/prelude.native.forma"),
             functions: vec![
+                (
+                    "report",
+                    NativeFunction::core_diagnostic(CoreDiagnosticFunction::Report),
+                ),
                 (
                     "struct",
                     NativeFunction::core_model(CoreModelFunction::Struct),

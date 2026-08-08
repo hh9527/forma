@@ -365,6 +365,21 @@ pub(crate) enum CoreDebugFunction {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CoreDiagnosticFunction {
+    Report,
+}
+
+impl CoreDiagnosticFunction {
+    pub(crate) const fn name(self) -> &'static str {
+        "report"
+    }
+
+    pub(crate) const fn arity(self) -> usize {
+        2
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CoreEqFunction {
     Equal,
 }
@@ -679,6 +694,7 @@ pub(crate) enum NativeKind {
     CoreString(CoreStringFunction),
     CorePath(CorePathFunction),
     CoreDebug(CoreDebugFunction),
+    CoreDiagnostic(CoreDiagnosticFunction),
     CoreHash(CoreHashFunction),
     CoreCodec(CoreCodecFunction),
     CoreTypeDesc(CoreTypeDescFunction),
@@ -799,6 +815,16 @@ impl NativeFunction {
             arity: function.arity(),
             callback: unavailable_core_callback,
             kind: NativeKind::CoreDebug(function),
+            native_type_local: None,
+        }
+    }
+
+    pub(crate) const fn core_diagnostic(function: CoreDiagnosticFunction) -> Self {
+        Self {
+            name: function.name(),
+            arity: function.arity(),
+            callback: unavailable_core_callback,
+            kind: NativeKind::CoreDiagnostic(function),
             native_type_local: None,
         }
     }

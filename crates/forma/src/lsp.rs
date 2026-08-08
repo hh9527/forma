@@ -562,6 +562,7 @@ async fn publish_diagnostics(state: &Rc<RefCell<State>>, snapshot: &WorkspaceSna
                     severity: Some(match diagnostic.severity {
                         forma_core::source::Severity::Error => lsp::DiagnosticSeverity::ERROR,
                         forma_core::source::Severity::Warning => lsp::DiagnosticSeverity::WARNING,
+                        forma_core::source::Severity::Info => lsp::DiagnosticSeverity::INFORMATION,
                     }),
                     message: diagnostic.message.clone(),
                     related_information: Some(

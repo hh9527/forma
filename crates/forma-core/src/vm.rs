@@ -5,10 +5,10 @@ use crate::heap::{
 use crate::lir::RegisterId;
 use crate::value::{
     BuiltinAtom, CoreArrayFunction, CoreAttributesFunction, CoreBuiltinTypeFunction,
-    CoreCodecFunction, CoreDebugFunction, CoreDictFunction, CoreDynFunction, CoreEqFunction,
-    CoreHashFunction, CoreJsonFunction, CoreModelFunction, CorePathFunction, CoreResultFunction,
-    CoreStringFunction, CoreTypeDescFunction, Dict, NativeError, NativeKind, NativeLimit, Shape,
-    Value,
+    CoreCodecFunction, CoreDebugFunction, CoreDiagnosticFunction, CoreDictFunction,
+    CoreDynFunction, CoreEqFunction, CoreHashFunction, CoreJsonFunction, CoreModelFunction,
+    CorePathFunction, CoreResultFunction, CoreStringFunction, CoreTypeDescFunction, Dict,
+    NativeError, NativeKind, NativeLimit, Shape, Value,
 };
 use crate::{Diagnostic, Origin, SourceDatabase};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -63,6 +63,7 @@ pub struct QuotaAccount {
     remaining_fuel: usize,
     requested_allocation_bytes: u64,
     query: Option<crate::query::QueryContext>,
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl QuotaAccount {
@@ -72,6 +73,7 @@ impl QuotaAccount {
             quota,
             requested_allocation_bytes: 0,
             query: None,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -94,6 +96,14 @@ impl QuotaAccount {
 
     pub(crate) fn query_context(&self) -> Option<crate::query::QueryContext> {
         self.query.clone()
+    }
+
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn take_diagnostics(&mut self) -> Vec<Diagnostic> {
+        std::mem::take(&mut self.diagnostics)
     }
 
     fn stack_limit(&self) -> usize {
@@ -723,6 +733,7 @@ pub enum RuntimeErrorKind {
     MissingField,
     NoPatternMatched,
     Panic,
+    ReportedDiagnostic,
     RaisedBlame,
     StackLimitExceeded,
     TypeMismatch,
@@ -765,6 +776,7 @@ impl RuntimeError {
             | RuntimeErrorKind::MissingField
             | RuntimeErrorKind::NoPatternMatched
             | RuntimeErrorKind::Panic
+            | RuntimeErrorKind::ReportedDiagnostic
             | RuntimeErrorKind::RaisedBlame
             | RuntimeErrorKind::TypeMismatch
             | RuntimeErrorKind::UninitializedDefinition
@@ -859,6 +871,38 @@ impl fmt::Display for RuntimeError {
 }
 
 impl std::error::Error for RuntimeError {}
+
+fn fail_on_reported_error(
+    account: &QuotaAccount,
+    start: usize,
+    function: &BytecodeFunction,
+) -> Result<(), RuntimeError> {
+    let Some(diagnostic) = account.diagnostics[start..]
+        .iter()
+        .find(|diagnostic| diagnostic.severity == crate::source::Severity::Error)
+    else {
+        return Ok(());
+    };
+    let mut runtime = error(
+        RuntimeErrorKind::ReportedDiagnostic,
+        diagnostic.message.clone(),
+        function,
+        0,
+    );
+    let primary = diagnostic
+        .labels
+        .iter()
+        .find(|label| label.primary)
+        .map(|label| label.location);
+    let rule = diagnostic
+        .labels
+        .iter()
+        .rev()
+        .find(|label| !label.primary)
+        .map(|label| label.location);
+    runtime.set_locations(primary, rule);
+    Err(runtime)
+}
 
 #[derive(Default)]
 struct ShapeInterner {
@@ -1070,6 +1114,7 @@ impl Vm {
         arguments: &[Value],
         account: &mut QuotaAccount,
     ) -> Result<Value, RuntimeError> {
+        let diagnostic_start = account.diagnostics.len();
         let background = Heap::main();
         let arena = self.execute_frame(
             &background,
@@ -1079,6 +1124,7 @@ impl Vm {
             &[],
             account,
         )?;
+        fail_on_reported_error(account, diagnostic_start, function)?;
         arena.export(&background).map_err(|heap_error| {
             error(
                 RuntimeErrorKind::InvalidBytecode,
@@ -1097,7 +1143,10 @@ impl Vm {
         arguments: &[Value],
         account: &mut QuotaAccount,
     ) -> Result<WorkWorld, RuntimeError> {
-        self.execute_frame(background, externals, function, arguments, &[], account)
+        let diagnostic_start = account.diagnostics.len();
+        let arena = self.execute_frame(background, externals, function, arguments, &[], account)?;
+        fail_on_reported_error(account, diagnostic_start, function)?;
+        Ok(arena)
     }
 
     pub(crate) fn execute_function_with_captures_in_work(
@@ -1109,9 +1158,12 @@ impl Vm {
         arguments: &[Value],
         account: &mut QuotaAccount,
     ) -> Result<WorkWorld, RuntimeError> {
-        self.execute_frame(
+        let diagnostic_start = account.diagnostics.len();
+        let arena = self.execute_frame(
             background, externals, function, arguments, captures, account,
-        )
+        )?;
+        fail_on_reported_error(account, diagnostic_start, function)?;
+        Ok(arena)
     }
 
     #[allow(clippy::needless_borrow)]
@@ -2679,6 +2731,16 @@ fn drive_vm_action(
                                 current,
                                 background,
                                 debug_sink,
+                            )?,
+                            NativeKind::CoreDiagnostic(function) => run_core_diagnostic(
+                                function,
+                                &arguments,
+                                return_target,
+                                &call_function,
+                                call_pc,
+                                current,
+                                background,
+                                account,
                             )?,
                             NativeKind::CoreHash(function) => run_core_hash(
                                 function,
@@ -9486,6 +9548,175 @@ fn run_core_debug(
         value,
         return_target,
     })
+}
+
+fn run_core_diagnostic(
+    operation: CoreDiagnosticFunction,
+    arguments: &[RichValue],
+    return_target: ReturnTarget,
+    function: &Arc<BytecodeFunction>,
+    pc: usize,
+    current: &mut Heap,
+    background: &Heap,
+    account: &mut QuotaAccount,
+) -> Result<VmAction, RuntimeError> {
+    let CoreDiagnosticFunction::Report = operation;
+    let severity = match arguments[0].value {
+        RuntimeValue::BuiltinAtom(atom) => atom.name(),
+        RuntimeValue::Atom(id) => HeapView {
+            current,
+            background: Some(background),
+        }
+        .text(id)
+        .map_err(|heap_error| {
+            error(
+                RuntimeErrorKind::InvalidBytecode,
+                heap_error.to_string(),
+                function,
+                pc,
+            )
+        })?,
+        _ => {
+            return Err(runtime_type_error(
+                "Severity",
+                &arguments[0],
+                &HeapView {
+                    current,
+                    background: Some(background),
+                },
+                function,
+                pc,
+            ));
+        }
+    };
+    let severity = match severity {
+        "Info" => crate::source::Severity::Info,
+        "Warn" => crate::source::Severity::Warning,
+        "Error" => crate::source::Severity::Error,
+        other => {
+            return Err(error(
+                RuntimeErrorKind::TypeMismatch,
+                format!("unknown diagnostic severity {other:?}"),
+                function,
+                pc,
+            ));
+        }
+    };
+    let view = HeapView {
+        current,
+        background: Some(background),
+    };
+    let diagnostic = diagnostic_from_blame(arguments[1], severity, &view, function, pc)?;
+    account.diagnostics.push(diagnostic);
+    Ok(VmAction::Return {
+        value: arguments[1],
+        return_target,
+    })
+}
+
+fn diagnostic_from_blame(
+    structured: RichValue,
+    severity: crate::source::Severity,
+    view: &HeapView<'_>,
+    function: &BytecodeFunction,
+    pc: usize,
+) -> Result<Diagnostic, RuntimeError> {
+    let RuntimeValue::Dict(handle) = structured.value else {
+        return Err(runtime_type_error(
+            "BlameError",
+            &structured,
+            view,
+            function,
+            pc,
+        ));
+    };
+    let fields = view.dict_fields(handle).map_err(|heap_error| {
+        error(
+            RuntimeErrorKind::InvalidBytecode,
+            heap_error.to_string(),
+            function,
+            pc,
+        )
+    })?;
+    if fields.as_slice() != ["data", "message", "rule"] {
+        return Err(runtime_type_error(
+            "BlameError",
+            &structured,
+            view,
+            function,
+            pc,
+        ));
+    }
+    let field = |name| {
+        view.dict_get_text(handle, name)
+            .map_err(|heap_error| {
+                error(
+                    RuntimeErrorKind::InvalidBytecode,
+                    heap_error.to_string(),
+                    function,
+                    pc,
+                )
+            })?
+            .ok_or_else(|| {
+                error(
+                    RuntimeErrorKind::InvalidBytecode,
+                    format!("BlameError is missing {name}"),
+                    function,
+                    pc,
+                )
+            })
+    };
+    let data = field("data")?;
+    let message = field("message")?;
+    let rule = field("rule")?;
+    let message = view
+        .string_text(message)
+        .map_err(|heap_error| {
+            error(
+                RuntimeErrorKind::InvalidBytecode,
+                heap_error.to_string(),
+                function,
+                pc,
+            )
+        })?
+        .ok_or_else(|| runtime_type_error("String", &message, view, function, pc))?;
+    let mut subjects = match data.value {
+        RuntimeValue::Tuple(handle) => view
+            .sequence(handle, true)
+            .map_err(|heap_error| {
+                error(
+                    RuntimeErrorKind::InvalidBytecode,
+                    heap_error.to_string(),
+                    function,
+                    pc,
+                )
+            })?
+            .iter()
+            .filter_map(|value| value.loc())
+            .collect::<Vec<_>>(),
+        _ => data.loc().into_iter().collect(),
+    };
+    let fallback = rule.loc().or_else(|| instruction_location(function, pc));
+    let Some(primary) = subjects.first().copied().or(fallback) else {
+        return Ok(Diagnostic {
+            severity,
+            message: message.to_owned(),
+            labels: Vec::new(),
+            notes: Vec::new(),
+        });
+    };
+    let mut diagnostic = Diagnostic::new(severity, message, primary);
+    for related in subjects.drain(1..) {
+        if related != primary {
+            diagnostic = diagnostic.with_secondary("related value", related);
+        }
+    }
+    if let Some(rule) = rule.loc()
+        && rule != primary
+    {
+        diagnostic = diagnostic.with_secondary("rule declared here", rule);
+    }
+    Ok(diagnostic)
 }
 
 fn core_debug_heap_error(

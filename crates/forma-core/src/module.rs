@@ -1669,7 +1669,10 @@ impl RecoverableWorkspaceBuilder<'_> {
                         &external_sourced_values,
                         &external_interfaces,
                     ) {
-                        Ok(result) => Some(result),
+                        Ok((analysis, value, emitted)) => {
+                            runtime_diagnostics.extend(emitted);
+                            Some((analysis, value))
+                        }
                         Err(RecoveryEvaluationError::Runtime(error))
                             if error.failure_class()
                                 == crate::evaluation::FailureClass::Recoverable =>
@@ -1803,7 +1806,7 @@ impl RecoverableWorkspaceBuilder<'_> {
         external_values: &BTreeMap<String, Value>,
         external_sourced_values: &BTreeMap<String, SourcedValue>,
         external_interfaces: &BTreeMap<String, ModuleInterface>,
-    ) -> Result<(crate::Analysis, Value), RecoveryEvaluationError> {
+    ) -> Result<(crate::Analysis, Value, Vec<Diagnostic>), RecoveryEvaluationError> {
         let mut account = QuotaAccount::new(self.engine.config.module_quota);
         if let Some(query) = self.query {
             account = account.with_query(query.clone());
@@ -1845,7 +1848,11 @@ impl RecoverableWorkspaceBuilder<'_> {
         let value = arena
             .export(&main.heap)
             .map_err(|_| RecoveryEvaluationError::Module)?;
-        Ok((analysis, value))
+        #[cfg(test)]
+        if source.name.as_ref().ends_with("main.forma") && !account.diagnostics().is_empty() {
+            eprintln!("emitted diagnostics: {:?}", account.diagnostics());
+        }
+        Ok((analysis, value, account.take_diagnostics()))
     }
 
     fn evaluate_independent_bindings(
@@ -1886,10 +1893,20 @@ impl RecoverableWorkspaceBuilder<'_> {
                 failed.insert(binding.value.name.value.clone());
                 continue;
             };
-            match Vm::new()
+            let result = Vm::new()
                 .with_debug_sink(Arc::clone(&self.engine.debug_sink))
-                .execute_with_account(&function, &[], &mut account)
-            {
+                .execute_with_account(&function, &[], &mut account);
+            let emitted = account.take_diagnostics();
+            for diagnostic in emitted {
+                if !diagnostics.iter().any(|existing| {
+                    existing.severity == diagnostic.severity
+                        && existing.message == diagnostic.message
+                        && existing.labels == diagnostic.labels
+                }) {
+                    diagnostics.push(diagnostic);
+                }
+            }
+            match result {
                 Ok(value) => {
                     values.insert(binding.value.name.value.clone(), value);
                 }
@@ -4825,6 +4842,14 @@ unchanged", "|"),
                }"#,
         )
         .unwrap();
+        let snapshot = recovery_engine().recover_workspace(&main).unwrap();
+        let warning = snapshot
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.message == "deprecated")
+            .expect("reported warning");
+        assert_eq!(warning.severity, crate::source::Severity::Warning);
+        assert_eq!(warning.labels.len(), 3);
         let module = load_module(&main, BTreeMap::new(), 100_000).unwrap();
         assert_eq!(
             module.analysis.display(module.analysis.result_type),
@@ -8776,6 +8801,41 @@ result.unwrap(failure)"#;
         ] {
             assert_eq!(output.get(field).unwrap().to_string(), expected);
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn report_publishes_severity_and_invalidates_error_results() {
+        let directory = fixture_dir();
+        let main = directory.join("main.forma");
+        fs::write(
+            &main,
+            r#"let warning = report('Warn, blame!("deprecated", "old", 42));
+export let output: String = warning.message;"#,
+        )
+        .unwrap();
+        let module = load_module(&main, BTreeMap::new(), 100_000).unwrap();
+        assert_eq!(
+            named_output(module.execute(100_000).unwrap()).to_string(),
+            "\"deprecated\""
+        );
+
+        fs::write(
+            &main,
+            r#"let error = report('Error, blame!("invalid", 42));
+export let output: String = error.message;"#,
+        )
+        .unwrap();
+        let snapshot = recovery_engine().recover_workspace(&main).unwrap();
+        let error = snapshot
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.message == "invalid")
+            .expect("reported error");
+        assert_eq!(error.severity, crate::source::Severity::Error);
+        let module = load_module(&main, BTreeMap::new(), 100_000).unwrap();
+        let failure = module.execute(100_000).unwrap_err();
+        assert_eq!(failure.kind, crate::RuntimeErrorKind::ReportedDiagnostic);
         fs::remove_dir_all(directory).unwrap();
     }
 }

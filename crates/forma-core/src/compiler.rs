@@ -2557,6 +2557,26 @@ let decorators = {
     }
 
     #[test]
+    fn report_records_a_diagnostic_and_returns_the_error() {
+        let function = compile_source(
+            "test",
+            "let error = report('Warn, blame!(\"warning\", 1, \"two\")); error.message",
+        )
+        .unwrap();
+        let mut account = crate::QuotaAccount::new(crate::Quota::with_fuel(100_000));
+        let value = Vm::new()
+            .execute_with_account(&function, &[], &mut account)
+            .unwrap();
+        assert_eq!(value.to_string(), "\"warning\"");
+        assert_eq!(account.diagnostics().len(), 1);
+        assert_eq!(
+            account.diagnostics()[0].severity,
+            crate::source::Severity::Warning
+        );
+        assert_eq!(account.diagnostics()[0].labels.len(), 3);
+    }
+
+    #[test]
     fn if_let_selects_and_scopes_structural_patterns() {
         let some = run(
             "let value: Option(Int) = 'Some(3); if let 'Some(item) = value { item + 1 } else { 0 }",

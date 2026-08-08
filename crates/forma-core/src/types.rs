@@ -15,8 +15,8 @@ use crate::semantic::{
 };
 use crate::source::{Diagnostic, SourceDatabase};
 use crate::value::{
-    Atom, Closure, CoreBuiltinTypeFunction, CoreDynFunction, CoreModelFunction, NativeError,
-    NativeFunction, Value,
+    Atom, Closure, CoreBuiltinTypeFunction, CoreDiagnosticFunction, CoreDynFunction,
+    CoreModelFunction, NativeError, NativeFunction, Value,
 };
 use crate::{
     BuiltinAtom, CallContext, DebugSink, DiscardDebugSink, Quota, QuotaAccount, ValueKind,
@@ -3129,6 +3129,7 @@ fn core_prelude_values(vm: &mut Vm) -> BTreeMap<String, Value> {
         prelude.insert(name.into(), descriptor.to_value(vm));
     }
     prelude.insert("Bool".into(), normalized_bool_value(vm));
+    prelude.insert("Severity".into(), normalized_severity_value(vm));
     prelude.insert("BlameError".into(), blame_error_descriptor().to_value(vm));
     for function in [
         NativeFunction::core_model(CoreModelFunction::Struct),
@@ -3145,6 +3146,7 @@ fn core_prelude_values(vm: &mut Vm) -> BTreeMap<String, Value> {
         NativeFunction::new("Tuple", 1, native_tuple_type),
         NativeFunction::new("Fn", 2, native_function_type),
         NativeFunction::new("validate", 2, native_validate),
+        NativeFunction::core_diagnostic(CoreDiagnosticFunction::Report),
     ] {
         prelude.insert(
             function.name().into(),
@@ -3178,6 +3180,7 @@ fn core_prelude_types() -> HashMap<String, TypeDescriptor> {
         ("String", TypeDescriptor::String),
         ("Bytes", TypeDescriptor::Bytes),
         ("Bool", normalized_bool_descriptor()),
+        ("Severity", normalized_severity_descriptor()),
         ("BlameError", blame_error_descriptor()),
     ] {
         prelude.insert(name.into(), TypeDescriptor::TypeOf(Box::new(instance)));
@@ -3243,6 +3246,13 @@ fn core_prelude_types() -> HashMap<String, TypeDescriptor> {
     prelude.insert(
         "validate".into(),
         function(vec![metadata, TypeDescriptor::Any], TypeDescriptor::Any),
+    );
+    prelude.insert(
+        "report".into(),
+        function(
+            vec![normalized_severity_descriptor(), blame_error_descriptor()],
+            blame_error_descriptor(),
+        ),
     );
     prelude.insert(
         "\0forma_pack_dyn".into(),
@@ -3315,11 +3325,18 @@ fn core_prelude_schemes() -> HashMap<String, TypeScheme> {
                 result_descriptor(bound(0), blame_error_descriptor()),
             )),
         ),
+        (
+            "report".into(),
+            scheme(function(
+                vec![normalized_severity_descriptor(), blame_error_descriptor()],
+                blame_error_descriptor(),
+            )),
+        ),
     ])
 }
 
 pub(crate) fn audit_default_prelude_interface(interface: &ModuleInterface) -> Result<(), String> {
-    let expected = ["enum", "struct", "union", "validate"]
+    let expected = ["Severity", "enum", "report", "struct", "union", "validate"]
         .into_iter()
         .collect::<BTreeSet<_>>();
     let actual = interface
@@ -3328,7 +3345,10 @@ pub(crate) fn audit_default_prelude_interface(interface: &ModuleInterface) -> Re
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
     if actual != expected {
-        return Err("core/prelude must export exactly enum, struct, union, and validate".into());
+        return Err(
+            "core/prelude must export exactly Severity, enum, report, struct, union, and validate"
+                .into(),
+        );
     }
     let bootstrap = core_prelude_schemes();
     let expected_validate = &bootstrap["validate"];
@@ -3414,6 +3434,31 @@ fn normalized_bool_descriptor() -> TypeDescriptor {
     TypeDescriptor::Enum(BTreeMap::from([
         ("False".into(), None),
         ("True".into(), None),
+    ]))
+}
+
+fn normalized_severity_value(vm: &mut Vm) -> Value {
+    let variants = ["Error", "Info", "Warn"]
+        .into_iter()
+        .map(|name| (name.into(), normalized_legacy_value(vm, Value::none())))
+        .collect::<Vec<_>>();
+    let variants = vm
+        .make_dict(variants)
+        .expect("Severity variant names are unique");
+    let metadata = vm
+        .make_dict(vec![
+            ("kind".into(), Value::atom("Enum")),
+            ("variants".into(), variants),
+        ])
+        .expect("Severity metadata fields are unique");
+    normalized_legacy_value(vm, metadata)
+}
+
+fn normalized_severity_descriptor() -> TypeDescriptor {
+    TypeDescriptor::Enum(BTreeMap::from([
+        ("Error".into(), None),
+        ("Info".into(), None),
+        ("Warn".into(), None),
     ]))
 }
 
