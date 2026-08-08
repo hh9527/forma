@@ -131,6 +131,12 @@ policy。后续阶段还需要：
 - CLI 失败输出完整呈现 Host 已收集的多条诊断；
 - 递归 SQL AST 跨 legacy module value boundary。
 
+诊断伞 RFC 还记录了一个不实现的远期扩展：由调用者显式使用
+`call_with_diagnostics!(compiler(intent))`，在单个调用边界把子诊断重新数据化。
+它将是 `interpreter!` 同级的受控内建语法，而不是普通函数或通用 effect
+handler；只有嵌套意图编译器的真实需求足够明确时，才应另开 RFC 定义其类型和
+Error 传播规则。
+
 RFC 0190 已删除 `RequirementCompilation` 和诊断数组。当前实验没有证明需要
 accumulation effect：可恢复的领域拒绝使用 `emit_error! + Option`，真正无法继续
 的依赖链才使用 `raise!`。是否需要更细粒度恢复，应由新的真实场景重新举证。

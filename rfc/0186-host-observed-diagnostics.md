@@ -78,3 +78,36 @@ The experiment did not require an accumulation effect or generic recovery
 inside array combinators. Workspace recovery retains all four independent
 fixture errors; CLI rendering of the complete event set remains a Host-facing
 presentation improvement.
+
+## Future scoped observation
+
+The model intentionally leaves room for a future explicit observation
+boundary:
+
+```forma
+call_with_diagnostics!(compiler(intent))
+```
+
+This would be compiler-known syntax at the same privilege level as
+`interpreter!`, not an ordinary function, user-defined macro, or implicit call
+mode. Its operand would be syntactically restricted to a call expression. The
+intrinsic could establish a child diagnostic scope, evaluate that call once,
+and reify the reports produced along its dynamic call path for the caller.
+This is useful when one intent compiler embeds another and must deliberately
+decide whether to preserve, translate, or raise the nested diagnostics.
+
+No such intrinsic is implemented by this RFC. A future RFC must define at
+least:
+
+1. the typed result protocol, including the distinction between a value with
+   Info/Warn reports and rejection by Error;
+2. whether captured Error reports are consumed or automatically propagated;
+3. the treatment of `raise!` inside the child scope;
+4. which failures remain uncatchable, including cancellation, fuel, stack,
+   and allocation exhaustion;
+5. deterministic ordering, nesting, provenance, and cache replay;
+6. why the concrete use case cannot remain at the current Host boundary.
+
+Introducing this form would explicitly amend the current write-only invariant.
+It must remain a narrow, call-site-selected bridge rather than grow into
+user-defined handlers or a general effect system.
