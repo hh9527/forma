@@ -1,6 +1,6 @@
 # RFC 0197: Reusable domain-compiler methods
 
-- Status: Accepted
+- Status: Implemented
 - Depends on: RFC 0166, RFC 0193
 
 ## Summary
@@ -145,6 +145,57 @@ The final comparison rates each extracted abstraction qualitatively:
 
 No aggregate numeric score is required. A partially reusable method is a
 successful result when its value is visible and its boundary is explicit.
+
+## Comparative implementation result
+
+The experiment found a useful but deliberately small cross-industry layer.
+`domain-method/method.telora` contains independent lowering, completeness,
+composition, fallback, and finalization combinators. Both reporting and the GCC
+wrapper use it without leaking either domain's vocabulary into that module.
+
+The larger reuse boundary is industry-specific. `analytics-method` owns graph
+closure, connecting-edge selection, and missing-field analysis while remaining
+generic over the concrete Entity, Relation, and result-field types.
+`toolchain-method` owns package lookup and deterministic archive preparation;
+the GCC model still owns TARGET selection, tool choice, sysroot policy, and
+argument rewriting. These different boundaries are evidence for the layered
+model, not a failure to discover one universal framework.
+
+Concrete reporting intents remain short domain values. Concrete catalogs,
+measure semantics, relations, and SQL payloads remain in the reporting model.
+Likewise, package sources and command policy remain outside the shared method
+module. Changes to those facts do not require editing the cross-industry core.
+
+RFC 0201 adds an ordinary JSON restriction. The domain model decodes and
+interprets it, successful plans record its revision, and rejected requirements
+carry source labels from the authored intent, JSON data, and Telora rule. This
+work also repaired recovery evaluation to preserve authoritative persistent
+module roots: sourced data and recursive closures no longer cross a lossy
+legacy `Value` boundary before diagnostic evaluation.
+
+The established reporting SQL results, four-diagnostic invalid fixture, GCC
+dry-run shape, and deterministic installation hashes remain unchanged.
+
+## Honest boundaries
+
+- The shared algebra is orchestration, not an ontology representation. Its
+  value is consistent control flow and completion policy, not domain meaning.
+- Rank-1 generics are sufficient for these combinators, but Telora still lacks
+  user-defined parameterized type constructors; therefore abstractions such as
+  `Capability(K, A, B)` remain domain-owned records rather than one generic
+  framework type.
+- Analytics reachability uses a documented six-round closure suitable for the
+  bounded example. It is not an unbounded graph algorithm or proof of arbitrary
+  ontology traversal.
+- Diagnostics can be emitted independently and recovered by the Host, but
+  user code still cannot explicitly observe one call's diagnostic stream;
+  `call_with_diagnostics!` remains only a possible future boundary.
+- Restriction freshness, database execution, downloads, and process effects
+  remain Host responsibilities. The plan records enough data to make those
+  responsibilities explicit; Telora does not claim to eliminate them.
+- Two industries demonstrate a stable layering technique, not universal domain
+  coverage. A third industry should be added only when it provides new pressure
+  rather than another tailored success example.
 
 ## Gap taxonomy
 
