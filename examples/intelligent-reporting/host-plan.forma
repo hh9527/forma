@@ -10,7 +10,7 @@ let compilation = compile({
     render: 'Json,
 });
 
-let checked: Option(ExecutionPlan) = compilation.plan;
+let checked: Option(ExecutionPlan) = compilation;
 
 export let output = match checked {
     'Some(plan) => encode_plan(plan),

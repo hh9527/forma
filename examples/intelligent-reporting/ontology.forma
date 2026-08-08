@@ -62,11 +62,6 @@ import "./execution.forma" { OutputMode, ExecutionPlan };
     required_entity: Entity,
 };
 
-@struct type RequirementCompilation = {
-    requirement: Option(GroupRequirement),
-    diagnostics: Array(BlameError),
-};
-
 @struct type FilterRequirement = {
     source: Filter,
     expression: SqlScalar,
@@ -92,13 +87,8 @@ import "./execution.forma" { OutputMode, ExecutionPlan };
     render: OutputMode,
 };
 
-@struct type Compilation = {
-    plan: Option(ExecutionPlan),
-    diagnostics: Array(BlameError),
-};
-
 type MeasureLowerer = Fn() -> QueryPlan;
-type DimensionLowerer = Fn(Measure) -> RequirementCompilation;
+type DimensionLowerer = Fn(Measure) -> Option(GroupRequirement);
 
 @struct type MeasureCapability = {
     id: Measure,
@@ -110,18 +100,13 @@ type DimensionLowerer = Fn(Measure) -> RequirementCompilation;
     lower: DimensionLowerer,
 };
 
-def complete_requirement: Fn(Dimension, Projection, SqlScalar, Entity) -> RequirementCompilation = fn(dimension, projected, group_expression, required_entity) {
-    {
-        requirement: 'Some({dimension, projection: projected, group_expression, required_entity}),
-        diagnostics: [],
-    }
+def complete_requirement: Fn(Dimension, Projection, SqlScalar, Entity) -> Option(GroupRequirement) = fn(dimension, projected, group_expression, required_entity) {
+    'Some({dimension, projection: projected, group_expression, required_entity})
 };
 
-def rejected_requirement: Fn(Dimension, String) -> RequirementCompilation = fn(value, message) {
-    {
-        requirement: 'None,
-        diagnostics: [blame!(message, value)],
-    }
+def rejected_requirement: Fn(Dimension, String) -> Option(GroupRequirement) = fn(value, message) {
+    let ignored = emit_error!(message, value);
+    'None
 };
 
 # A higher-order compiler factory: construct a dimension capability whose
@@ -329,37 +314,25 @@ def dimension_capability: Fn(Dimension) -> DimensionCapability = fn(dimension) {
     }
 };
 
-def measure_diagnostics: Fn(ReportIntent) -> Array(BlameError) = fn(intent) {
+def selected_measure: Fn(ReportIntent) -> Option(Measure) = fn(intent) {
     if array.length(intent.measures) == 1 {
-        []
+        array.find(intent.measures, fn(ignored) { 'True })
     } else {
-        [blame!("the initial compiler requires exactly one measure", intent.measures)]
+        let ignored = emit_error!("the initial compiler requires exactly one measure", intent.measures);
+        'None
     }
 };
 
-def selected_measure: Fn(ReportIntent) -> Measure = fn(intent) {
-    match array.find(intent.measures, fn(ignored) { 'True }) {
-        'Some(measure) => measure,
-        'None => 'NetRevenue,
-    }
-};
-
-def compile_requirements: Fn(Measure, Array(Dimension)) -> Array(RequirementCompilation) = fn(measure, dimensions) {
+def compile_requirements: Fn(Measure, Array(Dimension)) -> Array(Option(GroupRequirement)) = fn(measure, dimensions) {
     array.map(dimensions, fn(dimension) {
         let capability = dimension_capability(dimension);
         capability.lower(measure)
     })
 };
 
-def requirement_diagnostics: Fn(Array(RequirementCompilation)) -> Array(BlameError) = fn(compilations) {
+def successful_requirements: Fn(Array(Option(GroupRequirement))) -> Array(GroupRequirement) = fn(compilations) {
     array.flat_map(compilations, fn(compilation) {
-        compilation.diagnostics
-    })
-};
-
-def successful_requirements: Fn(Array(RequirementCompilation)) -> Array(GroupRequirement) = fn(compilations) {
-    array.flat_map(compilations, fn(compilation) {
-        match compilation.requirement {
+        match compilation {
             'Some(requirement) => [requirement],
             'None => [],
         }
@@ -378,14 +351,16 @@ def compile_filters: Fn(Array(Filter)) -> Array(FilterRequirement) = fn(filters)
     })
 };
 
-def order_diagnostics: Fn(ReportIntent) -> Array(BlameError) = fn(intent) {
-    array.flat_map(intent.order_by, fn(ordered) {
+def verify_order: Fn(ReportIntent) -> Bool = fn(intent) {
+    let checks: Array(Bool) = array.map(intent.order_by, fn(ordered) {
         if array.any(intent.dimensions, fn(dimension) { dimension == ordered }) {
-            []
+            'True
         } else {
-            [blame!("an ordered dimension must also be selected", ordered)]
+            let ignored = emit_error!("an ordered dimension must also be selected", ordered);
+            'False
         }
-    })
+    });
+    array.all(checks, fn(valid) { valid })
 };
 
 def ordered_expressions: Fn(Array(Dimension), Array(GroupRequirement)) -> Array(SqlScalar) = fn(ordered, requirements) {
@@ -405,23 +380,24 @@ def required_targets: Fn(QueryPlan, Array(GroupRequirement), Array(FilterRequire
     ])
 };
 
-def relationship_diagnostics: Fn(PathPlan, Array(GroupRequirement)) -> Array(BlameError) = fn(paths, requirements) {
-    array.concat([
+def verify_relationships: Fn(PathPlan, Array(GroupRequirement)) -> Bool = fn(paths, requirements) {
+    let failures = array.concat([
         array.flat_map(paths.fanout, fn(target) {
             array.map(
                 array.filter(requirements, fn(requirement) { requirement.required_entity == target }),
                 fn(requirement) {
-                    blame!(`reaching \{target} expands the measure grain; define pre-aggregation or an allocation policy`, requirement.dimension)
+                    emit_error!(`reaching \{target} expands the measure grain; define pre-aggregation or an allocation policy`, requirement.dimension)
                 },
             )
         }),
         array.flat_map(paths.missing, fn(target) {
             array.map(
                 array.filter(requirements, fn(requirement) { requirement.required_entity == target }),
-                fn(requirement) { blame!(`no verified relationship path reaches \{target}`, requirement.dimension) },
+                fn(requirement) { emit_error!(`no verified relationship path reaches \{target}`, requirement.dimension) },
             )
         }),
-    ])
+    ]);
+    array.length(failures) == 0
 };
 
 def lower_semantics: Fn(ReportIntent, QueryPlan, Array(GroupRequirement), Array(FilterRequirement)) -> SemanticPlan = fn(intent, query_plan, requirements, filter_requirements) {
@@ -476,35 +452,32 @@ def lower_sql: Fn(RelationalPlan) -> SqlPlan = fn(relational) {
     }
 };
 
-export def compile: Fn(ReportIntent) -> Compilation = fn(intent) {
-    let measure = selected_measure(intent);
-    let capability = measure_capability(measure);
-    let query_plan = capability.lower();
-    let requirement_compilations = compile_requirements(measure, intent.dimensions);
-    let requirements = successful_requirements(requirement_compilations);
-    let filter_requirements = compile_filters(intent.filters);
-    let semantic = lower_semantics(intent, query_plan, requirements, filter_requirements);
-    let relational = lower_relationships(semantic);
-    let paths = relational.paths;
-    let diagnostics = array.concat([
-        measure_diagnostics(intent),
-        requirement_diagnostics(requirement_compilations),
-        relationship_diagnostics(paths, requirements),
-        order_diagnostics(intent),
-    ]);
-    if array.length(diagnostics) == 0 {
-        {
-            plan: 'Some({
+export def compile: Fn(ReportIntent) -> Option(ExecutionPlan) = fn(intent) {
+    let order_valid = verify_order(intent);
+    match selected_measure(intent) {
+        'None => 'None,
+        'Some(measure) => {
+            let capability = measure_capability(measure);
+            let query_plan = capability.lower();
+            let requirement_compilations = compile_requirements(measure, intent.dimensions);
+            let requirements = successful_requirements(requirement_compilations);
+            let requirements_complete = array.length(requirements) == array.length(intent.dimensions);
+            let filter_requirements = compile_filters(intent.filters);
+            let semantic = lower_semantics(intent, query_plan, requirements, filter_requirements);
+            let relational = lower_relationships(semantic);
+            let relationships_valid = verify_relationships(relational.paths, requirements);
+            if requirements_complete && relationships_valid && order_valid {
+                'Some({
                 version: 1,
                 dialect: 'Sqlite,
                 statement: render_select(lower_sql(relational).query),
                 read_only: 'True,
                 output: intent.render,
-            }),
-            diagnostics,
+                })
+            } else {
+                'None
+            }
         }
-    } else {
-        {plan: 'None, diagnostics}
     }
 };
 
@@ -512,7 +485,6 @@ export {
     Measure,
     Dimension,
     ReportIntent,
-    Compilation,
     MeasureCapability,
     DimensionCapability,
     SemanticPlan,

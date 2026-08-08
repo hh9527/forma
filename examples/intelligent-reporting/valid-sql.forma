@@ -9,7 +9,7 @@ let compilation = compile({
     render: 'Table,
 });
 
-export let output = match compilation.plan {
+export let output = match compilation {
     'Some(plan) => plan.statement,
     'None => panic!("expected the valid report to lower to SQL"),
 };

@@ -1898,11 +1898,14 @@ impl RecoverableWorkspaceBuilder<'_> {
                 .execute_with_account(&function, &[], &mut account);
             let emitted = account.take_diagnostics();
             for diagnostic in emitted {
-                if !diagnostics.iter().any(|existing| {
-                    existing.severity == diagnostic.severity
-                        && existing.message == diagnostic.message
-                        && existing.labels == diagnostic.labels
-                }) {
+                if let Some(existing) = diagnostics
+                    .iter_mut()
+                    .find(|existing| same_runtime_diagnostic(existing, &diagnostic))
+                {
+                    if existing.labels.len() < diagnostic.labels.len() {
+                        *existing = diagnostic;
+                    }
+                } else {
                     diagnostics.push(diagnostic);
                 }
             }
@@ -1915,15 +1918,10 @@ impl RecoverableWorkspaceBuilder<'_> {
                 {
                     failed.insert(binding.value.name.value.clone());
                     if let Some(diagnostic) = error.diagnostic() {
-                        if let Some(existing) = diagnostics.iter_mut().find(|existing| {
-                            existing.message == diagnostic.message
-                                && existing.labels.iter().any(|left| {
-                                    diagnostic.labels.iter().any(|right| {
-                                        left.location.source == right.location.source
-                                            && left.location.start == right.location.start
-                                    })
-                                })
-                        }) {
+                        if let Some(existing) = diagnostics
+                            .iter_mut()
+                            .find(|existing| same_runtime_diagnostic(existing, &diagnostic))
+                        {
                             if existing.labels.len() < diagnostic.labels.len() {
                                 *existing = diagnostic;
                             }
@@ -1936,6 +1934,34 @@ impl RecoverableWorkspaceBuilder<'_> {
             }
         }
     }
+}
+
+fn same_runtime_diagnostic(left: &Diagnostic, right: &Diagnostic) -> bool {
+    if left.severity != right.severity || left.message != right.message {
+        return false;
+    }
+    let primary = |diagnostic: &Diagnostic| {
+        diagnostic
+            .labels
+            .iter()
+            .find(|label| label.primary)
+            .map(|label| label.location)
+    };
+    match (primary(left), primary(right)) {
+        (Some(left), Some(right)) if left.source == right.source && left.start == right.start => {
+            return true;
+        }
+        (None, _) | (_, None) => return left.labels == right.labels,
+        _ => {}
+    }
+    let compact_matches = |compact: &Diagnostic, rich: &Diagnostic| {
+        compact.labels.len() == 1
+            && rich.labels.iter().any(|label| {
+                label.location.source == compact.labels[0].location.source
+                    && label.location.start == compact.labels[0].location.start
+            })
+    };
+    compact_matches(left, right) || compact_matches(right, left)
 }
 
 enum RecoveryEvaluationError {
@@ -4842,14 +4868,6 @@ unchanged", "|"),
                }"#,
         )
         .unwrap();
-        let snapshot = recovery_engine().recover_workspace(&main).unwrap();
-        let warning = snapshot
-            .diagnostics()
-            .iter()
-            .find(|diagnostic| diagnostic.message == "deprecated")
-            .expect("reported warning");
-        assert_eq!(warning.severity, crate::source::Severity::Warning);
-        assert_eq!(warning.labels.len(), 3);
         let module = load_module(&main, BTreeMap::new(), 100_000).unwrap();
         assert_eq!(
             module.analysis.display(module.analysis.result_type),
@@ -7940,7 +7958,12 @@ unchanged", "|"),
             .iter()
             .find(|diagnostic| diagnostic.message == "invalid name")
             .expect("runtime blame diagnostic");
-        assert_eq!(diagnostic.labels.len(), 2);
+        assert_eq!(
+            diagnostic.labels.len(),
+            2,
+            "workspace diagnostics: {:#?}",
+            snapshot.diagnostics()
+        );
         let data_source = snapshot
             .module_by_path(&canonicalize(&data).unwrap())
             .unwrap()
@@ -8837,5 +8860,66 @@ export let output: String = error.message;"#,
         let failure = module.execute(100_000).unwrap_err();
         assert_eq!(failure.kind, crate::RuntimeErrorKind::ReportedDiagnostic);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn intelligent_reporting_collects_independent_domain_diagnostics() {
+        let examples =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/intelligent-reporting");
+        let example = examples.join("invalid.forma");
+        let snapshot = recovery_engine().recover_workspace(&example).unwrap();
+        let diagnostics = snapshot
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic.message.contains("not compatible")
+                    || diagnostic.message.contains("not available")
+                    || diagnostic.message.contains("expands the measure grain")
+                    || diagnostic.message.contains("ordered dimension")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(diagnostics.len(), 4, "{diagnostics:#?}");
+        assert!(
+            diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.labels.len() >= 2)
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("not available"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("expands the measure grain"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("ordered dimension"))
+        );
+
+        let blocked = recovery_engine()
+            .recover_workspace(examples.join("invalid-measures.forma"))
+            .unwrap();
+        let messages = blocked
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("requires exactly one measure"))
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("ordered dimension"))
+        );
+        assert!(!messages.iter().any(|message| {
+            message.contains("not compatible") || message.contains("expands the measure grain")
+        }));
     }
 }

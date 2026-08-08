@@ -24,8 +24,9 @@ Forma 代码将合法意图逐步 lowering 为 SQLite SQL。
 - RFC 0186：新的诊断伞 RFC 已接受；RFC 0187 已完成 message-first variadic
   `blame!` 与 `raise!`；RFC 0188 已完成普通 `report` BIF、Info/Warn/Error
   事件及 Error 成功边界；RFC 0189 已完成 `emit_info!`、`emit_warn!`、
-  `emit_error!` 与 `fail!` 便利形式。它支持普通控制流内继续诊断，但没有虚构
-  通用的数组元素级恢复；下一步由 RFC 0190 用本实验验证实际边界。
+  `emit_error!` 与 `fail!` 便利形式；RFC 0190 已完成领域库迁移，删除显式诊断
+  数组，并证明普通 `Option`、数组组合子与 Host 事件足以覆盖当前本体实验；
+- RFC 0186：全部四个子阶段已经完成。
 
 ## 文件
 
@@ -38,6 +39,8 @@ Forma 代码将合法意图逐步 lowering 为 SQLite SQL。
 - `valid.forma`：按月份、客户区域统计净收入；
 - `valid-units.forma`：按月份、品类、SKU 统计销量；
 - `invalid.forma`：一次暴露四个独立领域错误；
+- `invalid-measures.forma`：拒绝多 measure 意图，不用任意 fallback 猜测依赖它的
+  dimension 诊断；
 - `valid-sql.forma`：导出生成的 SQL，供 SQLite 执行；
 - `host-plan.forma`：模拟 Host shape 核对并输出 JSON plan；
 - `net-revenue.sql`：手写参考查询。
@@ -76,7 +79,8 @@ cargo run -p forma -- run examples/intelligent-reporting/invalid.forma
 - 高阶 factory 可以表达通用、特定 measure 和暂不支持的 dimension 家族；
 - 校验与 lowering 是同一过程：合法 dimension 产生 grouping requirement，非法
   组合产生诊断，不需要平行的 Boolean 兼容矩阵；
-- 各 dimension lowerer 独立运行，一次编译可以累计四个错误；
+- 各 dimension lowerer 独立运行，一次编译可以报告四个错误；诊断是 Host 事件，
+  不再是领域函数返回值；
 - capability 不再拼接 SQL，标识符和字面量只由 renderer 转义；
 - measure 只声明 base entity 和自身语义需要的 entity，dimension 只声明目标
   entity；关系 planner 从 catalog 计算二者之间的最小相关 edge 集合；
@@ -86,8 +90,9 @@ cargo run -p forma -- run examples/intelligent-reporting/invalid.forma
 - filter 本身也声明所需 entity，因此会参与同一关系规划；排序只能引用已经
   选择的 dimension，limit 与 render mode 保留在 typed plan 中；
 - semantic、relational、SQL 三个中间计划都是普通 Forma 值和显式函数边界；
-- 成功编译只发布无权限的 `ExecutionPlan`；Host 可以静态核对 shape，再接收
-  显式版本化 JSON。失败编译始终得到 `plan: None`；
+- 成功编译只发布无权限的 `Option(ExecutionPlan)`；Host 可以静态核对 shape，
+  再接收显式版本化 JSON。失败 lowering 得到 `None`，任意 Error 事件同时阻止
+  evaluation 被发布为成功；
 - 失败结果不发布 SQL，成功结果可以直接被 SQLite 执行。
 
 ## RFC 0181 的边界发现
@@ -112,17 +117,20 @@ group 和 order。任意深度表达式及嵌套 CTE 暂不支持；未来修复
 
 ## 尚未解决
 
-这轮伞 RFC 已完成，但它还不是通用查询规划器。当前 catalog 是有序、无代价的有向关系集合，使用
-固定六轮闭包覆盖这个有界本体；它不在多条语义不同的路径之间猜测。当前也
+这两轮伞 RFC 已完成，但它还不是通用查询规划器。当前 catalog 是有序、无代价
+的有向关系集合，使用固定六轮闭包覆盖这个有界本体；它不在多条语义不同的
+路径之间猜测。当前也
 只有“保持 grain”与“fan-out”两级证明，尚未实现具体预聚合或 allocation
 policy。后续阶段还需要：
 
 - 预聚合与 allocation policy；
 - 参数、drill 和更丰富的 render 意图；
-- 分阶段的 semantic/relational/SQL plan；
-- 结果 schema 与 Host 执行边界；
+- 参数、结果 schema 与 render plan 的一致性证明；
+- 授权和 catalog 的显式 Context；
 - provenance 穿过所有中间计划；
-- 更自然的诊断累积能力。
+- CLI 失败输出完整呈现 Host 已收集的多条诊断；
+- 递归 SQL AST 跨 legacy module value boundary。
 
-显式的 `RequirementCompilation` 和诊断数组证明了多错误反馈可行，也清楚暴露
-了未来窄化 accumulation 能力所要消除的样板代码。
+RFC 0190 已删除 `RequirementCompilation` 和诊断数组。当前实验没有证明需要
+accumulation effect：可恢复的领域拒绝使用 `emit_error! + Option`，真正无法继续
+的依赖链才使用 `raise!`。是否需要更细粒度恢复，应由新的真实场景重新举证。

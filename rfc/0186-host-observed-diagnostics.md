@@ -1,6 +1,6 @@
 # RFC 0186: Host-observed diagnostics
 
-- Status: Accepted
+- Status: Implemented
 - Amends: RFC 0105, RFC 0112, and RFC 0167
 
 ## Summary
@@ -44,8 +44,8 @@ independent siblings but can never publish a partial value.
    `reraise!` with `raise!`;
 2. RFC 0188 adds severity, the ordinary `report` BIF, diagnostic events, and
    final-success invalidation;
-3. RFC 0189 adds the four convenience intrinsics and Host-controlled
-   best-effort sibling exploration;
+3. RFC 0189 adds the four convenience intrinsics and records the precise
+   boundary of ordinary control-flow and retained-binding recovery;
 4. RFC 0190 migrates the reporting experiment away from explicit diagnostic
    arrays and records the resulting boundary.
 
@@ -67,3 +67,14 @@ independent siblings but can never publish a partial value.
 - a general algebraic effect or logging system;
 - dynamically selecting evaluation policy from Forma code;
 - making fatal Host/runtime failures constructible as domain diagnostics.
+
+## Completion
+
+RFCs 0187 through 0190 are implemented. The intelligent-reporting experiment
+now reports independent domain violations without returning or concatenating
+diagnostic arrays. Ordinary `Option` values represent unavailable local
+lowering results, while write-only Host events carry authoritative violations.
+The experiment did not require an accumulation effect or generic recovery
+inside array combinators. Workspace recovery retains all four independent
+fixture errors; CLI rendering of the complete event set remains a Host-facing
+presentation improvement.
