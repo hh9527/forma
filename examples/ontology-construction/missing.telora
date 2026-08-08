@@ -15,6 +15,6 @@ export let output = method.lower_requested(
     ['Revenue, 'Units],
     [revenue],
     fn(item) { item.id },
-    fn(item) { item.lower },
+    fn(item, id, input) { item.lower(input) },
     'Order,
 );

@@ -21,7 +21,7 @@ lower_requested:
         Array(Id),
         Array(Capability),
         Fn(Capability) -> Id,
-        Fn(Capability) -> Fn(Input) -> Option(Output),
+        Fn(Capability, Id, Input) -> Option(Output),
         Input,
     ) -> Array(Option(Output))
 ```

@@ -1,6 +1,6 @@
 import "std/array" as array;
 import "std/codec" as codec;
-import "domain-method/method.telora" as method;
+import "ontology-method/ontology.telora" as ontology;
 import "analytics-method/analytics.telora" as analytics;
 import "./sql.telora" {
     Function,
@@ -115,8 +115,8 @@ import "./execution.telora" {
     result_schema: Array(ResultField),
 };
 
-type MeasureLowerer = Fn(Alignment) -> Option(QueryPlan);
-type DimensionLowerer = Fn(Array(Measure)) -> Option(GroupRequirement);
+type MeasureLowerer = Fn(Measure, Alignment) -> Option(QueryPlan);
+type DimensionLowerer = Fn(Dimension, Array(Measure)) -> Option(GroupRequirement);
 
 @struct type MeasureCapability = {
     id: Measure,
@@ -145,8 +145,8 @@ def rejected_requirement: Fn(Dimension, String) -> Option(GroupRequirement) = fn
 def universal_dimension: Fn(Dimension, Projection, Expr, Entity, ResultField) -> DimensionCapability = fn(id, projected, group_expression, required_entity, result_field) {
     {
         id,
-        lower: fn(measures) {
-            complete_requirement(id, projected, group_expression, required_entity, result_field)
+        lower: fn(requested, measures) {
+            complete_requirement(requested, projected, group_expression, required_entity, result_field)
         },
     }
 };
@@ -156,12 +156,12 @@ def universal_dimension: Fn(Dimension, Projection, Expr, Entity, ResultField) ->
 def measure_dimension: Fn(Dimension, Measure, Projection, Expr, Entity, ResultField) -> DimensionCapability = fn(id, required_measure, projected, group_expression, required_entity, result_field) {
     {
         id,
-        lower: fn(actual_measures) {
+        lower: fn(requested, actual_measures) {
             if array.all(actual_measures, fn(actual_measure) { actual_measure == required_measure }) {
                 complete_requirement(id, projected, group_expression, required_entity, result_field)
             } else {
                 rejected_requirement(
-                    id,
+                    requested,
                     `dimension \{id} is not compatible with every selected measure \{actual_measures} at its current grain`,
                 )
             }
@@ -172,8 +172,8 @@ def measure_dimension: Fn(Dimension, Measure, Projection, Expr, Entity, ResultFi
 def unsupported_dimension: Fn(Dimension, String) -> DimensionCapability = fn(id, reason) {
     {
         id,
-        lower: fn(measures) {
-            rejected_requirement(id, `dimension \{id} is not available: \{reason}`)
+        lower: fn(requested, measures) {
+            rejected_requirement(requested, `dimension \{requested} is not available: \{reason}`)
         },
     }
 };
@@ -254,7 +254,7 @@ def net_revenue: MeasureCapability = {
     value_type: 'MoneyCents,
     natural_grain: 'Order,
     aggregation: 'Additive,
-    lower: fn(alignment) {
+    lower: fn(requested, alignment) {
         let aligned = match alignment {
             'Natural => 'Some('Order),
             'PreAggregate(target) => if target == 'Order {
@@ -267,7 +267,7 @@ def net_revenue: MeasureCapability = {
         match aligned {
         'None => 'None,
         'Some(base_entity) => 'Some({
-            measures: ['NetRevenue],
+            measures: [requested],
             base_entity,
             required_entities: [],
             common_tables: [
@@ -300,10 +300,10 @@ def units_sold: MeasureCapability = {
     value_type: 'Count,
     natural_grain: 'OrderItem,
     aggregation: 'Additive,
-    lower: fn(alignment) {
+    lower: fn(requested, alignment) {
         match alignment {
         'Natural => 'Some({
-            measures: ['UnitsSold],
+            measures: [requested],
             base_entity: 'OrderItem,
             required_entities: ['Order],
             common_tables: [],
@@ -315,7 +315,7 @@ def units_sold: MeasureCapability = {
         }),
         'PreAggregate(target) => if target == 'Order {
             'Some({
-                measures: ['UnitsSold],
+                measures: [requested],
                 base_entity: 'Order,
                 required_entities: [],
                 common_tables: [{
@@ -355,12 +355,7 @@ def units_sold: MeasureCapability = {
     },
 };
 
-def measure_capability: Fn(Measure) -> MeasureCapability = fn(measure) {
-    match measure {
-        'NetRevenue => net_revenue,
-        'UnitsSold => units_sold,
-    }
-};
+def measure_capabilities: Array(MeasureCapability) = [net_revenue, units_sold];
 
 def dimension_capability: Fn(Dimension) -> DimensionCapability = fn(dimension) {
     match dimension {
@@ -407,6 +402,18 @@ def dimension_capability: Fn(Dimension) -> DimensionCapability = fn(dimension) {
     }
 };
 
+def dimension_capabilities: Array(DimensionCapability) = array.map(
+    [
+        'OrderMonth,
+        'CustomerRegion,
+        'OrganizationKind,
+        'ProductCategory,
+        'EmployeeKind,
+        'ProductSku,
+    ],
+    dimension_capability,
+);
+
 def selected_measures: Fn(ReportIntent) -> Option(Array(Measure)) = fn(intent) {
     if array.length(intent.measures) == 0 {
         let ignored = emit_error!("a report requires at least one measure", intent.measures);
@@ -417,20 +424,27 @@ def selected_measures: Fn(ReportIntent) -> Option(Array(Measure)) = fn(intent) {
 };
 
 def compile_requirements: Fn(Array(Measure), Array(Dimension)) -> Array(Option(GroupRequirement)) = fn(measures, dimensions) {
-    method.lower_independent(dimensions, fn(dimension) {
-        let capability = dimension_capability(dimension);
-        capability.lower(measures)
-    })
+    ontology.lower_requested(
+        dimensions,
+        dimension_capabilities,
+        fn(capability) { capability.id },
+        fn(capability, dimension, selected) { capability.lower(dimension, selected) },
+        measures,
+    )
 };
 
 def compile_measure_fragments: Fn(Array(Measure), Alignment) -> Array(Option(QueryPlan)) = fn(measures, alignment) {
-    method.lower_independent(measures, fn(measure) {
-        measure_capability(measure).lower(alignment)
-    })
+    ontology.lower_requested(
+        measures,
+        measure_capabilities,
+        fn(capability) { capability.id },
+        fn(capability, measure, selected_alignment) { capability.lower(measure, selected_alignment) },
+        alignment,
+    )
 };
 
 def successful_query_plans: Fn(Array(Option(QueryPlan))) -> Array(QueryPlan) = fn(compilations) {
-    method.completed(compilations)
+    ontology.completed(compilations)
 };
 
 def combine_query_plans: Fn(Array(QueryPlan), Alignment) -> Option(QueryPlan) = fn(plans, alignment) {
@@ -466,7 +480,7 @@ def combine_query_plans: Fn(Array(QueryPlan), Alignment) -> Option(QueryPlan) = 
 };
 
 def successful_requirements: Fn(Array(Option(GroupRequirement))) -> Array(GroupRequirement) = fn(compilations) {
-    method.completed(compilations)
+    ontology.completed(compilations)
 };
 
 def compile_filters: Fn(Array(Filter)) -> Array(FilterRequirement) = fn(filters) {

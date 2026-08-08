@@ -1,4 +1,4 @@
-import "./ontology.telora" { compile };
+import "./b2b-model.telora" { compile };
 import "./restriction.json" as restriction;
 
 let compilation = compile(restriction, {

@@ -22,13 +22,13 @@ def lower_requested:
         Array(Id),
         Array(Capability),
         Fn(Capability) -> Id,
-        Fn(Capability) -> Fn(Input) -> Option(Output),
+        Fn(Capability, Id, Input) -> Option(Output),
         Input,
     ) -> Array(Option(Output)) =
     fn(requested, capabilities, id_of, lower_of, input) {
         array.map(requested, fn(id) {
             match find_capability(capabilities, id, id_of) {
-                'Some(capability) => lower_of(capability)(input),
+                'Some(capability) => lower_of(capability, id, input),
                 'None => {
                     let ignored = emit_error!(`no ontology capability is defined for \{id}`, id);
                     'None

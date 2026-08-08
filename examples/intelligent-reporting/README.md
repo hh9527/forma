@@ -39,6 +39,10 @@ Telora 代码将合法意图逐步 lowering 为 SQLite SQL。
   RFC 0199 抽取 analytics 行业方法，RFC 0200 用 GCC wrapper 验证 toolchain 行业
   方法，RFC 0201 证明普通外部 restriction 数据可以参与 lowering，并保留跨来源
   诊断。共享层保持很小，没有伪装成通用 ontology framework。
+- RFC 0202：ontology 定义方法复用实验已启动；RFC 0203 证明普通函数可以生成
+  跨模块严格检查的 capability 类型，RFC 0204 抽取 typed capability、关系和
+  restriction 方法，RFC 0205 已将本目录明确拆为共享 ontology 方法与具体 B2B
+  模型，既有 SQL、诊断和 wire plan 保持不变。
 
 ## 文件
 
@@ -47,7 +51,9 @@ Telora 代码将合法意图逐步 lowering 为 SQLite SQL。
 - `sql.telora`：最小 SQL AST 与 SQLite renderer；
 - `relations.telora`：关系 catalog、可达性分析和 join 路径规划；
 - `execution.telora`：Host-facing typed plan 与显式 wire encoding；
-- `ontology.telora`：领域校验和 lowering；
+- `b2b-model.telora`：B2B 领域类型、指标、维度、物理映射、校验和 lowering；
+- `../ontology-method/src/types.telora`：可复用的 TypeMetadata 类型构造器；
+- `../ontology-method/src/ontology.telora`：typed capability、关系与授权组合方法；
 - `restriction.json`：允许全部报表 entity 的普通外部 restriction；
 - `restricted.json`：只允许 Order entity，用于跨来源诊断回归；
 - `valid.telora`：按月份、客户区域统计净收入；

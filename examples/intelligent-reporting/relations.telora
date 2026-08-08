@@ -1,5 +1,5 @@
 import "std/array" as array;
-import "analytics-method/analytics.telora" as analytics;
+import "ontology-method/ontology.telora" as ontology;
 
 @enum type Entity = {
     Region: 'None,
@@ -48,19 +48,19 @@ def fanout_catalog: Array(Relation) = [
 ];
 
 def contains: Fn(Array(Entity), Entity) -> Bool = fn(values, expected) {
-    analytics.contains(values, expected)
+    ontology.contains(values, expected)
 };
 
 def relation_from: Fn(Relation) -> Entity = fn(relation) { relation.from };
 def relation_to: Fn(Relation) -> Entity = fn(relation) { relation.to };
 
 def plan: Fn(Entity, Array(Entity)) -> PathPlan = fn(base, targets) {
-    let needed = analytics.close_six(catalog, targets, relation_to, relation_from);
-    let safe_reachable = analytics.close_six(catalog, [base], relation_from, relation_to);
+    let needed = ontology.close_six(catalog, targets, relation_to, relation_from);
+    let safe_reachable = ontology.close_six(catalog, [base], relation_from, relation_to);
     let all = array.concat([catalog, fanout_catalog]);
-    let all_reachable = analytics.close_six(all, [base], relation_from, relation_to);
+    let all_reachable = ontology.close_six(all, [base], relation_from, relation_to);
     {
-        relations: analytics.select_connecting_edges(
+        relations: ontology.select_connecting_edges(
             catalog, safe_reachable, needed, relation_from, relation_to,
         ),
         fanout: array.filter(targets, fn(target) {

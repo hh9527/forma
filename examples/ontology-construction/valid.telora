@@ -27,7 +27,7 @@ let lowered = method.lower_requested(
     ['Revenue],
     [capability],
     fn(item) { item.id },
-    fn(item) { item.lower },
+    fn(item, id, input) { item.lower(input) },
     'Order,
 );
 

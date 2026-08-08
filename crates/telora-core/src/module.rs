@@ -9206,7 +9206,7 @@ export let output: String = error.message;"#,
             assert!(
                 source_names
                     .iter()
-                    .any(|name| name.ends_with("ontology.telora")),
+                    .any(|name| name.ends_with("b2b-model.telora")),
                 "{source_names:#?}"
             );
         }
