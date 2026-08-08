@@ -1,6 +1,6 @@
 # RFC 0193: Multi-measure report planning
 
-- Status: Accepted
+- Status: Implemented
 - Depends on: RFC 0192
 
 ## Summary
@@ -86,3 +86,17 @@ operation, a second Host-side business checker, an implicit grain choice, or a
 compatibility table separate from capability lowering. A reusable array, Dict,
 or diagnostic combinator may be proposed independently when the example proves
 the need.
+
+## Completion
+
+RFCs 0194 through 0196 are implemented. Measures now expose semantic value,
+grain, and aggregation descriptors; explicit pre-aggregation composes revenue
+and units without fan-out; and the final plan atomically carries parameterized
+SQL, result schema, and checked render fields. The implementation stayed in
+ordinary Telora capability and transform code and did not require accumulation
+or a reporting-specific kernel feature.
+
+The supported policy space remains intentionally bounded to natural grain and
+Order pre-aggregation. Render checking currently proves field existence rather
+than chart semantics. Context, authorization, richer aggregation behavior, and
+provenance through every intermediate plan remain future work.

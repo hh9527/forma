@@ -27,6 +27,7 @@ import "std/string" as string;
     Call: Call,
     Binary: Binary,
     Aggregate: Aggregate,
+    Parameter: 'None,
 };
 
 @struct type Projection = { expr: Expr, alias: Option(String) };
@@ -73,6 +74,7 @@ def render_expr: Fn(Expr) -> String = fn(value) {
         'Call(call) => `\{render_function(call.function)}(\{string.join(array.map(call.args, render_expr), ", ")})`,
         'Binary(binary) => `(\{render_expr(binary.left)} \{render_binary_op(binary.op)} \{render_expr(binary.right)})`,
         'Aggregate(aggregate) => `\{render_function(aggregate.function)}(\{render_expr(aggregate.value)})`,
+        'Parameter => "?",
     }
 };
 

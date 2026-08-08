@@ -9076,6 +9076,11 @@ export let output: String = error.message;"#,
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("ordered dimension"))
         );
+        assert!(snapshot.diagnostics().iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("render field missing_render_field is absent")
+        }));
 
         let blocked = recovery_engine()
             .recover_workspace(examples.join("invalid-measures.telora"))
@@ -9098,5 +9103,14 @@ export let output: String = error.message;"#,
         assert!(!messages.iter().any(|message| {
             message.contains("not compatible") || message.contains("expands the measure grain")
         }));
+
+        let host =
+            load_module(examples.join("host-plan.telora"), BTreeMap::new(), 500_000).unwrap();
+        let encoded = named_output(host.execute(500_000).unwrap()).to_string();
+        assert!(encoded.contains("parameters"), "{encoded}");
+        assert!(encoded.contains("customer_region"), "{encoded}");
+        assert!(encoded.contains("result_schema"), "{encoded}");
+        assert!(encoded.contains("money_cents"), "{encoded}");
+        assert!(encoded.contains("render"), "{encoded}");
     }
 }

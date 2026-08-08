@@ -7,5 +7,5 @@ export let output = compile({
     filters: [],
     order_by: ['CustomerRegion],
     limit: 'Some(20),
-    render: 'Table,
+    render: {mode: 'Table, fields: ["order_month", "net_revenue_cents", "units_sold"]},
 });

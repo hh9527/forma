@@ -33,6 +33,8 @@ Telora 代码将合法意图逐步 lowering 为 SQLite SQL。
   model，显式记录业务值类型、自然 grain 与 aggregation behavior。
 - RFC 0195：已完成显式 grain alignment；`NetRevenue + UnitsSold` 只有在意图
   请求 `PreAggregate(Order)` 时才组合，`Natural` 不会隐式猜测策略。
+- RFC 0196：已完成原子执行计划；SQL placeholder、typed parameters、result
+  schema 与经过核对的 render fields 由同一 lowering 链生成；RFC 0193 已完成。
 
 ## 文件
 
@@ -98,6 +100,8 @@ cargo run -p telora -- run examples/intelligent-reporting/invalid.telora
   不可达，诊断仍指向原始 dimension；
 - filter 本身也声明所需 entity，因此会参与同一关系规划；排序只能引用已经
   选择的 dimension，limit 与 render mode 保留在 typed plan 中；
+- filter requirement 同时产生 SQL placeholder 与 typed parameter，结果字段与
+  projection 同序产生；render field 必须存在于派生的 result schema；
 - semantic、relational、SQL 三个中间计划都是普通 Telora 值和显式函数边界；
 - SQL AST 使用递归 `Expr` 表达调用、二元运算和聚合；跨模块运行时保留真实
   UpLink 图，用户态反射可通过 `'Ref` 与 `type_desc.resolve` 有限遍历；
@@ -218,9 +222,9 @@ Host 不应在执行阶段才发现本可由领域 compiler 识别的结构或�
 |---|---|---|---|---|
 | 单 measure、多 dimension | 已证明 | 已证明 | 已证明 | SQL 与基础 wire plan 已证明 |
 | 非法 fan-out | 已证明 | 正确拒绝 | 已证明基础根因诊断 | 不发布计划 |
-| 多 grain + 显式对齐策略 | 尚未证明 | 尚未证明 | 尚未证明 | 尚未证明 |
+| 多 grain + 显式对齐策略 | Order 预聚合已证明 | NetRevenue + UnitsSold 已证明 | 缺失策略可修复 | 无 fan-out SQL 已证明 |
 | Context 与授权约束 | 尚未证明 | 尚未证明 | 尚未证明 | 尚未证明 |
-| SQL + parameters + result schema + render | 部分证明 | 部分证明 | 部分证明 | 尚未形成完整原子计划 |
+| SQL + parameters + result schema + render | 基础规则已证明 | 基础意图已证明 | 缺失 render field 可修复 | 基础原子计划已证明 |
 
 后续 RFC 不应只陈述新增了哪些 planner 功能，还应说明它对这四项分别增加了
 什么证据、留下了什么缺口，以及用了什么 fallback。最有价值的新场景，是能够
@@ -252,8 +256,8 @@ RFC 0192 将既有 UpLink 模型延伸到了模块边界。当前 `sql.telora` �
 policy。后续阶段还需要：
 
 - 预聚合与 allocation policy；
-- 参数、drill 和更丰富的 render 意图；
-- 参数、结果 schema 与 render plan 的一致性证明；
+- drill 和更丰富的 chart/render 语义；
+- 非位置参数、更多参数类型与 chart-specific channel 约束；
 - 授权和 catalog 的显式 Context；
 - provenance 穿过所有中间计划；
 - CLI 失败输出完整呈现 Host 已收集的多条诊断；

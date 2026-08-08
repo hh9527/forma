@@ -14,7 +14,9 @@ import "./sql.telora" {
     render_select,
 };
 import "./relations.telora" { Entity, Relation, PathPlan, plan };
-import "./execution.telora" { OutputMode, ExecutionPlan };
+import "./execution.telora" {
+    OutputMode, QueryParameter, ResultType, ResultField, RenderPlan, ExecutionPlan,
+};
 
 @enum type Measure = {
     NetRevenue: 'None,
@@ -51,8 +53,10 @@ import "./execution.telora" { OutputMode, ExecutionPlan };
     filters: Array(Filter),
     order_by: Array(Dimension),
     limit: Option(Int),
-    render: OutputMode,
+    render: RenderIntent,
 };
+
+@struct type RenderIntent = { mode: OutputMode, fields: Array(String) };
 
 @enum type Filter = { CustomerRegion: String };
 
@@ -65,6 +69,7 @@ import "./execution.telora" { OutputMode, ExecutionPlan };
     joins: Array(Join),
     filters: Array(Expr),
     measure_projections: Array(Projection),
+    measure_fields: Array(ResultField),
 };
 
 @struct type GroupRequirement = {
@@ -72,12 +77,14 @@ import "./execution.telora" { OutputMode, ExecutionPlan };
     projection: Projection,
     group_expression: Expr,
     required_entity: Entity,
+    result_field: ResultField,
 };
 
 @struct type FilterRequirement = {
     source: Filter,
     expression: Expr,
     required_entity: Entity,
+    parameter: QueryParameter,
 };
 
 @struct type SemanticPlan = {
@@ -86,7 +93,7 @@ import "./execution.telora" { OutputMode, ExecutionPlan };
     filter_requirements: Array(FilterRequirement),
     order_by: Array(Dimension),
     limit: Option(Int),
-    render: OutputMode,
+    render: RenderIntent,
 };
 
 @struct type RelationalPlan = {
@@ -96,7 +103,8 @@ import "./execution.telora" { OutputMode, ExecutionPlan };
 
 @struct type SqlPlan = {
     query: Select,
-    render: OutputMode,
+    parameters: Array(QueryParameter),
+    result_schema: Array(ResultField),
 };
 
 type MeasureLowerer = Fn(Alignment) -> Option(QueryPlan);
@@ -115,8 +123,8 @@ type DimensionLowerer = Fn(Array(Measure)) -> Option(GroupRequirement);
     lower: DimensionLowerer,
 };
 
-def complete_requirement: Fn(Dimension, Projection, Expr, Entity) -> Option(GroupRequirement) = fn(dimension, projected, group_expression, required_entity) {
-    'Some({dimension, projection: projected, group_expression, required_entity})
+def complete_requirement: Fn(Dimension, Projection, Expr, Entity, ResultField) -> Option(GroupRequirement) = fn(dimension, projected, group_expression, required_entity, result_field) {
+    'Some({dimension, projection: projected, group_expression, required_entity, result_field})
 };
 
 def rejected_requirement: Fn(Dimension, String) -> Option(GroupRequirement) = fn(value, message) {
@@ -126,23 +134,23 @@ def rejected_requirement: Fn(Dimension, String) -> Option(GroupRequirement) = fn
 
 # A higher-order compiler factory: construct a dimension capability whose
 # lowering is valid for every current measure.
-def universal_dimension: Fn(Dimension, Projection, Expr, Entity) -> DimensionCapability = fn(id, projected, group_expression, required_entity) {
+def universal_dimension: Fn(Dimension, Projection, Expr, Entity, ResultField) -> DimensionCapability = fn(id, projected, group_expression, required_entity, result_field) {
     {
         id,
         lower: fn(measures) {
-            complete_requirement(id, projected, group_expression, required_entity)
+            complete_requirement(id, projected, group_expression, required_entity, result_field)
         },
     }
 };
 
 # A second compiler factory: construct a capability restricted to one measure.
 # The same function both verifies the semantic edge and lowers it.
-def measure_dimension: Fn(Dimension, Measure, Projection, Expr, Entity) -> DimensionCapability = fn(id, required_measure, projected, group_expression, required_entity) {
+def measure_dimension: Fn(Dimension, Measure, Projection, Expr, Entity, ResultField) -> DimensionCapability = fn(id, required_measure, projected, group_expression, required_entity, result_field) {
     {
         id,
         lower: fn(actual_measures) {
             if array.all(actual_measures, fn(actual_measure) { actual_measure == required_measure }) {
-                complete_requirement(id, projected, group_expression, required_entity)
+                complete_requirement(id, projected, group_expression, required_entity, result_field)
             } else {
                 rejected_requirement(
                     id,
@@ -273,6 +281,7 @@ def net_revenue: MeasureCapability = {
                 ),
                 "net_revenue_cents",
             )],
+            measure_fields: [{name: "net_revenue_cents", ty: 'MoneyCents}],
         }),
         }
     },
@@ -294,6 +303,7 @@ def units_sold: MeasureCapability = {
             joins: [],
             filters: [binary(column("o", "status"), 'NotEqual, 'Int(3))],
             measure_projections: [aggregate_projection('Sum, column("oi", "quantity"), "units_sold")],
+            measure_fields: [{name: "units_sold", ty: 'Count}],
         }),
         'PreAggregate(target) => if target == 'Order {
             'Some({
@@ -327,6 +337,7 @@ def units_sold: MeasureCapability = {
                     call('Coalesce, [column("u", "units_sold"), 'Int(0)]),
                     "units_sold",
                 )],
+                measure_fields: [{name: "units_sold", ty: 'Count}],
             })
         } else {
             let ignored = emit_error!(`UnitsSold supports pre-aggregation from OrderItem to Order, not \{target}`, alignment);
@@ -350,12 +361,14 @@ def dimension_capability: Fn(Dimension) -> DimensionCapability = fn(dimension) {
             projection(call('Substr, [column("o", "ordered_at"), 'Int(1), 'Int(7)]), "order_month"),
             call('Substr, [column("o", "ordered_at"), 'Int(1), 'Int(7)]),
             'Order,
+            {name: "order_month", ty: 'Text},
         ),
         'CustomerRegion => universal_dimension(
             dimension,
             projection(column("r", "name"), "customer_region"),
             column("r", "name"),
             'Region,
+            {name: "customer_region", ty: 'Text},
         ),
         'OrganizationKind => measure_dimension(
             dimension,
@@ -363,12 +376,14 @@ def dimension_capability: Fn(Dimension) -> DimensionCapability = fn(dimension) {
             projection(column("org", "kind"), "organization_kind"),
             column("org", "kind"),
             'Organization,
+            {name: "organization_kind", ty: 'Int},
         ),
         'ProductCategory => universal_dimension(
             dimension,
             projection(column("cat", "name"), "product_category"),
             column("cat", "name"),
             'Category,
+            {name: "product_category", ty: 'Text},
         ),
         'EmployeeKind => unsupported_dimension(
             dimension,
@@ -379,6 +394,7 @@ def dimension_capability: Fn(Dimension) -> DimensionCapability = fn(dimension) {
             projection(column("product", "sku"), "product_sku"),
             column("product", "sku"),
             'Product,
+            {name: "product_sku", ty: 'Text},
         ),
     }
 };
@@ -421,6 +437,7 @@ def combine_query_plans: Fn(Array(QueryPlan), Alignment) -> Option(QueryPlan) = 
         let joins: Array(Join) = array.flat_map(plans, fn(plan) { plan.joins });
         let filters: Array(Expr) = array.flat_map(plans, fn(plan) { plan.filters });
         let measure_projections: Array(Projection) = array.flat_map(plans, fn(plan) { plan.measure_projections });
+        let measure_fields: Array(ResultField) = array.flat_map(plans, fn(plan) { plan.measure_fields });
         'Some({
             measures,
             base_entity: first.base_entity,
@@ -430,6 +447,7 @@ def combine_query_plans: Fn(Array(QueryPlan), Alignment) -> Option(QueryPlan) = 
             joins,
             filters,
             measure_projections,
+            measure_fields,
         })
     } else {
         let ignored = emit_error!(
@@ -455,8 +473,9 @@ def compile_filters: Fn(Array(Filter)) -> Array(FilterRequirement) = fn(filters)
         match filter {
             'CustomerRegion(value) => {
                 source: filter,
-                expression: equals(column("r", "name"), 'Text(value)),
+                expression: equals(column("r", "name"), 'Parameter),
                 required_entity: 'Region,
+                parameter: {name: "customer_region", value: 'Text(value)},
             },
         }
     })
@@ -559,7 +578,27 @@ def lower_sql: Fn(RelationalPlan) -> SqlPlan = fn(relational) {
                 limit: semantic.limit,
             },
         },
-        render: semantic.render,
+        parameters: array.map(semantic.filter_requirements, fn(filter) { filter.parameter }),
+        result_schema: array.concat([
+            array.map(requirements, fn(requirement) { requirement.result_field }),
+            query_plan.measure_fields,
+        ]),
+    }
+};
+
+def compile_render: Fn(RenderIntent, Array(ResultField)) -> Option(RenderPlan) = fn(intent, schema) {
+    let checks: Array(Bool) = array.map(intent.fields, fn(name) {
+        if array.any(schema, fn(field) { field.name == name }) {
+            'True
+        } else {
+            let ignored = emit_error!(`render field \{name} is absent from the result schema`, name);
+            'False
+        }
+    });
+    if array.all(checks, fn(valid) { valid }) {
+        'Some({mode: intent.mode, fields: intent.fields})
+    } else {
+        'None
     }
 };
 
@@ -581,16 +620,22 @@ export def compile: Fn(ReportIntent) -> Option(ExecutionPlan) = fn(intent) {
             let semantic = lower_semantics(intent, query_plan, requirements, filter_requirements);
             let relational = lower_relationships(semantic);
             let relationships_valid = verify_relationships(relational.paths, requirements);
-            if fragments_complete && requirements_complete && relationships_valid && order_valid {
+            let sql_plan = lower_sql(relational);
+            match compile_render(intent.render, sql_plan.result_schema) {
+            'None => 'None,
+            'Some(render) => if fragments_complete && requirements_complete && relationships_valid && order_valid {
                 'Some({
                 version: 1,
                 dialect: 'Sqlite,
-                statement: render_select(lower_sql(relational).query),
+                statement: render_select(sql_plan.query),
+                parameters: sql_plan.parameters,
+                result_schema: sql_plan.result_schema,
+                render,
                 read_only: 'True,
-                output: intent.render,
                 })
             } else {
                 'None
+            },
             }
             },
             }

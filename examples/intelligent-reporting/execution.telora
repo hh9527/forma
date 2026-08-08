@@ -1,26 +1,61 @@
 import "std/json" as json;
+import "std/array" as array;
 
 @enum type SqlDialect = { Sqlite: 'None };
 @enum type OutputMode = { Table: 'None, Json: 'None };
+
+@enum type ParameterValue = { Text: String, Int: Int };
+@struct type QueryParameter = { name: String, value: ParameterValue };
+
+@enum type ResultType = { Text: 'None, Int: 'None, MoneyCents: 'None, Count: 'None };
+@struct type ResultField = { name: String, ty: ResultType };
+
+@struct type RenderPlan = { mode: OutputMode, fields: Array(String) };
+@struct type EncodedParameter = { name: String, ty: String, value: String };
+@struct type EncodedResultField = { name: String, ty: String };
 
 @struct type ExecutionPlan = {
     version: Int,
     dialect: SqlDialect,
     statement: String,
+    parameters: Array(QueryParameter),
+    result_schema: Array(ResultField),
+    render: RenderPlan,
     read_only: Bool,
-    output: OutputMode,
+};
+
+def encode_parameter: Fn(QueryParameter) -> EncodedParameter = fn(parameter) {
+    match parameter.value {
+        'Text(value) => {name: parameter.name, ty: "text", value},
+        'Int(value) => {name: parameter.name, ty: "int", value: `\{value}`},
+    }
+};
+
+def encode_result_field: Fn(ResultField) -> EncodedResultField = fn(field) {
+    let ty = match field.ty {
+        'Text => "text",
+        'Int => "int",
+        'MoneyCents => "money_cents",
+        'Count => "count",
+    };
+    {name: field.name, ty}
 };
 
 def encode_plan: Fn(ExecutionPlan) -> String = fn(plan) {
     let dialect = match plan.dialect { 'Sqlite => "sqlite" };
-    let output = match plan.output { 'Table => "table", 'Json => "json" };
+    let output = match plan.render.mode { 'Table => "table", 'Json => "json" };
     json.stringify({
         version: plan.version,
         dialect,
         statement: plan.statement,
+        parameters: array.map(plan.parameters, encode_parameter),
+        result_schema: array.map(plan.result_schema, encode_result_field),
+        render: {mode: output, fields: plan.render.fields},
         read_only: plan.read_only,
-        output,
     })
 };
 
-export { SqlDialect, OutputMode, ExecutionPlan, encode_plan };
+export {
+    SqlDialect, OutputMode, ParameterValue, QueryParameter,
+    ResultType, ResultField, RenderPlan, ExecutionPlan, encode_plan,
+};

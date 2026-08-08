@@ -7,7 +7,7 @@ let compilation = compile({
     filters: [],
     order_by: ['OrderMonth, 'CustomerRegion],
     limit: 'Some(10),
-    render: 'Table,
+    render: {mode: 'Table, fields: ["order_month", "customer_region", "net_revenue_cents"]},
 });
 
 export let output = match compilation {

@@ -7,5 +7,5 @@ export let output = compile({
     filters: [],
     order_by: ['OrderMonth, 'ProductCategory, 'ProductSku],
     limit: 'None,
-    render: 'Json,
+    render: {mode: 'Json, fields: ["order_month", "product_category", "product_sku", "units_sold"]},
 });

@@ -8,7 +8,7 @@ let compilation = compile({
     filters: ['CustomerRegion("East")],
     order_by: ['OrderMonth],
     limit: 'Some(10),
-    render: 'Json,
+    render: {mode: 'Json, fields: ["order_month", "customer_region", "net_revenue_cents"]},
 });
 
 let checked: Option(ExecutionPlan) = compilation;
